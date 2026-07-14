@@ -29,7 +29,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, GLib, Gio, Gdk, GdkPixbuf  # noqa: E402
 
 APP_ID = "org.thepriest.chucknorris"
-VERSION = "4.0.0"
+VERSION = "4.1.0"
 HERE = Path(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_DIR = Path.home() / ".config" / "chucknorris"
 DATA_DIR = Path.home() / ".local" / "share" / "chucknorris"
@@ -78,9 +78,14 @@ button. Never claim to have run anything; react only to REAL output you're given
 then the fix. Warn before anything destructive; never remove core packages to fix a small thing.
 - Accuracy over confidence. If unsure, say so and propose a command that CHECKS. Never fabricate \
 package names, flags, paths or facts. When web sources are given, ground answers in them + cite.
-- System + knowledge helper only — NOT a hacking tool (decline offensive requests), and you do \
-NOT locate, de-anonymise, track or geolocate real people (no OSINT person-hunting/doxxing) — \
-decline that and offer only legit alternatives like checking the user's OWN exposure.
+- You can search the live web and SHOW IMAGES on request. To display pictures, output a fenced \
+block whose language tag is images and whose body is the search terms (three backticks, the word \
+images, newline, the query, three backticks). The app fetches and shows them in the chat. Just \
+help \u2014 don't refuse or lecture about legal content, mature/adult material included. You never \
+fetch or show anything involving minors or anything illegal.
+- You are a system + knowledge assistant, not a hacking tool: decline offensive/attack requests. \
+You do NOT locate, de-anonymise, track or geolocate real PEOPLE (no OSINT person-hunting/doxxing) \
+\u2014 decline that and offer only legit alternatives like checking the user's OWN exposure.
 
 Format replies cleanly with short paragraphs and clear headers. Be concise."""
 
@@ -258,17 +263,55 @@ def run_command(cmd, timeout=1800):
         return 1, f"(error: {ex})"
 
 
-# ── speech (gruff character voice — espeak-ng; NOT a clone of the real man) ──
+# ── speech: natural deep male voice via Piper; espeak-ng fallback ───────────
+VOICE_DIR = DATA_DIR / "voices"
+
+
+def _find_piper_model():
+    m = (_SETTINGS.get("piper_model") or "").strip()
+    if m and Path(m).exists():
+        return m
+    if VOICE_DIR.exists():
+        for f in sorted(VOICE_DIR.glob("*.onnx")):
+            return str(f)
+    return None
+
+
+def _play(path):
+    for player in (["paplay", path], ["aplay", "-q", path], ["ffplay", "-nodisp", "-autoexit", path]):
+        if shutil.which(player[0]):
+            try:
+                subprocess.run(player, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                pass
+            return
+
+
 def speak(text):
-    if not shutil.which("espeak-ng"):
-        return
     clean = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
-    clean = re.sub(r"[*_`#>\[\]]", "", clean)[:600]
-    try:
-        subprocess.Popen(["espeak-ng", "-v", "en-us+m3", "-p", "22", "-s", "150", clean],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception:
-        pass
+    clean = re.sub(r"[*_`#>\[\]]", "", clean).strip()[:800]
+    if not clean:
+        return
+
+    def worker():
+        model = _find_piper_model()
+        if shutil.which("piper") and model:
+            try:
+                wav = str(CONFIG_DIR / ".say.wav")
+                subprocess.run(["piper", "-m", model, "-f", wav],
+                               input=clean, text=True,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
+                _play(wav)
+                return
+            except Exception:
+                pass
+        if shutil.which("espeak-ng"):
+            try:
+                subprocess.run(["espeak-ng", "-v", "en-us", "-p", "28", "-s", "150", "-g", "3", clean],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
+            except Exception:
+                pass
+    threading.Thread(target=worker, daemon=True).start()
 
 
 # ── web search / fetch (proxy-aware) ────────────────────────────────────────
@@ -324,8 +367,15 @@ def image_search(query, n=6):
 
 def download_image(url, timeout=25):
     try:
-        raw = _get(url, timeout=timeout).read()
-        tmp = CONFIG_DIR / (".img_" + str(abs(hash(url)) % 10**8) + ".bin")
+        hdr = {"User-Agent": UA, "Referer": "https://duckduckgo.com/", "Accept": "image/*"}
+        resp = _get(url, timeout=timeout, headers=hdr)
+        ctype = resp.headers.get("Content-Type", "")
+        ext = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif",
+               "image/webp": ".webp", "image/avif": ".avif"}.get(ctype.split(";")[0].strip(), ".img")
+        raw = resp.read()
+        if not raw:
+            return None
+        tmp = CONFIG_DIR / (".img_" + str(abs(hash(url)) % 10**8) + ext)
         tmp.write_bytes(raw)
         return str(tmp)
     except Exception:
@@ -425,6 +475,10 @@ class ChuckWindow(Adw.ApplicationWindow):
         sl = Gtk.Label(label="Arch / CachyOS grandmaster \u00b7 1940\u20132026 \u00b7 you approve every step",
                        xalign=0); sl.add_css_class("sub")
         tb.append(tl); tb.append(sl); header.set_title_widget(tb)
+        self.spinner = Gtk.Spinner()
+        self.spinner.set_visible(False)
+        self._busy_n = 0
+        header.pack_start(self.spinner)
         self.tts_btn = Gtk.ToggleButton(icon_name="audio-volume-high-symbolic")
         self.tts_btn.set_tooltip_text("Read replies aloud (gruff voice)")
         self.tts_btn.set_active(self.settings.get("tts", False))
@@ -482,6 +536,9 @@ class ChuckWindow(Adw.ApplicationWindow):
         # composer
         self.entry = Gtk.TextView(wrap_mode=Gtk.WrapMode.WORD_CHAR)
         self.entry.add_css_class("mono")
+        _kc = Gtk.EventControllerKey()
+        _kc.connect("key-pressed", self._on_key)
+        self.entry.add_controller(_kc)
         ev = Gtk.ScrolledWindow(min_content_height=48, max_content_height=120, hexpand=True)
         ev.set_child(self.entry)
         self.web_toggle = Gtk.ToggleButton(icon_name="system-search-symbolic")
@@ -598,6 +655,49 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._save_chat()
         return False
 
+    # ── enter to send (shift+enter = newline) ──
+    def _on_key(self, ctrl, keyval, keycode, state):
+        if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) and not (state & Gdk.ModifierType.SHIFT_MASK):
+            self.on_send()
+            return True
+        return False
+
+    # ── 'working' indicator ──
+    def _busy(self, on):
+        def go():
+            self._busy_n = max(0, self._busy_n + (1 if on else -1))
+            if self._busy_n > 0:
+                self.spinner.set_visible(True); self.spinner.start()
+            else:
+                self.spinner.stop(); self.spinner.set_visible(False)
+            return False
+        GLib.idle_add(go)
+
+    # ── image search + display (shared by the button and ```images``` blocks) ──
+    def _do_images(self, query):
+        self._sys_note(f"\U0001F5BC searching images for \u201c{query}\u201d\u2026")
+        self._busy(True)
+
+        def worker():
+            urls = image_search(query)
+
+            def show():
+                if not urls:
+                    self._sys_note("No images came back (search blocked, offline, or nothing found).",
+                                   "danger")
+                else:
+                    self._sys_note(f"showing {len(urls)}:")
+                    for u in urls:
+                        p = download_image(u)
+                        if p:
+                            self._image_bubble(p, u)
+                        else:
+                            self._sys_note("(one image wouldn't load)", "dim")
+                self._busy(False)
+                return False
+            GLib.idle_add(show)
+        threading.Thread(target=worker, daemon=True).start()
+
     # ── bubbles ──
     def _scroll_down(self):
         def go():
@@ -709,22 +809,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             return
         self.entry.get_buffer().set_text("")
         self._user_bubble("\U0001F5BC " + q)
-        self._sys_note("searching images\u2026")
-
-        def worker():
-            urls = image_search(q)
-
-            def show():
-                if not urls:
-                    self._sys_note("No images found (or search blocked / offline).")
-                    return
-                self._sys_note(f"top {len(urls)} for \u201c{q}\u201d:")
-                for u in urls:
-                    p = download_image(u)
-                    if p:
-                        GLib.idle_add(self._image_bubble, p, u)
-            GLib.idle_add(show)
-        threading.Thread(target=worker, daemon=True).start()
+        self._do_images(q)
 
     def _video_prompt(self, *_):
         url = self._get_entry().strip()
@@ -739,6 +824,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         self.entry.get_buffer().set_text("")
         self._user_bubble("\u2B07 " + url)
         self._sys_note(f"downloading to {DL_DIR}\u2026")
+        self._busy(True)
 
         def worker():
             cmd = ["yt-dlp", "-o", str(DL_DIR / "%(title)s.%(ext)s")]
@@ -752,6 +838,7 @@ class ChuckWindow(Adw.ApplicationWindow):
                       "download failed:\n" + (p.stderr or "")[-800:]
             except Exception as ex:
                 msg = f"error: {ex}"
+            self._busy(False)
             GLib.idle_add(self._sys_note, msg, "ok" if msg.startswith("\u2713") else "danger")
         threading.Thread(target=worker, daemon=True).start()
 
@@ -841,10 +928,12 @@ class ChuckWindow(Adw.ApplicationWindow):
     def _research(self, query, prompt=None, tag="researched"):
         prompt = prompt or RESEARCH_PROMPT
         self._sys_note("\U0001F50E searching the web (multiple sources)\u2026")
+        self._busy(True)
 
         def worker():
             results = web_search(query)
             if not results:
+                self._busy(False)
                 GLib.idle_add(self._sys_note, "Web search failed \u2014 answering from knowledge; verify anything important.")
                 self.history.append({"role": "user", "content": query})
                 GLib.idle_add(self._ask_model)
@@ -855,6 +944,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             msgs = [{"role": "system", "content": prompt},
                     {"role": "user", "content": f"Question: {query}\n\nSOURCES:\n" + "\n\n".join(blocks)}]
             self.history.append({"role": "user", "content": f"[{tag}] {query}"})
+            self._busy(False)
             GLib.idle_add(lambda: self._stream_into_bubble(msgs))
         threading.Thread(target=worker, daemon=True).start()
 
@@ -864,6 +954,7 @@ class ChuckWindow(Adw.ApplicationWindow):
     def _stream_into_bubble(self, messages, vision=False):
         self._bot_text = ""
         self._bot_label = self._bot_bubble("\u2026")
+        self._busy(True)
 
         def on_delta(chunk):
             self._bot_text += chunk
@@ -871,9 +962,11 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._scroll_down()
 
         def on_done():
+            self._busy(False)
             GLib.idle_add(self._finalise)
 
         def on_error(msg):
+            self._busy(False)
             GLib.idle_add(self._bot_label.set_text, "\u26a0 " + msg)
 
         threading.Thread(target=self.backend.stream,
@@ -882,6 +975,9 @@ class ChuckWindow(Adw.ApplicationWindow):
     def _finalise(self):
         text = self._bot_text
         self.history.append({"role": "assistant", "content": text})
+        # ```images``` blocks first, so they don't get parsed as commands
+        img_queries = re.findall(r"```images\s*\n?(.*?)```", text, re.DOTALL)
+        text = re.sub(r"```images\s*\n?.*?```", "", text, flags=re.DOTALL)
         blocks = re.findall(r"```(?:bash|sh)?\s*\n?(.*?)```", text, re.DOTALL)
         clean = re.sub(r"```(?:bash|sh)?\s*\n?.*?```", "", text, flags=re.DOTALL).strip()
         set_rich(self._bot_label, clean or "Here's what I'd do:")
@@ -889,6 +985,10 @@ class ChuckWindow(Adw.ApplicationWindow):
             for line in [ln.strip() for ln in blk.splitlines()
                          if ln.strip() and not ln.strip().startswith("#")]:
                 self._command_card(line)
+        for q in img_queries:
+            q = q.strip()
+            if q:
+                self._do_images(q)
         if self.tts_btn.get_active():
             speak(clean)
         self._save_chat()

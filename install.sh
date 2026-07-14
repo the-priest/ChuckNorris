@@ -32,7 +32,7 @@ mkdir -p "$APP_DIR" "$ASSET_DIR" "${HOME}/.local/bin" "${HOME}/.local/share/appl
 step "installing GTK4 + tools (screenshot, polkit, cleanup, GPU, pkgfile, voice, video)"
 SESS="${XDG_SESSION_TYPE:-}"; DE="${XDG_CURRENT_DESKTOP:-}"
 if command -v pacman >/dev/null; then
-  PKGS="python-gobject python-cairo gtk4 libadwaita polkit pciutils pacman-contrib pkgfile espeak-ng yt-dlp"
+  PKGS="python-gobject python-cairo gtk4 libadwaita polkit pciutils pacman-contrib pkgfile espeak-ng yt-dlp alsa-utils python-pip"
   if [ "$SESS" = "wayland" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then PKGS="$PKGS grim"; else PKGS="$PKGS scrot"; fi
   case "$DE" in *KDE*|*kde*|*plasma*|*Plasma*) PKGS="$PKGS spectacle" ;; esac
   # shellcheck disable=SC2086
@@ -53,6 +53,24 @@ else
   die "unknown package manager — install python3-gi, GTK4, libadwaita, polkit, pciutils, espeak-ng, yt-dlp, grim/scrot"
 fi
 ok "dependencies ready"
+
+step "setting up the voice (Piper — natural deep voice; espeak-ng is the fallback)"
+if ! command -v piper >/dev/null; then
+  pip install --user --break-system-packages piper-tts >/dev/null 2>&1 \
+    || pip install --user piper-tts >/dev/null 2>&1 \
+    || info "piper install skipped — espeak-ng will be used instead"
+fi
+mkdir -p "${DATA_DIR}/voices"
+VOICE="${DATA_DIR}/voices/en_US-ryan-high.onnx"
+if [ ! -f "$VOICE" ]; then
+  VBASE="https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ryan/high"
+  if curl -fsSL "${VBASE}/en_US-ryan-high.onnx" -o "$VOICE" 2>/dev/null \
+     && curl -fsSL "${VBASE}/en_US-ryan-high.onnx.json" -o "${VOICE}.json" 2>/dev/null; then
+    ok "natural voice model installed"
+  else
+    rm -f "$VOICE" "${VOICE}.json"; info "voice model download skipped — espeak-ng fallback in use"
+  fi
+fi
 
 step "installing Chuck Norris + art"
 if [ -f chucknorris.py ]; then
