@@ -1,47 +1,44 @@
 <div align="center">
 
-<img src="assets/chucknorris-icon.png" alt="Chuck Norris" width="150">
+<img src="assets/chucknorris-icon.png" alt="Chuck Norris" width="140">
 
 # 🥋 CHUCK NORRIS
 
-### An Arch / CachyOS grandmaster on your desktop. Fixes, installs, researches, verifies the news, reads your files — and you approve every step.
+### An Arch / CachyOS grandmaster on your desktop. A tribute. He fixes anything, researches and verifies, shows pictures, downloads video, speaks — and you approve every step.
 
-![version](https://img.shields.io/badge/version-3.0.0-14b8a6?style=for-the-badge&labelColor=0b0e10)
-![license](https://img.shields.io/badge/license-MIT-14b8a6?style=for-the-badge&labelColor=0b0e10)
-![distro](https://img.shields.io/badge/Arch%20%7C%20CachyOS-grandmaster-14b8a6?style=for-the-badge&labelColor=0b0e10)
-![web](https://img.shields.io/badge/web%20%2B%20news-multi--source%20%2B%20cited-14b8a6?style=for-the-badge&labelColor=0b0e10)
-![mode](https://img.shields.io/badge/non--autonomous-you%20approve%20every%20step-14b8a6?style=for-the-badge&labelColor=0b0e10)
+![version](https://img.shields.io/badge/version-4.0.0-b6892f?style=for-the-badge&labelColor=0b0b0d)
+![tribute](https://img.shields.io/badge/1940-2026-b6892f?style=for-the-badge&labelColor=0b0b0d)
+![distro](https://img.shields.io/badge/Arch%20%7C%20CachyOS-grandmaster-b6892f?style=for-the-badge&labelColor=0b0b0d)
+![mode](https://img.shields.io/badge/non--autonomous-you%20approve%20every%20step-b6892f?style=for-the-badge&labelColor=0b0b0d)
 
 </div>
 
 ---
 
-## What Chuck is
+## What this is
 
-Chuck Norris is a native GTK4/libadwaita desktop assistant built to be an **extreme Arch Linux / CachyOS expert** and an all-round smart helper. It fixes problems, installs anything, finds the right tool for any job and shows you how to use it, researches the live web with citations, verifies the news across multiple sources, looks at your screen, and reads your files. It shares Basilisk's button art and bones — with a friendly Tux where the serpent used to be — but it's a **builder and healer, not a hacker.**
+A native GTK4/libadwaita desktop assistant built as a tribute to **Chuck Norris (1940–2026)** — reborn as an extreme **Arch Linux / CachyOS** expert. Deadpan, unflappable, and very good at his job. He fixes and installs anything, finds the right tool for any task, researches the live web with citations, verifies the news, looks at your screen, reads your files, pulls up images, downloads video, talks in a gruff voice, and drops a Chuck Norris fact when the moment's right. Every fix is a command **you** approve — he never runs off on his own.
 
-Everything it can do:
+Chuck was famously amused by his own legend. This keeps it going.
 
-- **CachyOS/Arch grandmaster** — pacman, AUR (paru/yay), CachyOS repos + kernels (BORE/sched-ext), systemd, GRUB/systemd-boot, mkinitcpio, keyring/mirrorlist repair, partial-upgrade recovery, orphans, GPU drivers, btrfs/snapper, chroot rescue. Ask it to fix or install *anything* and it hands you the exact commands.
-- **Tool finder** — for any task it names the right tool, tells you where it lives (repo / AUR / flatpak) and the command to get it, uses `pkgfile`/`pacman -F` to find which package provides a missing command, and shows how to use and troubleshoot it.
-- **Live-web research** — toggle **🔎 Web**: it searches multiple sources, reads them, and answers **grounded in what it found, with `[n]` citations** and a Sources list. Told to cross-check and prefer official docs.
-- **Verified news** — hit **📰 News**, type a topic: it cross-checks multiple outlets and reports **only what's corroborated by 2+ sources**, labels single-source claims `[UNVERIFIED]`, flags spin and staleness, and cites everything.
-- **Eyes** — screenshots your screen and reads the error with a vision model.
-- **Reads files** — paperclip a text file (config, log, script) and Chuck works from its contents.
-- **Junk scanner** + **one-tap actions** — Update · GPU drivers · Fix keyring · Clean junk · Orphans · Failed services.
-- **Hands** — every fix is an approve-to-run **command card**; sudo via graphical polkit; destructive commands flagged red.
+## What he does
 
-**Non-autonomous by design** — it proposes, you decide, scans are read-only, and it never claims to have run something it hasn't.
+- **CachyOS/Arch grandmaster** — pacman, AUR (paru/yay), CachyOS kernels (BORE/sched-ext), systemd, GRUB, mkinitcpio, keyring/mirrorlist repair, partial-upgrade recovery, orphans, GPU drivers, btrfs/snapper, chroot rescue. **Tool finder:** names the tool, where it lives, the command to get it (`pkgfile`/`pacman -F` for what provides a command), and how to use + troubleshoot it.
+- **🔎 Web research** — multi-source, grounded, cited. **📰 News** — reports only what 2+ sources corroborate, flags `[UNVERIFIED]`.
+- **🖼 Images** — type a query, hit Images: pulls pictures into the chat (unfiltered — legal content, your machine). Click one to open the source in **Brave**.
+- **⬇ Video** — paste a URL, hit Video: downloads via `yt-dlp` to `~/Downloads/ChuckNorris` (proxy-aware).
+- **🔊 Voice** — reads replies aloud in a gruff character voice (`espeak-ng`). *(A synthetic tough-guy voice — not a clone of the real man's.)*
+- **Eyes & files** — screenshots your screen and reads errors; paperclip a text file and he works from it.
+- **Junk scanner + one-tap actions** — Update · GPU drivers · Fix keyring · Clean junk · Failed services.
+- **Clean rendering** — proper titles, bold and code, bullet points. No stray asterisks or hashes.
+- **Saved chats** — every conversation is saved to `~/.local/share/chucknorris/chats/`; the recent-chats button reloads any of them, and **New chat** starts fresh.
+- **Mullvad + Brave** — set a proxy in Settings (e.g. Mullvad's SOCKS/HTTP) to route web/image/video fetches through it; links open in Brave. For a full tunnel, just connect Mullvad system-wide.
 
-### What Chuck won't do
-
-Chuck is a system + knowledge assistant, **not** a hacking or surveillance tool. It won't run offensive/attack tooling, and it **won't locate, de-anonymise, track or geolocate real people** (no OSINT person-hunting, no doxxing). Ask it to find or geolocate someone and it declines — it'll only help you check *your own* exposure. That line's deliberate.
+**Hands on a leash:** commands are approve-to-run cards, sudo via graphical polkit, destructive ones flagged red. He's a system + knowledge helper — **not a hacking tool**, and he **won't track or geolocate people**.
 
 ---
 
 ## Install
-
-One line (Arch/CachyOS first-class; also apt/dnf):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/the-priest/ChuckNorris/main/install.sh | bash
@@ -59,37 +56,22 @@ cd chucknorris
 ./install.sh
 ```
 
-The installer does everything: GTK4 + libadwaita, screenshot tool, polkit, `pacman-contrib` (cleanup), `pciutils` (GPU) and `pkgfile` (tool lookup), plus the app, art and background.
+Installs the lot: GTK4 + libadwaita, screenshot tool, polkit, `pacman-contrib`, `pciutils`, `pkgfile`, `espeak-ng` (voice), `yt-dlp` (video), plus the app and art.
 
----
+## Set up & run
 
-## Set it up & use it
-
-Open **Settings**, paste a **SiliconFlow** key (<https://cloud.siliconflow.com/account/ak>) — or Chuck reuses **Basilisk's key** automatically if it's installed. Then:
+Open **Settings**, paste a **SiliconFlow** key (<https://cloud.siliconflow.com/account/ak>) — or Chuck reuses **Basilisk's** automatically. Optional: set a **proxy** (Mullvad). Then:
 
 ```bash
 chucknorris
 ```
 
-Ask it to fix or install anything, toggle **🔎 Web** for cited research, **📰 News** for verified headlines, the camera to show an error, or the paperclip to hand it a file. Approve the command cards it hands back. On first launch it reads safe, read-only facts about your box so its advice fits *your* machine.
-
----
-
-## Accuracy
-
-No model is incapable of being wrong, so Chuck is built to *check itself*: web and news answers are grounded in fetched sources and cited so you can verify; news needs 2+ corroborating sources; it proposes a command that **checks** rather than guessing when unsure; and it never claims to have run something it hasn't.
-
 ---
 
 <div align="center">
 
-## License
+*"Chuck Norris doesn't kill zombie processes. He stares at them until they apologise and exit 0."*
 
-**MIT.** Yours to fork.
-
-Made by **The Priest** ⛧
-
-*grandmaster of your machine — answers to no one but you*
+**MIT.** Made by **The Priest** ⛧ — in memory of a legend.
 
 </div>
-# ChuckNorrs
