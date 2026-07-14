@@ -4,37 +4,44 @@
 
 # 🥋 CHUCK NORRIS
 
-### An Arch / CachyOS grandmaster on your desktop. A tribute. He fixes anything, researches and verifies, shows pictures, downloads video, speaks — and you approve every step.
+### The Arch / CachyOS grandmaster that lives on your desktop. You ask — he acts. No modes, no buttons, no excuses. A tribute.
 
-![version](https://img.shields.io/badge/version-4.0.0-b6892f?style=for-the-badge&labelColor=0b0b0d)
+![version](https://img.shields.io/badge/version-4.2.0-b6892f?style=for-the-badge&labelColor=0b0b0d)
 ![tribute](https://img.shields.io/badge/1940-2026-b6892f?style=for-the-badge&labelColor=0b0b0d)
-![distro](https://img.shields.io/badge/Arch%20%7C%20CachyOS-grandmaster-b6892f?style=for-the-badge&labelColor=0b0b0d)
-![mode](https://img.shields.io/badge/non--autonomous-you%20approve%20every%20step-b6892f?style=for-the-badge&labelColor=0b0b0d)
+![agentic](https://img.shields.io/badge/agentic-decides%20%26%20acts-b6892f?style=for-the-badge&labelColor=0b0b0d)
+![distro](https://img.shields.io/badge/Arch%20%7C%20CachyOS-first--class-b6892f?style=for-the-badge&labelColor=0b0b0d)
 
 </div>
 
 ---
 
-## What this is
+## What makes this different
 
-A native GTK4/libadwaita desktop assistant built as a tribute to **Chuck Norris (1940–2026)** — reborn as an extreme **Arch Linux / CachyOS** expert. Deadpan, unflappable, and very good at his job. He fixes and installs anything, finds the right tool for any task, researches the live web with citations, verifies the news, looks at your screen, reads your files, pulls up images, downloads video, talks in a gruff voice, and drops a Chuck Norris fact when the moment's right. Every fix is a command **you** approve — he never runs off on his own.
+Most Linux "assistants" are a chat box that spits out commands you copy-paste, or a wrapper that needs you to pick a mode before it'll do anything. Chuck is neither. **He reads what you ask, decides which of his tools to use, and uses them — live, in front of you — then answers.** You never toggle "search mode" or press an "images" button. You just talk. And every shell command he wants to run still lands as a card **you** approve, so he's powerful without being reckless.
 
-Chuck was famously amused by his own legend. This keeps it going.
+There isn't another GTK-native, offline-first, agentic CachyOS specialist that fuses live web research, a running feed of what it's doing, image and video retrieval, a full recon toolkit, screen vision, file reading, a natural voice, and approve-to-run safety — in one app that runs on your own machine and answers to no one but you.
 
-## What he does
+## How he works
 
-- **CachyOS/Arch grandmaster** — pacman, AUR (paru/yay), CachyOS kernels (BORE/sched-ext), systemd, GRUB, mkinitcpio, keyring/mirrorlist repair, partial-upgrade recovery, orphans, GPU drivers, btrfs/snapper, chroot rescue. **Tool finder:** names the tool, where it lives, the command to get it (`pkgfile`/`pacman -F` for what provides a command), and how to use + troubleshoot it.
-- **🔎 Web research** — multi-source, grounded, cited. **📰 News** — reports only what 2+ sources corroborate, flags `[UNVERIFIED]`.
-- **🖼 Images** — type a query, hit Images: pulls pictures into the chat (unfiltered — legal content, your machine). Click one to open the source in **Brave**.
-- **⬇ Video** — paste a URL, hit Video: downloads via `yt-dlp` to `~/Downloads/ChuckNorris` (proxy-aware).
-- **🔊 Voice** — reads replies aloud in a gruff character voice (`espeak-ng`). *(A synthetic tough-guy voice — not a clone of the real man's.)*
-- **Eyes & files** — screenshots your screen and reads errors; paperclip a text file and he works from it.
-- **Junk scanner + one-tap actions** — Update · GPU drivers · Fix keyring · Clean junk · Failed services.
-- **Clean rendering** — proper titles, bold and code, bullet points. No stray asterisks or hashes.
-- **Saved chats** — every conversation is saved to `~/.local/share/chucknorris/chats/`; the recent-chats button reloads any of them, and **New chat** starts fresh.
-- **Mullvad + Brave** — set a proxy in Settings (e.g. Mullvad's SOCKS/HTTP) to route web/image/video fetches through it; links open in Brave. For a full tunnel, just connect Mullvad system-wide.
+Ask for anything. Behind the scenes Chuck reaches for the right tool and you watch it happen in the **live feed** at the bottom of the window — `🔎 searching: cachyos bore scheduler` → `📄 reading wiki.cachyos.org` → `📄 reading phoronix.com` — so you always know he's working, never wondering if he's stuck. His tools:
 
-**Hands on a leash:** commands are approve-to-run cards, sudo via graphical polkit, destructive ones flagged red. He's a system + knowledge helper — **not a hacking tool**, and he **won't track or geolocate people**.
+- **Web search & browsing** — he searches multiple sources, opens and reads the actual pages, and answers grounded in them **with citations**. For news he cross-checks 2+ outlets and flags single-source claims `[UNVERIFIED]`.
+- **Images** — ask to see something and he pulls the pictures straight into the chat. Click one to open the source in **Brave**.
+- **Video/audio download** — give him a link, he grabs it with `yt-dlp` into `~/Downloads/ChuckNorris` (proxy-aware).
+- **Recon / OSINT arsenal** — whois, DNS (`dig`/`host`/reverse), HTTP headers, TLS certs (`openssl s_client`), traceroute, ASN, server-IP geolocation (`ipinfo.io`), port/service views (`ss`), and breach-checking **your own** email. Full infrastructure recon, proposed as approve-to-run cards.
+- **System fixes & installs** — pacman, AUR (paru/yay), CachyOS kernels (BORE/sched-ext), systemd, GRUB, mkinitcpio, keyring/mirrorlist repair, partial-upgrade recovery, orphans, GPU drivers, btrfs/snapper, chroot rescue. He finds the right tool, tells you where it lives, installs it, and shows you how to use and troubleshoot it.
+- **Disk cleanup** — a read-only junk scan (pacman cache, orphans, journal, thumbnails, trash, coredumps) with one-tap cleanup cards.
+- **Screen vision** — show him an error on your screen and he reads it.
+- **File reading** — hand him a config, log or script and he works from its contents.
+- **Voice** — reads replies aloud in a natural deep voice (Piper; espeak-ng fallback).
+- **Saved chats** — every conversation is saved and reloadable; start fresh anytime.
+- **Mullvad + Brave** — route all fetches through a proxy (Settings); links open in Brave.
+
+**Clean output:** real titles, bold, code and bullets — no stray asterisks or hashes. **Enter sends** (Shift+Enter for a newline).
+
+## The one boundary
+
+Chuck helps with anything legal and doesn't moralize — mature/adult content included. He refuses only four things, because they hurt people who aren't you: anything involving **minors**, anything **clearly illegal**, **malware/weapon-making**, and **locating or tracking a real person** (person-OSINT / doxxing). For that last one he'll help you check *your own* exposure instead. Everything else, he just does.
 
 ---
 
@@ -56,21 +63,23 @@ cd chucknorris
 ./install.sh
 ```
 
-Installs the lot: GTK4 + libadwaita, screenshot tool, polkit, `pacman-contrib`, `pciutils`, `pkgfile`, `espeak-ng` (voice), `yt-dlp` (video), plus the app and art.
+The installer does everything: GTK4 + libadwaita, screenshot tool, polkit, `pacman-contrib`, `pciutils`, `pkgfile`, `espeak-ng` + **Piper** and a natural voice model, `yt-dlp`, and the recon kit (`whois`, `bind`/`dig`, `traceroute`, `wget`, `netcat`), plus the app and art.
 
 ## Set up & run
 
-Open **Settings**, paste a **SiliconFlow** key (<https://cloud.siliconflow.com/account/ak>) — or Chuck reuses **Basilisk's** automatically. Optional: set a **proxy** (Mullvad). Then:
+Open **Settings**, paste a **SiliconFlow** key (<https://cloud.siliconflow.com/account/ak>) — or Chuck reuses **Basilisk's** automatically. Optional: a **proxy** (Mullvad). Then:
 
 ```bash
 chucknorris
 ```
 
+Talk to him. That's it.
+
 ---
 
 <div align="center">
 
-*"Chuck Norris doesn't kill zombie processes. He stares at them until they apologise and exit 0."*
+*"Chuck Norris doesn't read man pages. Man pages read Chuck Norris and take notes."*
 
 **MIT.** Made by **The Priest** ⛧ — in memory of a legend.
 

@@ -32,7 +32,7 @@ mkdir -p "$APP_DIR" "$ASSET_DIR" "${HOME}/.local/bin" "${HOME}/.local/share/appl
 step "installing GTK4 + tools (screenshot, polkit, cleanup, GPU, pkgfile, voice, video)"
 SESS="${XDG_SESSION_TYPE:-}"; DE="${XDG_CURRENT_DESKTOP:-}"
 if command -v pacman >/dev/null; then
-  PKGS="python-gobject python-cairo gtk4 libadwaita polkit pciutils pacman-contrib pkgfile espeak-ng yt-dlp alsa-utils python-pip"
+  PKGS="python-gobject python-cairo gtk4 libadwaita polkit pciutils pacman-contrib pkgfile espeak-ng yt-dlp alsa-utils python-pip whois bind traceroute wget openbsd-netcat"
   if [ "$SESS" = "wayland" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then PKGS="$PKGS grim"; else PKGS="$PKGS scrot"; fi
   case "$DE" in *KDE*|*kde*|*plasma*|*Plasma*) PKGS="$PKGS spectacle" ;; esac
   # shellcheck disable=SC2086
@@ -40,12 +40,12 @@ if command -v pacman >/dev/null; then
   sudo pkgfile --update 2>/dev/null || true
 elif command -v apt-get >/dev/null; then
   sudo apt-get update
-  PKGS="python3-gi python3-gi-cairo gir1.2-gtk-4.0 gir1.2-adw-1 libgtk-4-1 libadwaita-1-0 policykit-1 pciutils espeak-ng yt-dlp"
+  PKGS="python3-gi python3-gi-cairo gir1.2-gtk-4.0 gir1.2-adw-1 libgtk-4-1 libadwaita-1-0 policykit-1 pciutils espeak-ng yt-dlp whois dnsutils traceroute wget netcat-openbsd"
   if [ "$SESS" = "wayland" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then PKGS="$PKGS grim"; else PKGS="$PKGS scrot"; fi
   # shellcheck disable=SC2086
   sudo apt-get install -y $PKGS || die "apt install failed"
 elif command -v dnf >/dev/null; then
-  PKGS="python3-gobject gtk4 libadwaita polkit pciutils espeak-ng yt-dlp"
+  PKGS="python3-gobject gtk4 libadwaita polkit pciutils espeak-ng yt-dlp whois bind-utils traceroute wget nmap-ncat"
   if [ "$SESS" = "wayland" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then PKGS="$PKGS grim"; else PKGS="$PKGS scrot"; fi
   # shellcheck disable=SC2086
   sudo dnf install -y $PKGS || die "dnf install failed"

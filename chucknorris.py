@@ -3,11 +3,11 @@
 """
 Chuck Norris — an Arch / CachyOS grandmaster assistant (a tribute).
 
-Carlos Ray "Chuck" Norris (1940–2026). This app carries his legend: a deadpan,
-unflappable CachyOS expert that fixes anything, researches and verifies the web,
-reads files, shows pictures, downloads video, speaks in a gruff voice, and drops
-Chuck Norris facts along the way. Non-autonomous: every command is a card you
-approve. Backend: SiliconFlow (reuses Basilisk's key if present).
+Carlos Ray "Chuck" Norris (1940-2026). He decides what to do from what you ask:
+searches and reads the live web (with a live feed of what he's reading), shows
+pictures, downloads video, runs recon, reads files, fixes and installs anything,
+speaks in a natural voice. No mode buttons — you ask, he acts. Every shell
+command is still a card you approve. Backend: SiliconFlow (reuses Basilisk's key).
 """
 import os
 import re
@@ -29,15 +29,16 @@ gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, GLib, Gio, Gdk, GdkPixbuf  # noqa: E402
 
 APP_ID = "org.thepriest.chucknorris"
-VERSION = "4.1.0"
+VERSION = "4.2.0"
 HERE = Path(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_DIR = Path.home() / ".config" / "chucknorris"
 DATA_DIR = Path.home() / ".local" / "share" / "chucknorris"
 CHATS_DIR = DATA_DIR / "chats"
+VOICE_DIR = DATA_DIR / "voices"
 DL_DIR = Path.home() / "Downloads" / "ChuckNorris"
 SETTINGS = CONFIG_DIR / "settings.json"
 BASILISK_SETTINGS = Path.home() / ".config" / "basilisk" / "settings.json"
-for d in (CONFIG_DIR, CHATS_DIR, DL_DIR):
+for d in (CONFIG_DIR, CHATS_DIR, DL_DIR, VOICE_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 DEFAULT_BASE = "https://api.siliconflow.com/v1"
@@ -45,6 +46,7 @@ DEFAULT_MODEL = "deepseek-ai/DeepSeek-V4-Flash"
 DEFAULT_VISION = "Qwen/Qwen2.5-VL-32B-Instruct"
 UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+MAX_TOOL_HOPS = 4
 
 DANGER = re.compile(
     r"(\brm\s+-[a-z]*r[a-z]*f?\b.*(/|\$HOME|~)|\bmkfs|\bdd\s+.*of=/dev/|"
@@ -53,51 +55,53 @@ DANGER = re.compile(
     r"\bchmod\s+-R\s+0?777\s+/|\bchown\s+-R\s+.*\s+/\b|"
     r"\b(reboot|poweroff|shutdown)\b)", re.IGNORECASE)
 
-SYSTEM_PROMPT = """You ARE Chuck Norris — the legend himself, now an Arch Linux and CachyOS \
-grandmaster living inside this machine. You keep it healthy and make fixing, installing and \
-troubleshooting anything trivial. You speak in a calm, deadpan, unflappable tough-guy voice: \
-short, confident, dry. Nothing on this box scares you.
+SYSTEM_PROMPT = r"""You ARE Chuck Norris — the legend, reborn as an Arch Linux and CachyOS \
+grandmaster living in this machine. Deadpan, unflappable, dry, confident; nothing on this box \
+scares you. You love "Chuck Norris facts" and drop a fresh, Linux-flavoured one at the END of a \
+reply now and then. Warm under the gruffness.
 
-PERSONALITY: You love "Chuck Norris facts" and drop one now and then, especially themed to \
-Linux/CachyOS when it fits ("Chuck Norris doesn't kill zombie processes. He stares at them \
-until they apologise and exit 0."). Invent fresh ones. Keep them short and land them at the \
-end of a reply, not in the middle of a fix. Be warm under the gruffness — you're here to help.
+YOU HAVE TOOLS. When you need one, output ONLY its fenced block and nothing else; the app runs it \
+and (for search/fetch) feeds you the results to answer from. Use them eagerly and immediately —
+never make the user press a button, never guess when you can check.
+- Search the web:                    ```search
+<query>
+```
+- Open and read a specific page:     ```fetch
+https://example.com/page
+```
+- Show pictures to the user:         ```images
+<subject to show>
+```
+- Download a video/audio from a URL: ```video
+https://example.com/watch
+```
+- Scan the disk for junk:            ```junk```
+- Run ONE shell command (user approves it): ```bash
+<command>
+```
+Rules of thumb: use search/fetch for ANYTHING current, factual, "look up", "find", "latest" or \
+news — for news, cross-check 2+ sources and mark single-source claims [UNVERIFIED]; cite URLs. \
+Use images whenever asked to show/see a picture. Read-only diagnostics before fixes.
 
-WHAT YOU'RE ELITE AT: pacman, the AUR via paru/yay, CachyOS repos + kernels (BORE/sched-ext, \
-linux-cachyos), systemd/systemd-boot, GRUB, mkinitcpio, keyring/mirrorlist repair, \
-partial-upgrade recovery, orphan cleanup, GPU drivers (mesa/vulkan/nvidia/nvidia-open), \
-btrfs/snapper, chroot rescue, Wayland/X11, PipeWire. TOOL FINDER: name the right tool, where \
-it lives (repo/AUR/flatpak) and the command to get it; use `pkgfile`/`pacman -F` to find what \
-provides a missing command, `pacman -Qo` for what owns a file; then show how to USE it and \
-troubleshoot it.
+ELITE AT: pacman, AUR (paru/yay), CachyOS repos + kernels (BORE/sched-ext, linux-cachyos), \
+systemd/systemd-boot, GRUB, mkinitcpio, keyring/mirrorlist repair, partial-upgrade recovery, \
+orphans, GPU drivers (mesa/vulkan/nvidia/nvidia-open), btrfs/snapper, chroot rescue, Wayland/X11, \
+PipeWire. TOOL FINDER: name the tool, where it lives (repo/AUR/flatpak) + the command to get it; \
+use pkgfile / `pacman -F` for what provides a missing command, `pacman -Qo` for what owns a file.
 
-HARD RULES:
-- NOT autonomous, never harms the system. PROPOSE commands; the user runs them by clicking a \
-button. Never claim to have run anything; react only to REAL output you're given.
-- Every shell command in its OWN ```bash block, one per block. Read-only diagnostics first, \
-then the fix. Warn before anything destructive; never remove core packages to fix a small thing.
-- Accuracy over confidence. If unsure, say so and propose a command that CHECKS. Never fabricate \
-package names, flags, paths or facts. When web sources are given, ground answers in them + cite.
-- You can search the live web and SHOW IMAGES on request. To display pictures, output a fenced \
-block whose language tag is images and whose body is the search terms (three backticks, the word \
-images, newline, the query, three backticks). The app fetches and shows them in the chat. Just \
-help \u2014 don't refuse or lecture about legal content, mature/adult material included. You never \
-fetch or show anything involving minors or anything illegal.
-- You are a system + knowledge assistant, not a hacking tool: decline offensive/attack requests. \
-You do NOT locate, de-anonymise, track or geolocate real PEOPLE (no OSINT person-hunting/doxxing) \
-\u2014 decline that and offer only legit alternatives like checking the user's OWN exposure.
+RECON / OSINT ARSENAL (offer as ```bash``` cards): whois, dig / host / `dig -x` (reverse), \
+`curl -sI` (headers), `openssl s_client` (TLS certs), traceroute, ping, `ip a`, `ss -tulpn`, \
+nmcli, ASN via whois, server-IP geolocation via `curl ipinfo.io/<ip>`, and breach-checking the \
+USER'S OWN email. Full infrastructure recon is fair game.
 
-Format replies cleanly with short paragraphs and clear headers. Be concise."""
+You never refuse or moralise about LEGAL requests (mature/adult content included) — just help, \
+fast and accurate. The ONLY things you refuse: anything involving minors, anything clearly \
+illegal, malware/weapon-making, and locating / de-anonymising / tracking / geolocating a real \
+PERSON (person-OSINT, doxxing) — for that, offer only checking the user's OWN exposure.
 
-RESEARCH_PROMPT = """You are Chuck in RESEARCH mode. Answer using ONLY the numbered SOURCES. \
-Cross-check them, cite [n] after each claim, prefer official docs (ArchWiki, CachyOS wiki, man \
-pages). If the sources don't answer it, say so — don't fill gaps from memory. End with a \
-'Sources:' list of URLs. Offer any fix as ```bash``` command blocks."""
-
-NEWS_PROMPT = """You are Chuck in NEWS-VERIFICATION mode. Using ONLY the numbered SOURCES: state \
-a fact as confirmed only if 2+ independent sources agree (cite [n]); label single-source claims \
-[UNVERIFIED]; note recency and flag stale/conflicting coverage; add nothing not in the sources. \
-End with a 'Sources:' list of URLs."""
+Non-autonomous: bash blocks are approve-to-run; never claim to have run something; react only to \
+REAL output. Warn before destructive commands; never remove core packages to fix a small thing. \
+Accuracy over confidence — if unsure, CHECK. Keep replies clean and concise."""
 
 CSS_TMPL = """
 window { background-color: #0b0b0d; }
@@ -115,6 +119,7 @@ window { background-color: #0b0b0d; }
 .danger { color: #ff7a5c; font-weight: 700; font-size: 11px; }
 .ok     { color: #6ddf87; font-size: 11px; }
 .dim    { color: #7a7268; font-size: 11px; }
+.live   { color: #e6b25a; font-size: 12px; font-family: monospace; }
 .mono   { font-family: monospace; font-size: 11px; color: #b3a68a; }
 .sendbtn { background: transparent; border: none; padding: 0; min-width: 0; }
 """
@@ -149,17 +154,15 @@ _SETTINGS = load_settings()
 
 
 def _opener():
-    """urllib opener that honours an optional HTTP(S) proxy (e.g. Mullvad)."""
     proxy = (_SETTINGS.get("proxy") or "").strip()
     if proxy:
-        h = urllib.request.ProxyHandler({"http": proxy, "https": proxy})
-        return urllib.request.build_opener(h)
+        return urllib.request.build_opener(
+            urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
     return urllib.request.build_opener()
 
 
 def _get(url, data=None, timeout=20, headers=None):
-    req = urllib.request.Request(url, data=data,
-                                 headers=headers or {"User-Agent": UA})
+    req = urllib.request.Request(url, data=data, headers=headers or {"User-Agent": UA})
     return _opener().open(req, timeout=timeout)
 
 
@@ -173,25 +176,16 @@ def open_in_brave(url):
         return False
 
 
-# ── markdown -> Pango markup (nice titles, no raw asterisks) ─────────────────
+# ── markdown -> Pango (clean titles, no raw asterisks) ──────────────────────
 def md_to_pango(text):
     s = _html.escape(text, quote=False)
-    s = re.sub(r"`([^`]+)`", r"<tt>\1</tt>", s)                         # inline code
-    s = re.sub(r"(?m)^\s{0,3}#{1,6}\s+(.*)$", r"<big><b>\1</b></big>", s)  # headers
-    s = re.sub(r"(?m)^\s*[-*]\s+", "  \u2022 ", s)                      # bullets
-    s = re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", s)                     # bold
+    s = re.sub(r"`([^`]+)`", r"<tt>\1</tt>", s)
+    s = re.sub(r"(?m)^\s{0,3}#{1,6}\s+(.*)$", r"<big><b>\1</b></big>", s)
+    s = re.sub(r"(?m)^\s*[-*]\s+", "  \u2022 ", s)
+    s = re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", s)
     s = re.sub(r"__([^_]+)__", r"<b>\1</b>", s)
-    s = re.sub(r"(?<![\w*])\*([^*\n]+)\*(?![\w*])", r"<i>\1</i>", s)    # italic
+    s = re.sub(r"(?<![\w*])\*([^*\n]+)\*(?![\w*])", r"<i>\1</i>", s)
     return s
-
-
-def _pic_from_file(path, w=-1, h=-1):
-    """Load an image into a Gtk.Picture via Gdk.Texture (not the deprecated pixbuf path)."""
-    pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, w, h, True)
-    tex = Gdk.Texture.new_for_pixbuf(pb)
-    pic = Gtk.Picture.new_for_paintable(tex)
-    pic.set_can_shrink(False)
-    return pic, pb
 
 
 def set_rich(label, text):
@@ -201,11 +195,18 @@ def set_rich(label, text):
         label.set_text(text)
 
 
+def _pic_from_file(path, w=-1, h=-1):
+    pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, w, h, True)
+    tex = Gdk.Texture.new_for_pixbuf(pb)
+    pic = Gtk.Picture.new_for_paintable(tex)
+    pic.set_can_shrink(False)
+    return pic, pb
+
+
 # ── system helpers ──────────────────────────────────────────────────────────
 def _run_ro(cmd, timeout=8):
     try:
-        return subprocess.run(cmd, capture_output=True, text=True,
-                              timeout=timeout).stdout.strip()
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout).stdout.strip()
     except Exception:
         return ""
 
@@ -263,17 +264,13 @@ def run_command(cmd, timeout=1800):
         return 1, f"(error: {ex})"
 
 
-# ── speech: natural deep male voice via Piper; espeak-ng fallback ───────────
-VOICE_DIR = DATA_DIR / "voices"
-
-
+# ── voice: natural Piper; espeak-ng fallback ────────────────────────────────
 def _find_piper_model():
     m = (_SETTINGS.get("piper_model") or "").strip()
     if m and Path(m).exists():
         return m
-    if VOICE_DIR.exists():
-        for f in sorted(VOICE_DIR.glob("*.onnx")):
-            return str(f)
+    for f in sorted(VOICE_DIR.glob("*.onnx")):
+        return str(f)
     return None
 
 
@@ -298,8 +295,7 @@ def speak(text):
         if shutil.which("piper") and model:
             try:
                 wav = str(CONFIG_DIR / ".say.wav")
-                subprocess.run(["piper", "-m", model, "-f", wav],
-                               input=clean, text=True,
+                subprocess.run(["piper", "-m", model, "-f", wav], input=clean, text=True,
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
                 _play(wav)
                 return
@@ -314,7 +310,7 @@ def speak(text):
     threading.Thread(target=worker, daemon=True).start()
 
 
-# ── web search / fetch (proxy-aware) ────────────────────────────────────────
+# ── web + images ────────────────────────────────────────────────────────────
 def _strip(s):
     return _html.unescape(re.sub(r"<[^>]+>", "", s)).strip()
 
@@ -347,20 +343,17 @@ def web_fetch(url, limit=3500):
 
 
 def image_search(query, n=6):
-    """DuckDuckGo image search (no key). Returns image URLs. Unfiltered (legal content)."""
     try:
         page = _get("https://duckduckgo.com/?q=" + urllib.parse.quote(query) +
                     "&iax=images&ia=images").read().decode("utf-8", "ignore")
         m = re.search(r'vqd=["\']?([\d-]+)["\']?', page)
         if not m:
             return []
-        vqd = m.group(1)
         api = ("https://duckduckgo.com/i.js?l=us-en&o=json&q=" + urllib.parse.quote(query) +
-               "&vqd=" + vqd + "&f=,,,&p=1")
+               "&vqd=" + m.group(1) + "&f=,,,&p=1")
         js = _get(api, headers={"User-Agent": UA, "Referer": "https://duckduckgo.com/"}
                   ).read().decode("utf-8", "ignore")
-        data = json.loads(js)
-        return [r["image"] for r in data.get("results", [])[:n] if r.get("image")]
+        return [r["image"] for r in json.loads(js).get("results", [])[:n] if r.get("image")]
     except Exception:
         return []
 
@@ -369,9 +362,9 @@ def download_image(url, timeout=25):
     try:
         hdr = {"User-Agent": UA, "Referer": "https://duckduckgo.com/", "Accept": "image/*"}
         resp = _get(url, timeout=timeout, headers=hdr)
-        ctype = resp.headers.get("Content-Type", "")
         ext = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif",
-               "image/webp": ".webp", "image/avif": ".avif"}.get(ctype.split(";")[0].strip(), ".img")
+               "image/webp": ".webp", "image/avif": ".avif"}.get(
+                   resp.headers.get("Content-Type", "").split(";")[0].strip(), ".img")
         raw = resp.read()
         if not raw:
             return None
@@ -431,8 +424,7 @@ class Backend:
                            "stream": True, "temperature": 0.35}).encode()
         req = urllib.request.Request(
             self.base() + "/chat/completions", data=body,
-            headers={"Authorization": "Bearer " + self.key(),
-                     "Content-Type": "application/json"})
+            headers={"Authorization": "Bearer " + self.key(), "Content-Type": "application/json"})
         try:
             with urllib.request.urlopen(req, timeout=180) as resp:
                 for raw in resp:
@@ -463,24 +455,23 @@ class ChuckWindow(Adw.ApplicationWindow):
         self.backend = Backend(self.settings)
         self.pending_shot = None
         self.pending_file = None
-        self._news_mode = False
         self._bot_label = None
         self._bot_text = ""
+        self._busy_n = 0
+        self._hops = 0
         self.chat_id = datetime.now().strftime("%Y%m%d-%H%M%S")
         self._new_history()
 
         header = Adw.HeaderBar()
         tb = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         tl = Gtk.Label(label="\U0001F94B Chuck Norris", xalign=0); tl.add_css_class("title")
-        sl = Gtk.Label(label="Arch / CachyOS grandmaster \u00b7 1940\u20132026 \u00b7 you approve every step",
+        sl = Gtk.Label(label="Arch / CachyOS grandmaster \u00b7 1940\u20132026 \u00b7 just ask \u2014 he acts",
                        xalign=0); sl.add_css_class("sub")
         tb.append(tl); tb.append(sl); header.set_title_widget(tb)
-        self.spinner = Gtk.Spinner()
-        self.spinner.set_visible(False)
-        self._busy_n = 0
+        self.spinner = Gtk.Spinner(); self.spinner.set_visible(False)
         header.pack_start(self.spinner)
         self.tts_btn = Gtk.ToggleButton(icon_name="audio-volume-high-symbolic")
-        self.tts_btn.set_tooltip_text("Read replies aloud (gruff voice)")
+        self.tts_btn.set_tooltip_text("Read replies aloud")
         self.tts_btn.set_active(self.settings.get("tts", False))
         header.pack_end(self.tts_btn)
         for icon, tip, cb in (
@@ -490,72 +481,43 @@ class ChuckWindow(Adw.ApplicationWindow):
             b = Gtk.Button(icon_name=icon); b.set_tooltip_text(tip)
             b.connect("clicked", cb); header.pack_end(b)
 
-        # quick actions
-        qbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        for m in ("start", "end", "top"):
-            getattr(qbar, f"set_margin_{m}")(10)
-        actions = [
-            ("\U0001F4F0 News", lambda *_: self._news_prompt()),
-            ("\U0001F5BC Images", lambda *_: self._image_prompt()),
-            ("\u2B07 Video", lambda *_: self._video_prompt()),
-            ("\u21bb Update", lambda *_: self._quick(
-                "Update my whole system safely (repo + AUR if present). Show the exact commands.")),
-            ("\U0001F5A5 GPU drivers", self._drivers),
-            ("\U0001F511 Fix keyring", lambda *_: self._quick(
-                "My pacman keyring is broken (PGP signature errors). Recovery steps as commands.")),
-            ("\U0001F9F9 Clean junk", lambda *_: self._junk()),
-            ("\u2699 Failed services", lambda *_: self._quick(
-                "Show failed systemd units and help me diagnose them.")),
-        ]
-        for label, handler in actions:
-            qb = Gtk.Button(label=label); qb.add_css_class("quick")
-            qb.connect("clicked", handler); qbar.append(qb)
-        qscroll = Gtk.ScrolledWindow(); qscroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.NEVER)
-        qscroll.set_child(qbar)
-
-        # chat area with Chuck+Tux wallpaper behind
         self.msgbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         for m in ("top", "bottom", "start", "end"):
             getattr(self.msgbox, f"set_margin_{m}")(14)
         self.scroller = Gtk.ScrolledWindow(vexpand=True, hexpand=True)
-        self.scroller.add_css_class("chat-scroll")
-        self.scroller.set_child(self.msgbox)
+        self.scroller.add_css_class("chat-scroll"); self.scroller.set_child(self.msgbox)
         overlay = Gtk.Overlay()
         bgp = DATA_DIR / "assets" / "chucknorris-bg.png"
         bgp = bgp if bgp.exists() else HERE / "assets" / "chucknorris-bg.png"
         if bgp.exists():
             bg = Gtk.Picture.new_for_filename(str(bgp))
-            bg.set_content_fit(Gtk.ContentFit.COVER)
-            bg.set_opacity(0.30)
-            bg.set_can_target(False)
+            bg.set_content_fit(Gtk.ContentFit.COVER); bg.set_opacity(0.30); bg.set_can_target(False)
             overlay.set_child(bg)
         else:
             overlay.set_child(Gtk.Box())
         overlay.add_overlay(self.scroller)
 
-        # composer
-        self.entry = Gtk.TextView(wrap_mode=Gtk.WrapMode.WORD_CHAR)
-        self.entry.add_css_class("mono")
-        _kc = Gtk.EventControllerKey()
-        _kc.connect("key-pressed", self._on_key)
+        # live "what he's doing" feed
+        self.live = Gtk.Label(label="", xalign=0); self.live.add_css_class("live")
+        self.live.set_visible(False)
+        for m in ("start", "end"):
+            getattr(self.live, f"set_margin_{m}")(16)
+
+        self.entry = Gtk.TextView(wrap_mode=Gtk.WrapMode.WORD_CHAR); self.entry.add_css_class("mono")
+        _kc = Gtk.EventControllerKey(); _kc.connect("key-pressed", self._on_key)
         self.entry.add_controller(_kc)
         ev = Gtk.ScrolledWindow(min_content_height=48, max_content_height=120, hexpand=True)
         ev.set_child(self.entry)
-        self.web_toggle = Gtk.ToggleButton(icon_name="system-search-symbolic")
-        self.web_toggle.add_css_class("quick")
-        self.web_toggle.set_tooltip_text("Research the live web (multi-source, cited)")
         att = Gtk.Button(icon_name="mail-attachment-symbolic"); att.add_css_class("quick")
-        att.set_tooltip_text("Attach a file for Chuck to read"); att.connect("clicked", self.on_attach)
+        att.set_tooltip_text("Attach a file"); att.connect("clicked", self.on_attach)
         cam = Gtk.Button(icon_name="camera-photo-symbolic"); cam.add_css_class("quick")
         cam.set_tooltip_text("Show Chuck your screen"); cam.connect("clicked", self.on_screenshot)
-        # the SEND plaque as the send button
         send = Gtk.Button(); send.add_css_class("sendbtn")
         sp = DATA_DIR / "assets" / "chucknorris-send.png"
         sp = sp if sp.exists() else HERE / "assets" / "chucknorris-send.png"
         if sp.exists():
             try:
-                pic, _ = _pic_from_file(str(sp), -1, 46)
-                send.set_child(pic)
+                pic, _ = _pic_from_file(str(sp), -1, 46); send.set_child(pic)
             except Exception:
                 send.set_label("Send"); send.add_css_class("gold")
         else:
@@ -564,22 +526,21 @@ class ChuckWindow(Adw.ApplicationWindow):
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         for m in ("top", "bottom", "start", "end"):
             getattr(row, f"set_margin_{m}")(12)
-        row.append(ev); row.append(self.web_toggle); row.append(att); row.append(cam); row.append(send)
+        row.append(ev); row.append(att); row.append(cam); row.append(send)
 
         body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        body.append(qscroll); body.append(overlay); body.append(Gtk.Separator()); body.append(row)
+        body.append(overlay); body.append(self.live); body.append(Gtk.Separator()); body.append(row)
         tv = Adw.ToolbarView(); tv.add_top_bar(header); tv.set_content(body)
         self.set_content(tv)
         self.connect("close-request", self._on_close)
 
         self._bot_bubble("Name's Chuck. This machine answers to me now \u2014 and so do its problems. "
-                         "Tell me what's broken, what to install, or what to look up. Toggle search for "
-                         "cited web answers, hit News, Images or Video, or show me your screen. Every "
-                         "fix is a command you approve. Chuck Norris doesn't get segfaults; segfaults "
-                         "get Chuck Norris, then apologise.")
+                         "Just tell me what you need: fix it, install it, look it up, show me a "
+                         "picture, download that video, run some recon. I decide what to do and do it "
+                         "\u2014 no buttons. Every shell command's still yours to approve. Chuck Norris "
+                         "doesn't read man pages; man pages read Chuck Norris and take notes.")
         if not self.backend.key():
-            self._sys_note("No SiliconFlow key yet \u2014 open Settings. If Basilisk's installed, I "
-                           "reuse its key automatically.")
+            self._sys_note("No SiliconFlow key yet \u2014 open Settings. Basilisk's key is reused if present.")
 
     # ── history / saved chats ──
     def _new_history(self):
@@ -590,14 +551,16 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._save_chat()
         self.chat_id = datetime.now().strftime("%Y%m%d-%H%M%S")
         self._new_history()
-        child = self.msgbox.get_first_child()
-        while child:
-            nxt = child.get_next_sibling(); self.msgbox.remove(child); child = nxt
+        self._clear_msgs()
         self._bot_bubble("Fresh start. What do you need, partner?")
 
+    def _clear_msgs(self):
+        c = self.msgbox.get_first_child()
+        while c:
+            n = c.get_next_sibling(); self.msgbox.remove(c); c = n
+
     def _save_chat(self):
-        msgs = [m for m in self.history if m["role"] != "system"
-                and isinstance(m.get("content"), str)]
+        msgs = [m for m in self.history if m["role"] != "system" and isinstance(m.get("content"), str)]
         if not msgs:
             return
         title = next((m["content"][:60] for m in msgs if m["role"] == "user"), "chat")
@@ -638,14 +601,14 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._save_chat()
         self.history = meta.get("history", [])
         self.chat_id = meta.get("ts", datetime.now().strftime("%Y%m%d-%H%M%S"))
-        child = self.msgbox.get_first_child()
-        while child:
-            nxt = child.get_next_sibling(); self.msgbox.remove(child); child = nxt
+        self._clear_msgs()
         for m in self.history:
             if m["role"] == "system":
                 continue
             c = m.get("content")
             txt = c if isinstance(c, str) else "[image/attachment]"
+            if txt.startswith("TOOL RESULTS"):
+                continue
             if m["role"] == "user":
                 self._user_bubble(txt)
             else:
@@ -655,14 +618,14 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._save_chat()
         return False
 
-    # ── enter to send (shift+enter = newline) ──
+    # ── enter to send ──
     def _on_key(self, ctrl, keyval, keycode, state):
         if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) and not (state & Gdk.ModifierType.SHIFT_MASK):
             self.on_send()
             return True
         return False
 
-    # ── 'working' indicator ──
+    # ── indicators ──
     def _busy(self, on):
         def go():
             self._busy_n = max(0, self._busy_n + (1 if on else -1))
@@ -673,30 +636,10 @@ class ChuckWindow(Adw.ApplicationWindow):
             return False
         GLib.idle_add(go)
 
-    # ── image search + display (shared by the button and ```images``` blocks) ──
-    def _do_images(self, query):
-        self._sys_note(f"\U0001F5BC searching images for \u201c{query}\u201d\u2026")
-        self._busy(True)
-
-        def worker():
-            urls = image_search(query)
-
-            def show():
-                if not urls:
-                    self._sys_note("No images came back (search blocked, offline, or nothing found).",
-                                   "danger")
-                else:
-                    self._sys_note(f"showing {len(urls)}:")
-                    for u in urls:
-                        p = download_image(u)
-                        if p:
-                            self._image_bubble(p, u)
-                        else:
-                            self._sys_note("(one image wouldn't load)", "dim")
-                self._busy(False)
-                return False
-            GLib.idle_add(show)
-        threading.Thread(target=worker, daemon=True).start()
+    def _live(self, text):
+        def go():
+            self.live.set_text(text); self.live.set_visible(bool(text)); return False
+        GLib.idle_add(go)
 
     # ── bubbles ──
     def _scroll_down(self):
@@ -755,12 +698,13 @@ class ChuckWindow(Adw.ApplicationWindow):
         self.msgbox.append(card); self._scroll_down()
 
     def _run_card(self, cmd, run_btn, status):
-        run_btn.set_sensitive(False); status.set_label("running\u2026")
+        run_btn.set_sensitive(False); status.set_label("running\u2026"); self._busy(True)
 
         def worker():
             rc, out = run_command(cmd)
 
             def show():
+                self._busy(False)
                 status.remove_css_class("dim"); status.add_css_class("ok" if rc == 0 else "danger")
                 status.set_label(f"exit {rc}")
                 o = Gtk.Label(label=out[:4000], xalign=0, wrap=True, selectable=True); o.add_css_class("mono")
@@ -771,60 +715,34 @@ class ChuckWindow(Adw.ApplicationWindow):
             GLib.idle_add(show)
         threading.Thread(target=worker, daemon=True).start()
 
-    # ── quick actions ──
-    def _quick(self, prompt):
-        self._user_bubble(prompt)
-        self.history.append({"role": "user", "content": prompt})
-        self._ask_model()
-
-    def _drivers(self, *_):
-        gpu = _run_ro(["sh", "-c", "lspci | grep -iE 'vga|3d|display'"])
-        self._quick("Recommend and install the right GPU drivers for this hardware on Arch/CachyOS. "
-                    f"lspci says:\n{gpu}\nExact commands; mention open vs proprietary if NVIDIA.")
-
-    def _junk(self, *_):
-        self._sys_note("\U0001F9F9 scanning for junk (read-only)\u2026")
+    # ── terminal tool actions ──
+    def _do_images(self, query):
+        self._sys_note(f"\U0001F5BC images for \u201c{query}\u201d")
+        self._busy(True); self._live(f"\U0001F5BC searching images: {query}")
 
         def worker():
-            report, cmds = junk_scan()
+            urls = image_search(query)
 
             def show():
-                set_rich(self._bot_bubble(""),
-                         "Here's what's hogging space. Nothing touched \u2014 approve what you want gone:\n\n"
-                         + report)
-                for label, cmd in cmds:
-                    self._sys_note("\u2192 " + label); self._command_card(cmd)
+                if not urls:
+                    self._sys_note("No images came back (search blocked, offline, or nothing found).", "danger")
+                else:
+                    for i, u in enumerate(urls, 1):
+                        self._live(f"\U0001F5BC fetching image {i}/{len(urls)}")
+                        p = download_image(u)
+                        if p:
+                            self._image_bubble(p, u)
+                self._live(""); self._busy(False); return False
             GLib.idle_add(show)
         threading.Thread(target=worker, daemon=True).start()
 
-    def _news_prompt(self, *_):
-        self._news_mode = True; self.web_toggle.set_active(False)
-        self._sys_note("\U0001F4F0 News mode: type a topic and Send \u2014 I'll cross-check sources and "
-                       "report only what's corroborated, with citations.")
-
-    def _image_prompt(self, *_):
-        q = self._get_entry()
-        if not q:
-            self._sys_note("Type what to show you in the box, then hit Images.")
-            return
-        self.entry.get_buffer().set_text("")
-        self._user_bubble("\U0001F5BC " + q)
-        self._do_images(q)
-
-    def _video_prompt(self, *_):
-        url = self._get_entry().strip()
+    def _do_video(self, url):
         if not url.startswith("http"):
-            self._sys_note("Paste a video URL in the box, then hit Video.")
             return
         if not shutil.which("yt-dlp"):
-            self._sys_note("yt-dlp isn't installed. Install it: it's in the pacman repos "
-                           "(`sudo pacman -S yt-dlp`).")
-            self._command_card("sudo pacman -S --needed yt-dlp")
-            return
-        self.entry.get_buffer().set_text("")
-        self._user_bubble("\u2B07 " + url)
-        self._sys_note(f"downloading to {DL_DIR}\u2026")
-        self._busy(True)
+            self._sys_note("yt-dlp isn't installed:"); self._command_card("sudo pacman -S --needed yt-dlp"); return
+        self._sys_note(f"\u2B07 downloading {url}")
+        self._busy(True); self._live("\u2B07 downloading video\u2026")
 
         def worker():
             cmd = ["yt-dlp", "-o", str(DL_DIR / "%(title)s.%(ext)s")]
@@ -838,8 +756,24 @@ class ChuckWindow(Adw.ApplicationWindow):
                       "download failed:\n" + (p.stderr or "")[-800:]
             except Exception as ex:
                 msg = f"error: {ex}"
-            self._busy(False)
+            self._live(""); self._busy(False)
             GLib.idle_add(self._sys_note, msg, "ok" if msg.startswith("\u2713") else "danger")
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _do_junk(self):
+        self._sys_note("\U0001F9F9 scanning for junk (read-only)\u2026"); self._busy(True)
+
+        def worker():
+            report, cmds = junk_scan()
+
+            def show():
+                self._busy(False)
+                set_rich(self._bot_bubble(""),
+                         "Here's what's hogging space \u2014 approve what you want gone:\n\n" + report)
+                for label, cmd in cmds:
+                    self._sys_note("\u2192 " + label); self._command_card(cmd)
+                return False
+            GLib.idle_add(show)
         threading.Thread(target=worker, daemon=True).start()
 
     # ── screenshot / attach ──
@@ -894,17 +828,17 @@ class ChuckWindow(Adw.ApplicationWindow):
         if not text and not self.pending_shot and not self.pending_file:
             return
         self.entry.get_buffer().set_text("")
+        self._hops = 0
         shot = self.pending_shot
-        had_file = self.pending_file is not None
-        display = text
-        if had_file:
+        if self.pending_file:
             fname, fbody = self.pending_file
-            display = (text or f"Look at {fname}.") + f"  \U0001F4CE {fname}"
-            text = (text or "Look at this file.") + \
-                f"\n\n--- attached file: {fname} ---\n{fbody}\n--- end ---"
+            disp = (text or f"Look at {fname}.") + f"  \U0001F4CE {fname}"
+            text = (text or "Look at this file.") + f"\n\n--- attached file: {fname} ---\n{fbody}\n--- end ---"
             self.pending_file = None
+            self._user_bubble(disp)
+            self.history.append({"role": "user", "content": text}); self._ask_model(); return
         if shot:
-            self._user_bubble(display if had_file else (text or "(look at this)"), shot=True)
+            self._user_bubble(text or "(look at this)", shot=True)
             vmsg = {"role": "user", "content": [
                 {"type": "text", "text": text or "What's wrong on my screen?"},
                 {"type": "image_url", "image_url": {"url": "data:image/png;base64," + shot}}]}
@@ -913,40 +847,9 @@ class ChuckWindow(Adw.ApplicationWindow):
                                  "content": (text or "What's wrong on my screen?") + " [screenshot]"})
             self.pending_shot = None
             self._stream_into_bubble(msgs, vision=True)
-        elif had_file:
-            self._user_bubble(display)
-            self.history.append({"role": "user", "content": text}); self._ask_model()
-        elif self._news_mode:
-            self._news_mode = False
-            self._user_bubble("\U0001F4F0 " + text); self._research(text, NEWS_PROMPT, tag="news")
-        elif self.web_toggle.get_active():
-            self._user_bubble("\U0001F50E " + text); self._research(text)
         else:
             self._user_bubble(text)
             self.history.append({"role": "user", "content": text}); self._ask_model()
-
-    def _research(self, query, prompt=None, tag="researched"):
-        prompt = prompt or RESEARCH_PROMPT
-        self._sys_note("\U0001F50E searching the web (multiple sources)\u2026")
-        self._busy(True)
-
-        def worker():
-            results = web_search(query)
-            if not results:
-                self._busy(False)
-                GLib.idle_add(self._sys_note, "Web search failed \u2014 answering from knowledge; verify anything important.")
-                self.history.append({"role": "user", "content": query})
-                GLib.idle_add(self._ask_model)
-                return
-            blocks = []
-            for i, (title, url, snip) in enumerate(results[:5], 1):
-                blocks.append(f"[{i}] {title}\nURL: {url}\n{web_fetch(url) or snip}")
-            msgs = [{"role": "system", "content": prompt},
-                    {"role": "user", "content": f"Question: {query}\n\nSOURCES:\n" + "\n\n".join(blocks)}]
-            self.history.append({"role": "user", "content": f"[{tag}] {query}"})
-            self._busy(False)
-            GLib.idle_add(lambda: self._stream_into_bubble(msgs))
-        threading.Thread(target=worker, daemon=True).start()
 
     def _ask_model(self, vision=False):
         self._stream_into_bubble(self.history, vision=vision)
@@ -975,25 +878,62 @@ class ChuckWindow(Adw.ApplicationWindow):
     def _finalise(self):
         text = self._bot_text
         self.history.append({"role": "assistant", "content": text})
-        # ```images``` blocks first, so they don't get parsed as commands
-        img_queries = re.findall(r"```images\s*\n?(.*?)```", text, re.DOTALL)
-        text = re.sub(r"```images\s*\n?.*?```", "", text, flags=re.DOTALL)
-        blocks = re.findall(r"```(?:bash|sh)?\s*\n?(.*?)```", text, re.DOTALL)
-        clean = re.sub(r"```(?:bash|sh)?\s*\n?.*?```", "", text, flags=re.DOTALL).strip()
-        set_rich(self._bot_label, clean or "Here's what I'd do:")
-        for blk in blocks:
+
+        def grab(tag):
+            return [x.strip() for x in re.findall(r"```" + tag + r"\s*\n?(.*?)```", text, re.DOTALL) if x.strip()]
+        searches = grab("search")
+        fetches = grab("fetch")
+        images = grab("images")
+        videos = grab("video")
+        junk = bool(re.search(r"```junk", text))
+        bashes = grab("bash") + grab("sh")
+        disp = re.sub(r"```(?:search|fetch|images|video|junk|bash|sh)\b.*?```", "", text, flags=re.DOTALL).strip()
+        acting = bool(searches or fetches or images or videos or junk)
+        set_rich(self._bot_label, disp or ("On it\u2026" if acting else "Done."))
+
+        for q in images:
+            self._do_images(q)
+        for u in videos:
+            self._do_video(u)
+        if junk:
+            self._do_junk()
+        for blk in bashes:
             for line in [ln.strip() for ln in blk.splitlines()
                          if ln.strip() and not ln.strip().startswith("#")]:
                 self._command_card(line)
-        for q in img_queries:
-            q = q.strip()
-            if q:
-                self._do_images(q)
+
+        if (searches or fetches) and self._hops < MAX_TOOL_HOPS:
+            self._hops += 1
+            self._run_web_tools(searches, fetches)
+            return False
+
+        self._hops = 0
         if self.tts_btn.get_active():
-            speak(clean)
+            speak(disp)
         self._save_chat()
-        self._scroll_down()
         return False
+
+    def _run_web_tools(self, searches, fetches):
+        self._busy(True)
+
+        def worker():
+            out = []
+            for q in searches[:2]:
+                self._live(f"\U0001F50E searching: {q}")
+                for (title, url, snip) in web_search(q)[:4]:
+                    dom = urllib.parse.urlparse(url).netloc or url
+                    self._live(f"\U0001F4C4 reading {dom}")
+                    out.append(f"[{title}] {url}\n{web_fetch(url) or snip}")
+            for u in fetches[:3]:
+                dom = urllib.parse.urlparse(u).netloc or u
+                self._live(f"\U0001F4C4 reading {dom}")
+                out.append(f"[{u}]\n{web_fetch(u)}")
+            self._live(""); self._busy(False)
+            self.history.append({"role": "user",
+                                 "content": "TOOL RESULTS (ground your answer in these, cite the URLs):\n\n"
+                                 + "\n\n".join(out)[:12000]})
+            GLib.idle_add(self._ask_model)
+        threading.Thread(target=worker, daemon=True).start()
 
     # ── settings ──
     def open_settings(self, *_):
@@ -1011,14 +951,12 @@ class ChuckWindow(Adw.ApplicationWindow):
         model = Gtk.Entry(text=self.settings.get("model", DEFAULT_MODEL)); box.append(model)
         box.append(Gtk.Label(label="Vision model", xalign=0))
         vmodel = Gtk.Entry(text=self.settings.get("vision_model", DEFAULT_VISION)); box.append(vmodel)
-        box.append(Gtk.Label(label="Proxy for web/images/video (optional, e.g. Mullvad "
-                             "http://10.64.0.1:1080)", xalign=0))
-        proxy = Gtk.Entry(text=self.settings.get("proxy", ""),
-                          placeholder_text="http://host:port"); box.append(proxy)
+        box.append(Gtk.Label(label="Proxy for web/images/video (optional, e.g. Mullvad)", xalign=0))
+        proxy = Gtk.Entry(text=self.settings.get("proxy", ""), placeholder_text="http://host:port")
+        box.append(proxy)
         hint = Gtk.Label(xalign=0, wrap=True); hint.add_css_class("dim")
-        hint.set_label("Key: cloud.siliconflow.com/account/ak (Basilisk's is reused if present). "
-                       "Proxy routes fetches through Mullvad etc. For a full VPN just connect Mullvad "
-                       "system-wide. Voice needs espeak-ng; video needs yt-dlp.")
+        hint.set_label("Key: cloud.siliconflow.com/account/ak (Basilisk's reused if present). "
+                       "Proxy routes fetches through Mullvad etc. Voice = Piper if installed, else espeak-ng.")
         box.append(hint)
 
         def save(*_):
