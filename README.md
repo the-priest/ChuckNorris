@@ -6,7 +6,7 @@
 
 ### The Arch / CachyOS grandmaster that lives on your desktop. You ask — he acts. No modes, no buttons, no excuses. A tribute.
 
-![version](https://img.shields.io/badge/version-9.0.0-b6892f?style=for-the-badge&labelColor=0b0b0d)
+![version](https://img.shields.io/badge/version-9.1.0-b6892f?style=for-the-badge&labelColor=0b0b0d)
 ![tribute](https://img.shields.io/badge/1940-2026-b6892f?style=for-the-badge&labelColor=0b0b0d)
 ![agentic](https://img.shields.io/badge/agentic-decides%20%26%20acts-b6892f?style=for-the-badge&labelColor=0b0b0d)
 ![distro](https://img.shields.io/badge/Arch%20%7C%20CachyOS-first--class-b6892f?style=for-the-badge&labelColor=0b0b0d)
@@ -23,7 +23,7 @@ There isn't another GTK-native, offline-first, agentic CachyOS specialist that f
 
 ## How he works
 
-Ask for anything. Behind the scenes Chuck reaches for the right tool and you watch it happen in the **live feed** at the bottom of the window — `🔎 searching: cachyos bore scheduler` → `📄 reading wiki.cachyos.org` → `📄 reading phoronix.com` — so you always know he's working, never wondering if he's stuck. His tools:
+Ask for anything. Behind the scenes Chuck reaches for the right tool and you watch every step happen **live, as a running checklist right in the chat** — `● searching  current CachyOS scheduler` → `✓ searched (5 sources)` → `● reading  wiki.cachyos.org — BORE scheduler` → `✓ read  phoronix.com — benchmark results` — each line marks itself done the moment it finishes, so you always see exactly what he's doing at any moment and never stare at a silent spinner. And he reads all his sources **in parallel**, so deep research that used to crawl through pages one-by-one now finishes in a fraction of the time. His tools:
 
 - **Verify-first web research** — Chuck doesn't answer from memory. Before any factual, current, "how do I" or news claim he **searches, reads the real pages, and cross-checks them** — fanning out across several queries and pulling up to **10 distinct sources across different domains** (capped at 2 per outlet, so "cross-checked" means genuinely different outlets). He answers grounded in what he read, **with citations**, and marks anything he only found in one place `[UNVERIFIED]`. Search runs over **SearXNG** (Brave + Google + DuckDuckGo + Bing under the hood) with a DuckDuckGo fallback; point it at your own private instance in Settings.
 - **One continuous run** — give him a task and he does the *whole* thing before reporting: gather → verify → act → answer, back-to-back in a single pass, instead of stopping halfway to narrate and wait. The only thing that pauses him is a shell command, because **you** approve those.

@@ -22,6 +22,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import gi
 gi.require_version("Gtk", "4.0")
@@ -45,7 +46,7 @@ except Exception:
     _skill_library = None
 
 APP_ID = "org.thepriest.chucknorris"
-VERSION = "9.0.0"
+VERSION = "9.1.0"
 HERE = Path(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_DIR = Path.home() / ".config" / "chucknorris"
 DATA_DIR = Path.home() / ".local" / "share" / "chucknorris"
@@ -178,6 +179,14 @@ window { background-color: #0e0e10; }
 .mono   { font-family: monospace; font-size: 11px; color: #b3a68a; }
 .sendbtn { background: transparent; border: none; padding: 0; min-width: 0; }
 .empty-hint { color: #55524a; font-size: 15px; }
+
+/* live activity steps — a running checklist of exactly what Chuck is doing */
+.step-box   { background-color: #141418; border: 1px solid #24242b; border-radius: 12px;
+              padding: 6px 10px; }
+.step-run   { color: #e6b25a; font-size: 12px; }
+.step-done  { color: #6f6a5e; font-size: 12px; }
+.step-fail  { color: #c96a52; font-size: 12px; }
+.step-head  { color: #8a8578; font-size: 11px; font-weight: 700; }
 """
 
 
@@ -535,10 +544,12 @@ _ARTICLE_TAGS = re.compile(r"(?is)<(script|style|nav|footer|header|form|aside|no
 _BLOCK = re.compile(r"(?is)</(p|div|li|h[1-6]|br|tr|section|article)>")
 
 
-def web_fetch(url, limit=6000):
-    """Fetch a page and pull readable body text (keeps paragraph breaks)."""
+def web_fetch(url, limit=6000, timeout=8):
+    """Fetch a page and pull readable body text (keeps paragraph breaks).
+    Also tries to pull the page <title> for display. Returns just the body text
+    (use web_fetch_titled for (title, body))."""
     try:
-        raw = _get(url, timeout=22).read().decode("utf-8", "ignore")
+        raw = _get(url, timeout=timeout).read().decode("utf-8", "ignore")
     except Exception:
         return ""
     raw = _ARTICLE_TAGS.sub(" ", raw)
@@ -550,6 +561,18 @@ def web_fetch(url, limit=6000):
     text = re.sub(r"[ \t]+", " ", _strip(body))
     text = re.sub(r"\n\s*\n+", "\n\n", text).strip()
     return text[:limit]
+
+
+def _page_title(url, timeout=6):
+    """Best-effort <title> of a page, for the activity feed."""
+    try:
+        raw = _get(url, timeout=timeout).read(20000).decode("utf-8", "ignore")
+        m = re.search(r"(?is)<title[^>]*>(.*?)</title>", raw)
+        if m:
+            return _strip(m.group(1))[:80]
+    except Exception:
+        pass
+    return ""
 
 
 def image_search(query, n=6):
@@ -680,6 +703,9 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._pending_tools = 0
         self._tool_feedback = []
         self._loop_web = None
+        self._activity_box = None
+        self._activity_steps = []
+        self._activity_lock = threading.Lock()
         self.chat_id = datetime.now().strftime("%Y%m%d-%H%M%S")
         self._new_history()
 
@@ -922,6 +948,71 @@ class ChuckWindow(Adw.ApplicationWindow):
     def _live(self, text):
         def go():
             self.live.set_text(text); self.live.set_visible(bool(text)); return False
+        GLib.idle_add(go)
+
+    # ── live activity panel: a running checklist of exactly what Chuck is doing,
+    #    so you can see every step (searching BBC, reading <article>, verifying…)
+    #    instead of a silent spinner. Steps persist in the chat.
+    def _activity_start(self, header="Working"):
+        def go():
+            self._drop_hint()
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            box.add_css_class("step-box")
+            hl = Gtk.Label(label=header, xalign=0); hl.add_css_class("step-head")
+            box.append(hl)
+            self.msgbox.append(box)
+            self._activity_box = box
+            self._activity_steps = []
+            self._scroll_down()
+            return False
+        GLib.idle_add(go)
+
+    def _activity_step(self, text):
+        """Add a step marked 'running'. Returns an index to finish it later.
+        Thread-safe: reserves the slot under a lock (parallel fetches call this
+        concurrently), then schedules the widget onto the main loop."""
+        if not hasattr(self, "_activity_lock"):
+            self._activity_lock = threading.Lock()
+        with self._activity_lock:
+            if not hasattr(self, "_activity_steps"):
+                self._activity_steps = []
+            idx = len(self._activity_steps)
+            self._activity_steps.append(None)
+
+        def go():
+            box = getattr(self, "_activity_box", None)
+            if box is None:
+                return False
+            lbl = Gtk.Label(label="\u25CF " + text, xalign=0, wrap=True)
+            lbl.add_css_class("step-run")
+            box.append(lbl)
+            if idx < len(self._activity_steps):
+                self._activity_steps[idx] = lbl
+            self._scroll_down()
+            return False
+        GLib.idle_add(go)
+        return idx
+
+    def _activity_done(self, idx, text=None, ok=True):
+        def go():
+            steps = getattr(self, "_activity_steps", [])
+            if idx < 0 or idx >= len(steps) or steps[idx] is None:
+                return False
+            lbl = steps[idx]
+            cur = lbl.get_text().lstrip("\u25CF ").strip()
+            mark = "\u2713" if ok else "\u2717"
+            lbl.set_text(f"{mark} {text if text is not None else cur}")
+            lbl.remove_css_class("step-run")
+            lbl.add_css_class("step-done" if ok else "step-fail")
+            return False
+        GLib.idle_add(go)
+
+    def _activity_end(self):
+        # leave the finished panel in place as a record; just clear the handle
+        def go():
+            self._activity_box = None
+            self._activity_steps = []
+            return False
         GLib.idle_add(go)
 
     # ── bubbles ──
@@ -1345,13 +1436,20 @@ class ChuckWindow(Adw.ApplicationWindow):
 
     def _stream_into_bubble(self, messages, vision=False):
         self._bot_text = ""
-        self._bot_label = self._bot_bubble("\u2026")
+        self._bot_label = self._bot_bubble("Thinking\u2026")
         self._busy(True)
         send_msgs = self._augment(messages) if not vision else messages
 
         def on_delta(chunk):
             self._bot_text += chunk
-            GLib.idle_add(self._bot_label.set_text, self._bot_text)
+            # While streaming, show only the human-readable narration — strip any
+            # fenced tool blocks (even half-finished ones) so the user never sees
+            # raw ```search ... ``` gibberish scroll past; the blocks become clean
+            # activity steps in _finalise.
+            shown = re.sub(r"```[a-z]*.*?```", "", self._bot_text, flags=re.DOTALL)
+            shown = re.sub(r"```[a-z]*\b.*$", "", shown, flags=re.DOTALL)  # trailing open block
+            shown = shown.strip()
+            GLib.idle_add(self._bot_label.set_text, shown or "Thinking\u2026")
             self._scroll_down()
 
         def on_done():
@@ -1501,38 +1599,63 @@ class ChuckWindow(Adw.ApplicationWindow):
 
     def _run_web_tools(self, searches, fetches, extra_feedback=None):
         self._busy(True)
+        self._activity_start("Researching")
 
         def worker():
             out = list(extra_feedback or [])
-            seen_domains, sources_read = set(), 0
-            # fan out across several distinct queries
+            # 1. gather a diverse candidate list from all queries (fast — snippets)
+            candidates, seen_domains, seen_urls = [], set(), set()
             for q in searches[:RESEARCH_QUERIES]:
-                if sources_read >= RESEARCH_MAX_SOURCES:
-                    break
-                self._live(f"\U0001F50E searching: {q}")
+                si = self._activity_step(f"searching  {q}")
                 results = web_search(q, n=RESEARCH_MAX_SOURCES)
                 if not results:
+                    self._activity_done(si, f"searched  {q}  (no results)", ok=False)
                     out.append(f"[search '{q}': engines returned nothing — try different wording]")
                     continue
+                n_new = 0
                 for (title, url, snip) in results:
-                    if sources_read >= RESEARCH_MAX_SOURCES:
-                        break
-                    dom = _domain(url)
-                    if dom in seen_domains:      # diversity: one read per domain
+                    if url in seen_urls:
                         continue
-                    seen_domains.add(dom)
-                    self._live(f"\U0001F4C4 reading {dom}")
-                    body = web_fetch(url) or snip
-                    if body:
-                        out.append(f"[{title}] {url}\n{body}")
-                        sources_read += 1
+                    dom = _domain(url)
+                    if dom in seen_domains:           # diversity: one read per domain
+                        continue
+                    seen_domains.add(dom); seen_urls.add(url)
+                    candidates.append((title, url, snip))
+                    n_new += 1
+                    if len(candidates) >= RESEARCH_MAX_SOURCES:
+                        break
+                self._activity_done(si, f"searched  {q}  ({n_new} new sources)")
+                if len(candidates) >= RESEARCH_MAX_SOURCES:
+                    break
             for u in fetches[:RESEARCH_MAX_SOURCES]:
-                dom = _domain(u)
-                self._live(f"\U0001F4C4 reading {dom}")
-                body = web_fetch(u)
-                out.append(f"[{u}]\n{body or '(page unreadable / blocked)'}")
-            self._live(""); self._busy(False)
-            note = (f"TOOL RESULTS — {sources_read} distinct sources across "
+                if u not in seen_urls:
+                    seen_urls.add(u); candidates.append((_domain(u), u, ""))
+
+            # 2. fetch ALL candidates in PARALLEL — each with its own live step
+            def fetch_one(item):
+                title, url, snip = item
+                dom = _domain(url)
+                label = f"{dom}" + (f" — {title[:60]}" if title and title != dom else "")
+                si = self._activity_step(f"reading  {label}")
+                body = web_fetch(url) or snip
+                self._activity_done(si, f"read  {label}", ok=bool(body))
+                if body:
+                    return f"[{title or dom}] {url}\n{body}"
+                return None
+
+            got = 0
+            with ThreadPoolExecutor(max_workers=6) as ex:
+                futs = {ex.submit(fetch_one, it): it for it in candidates}
+                for fut in as_completed(futs):
+                    try:
+                        r = fut.result()
+                    except Exception:
+                        r = None
+                    if r:
+                        out.append(r); got += 1
+
+            self._busy(False); self._activity_end()
+            note = (f"TOOL RESULTS — {got} distinct sources across "
                     f"{len(seen_domains)} domains. Cross-check them, cite the URLs, "
                     "mark single-source claims [UNVERIFIED], and keep going until the "
                     "whole task is finished before you write your final answer:\n\n")
