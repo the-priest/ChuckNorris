@@ -76,7 +76,7 @@ def skill_write(name, lang, body, description=""):
 def skill_run_cmd(name):
     """The shell command that runs a saved skill (for an approve-to-run card)."""
     slug = _slug(name)
-    for lang, ext in (("python", "py"), ("bash", "sh")):
+    for ext in ("py", "sh"):
         p = SKILLS_DIR / (slug + "." + ext)
         if p.exists():
             if ext == "py":

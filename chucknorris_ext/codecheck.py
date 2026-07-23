@@ -101,6 +101,29 @@ def _syntax_via(body, ext, argv_builder):
 
 
 # ── lint ─────────────────────────────────────────────────────────────────────
+_LINT_NOISE = ("all checks passed", "no issues found", "found 0 errors")
+
+
+def _clean_lint_output(rc, out, replace_path=None, as_name="code.py"):
+    """Turn a linter's raw output into real findings only.
+
+    Linters are not consistent: ruff prints "All checks passed!" to STDOUT and
+    exits 0 when the code is fine. Treating any output as a finding marks clean
+    code broken — which would withhold the Run button and send the model into a
+    pointless fix loop. So: trust the exit code, and drop success banners.
+    """
+    if rc == 0:
+        return []
+    text = (out or "").strip()
+    if not text:
+        return []
+    if replace_path:
+        text = text.replace(replace_path, as_name)
+    lines = [ln for ln in text.splitlines()
+             if ln.strip() and not any(n in ln.lower() for n in _LINT_NOISE)]
+    return ["\n".join(lines)] if lines else []
+
+
 def _lint_python(body):
     findings = []
     tool = _which("ruff")
@@ -108,9 +131,16 @@ def _lint_python(body):
         with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
             f.write(body); p = f.name
         try:
-            rc, out = _run([tool, "check", "--output-format", "concise", p])
-            if out.strip():
-                findings.append(out.strip().replace(p, "code.py"))
+            # --isolated: ignore any ruff.toml/pyproject.toml that happens to be
+            #   in the working directory, so verification is deterministic and a
+            #   user's strict project config can't start blocking code cards.
+            # --select E9,F,B: real defects only — syntax errors, undefined names,
+            #   unused imports, likely bugs. NOT style rules (import sorting, line
+            #   length): withholding working code over formatting taste would trap
+            #   the model in a pointless fix loop.
+            rc, out = _run([tool, "check", "--isolated", "--select", "E9,F,B",
+                            "--output-format", "concise", p])
+            findings += _clean_lint_output(rc, out, p, "code.py")
         finally:
             os.unlink(p)
     elif _which("pyflakes"):
@@ -118,12 +148,11 @@ def _lint_python(body):
             f.write(body); p = f.name
         try:
             rc, out = _run(["pyflakes", p])
-            if out.strip():
-                findings.append(out.strip().replace(p, "code.py"))
+            findings += _clean_lint_output(rc, out, p, "code.py")
         finally:
             os.unlink(p)
     else:
-        # stdlib fallback: compile catches a lot; also flag bare except / undefined-ish
+        # stdlib fallback: compile catches a lot on its own
         try:
             compile(body, "code.py", "exec")
         except Exception as e:
@@ -140,7 +169,7 @@ def _lint_shell(body):
         f.write(body); p = f.name
     try:
         rc, out = _run([tool, "-f", "gcc", p])
-        return [out.strip().replace(p, "script.sh")] if out.strip() else []
+        return _clean_lint_output(rc, out, p, "script.sh")
     finally:
         os.unlink(p)
 
@@ -155,7 +184,7 @@ def _lint_js(body):
                 f.write(body); p = f.name
             try:
                 rc, out = _run([eslint, "--no-eslintrc", "--format", "compact", p])
-                return [out.strip().replace(p, "code.js")] if out.strip() else []
+                return _clean_lint_output(rc, out, p, "code.js")
             finally:
                 os.unlink(p)
     return []
@@ -183,7 +212,15 @@ def security_scan(lang, body):
 # ── public: full pipeline ────────────────────────────────────────────────────
 def check(lang, body, tests=None):
     """Run the full verify pipeline. Returns a dict:
-       {ok, lang, syntax_ok, syntax_err, lint[], security[], tests{ran,rc,out}}"""
+       {ok, lang, syntax_ok, syntax_err, lint[], security[], tests{...}}
+
+    SAFETY INVARIANT: this function NEVER executes the code it is checking.
+    Verification is 100% static — parse, lint, and pattern-scan only. Running
+    code is a separate, deliberate act that always goes through the app's
+    approve-to-run card, where the user sees it and presses the button.
+    The `tests` argument is accepted for API compatibility but is NOT executed;
+    a verifier that runs untrusted code would defeat its own purpose.
+    """
     lang = _LANG_NORM.get((lang or "").lower(), (lang or "").lower())
     res = {"lang": lang, "syntax_ok": True, "syntax_err": "",
            "lint": [], "security": [], "tests": None, "ok": True}
@@ -209,30 +246,29 @@ def check(lang, body, tests=None):
         elif lang == "js":
             res["lint"] = _lint_js(body)
 
-    # 3. security scan (always — cheap)
+    # 3. security scan (always — cheap, static)
     res["security"] = security_scan(lang, body)
 
-    # 4. tests (only python for now, if provided and syntax ok)
-    if tests and res["syntax_ok"] and lang == "python":
-        prog = body + "\n\n# --- tests ---\n" + tests
-        with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
-            f.write(prog); p = f.name
-        try:
-            rc, out = _run(["python3", p], timeout=60)
-            res["tests"] = {"ran": True, "rc": rc, "out": out.strip()[:2000]}
-        finally:
-            os.unlink(p)
+    # 4. tests are NOT run here (see the safety invariant above). If the model
+    #    supplied tests, statically check them too and fold the findings in.
+    if tests:
+        t_syntax_ok = True
+        if lang == "python":
+            t_syntax_ok, t_err = _syntax_python(tests)
+            if not t_syntax_ok:
+                res["lint"].append(f"test block: {t_err}")
+        res["security"] += security_scan(lang, tests)
+        res["tests"] = {"ran": False, "reason": "not executed by design "
+                        "(verification is static; run it via the approve-to-run card)"}
 
-    res["ok"] = (res["syntax_ok"] and not res["lint"] and not res["security"]
-                 and (res["tests"] is None or res["tests"]["rc"] == 0))
+    res["ok"] = (res["syntax_ok"] and not res["lint"] and not res["security"])
     return res
 
 
 def report(res):
     """Compact human/model-readable report string from a check() result."""
     if res.get("ok"):
-        extra = " (tests passed)" if res.get("tests") else ""
-        return f"\u2713 {res['lang']} verified: syntax OK, no lint or security issues{extra}."
+        return f"\u2713 {res['lang']} verified: syntax OK, no lint or security issues."
     lines = [f"Verification of the {res['lang']} code found issues:"]
     if not res["syntax_ok"]:
         lines.append(f"  SYNTAX: {res['syntax_err']}")
@@ -242,10 +278,6 @@ def report(res):
                 lines.append(f"  LINT: {sub.strip()}")
     for s in res["security"][:20]:
         lines.append(f"  SECURITY: {s}")
-    if res.get("tests") and res["tests"]["rc"] != 0:
-        lines.append(f"  TESTS FAILED (exit {res['tests']['rc']}):")
-        for sub in res["tests"]["out"].splitlines()[-12:]:
-            lines.append("    " + sub)
     lines.append("Fix these, then re-verify.")
     return "\n".join(lines)
 

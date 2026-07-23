@@ -6,7 +6,7 @@
 
 ### The Arch / CachyOS grandmaster that lives on your desktop. You ask — he acts. No modes, no buttons, no excuses. A tribute.
 
-![version](https://img.shields.io/badge/version-9.1.0-b6892f?style=for-the-badge&labelColor=0b0b0d)
+![version](https://img.shields.io/badge/version-9.7.0-b6892f?style=for-the-badge&labelColor=0b0b0d)
 ![tribute](https://img.shields.io/badge/1940-2026-b6892f?style=for-the-badge&labelColor=0b0b0d)
 ![agentic](https://img.shields.io/badge/agentic-decides%20%26%20acts-b6892f?style=for-the-badge&labelColor=0b0b0d)
 ![distro](https://img.shields.io/badge/Arch%20%7C%20CachyOS-first--class-b6892f?style=for-the-badge&labelColor=0b0b0d)
@@ -19,11 +19,13 @@
 
 Most Linux "assistants" are a chat box that spits out commands you copy-paste, or a wrapper that needs you to pick a mode before it'll do anything. Chuck is neither. **He reads what you ask, decides which of his tools to use, and uses them — live, in front of you — then answers.** You never toggle "search mode" or press an "images" button. You just talk. And every shell command he wants to run still lands as a card **you** approve, so he's powerful without being reckless.
 
+**Two-tier safety on every command.** Nothing executes unless you press Run — there is no path around that, not through a script, not through a saved skill, not through the code verifier (which is deliberately static and never runs the code it checks). On top of that, anything catastrophic — wiping a disk, `rm -rf /` or `~`, piping `curl` into a shell, reformatting, ripping out core packages — is flagged **CRITICAL** and the Run button stays **disarmed** until you tick a box confirming you've read it. Merely destructive-but-scoped things (`rm -rf ./build`, a service stop, a reboot) get a plain red warning and a single approval. A misclick can't wipe your machine.
+
 There isn't another GTK-native, offline-first, agentic CachyOS specialist that fuses live web research, a running feed of what it's doing, image and video retrieval, a full recon toolkit, screen vision, file reading, a natural voice, and approve-to-run safety — in one app that runs on your own machine and answers to no one but you.
 
 ## How he works
 
-Ask for anything. Behind the scenes Chuck reaches for the right tool and you watch every step happen **live, as a running checklist right in the chat** — `● searching  current CachyOS scheduler` → `✓ searched (5 sources)` → `● reading  wiki.cachyos.org — BORE scheduler` → `✓ read  phoronix.com — benchmark results` — each line marks itself done the moment it finishes, so you always see exactly what he's doing at any moment and never stare at a silent spinner. And he reads all his sources **in parallel**, so deep research that used to crawl through pages one-by-one now finishes in a fraction of the time. His tools:
+Ask for anything. Behind the scenes Chuck reaches for the right tool and you watch every step happen **live, as a running checklist right in the chat** — `● searching  current CachyOS scheduler` → `✓ searched (5 sources)` → `● reading  wiki.cachyos.org — BORE scheduler` → `✓ read  phoronix.com — benchmark results` — each line marks itself done the moment it finishes, so you always see exactly what he's doing at any moment and never stare at a silent spinner. And he reads his sources **in parallel** and keeps it **lean — a few well-chosen sources, not a slow crawl through dozens** — so research comes back fast instead of making you wait. His tools:
 
 - **Verify-first web research** — Chuck doesn't answer from memory. Before any factual, current, "how do I" or news claim he **searches, reads the real pages, and cross-checks them** — fanning out across several queries and pulling up to **10 distinct sources across different domains** (capped at 2 per outlet, so "cross-checked" means genuinely different outlets). He answers grounded in what he read, **with citations**, and marks anything he only found in one place `[UNVERIFIED]`. Search runs over **SearXNG** (Brave + Google + DuckDuckGo + Bing under the hood) with a DuckDuckGo fallback; point it at your own private instance in Settings.
 - **One continuous run** — give him a task and he does the *whole* thing before reporting: gather → verify → act → answer, back-to-back in a single pass, instead of stopping halfway to narrate and wait. The only thing that pauses him is a shell command, because **you** approve those.
@@ -44,6 +46,14 @@ Ask for anything. Behind the scenes Chuck reaches for the right tool and you wat
 - **Voice** — reads replies aloud in a natural deep voice (Piper; espeak-ng fallback).
 - **Saved chats** — every conversation is saved and reloadable; start fresh anytime.
 - **Mullvad + Brave** — route all fetches through a proxy (Settings); links open in Brave.
+
+**Never wonder if it's stuck:** while Chuck works, a live **`● working… 12s`** counter ticks up every second so you can always see he's alive and moving — and the **Send button turns into a Stop button** the moment he starts. Press it and he halts immediately, keeping whatever he'd found so far; it flips back to Send when he's done. If a request ever truly hangs, a built-in watchdog stops it on its own (no progress for 45s, or 5 minutes total) so it can never spin forever.
+
+**Saved chats live in a sidebar.** Toggle it from the header and every conversation is there, newest first, with the current one highlighted — click to jump back into any of them. Each row shows how long it has left, because **chats auto-delete 24 hours after you last touch one**. The clock is based on last activity, so a conversation you're still using never vanishes mid-thought; it's the stale ones that clean themselves up. Nothing to manage, and nothing piling up on disk forever.
+
+**It stays fast in long conversations.** What Chuck *sends* each turn is capped: the system prompt, your recent exchanges, and only the freshest research. Stale research blobs get dropped once he's already answered from them — so turn fifty is as quick as turn one, while your full transcript stays on disk untouched.
+
+**You can verify it yourself.** Run `./run_tests.sh` from the project folder. It drives whole conversations through the real app — research chains, code that gets written, verified, approved and executed, destructive commands hitting the confirm gate, runaway loops terminating, stop mid-run, the 24h chat purge — and tells you if anything is off.
 
 **Clean output:** real titles, bold, code and bullets — no stray asterisks or hashes. **Enter sends** (Shift+Enter for a newline).
 
