@@ -32,7 +32,7 @@ mkdir -p "$APP_DIR" "$ASSET_DIR" "${HOME}/.local/bin" "${HOME}/.local/share/appl
 step "installing GTK4 + tools (screenshot, polkit, cleanup, GPU, pkgfile, voice, video)"
 SESS="${XDG_SESSION_TYPE:-}"; DE="${XDG_CURRENT_DESKTOP:-}"
 if command -v pacman >/dev/null; then
-  PKGS="python-gobject python-cairo gtk4 libadwaita polkit pciutils pacman-contrib pkgfile espeak-ng yt-dlp alsa-utils python-pip whois bind traceroute wget openbsd-netcat"
+  PKGS="python-gobject python-cairo gtk4 libadwaita polkit pciutils pacman-contrib pkgfile espeak-ng yt-dlp alsa-utils python-pip whois bind traceroute wget openbsd-netcat nodejs shellcheck ruff"
   if [ "$SESS" = "wayland" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then PKGS="$PKGS grim"; else PKGS="$PKGS scrot"; fi
   case "$DE" in *KDE*|*kde*|*plasma*|*Plasma*) PKGS="$PKGS spectacle" ;; esac
   # shellcheck disable=SC2086
@@ -60,6 +60,14 @@ if ! command -v piper >/dev/null; then
     || pip install --user piper-tts >/dev/null 2>&1 \
     || info "piper install skipped — espeak-ng will be used instead"
 fi
+
+# code verifier linters (best-effort — the verifier degrades gracefully without them)
+if ! command -v ruff >/dev/null; then
+  pip install --user --break-system-packages ruff >/dev/null 2>&1 \
+    || pip install --user pyflakes >/dev/null 2>&1 \
+    || info "ruff/pyflakes not installed — Python lint will use the stdlib compiler only"
+fi
+command -v shellcheck >/dev/null || info "shellcheck not found — shell lint falls back to 'bash -n' (syntax only)"
 mkdir -p "${DATA_DIR}/voices"
 VOICE="${DATA_DIR}/voices/en_US-ryan-high.onnx"
 if [ ! -f "$VOICE" ]; then
@@ -76,15 +84,25 @@ step "installing Chuck Norris + art"
 if [ -f chucknorris.py ]; then
   cp chucknorris.py "${APP_DIR}/chucknorris.py"
   cp -r assets/* "${ASSET_DIR}/" 2>/dev/null || true
+  # ship the sidecar package (skills, on-demand specs, memory, code verifier,
+  # and the ready-made skill library)
+  rm -rf "${APP_DIR}/chucknorris_ext"
+  cp -r chucknorris_ext "${APP_DIR}/chucknorris_ext" 2>/dev/null || true
 else
   curl -fsSL "https://raw.githubusercontent.com/${REPO}/${BRANCH}/chucknorris.py" \
     -o "${APP_DIR}/chucknorris.py" || die "could not fetch chucknorris.py"
+  mkdir -p "${APP_DIR}/chucknorris_ext"
+  for f in __init__ skills specs memory codecheck skill_library; do
+    curl -fsSL "https://raw.githubusercontent.com/${REPO}/${BRANCH}/chucknorris_ext/${f}.py" \
+      -o "${APP_DIR}/chucknorris_ext/${f}.py" \
+      || info "could not fetch chucknorris_ext/${f}.py (skills/specs/memory may be limited)"
+  done
   for a in chucknorris-bg chucknorris-icon chucknorris-send; do
     curl -fsSL "https://raw.githubusercontent.com/${REPO}/${BRANCH}/assets/${a}.png" \
       -o "${ASSET_DIR}/${a}.png" 2>/dev/null || true
   done
 fi
-ok "app + art installed"
+ok "app + ext + art installed"
 
 cat > "$LAUNCH" <<EOF
 #!/usr/bin/env bash
@@ -96,12 +114,12 @@ cat > "$DESKTOP" <<EOF
 Type=Application
 Name=Chuck Norris
 GenericName=Arch/CachyOS Assistant
-Comment=Arch/CachyOS grandmaster: fixes, installs, researches, verifies news, shows images, downloads video
+Comment=Arch/CachyOS grandmaster: verifies everything on the web first, cross-checks sources, fixes, installs, writes code, shows images, finds video
 Exec=${LAUNCH}
 Icon=org.thepriest.chucknorris
 Terminal=false
 Categories=Utility;System;
-Keywords=arch;cachyos;assistant;fixer;research;news;images;video;pacman;
+Keywords=arch;cachyos;assistant;fixer;research;news;images;video;code;pacman;searxng;
 StartupNotify=true
 EOF
 update-desktop-database "${HOME}/.local/share/applications" 2>/dev/null || true

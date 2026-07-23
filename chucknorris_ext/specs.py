@@ -1,0 +1,105 @@
+"""specs.py — on-demand tool/knowledge specs (Basilisk "mise en place" pattern).
+
+The base system prompt ships only GROUP NAMES. When the user's turn clearly
+touches a group, the app injects that group's detailed spec for the NEXT model
+turn only — so deep expertise costs ~0 tokens until it's actually needed.
+
+Each entry: keyword trigger -> (label, spec text). Keep specs tight.
+"""
+import re
+
+# group -> (compiled trigger regex, spec text)
+_GROUPS = {
+    "arch": (
+        r"\b(pacman|paru|yay|aur|makepkg|mkinitcpio|grub|systemd-boot|keyring|"
+        r"mirrorlist|pgp|partial upgrade|orphan|linux-cachyos|bore|sched-ext|"
+        r"snapper|btrfs|chroot|initramfs|kernel|nvidia|mesa|vulkan|pipewire|"
+        r"cachyos|x86-64-v[34])\b",
+        "ARCH/CACHYOS PLAYBOOK:\n"
+        "- Update: `sudo pacman -Syu` (never -Sy alone → partial-upgrade breakage). "
+        "AUR: paru/yay -Sua. CachyOS mirror refresh: `sudo cachyos-rate-mirrors`.\n"
+        "- Keyring/PGP errors: `sudo pacman -Sy archlinux-keyring cachyos-keyring` "
+        "then -Su; if still broken `sudo pacman-key --init && sudo pacman-key --populate`.\n"
+        "- 'invalid or corrupted package': clear cache `sudo paccache -rk1` / remove the "
+        "bad .pkg from /var/cache/pacman/pkg then retry.\n"
+        "- What provides a missing command: `pacman -F <cmd>` (run `sudo pkgfile -u` once). "
+        "Who owns a file: `pacman -Qo <path>`. Orphans: `pacman -Qtdq`.\n"
+        "- CachyOS kernels: linux-cachyos (BORE) / linux-cachyos-sched-ext; set via "
+        "`sudo cachyos-kernel-manager` or pacman; rebuild initramfs after: `sudo mkinitcpio -P`.\n"
+        "- GPU: mesa+vulkan-radeon (AMD) / nvidia-open-dkms or nvidia-dkms (NVIDIA); "
+        "rebuild initramfs + update bootloader after driver changes.\n"
+        "- btrfs/snapper rollback + chroot rescue from live USB: `arch-chroot /mnt`.\n"
+        "- VERIFY exact flags/pkg names on wiki.archlinux.org / wiki.cachyos.org before you assert them.",
+    ),
+    "recon": (
+        r"\b(whois|dns|dig|nslookup|reverse dns|tls|ssl|cert|header|traceroute|"
+        r"asn|geolocat|ip info|ipinfo|port|open port|ss -|nmap|subdomain|"
+        r"breach|haveibeenpwned|recon|osint|infrastructure)\b",
+        "RECON / OSINT (propose as approve-to-run ```bash``` cards, read-only first):\n"
+        "- WHOIS: `whois <domain>`  ASN: `whois -h whois.cymru.com \" -v <ip>\"`\n"
+        "- DNS: `dig +short <domain> ANY`  reverse: `dig -x <ip> +short`  `host <domain>`\n"
+        "- HTTP headers: `curl -sSIL <url>`   TLS cert: "
+        "`echo | openssl s_client -connect <host>:443 -servername <host> 2>/dev/null | openssl x509 -noout -subject -issuer -dates`\n"
+        "- Path: `traceroute <host>`   Server-IP geo: `curl -s ipinfo.io/<ip>`\n"
+        "- Local sockets: `ss -tulpn`   interfaces: `ip a`   wifi: `nmcli dev wifi`\n"
+        "- Breach check the USER'S OWN email only. NEVER locate/track/de-anonymise a real person.",
+    ),
+    "code": (
+        r"\b(write|fix|debug|refactor|bug|error|traceback|compile|script|"
+        r"function|class|api|library|python|rust|c\+\+|golang|bash script|"
+        r"segfault|exception|stack trace|run this|execute|calculate|parse|"
+        r"convert|regex|json|csv)\b",
+        "CODE MODE:\n"
+        "- To actually RUN something, write a ```python``` (or ```node``` / ```bash```) block — it "
+        "is AUTO-VERIFIED (syntax + lint + security + tests) before the user gets a run button; if "
+        "the verifier reports issues, FIX them and re-emit. Prefer this over guessing an answer you "
+        "could compute.\n"
+        "- To verify code WITHOUT running it, use ```check <lang>``` — good for reviewing the user's "
+        "code or your own draft.\n"
+        "- Produce COMPLETE runnable files, not fragments. Put build/install steps in ```bash``` cards.\n"
+        "- If a library/API/flag/version matters, SEARCH its current docs first — don't guess an API "
+        "from memory.\n"
+        "- 'find bugs': read carefully, name each bug (line + symptom + why), give the corrected "
+        "version, and ```check``` it. Look for off-by-one, unhandled errors, resource leaks, "
+        "injection, race conditions, wrong types.\n"
+        "- You ship with ready-made skills (arch-*, recon-*, net-*, gpu-info, http-headers-audit…) "
+        "— run one with ```runskill <name>``` instead of rewriting it. Save new reusable ones too.",
+    ),
+    "files": (
+        r"\b(file|read|open|cat|log|config|\.conf|\.log|\.py|\.txt|\.json|\.yaml|"
+        r"\.toml|dotfile|directory|folder|/etc/|~/\.)\b",
+        "FILES: use ```read\\n/path/to/file``` to pull a text file or list a directory straight "
+        "into the conversation, then work from its real contents. For files needing root, propose "
+        "a ```bash``` card with sudo cat. Never guess a config's contents — read it.",
+    ),
+    "media": (
+        r"\b(image|picture|photo|pic|show me|video|clip|footage|youtube|"
+        r"download|yt-dlp|watch)\b",
+        "MEDIA: use ```images\\n<subject>``` to show pictures, ```videos\\n<subject>``` to "
+        "find videos (cards the user can open/download), ```video\\n<url>``` to download one "
+        "with yt-dlp into ~/Downloads/ChuckNorris (proxy-aware).",
+    ),
+    "skills": (
+        r"\b(remember this|save this|reuse|every time|make a skill|"
+        r"my skill|run the|saved skill|do this again)\b",
+        "SKILLS (smart files): when the user has a task they'll repeat, save it — emit "
+        "```skill\\nname: <slug>\\nlang: bash|python\\ndesc: <one line>\\n---\\n<body>\\n``` "
+        "and the app stores it + shows a run card. To run a saved one: "
+        "```runskill\\n<name>\\n```. They persist across restarts and the user can edit them.",
+    ),
+}
+
+
+def specs_for(text):
+    """Return a list of (label, spec) for every group the text triggers."""
+    t = (text or "").lower()
+    hits = []
+    for label, (pat, spec) in _GROUPS.items():
+        if re.search(pat, t):
+            hits.append((label, spec))
+    return hits
+
+
+def group_index():
+    """The one-liner of group names for the lean base prompt."""
+    return ", ".join(_GROUPS.keys())
