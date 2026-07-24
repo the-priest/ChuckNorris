@@ -6,7 +6,7 @@
 
 ### The Arch / CachyOS grandmaster that lives on your desktop. You ask — he acts. No modes, no buttons, no excuses. A tribute.
 
-![version](https://img.shields.io/badge/version-10.3.0-b6892f?style=for-the-badge&labelColor=0b0b0d)
+![version](https://img.shields.io/badge/version-10.4.0-b6892f?style=for-the-badge&labelColor=0b0b0d)
 ![tribute](https://img.shields.io/badge/1940-2026-b6892f?style=for-the-badge&labelColor=0b0b0d)
 ![agentic](https://img.shields.io/badge/agentic-decides%20%26%20acts-b6892f?style=for-the-badge&labelColor=0b0b0d)
 ![distro](https://img.shields.io/badge/Arch%20%7C%20CachyOS-first--class-b6892f?style=for-the-badge&labelColor=0b0b0d)
@@ -33,7 +33,8 @@ What you get from that split: real access to your system, and a model far strong
 - **He never searches the same thing twice.** A query he's already run — however it's reworded — is dropped, pages already read are never re-fetched, and dead URLs aren't retried. When the research budget is spent he *answers*; he doesn't spin.
 - **Conversations don't get slower.** What's sent each turn is capped: system prompt, recent exchanges, freshest research. Stale research is dropped once he's answered from it. Turn fifty is as quick as turn one.
 - **The transcript doesn't eat your RAM.** Only the newest messages exist as widgets. Scroll up and older ones load twenty at a time; scroll back down and they're released. A three-hundred-message chat opens in a fraction of a second.
-- **The first message works.** The connection is warmed as the window opens, and a transient hiccup retries quietly instead of throwing an error at you.
+- **The first message works.** The connection is warmed as the window opens, a transient hiccup retries quietly, and a model that takes its time to start speaking is given room to think — the ticker says *waiting for the model…* rather than pretending something broke.
+- **Text size is yours.** Set it in Settings and it applies instantly, no restart.
 - **Several search backends at once.** Whichever answers first wins, so one rate-limited instance costs you nothing.
 
 ---
@@ -56,7 +57,7 @@ What you get from that split: real access to your system, and a model far strong
 
 **Carry a library of skills.** He ships knowing the hard stuff: system health checks, keyring-first safe updates, keyring repair, mirror ranking, disk cleanup, boot rescue, GPU inspection, passive domain recon, IP geolocation and ASN, security-header audits, listening-port audits, WiFi scan, authorised port scan. One tap each — and he writes new ones as he goes.
 
-**Talk.** A natural Piper voice (espeak-ng as fallback) that reads replies *in full* — chunked and synthesised a step ahead of playback, so long answers finish instead of cutting out. Stop silences it instantly.
+**Talk — and it's on from the start.** A natural Piper voice (espeak-ng as fallback) reads replies *in full* by default — chunked and synthesised a step ahead of playback, so long answers finish instead of cutting out. Every reply also carries a small **▶** button: tap it to hear that one message again, whenever you like. Stop silences everything instantly.
 
 **Look at your screen.** Send him a screenshot and he'll tell you what's wrong with it.
 

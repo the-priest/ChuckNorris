@@ -21,6 +21,7 @@ import importlib.util
 _spec = importlib.util.spec_from_file_location("cn", "chucknorris.py")
 cn = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(cn)
+cn.speak = lambda *a, **k: None      # no audio in tests
 
 FAILS = []
 
@@ -40,13 +41,16 @@ class ScriptedBackend:
     def key(self): return "test-key"
     def base(self): return "https://api.example.com/v1"
 
-    def stream(self, messages, on_delta, on_done, on_error, vision=False, should_stop=None):
+    def stream(self, messages, on_delta, on_done, on_error, vision=False,
+               should_stop=None, attempts=3, on_open=None):
         self.calls.append(len(messages))
         # the payload the real Backend would build — must be serialisable
         try:
             self.payloads.append(json.dumps({"model": "m", "messages": messages}))
         except Exception as e:
             fail(f"history is not JSON-serialisable: {e}")
+        if on_open:
+            on_open()
         reply = self.replies.pop(0) if self.replies else "Done."
         for i in range(0, len(reply), 40):
             if should_stop and should_stop():

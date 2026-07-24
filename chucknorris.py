@@ -53,7 +53,7 @@ except Exception:
     _builder = None
 
 APP_ID = "org.thepriest.chucknorris"
-VERSION = "10.3.0"
+VERSION = "10.4.0"
 HERE = Path(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_DIR = Path.home() / ".config" / "chucknorris"
 DATA_DIR = Path.home() / ".local" / "share" / "chucknorris"
@@ -61,6 +61,7 @@ CHATS_DIR = DATA_DIR / "chats"
 CHAT_TTL_HOURS = 24        # saved chats self-delete this long after last activity
 RENDER_KEEP = 10           # bubbles kept alive when you're at the bottom of the chat
 RENDER_PAGE = 20           # more revealed each time you scroll to the top
+FONT_SIZE = 14             # chat text size in px (adjustable in Settings)
 VOICE_DIR = DATA_DIR / "voices"
 DL_DIR = Path.home() / "Downloads" / "ChuckNorris"
 SETTINGS = CONFIG_DIR / "settings.json"
@@ -286,6 +287,10 @@ window { background-color: #0e0e10; }
 .set-label   { color: #cfc9bc; font-size: 12px; }
 .set-hint    { color: #6c675d; font-size: 11px; }
 .older-note  { color: #6c675d; font-size: 11px; padding: 6px 0; }
+.msg-tools   { margin-top: 2px; }
+.playbtn     { background: transparent; border: none; padding: 2px 4px; min-width: 0;
+               min-height: 0; color: #6c675d; }
+.playbtn:hover { color: #e6b25a; background-color: #1c1c22; border-radius: 8px; }
 
 /* saved-chats sidebar */
 .sidebar     { background-color: #121215; border-right: 1px solid #24242b; }
@@ -364,6 +369,59 @@ def _get(url, data=None, timeout=20, headers=None):
         raise ValueError(f"blocked URL scheme {scheme!r} (only http/https allowed)")
     req = urllib.request.Request(url, data=data, headers=headers or {"User-Agent": UA})
     return _opener().open(req, timeout=timeout)
+
+
+_FONT_PROVIDER = None
+
+
+def font_css(px):
+    """Message text scales together; the small print stays proportionally small."""
+    px = max(9, min(28, int(px)))
+    sm, xs = max(8, px - 2), max(8, px - 3)
+    return f""".bot-bubble label, .user-bubble label {{ font-size: {px}px; }}
+.composer-entry {{ font-size: {px}px; }}
+.cmd-text {{ font-size: {sm}px; }}
+.step-run, .step-done, .step-fail {{ font-size: {sm}px; }}
+.empty-hint {{ font-size: {px + 1}px; }}
+.chat-title {{ font-size: {sm}px; }}
+.dim, .ok, .danger, .mono, .older-note, .chat-meta {{ font-size: {xs}px; }}
+"""
+
+
+def apply_font_size(px):
+    """(Re)load the font-scale provider — takes effect immediately, no restart."""
+    global _FONT_PROVIDER
+    try:
+        if _FONT_PROVIDER is None:
+            _FONT_PROVIDER = Gtk.CssProvider()
+            Gtk.StyleContext.add_provider_for_display(
+                Gdk.Display.get_default(), _FONT_PROVIDER,
+                Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 1)
+        data = font_css(px)
+        try:
+            _FONT_PROVIDER.load_from_data(data.encode())
+        except TypeError:
+            _FONT_PROVIDER.load_from_data(data)
+        return True
+    except Exception:
+        return False
+
+
+def _pick_icon(*names):
+    """First icon name that actually exists in the user's theme.
+
+    Newer Adwaita names (sidebar-show-symbolic and friends) simply aren't in
+    older icon themes, and GTK then draws the 'missing image' glyph — which is
+    what the crossed-out circle in the header was. Ask the theme first.
+    """
+    try:
+        theme = Gtk.IconTheme.get_for_display(Gdk.Display.get_default())
+        for n in names:
+            if theme.has_icon(n):
+                return n
+    except Exception:
+        pass
+    return names[-1] if names else ""
 
 
 def _open_path(path):
@@ -1107,7 +1165,7 @@ class Backend:
         threading.Thread(target=go, daemon=True).start()
 
     def stream(self, messages, on_delta, on_done, on_error, vision=False, should_stop=None,
-               attempts=3):
+               attempts=3, on_open=None):
         if not self.key():
             on_error("No SiliconFlow API key. Add one in Settings.")
             return
@@ -1126,6 +1184,8 @@ class Backend:
             try:
                 req = urllib.request.Request(url, data=body, headers=headers)
                 with urllib.request.urlopen(req, timeout=180) as resp:
+                    if on_open:
+                        on_open()          # connection is live — proof of life
                     for raw in resp:
                         if should_stop and should_stop():
                             try:
@@ -1169,7 +1229,7 @@ class Backend:
 class ChuckWindow(Adw.ApplicationWindow):
     def __init__(self, app):
         super().__init__(application=app)
-        self.set_title("Chuck Norris")
+        self.set_title("\U0001F94B Chuck Norris")
         self.set_default_size(980, 820)
         self.settings = _SETTINGS
         self.backend = Backend(self.settings)
@@ -1190,6 +1250,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._seen_urls = set()     # pages already read this turn
         self._dead_urls = set()     # pages that failed — don't retry
         self._forced_answer = False
+        self._awaiting_first = False
         self._activity_box = None
         self._activity_steps = []
         self._activity_lock = threading.Lock()
@@ -1204,17 +1265,20 @@ class ChuckWindow(Adw.ApplicationWindow):
 
         header = Adw.HeaderBar()
         tb = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        tl = Gtk.Label(label="Chuck Norris", xalign=0.5); tl.add_css_class("title")
+        tl = Gtk.Label(label="\U0001F94B  CHUCK NORRIS", xalign=0.5); tl.add_css_class("title")
         sl = Gtk.Label(label="Arch / CachyOS grandmaster \u00b7 1940\u20132026",
                        xalign=0.5); sl.add_css_class("sub")
         tb.append(tl); tb.append(sl); header.set_title_widget(tb)
 
         # LEFT: the primary action (New chat) + the busy spinner
-        newb = Gtk.Button(icon_name="document-new-symbolic"); newb.add_css_class("headerbtn")
+        newb = Gtk.Button(icon_name=_pick_icon("document-new-symbolic", "tab-new-symbolic", "list-add-symbolic")); newb.add_css_class("headerbtn")
         newb.set_tooltip_text("New chat"); newb.connect("clicked", lambda *_: self.new_chat())
         header.pack_start(newb)
         # LEFT: sidebar toggle sits next to New chat
-        self.side_btn = Gtk.ToggleButton(icon_name="sidebar-show-symbolic")
+        self.side_btn = Gtk.ToggleButton(
+            icon_name=_pick_icon("sidebar-show-symbolic", "view-dual-symbolic",
+                                 "view-list-bullet-symbolic", "format-justify-fill-symbolic",
+                                 "document-open-recent-symbolic"))
         self.side_btn.add_css_class("headerbtn")
         self.side_btn.set_tooltip_text("Saved chats")
         self.side_btn.set_active(bool(self.settings.get("sidebar_open", False)))
@@ -1224,10 +1288,10 @@ class ChuckWindow(Adw.ApplicationWindow):
         header.pack_start(self.spinner)
 
         # RIGHT: secondary controls, grouped (memory · voice · settings)
-        self.tts_btn = Gtk.ToggleButton(icon_name="audio-volume-high-symbolic")
+        self.tts_btn = Gtk.ToggleButton(icon_name=_pick_icon("audio-volume-high-symbolic", "audio-speakers-symbolic", "audio-x-generic-symbolic"))
         self.tts_btn.add_css_class("headerbtn")
         self.tts_btn.set_tooltip_text("Read replies aloud")
-        self.tts_btn.set_active(self.settings.get("tts", False))
+        self.tts_btn.set_active(self.settings.get("tts", True))
         self.tts_btn.connect("toggled", self._on_tts_toggled)
         header.pack_end(self.tts_btn)
         for icon, tip, cb in (
@@ -1273,13 +1337,13 @@ class ChuckWindow(Adw.ApplicationWindow):
         ev = Gtk.ScrolledWindow(min_content_height=40, max_content_height=140, hexpand=True)
         ev.set_child(self.entry)
 
-        att = Gtk.Button(icon_name="mail-attachment-symbolic"); att.add_css_class("icon-btn")
+        att = Gtk.Button(icon_name=_pick_icon("mail-attachment-symbolic", "edit-copy-symbolic", "list-add-symbolic")); att.add_css_class("icon-btn")
         att.set_valign(Gtk.Align.END)
         att.set_tooltip_text("Attach a file"); att.connect("clicked", self.on_attach)
-        cam = Gtk.Button(icon_name="camera-photo-symbolic"); cam.add_css_class("icon-btn")
+        cam = Gtk.Button(icon_name=_pick_icon("camera-photo-symbolic", "camera-symbolic", "applets-screenshooter-symbolic")); cam.add_css_class("icon-btn")
         cam.set_valign(Gtk.Align.END)
         cam.set_tooltip_text("Show Chuck your screen"); cam.connect("clicked", self.on_screenshot)
-        self.send_btn = Gtk.Button(icon_name="go-up-symbolic"); self.send_btn.add_css_class("send-fab")
+        self.send_btn = Gtk.Button(icon_name=_pick_icon("go-up-symbolic", "pan-up-symbolic", "up-symbolic")); self.send_btn.add_css_class("send-fab")
         self.send_btn.set_valign(Gtk.Align.END)
         self.send_btn.set_tooltip_text("Send  (Enter)")
         self.send_btn.connect("clicked", self._on_send_or_stop)
@@ -1418,6 +1482,18 @@ class ChuckWindow(Adw.ApplicationWindow):
                 set_rich(lbl, txt)
             else:
                 lbl.set_text(txt)
+            # Play this one reply on demand. Reads from the log entry, so it
+            # still speaks the right text after the bubble has been unloaded
+            # and rebuilt by the transcript window.
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            row.add_css_class("msg-tools")
+            play = Gtk.Button(icon_name=_pick_icon("media-playback-start-symbolic",
+                                                   "audio-volume-high-symbolic",
+                                                   "media-playback-start"))
+            play.add_css_class("playbtn")
+            play.set_tooltip_text("Read this message aloud")
+            play.connect("clicked", lambda _b, ent=e: self._speak_entry(ent))
+            row.append(play); w.append(row)
             return w
         if k == "note":
             l = Gtk.Label(label=d.get("text", ""), xalign=0, wrap=True)
@@ -1426,6 +1502,12 @@ class ChuckWindow(Adw.ApplicationWindow):
         if k == "image":
             return self._build_image_widget(d.get("path"), d.get("src"))
         return Gtk.Label(label="")
+
+    def _speak_entry(self, entry):
+        """Speak one specific message, replacing whatever is being read."""
+        txt = (entry.get("data") or {}).get("text", "")
+        if txt.strip():
+            speak(txt, self.settings)
 
     def _window_bounds(self):
         keep = self.cfg("render_keep", RENDER_KEEP, 4, 200)
@@ -1539,7 +1621,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             rowb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
             tag = "\u2605 " if kind == "core" else "\u00b7 "
             lbl = Gtk.Label(label=tag + text, xalign=0, wrap=True, hexpand=True, selectable=True)
-            rm = Gtk.Button(icon_name="user-trash-symbolic"); rm.add_css_class("quick")
+            rm = Gtk.Button(icon_name=_pick_icon("user-trash-symbolic", "edit-delete-symbolic", "list-remove-symbolic")); rm.add_css_class("quick")
             rm.set_tooltip_text("Forget this")
 
             def drop(_b, t=text, r=rowb):
@@ -1562,7 +1644,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             r2 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
             t2 = Gtk.Label(label=f"\u00b7 {name}  ({lang})  \u2014 {desc}", xalign=0,
                            wrap=True, hexpand=True, selectable=True)
-            d2 = Gtk.Button(icon_name="user-trash-symbolic"); d2.add_css_class("quick")
+            d2 = Gtk.Button(icon_name=_pick_icon("user-trash-symbolic", "edit-delete-symbolic", "list-remove-symbolic")); d2.add_css_class("quick")
             d2.set_tooltip_text("Archive this skill")
 
             def drop_skill(_b, nm=name, row=r2):
@@ -1697,7 +1779,12 @@ class ChuckWindow(Adw.ApplicationWindow):
 
     # ── run lifecycle: send↔stop button, "still working" heartbeat, watchdog ──
     RUN_HARD_CAP = 300      # seconds: absolute ceiling on one turn, then auto-stop
-    STUCK_AFTER = 45        # seconds with zero progress → assume stuck, auto-stop
+    STUCK_AFTER = 45        # seconds with zero progress BETWEEN steps → assume stuck
+    AWAIT_FIRST = 180       # seconds allowed for the model's FIRST token
+    # Waiting on the first token looks identical to being stuck — nothing is
+    # arriving — but the request is open and the model is simply thinking or
+    # queued. Judging that by the tight between-steps timer is what killed
+    # perfectly healthy first messages at 45s.
 
     def _note_progress(self):
         """Anything happening (a delta, a step, a hop) calls this — resets the
@@ -1712,7 +1799,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._run_started = time.time()
         self._last_progress = time.time()
         # flip Send → Stop
-        self.send_btn.set_icon_name("media-playback-stop-symbolic")
+        self.send_btn.set_icon_name(_pick_icon("media-playback-stop-symbolic", "process-stop-symbolic"))
         self.send_btn.remove_css_class("send-fab"); self.send_btn.add_css_class("stop-fab")
         self.send_btn.set_tooltip_text("Stop")
         # show the "still working" ticker
@@ -1724,7 +1811,7 @@ class ChuckWindow(Adw.ApplicationWindow):
 
     def _end_run(self):
         self._running = False
-        self.send_btn.set_icon_name("go-up-symbolic")
+        self.send_btn.set_icon_name(_pick_icon("go-up-symbolic", "pan-up-symbolic", "up-symbolic"))
         self.send_btn.remove_css_class("stop-fab"); self.send_btn.add_css_class("send-fab")
         self.send_btn.set_tooltip_text("Send  (Enter)")
         self.live.set_visible(False)
@@ -1733,7 +1820,8 @@ class ChuckWindow(Adw.ApplicationWindow):
 
     def _tick(self, secs):
         s = int(secs)
-        self.live.set_text(f"\u25CF working\u2026 {s}s   (press \u25A0 to stop)")
+        what = "waiting for the model" if getattr(self, "_awaiting_first", False) else "working"
+        self.live.set_text(f"\u25CF {what}\u2026 {s}s   (press \u25A0 to stop)")
 
     def _heartbeat(self):
         """Runs every second while a turn is active: updates the elapsed clock so
@@ -1747,9 +1835,15 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._sys_note(f"\u23f1 hit the {self.RUN_HARD_CAP}s time cap \u2014 stopping.", "danger")
             self.stop_run(auto=True)
             return False
-        if now - self._last_progress > self.STUCK_AFTER:
-            self._sys_note(f"\u26a0 no progress for {self.STUCK_AFTER}s \u2014 looks stuck, stopping.",
-                           "danger")
+        waiting = getattr(self, "_awaiting_first", False)
+        budget = self.AWAIT_FIRST if waiting else self.STUCK_AFTER
+        if now - self._last_progress > budget:
+            if waiting:
+                self._sys_note(f"\u26a0 the model didn't respond within {budget}s. "
+                               "Send it again \u2014 the connection is warm now.", "danger")
+            else:
+                self._sys_note(f"\u26a0 no progress for {budget}s \u2014 looks stuck, stopping.",
+                               "danger")
             self.stop_run(auto=True)
             return False
         return True  # keep ticking
@@ -2518,12 +2612,14 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._bot_text = ""
         self._bot_label = self._bot_bubble("Thinking\u2026")
         self._busy(True)
+        self._awaiting_first = True     # nothing back from the model yet
         self._note_progress()
         send_msgs = self._augment(messages) if not vision else messages
 
         def on_delta(chunk):
             if self._cancelled:
                 return
+            self._awaiting_first = False
             self._note_progress()
             self._bot_text += chunk
             # While streaming, show only the human-readable narration — strip any
@@ -2537,12 +2633,14 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._scroll_down()
 
         def on_done():
+            self._awaiting_first = False
             self._busy(False)
             if self._cancelled:
                 return
             GLib.idle_add(self._finalise)
 
         def on_error(msg):
+            self._awaiting_first = False
             self._busy(False)
             if self._cancelled:
                 return
@@ -2552,7 +2650,8 @@ class ChuckWindow(Adw.ApplicationWindow):
         threading.Thread(
             target=self.backend.stream,
             args=(send_msgs, on_delta, on_done, on_error, vision),
-            kwargs={"should_stop": lambda: self._cancelled},
+            kwargs={"should_stop": lambda: self._cancelled,
+                    "on_open": self._note_progress},
             daemon=True).start()
 
     def _finalise(self):
@@ -2741,7 +2840,7 @@ class ChuckWindow(Adw.ApplicationWindow):
 
         # the turn is truly finished
         self._hops = 0
-        if self.tts_btn.get_active() and disp:
+        if self.settings.get("tts", True) and disp:
             speak(disp, self.settings)
         self._save_chat()
         self._end_run()
@@ -2922,7 +3021,7 @@ class ChuckWindow(Adw.ApplicationWindow):
 
         section("Voice")
         tts_on = Gtk.CheckButton(label="Read replies aloud")
-        tts_on.set_active(bool(self.settings.get("tts", False)))
+        tts_on.set_active(bool(self.settings.get("tts", True)))
         box.append(tts_on)
         eng = Gtk.DropDown.new_from_strings(
             ["auto (Piper, else espeak-ng)", "piper only", "espeak-ng only"])
@@ -2951,6 +3050,11 @@ class ChuckWindow(Adw.ApplicationWindow):
         ttl = field("Auto-delete saved chats after (hours)",
                     slider(1, 168, 1, self.cfg("chat_ttl_hours", CHAT_TTL_HOURS, 1, 720)),
                     "Counted from your last activity in a chat, not from when it started.")
+
+        section("Appearance")
+        fsz = field("Chat text size",
+                    slider(9, 28, 1, self.cfg("font_size", FONT_SIZE, 9, 28)),
+                    "Applies the moment you hit Save \u2014 no restart.")
 
         section("Performance")
         rkeep = field("Messages kept in memory",
@@ -2999,6 +3103,7 @@ class ChuckWindow(Adw.ApplicationWindow):
                 "research_hops": int(hops.get_value()),
                 "fetch_timeout": int(ftmo.get_value()),
                 "chat_ttl_hours": int(ttl.get_value()),
+                "font_size": int(fsz.get_value()),
                 "render_keep": int(rkeep.get_value()),
                 "render_page": int(rpage.get_value()),
                 "searx_url": searx.get_text().strip(),
@@ -3008,9 +3113,10 @@ class ChuckWindow(Adw.ApplicationWindow):
         def apply_and_save(*_):
             self.settings.update(collect())
             save_settings(self.settings)
-            self.tts_btn.set_active(self.settings.get("tts", False))
+            self.tts_btn.set_active(self.settings.get("tts", True))
             if not self.settings.get("tts"):
                 stop_speaking()
+            apply_font_size(self.settings.get("font_size", FONT_SIZE))
             self._refresh_sidebar()
             self._collapse_window()
             status.set_label("Saved.")
@@ -3025,9 +3131,10 @@ class ChuckWindow(Adw.ApplicationWindow):
         def reset(*_):
             for k in ("voice_engine", "voice_speed", "voice_pitch", "research_sources",
                       "research_queries", "research_hops", "fetch_timeout", "chat_ttl_hours",
-                      "render_keep", "render_page"):
+                      "render_keep", "render_page", "font_size"):
                 self.settings.pop(k, None)
             save_settings(self.settings)
+            apply_font_size(FONT_SIZE)
             status.set_label("Tuning reset \u2014 reopen Settings to see the defaults.")
 
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -3056,6 +3163,7 @@ class ChuckApp(Adw.Application):
             prov.load_from_data(CSS_TMPL)
         Gtk.StyleContext.add_provider_for_display(
             Gdk.Display.get_default(), prov, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        apply_font_size(_SETTINGS.get("font_size", FONT_SIZE))
         # seed the ready-made skill library once (idempotent; never clobbers
         # user skills). Runs in a thread so it never delays the window.
         if _skill_library and _skills:

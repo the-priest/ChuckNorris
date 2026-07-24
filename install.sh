@@ -97,7 +97,9 @@ else
       -o "${APP_DIR}/chucknorris_ext/${f}.py" \
       || info "could not fetch chucknorris_ext/${f}.py (skills/specs/memory may be limited)"
   done
-  for a in chucknorris-bg chucknorris-icon chucknorris-send; do
+  for a in chucknorris-bg chucknorris-icon chucknorris-send \
+           chucknorris-icon-256 chucknorris-icon-128 chucknorris-icon-64 \
+           chucknorris-icon-48 chucknorris-icon-32; do
     curl -fsSL "https://raw.githubusercontent.com/${REPO}/${BRANCH}/assets/${a}.png" \
       -o "${ASSET_DIR}/${a}.png" 2>/dev/null || true
   done
@@ -112,7 +114,7 @@ chmod +x "$LAUNCH"
 cat > "$DESKTOP" <<EOF
 [Desktop Entry]
 Type=Application
-Name=Chuck Norris
+Name=🥋 Chuck Norris
 GenericName=Arch/CachyOS Assistant
 Comment=Arch/CachyOS grandmaster: verifies everything on the web first, cross-checks sources, fixes, installs, writes code, shows images, finds video
 Exec=${LAUNCH}
@@ -124,8 +126,17 @@ StartupNotify=true
 EOF
 update-desktop-database "${HOME}/.local/share/applications" 2>/dev/null || true
 if [ -f "${ASSET_DIR}/chucknorris-icon.png" ]; then
-  ICON="${HOME}/.local/share/icons/hicolor/512x512/apps"
-  mkdir -p "$ICON"; cp "${ASSET_DIR}/chucknorris-icon.png" "${ICON}/org.thepriest.chucknorris.png" 2>/dev/null || true
+  # install every generated size so the taskbar/dock picks a crisp one
+  for SZ in 512 256 128 64 48 32; do
+    IDIR="${HOME}/.local/share/icons/hicolor/${SZ}x${SZ}/apps"
+    mkdir -p "$IDIR"
+    if [ "$SZ" = "512" ]; then
+      SRC="${ASSET_DIR}/chucknorris-icon.png"
+    else
+      SRC="${ASSET_DIR}/chucknorris-icon-${SZ}.png"
+    fi
+    [ -f "$SRC" ] && cp "$SRC" "${IDIR}/org.thepriest.chucknorris.png"
+  done
   gtk-update-icon-cache -f "${HOME}/.local/share/icons/hicolor" 2>/dev/null || true
 fi
 

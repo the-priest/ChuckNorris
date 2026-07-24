@@ -153,6 +153,72 @@ try:
 except Exception as e:
     fail(f"cold start raised: {e}")
 
+print("--- a SLOW first token is not mistaken for a hang ---")
+# This is the bug in the screenshots: "Thinking..." then
+# "no progress for 45s - looks stuck, stopping." on a healthy request.
+import time as _t
+import tempfile as _tf
+cn.CHATS_DIR = Path(_tf.mkdtemp()); cn.SETTINGS = Path(_tf.mkdtemp()) / "s.json"
+_app = cn.ChuckApp()
+w = cn.ChuckWindow(_app)
+w._start_run()
+w._awaiting_first = True
+w._run_started = _t.time() - 60
+w._last_progress = _t.time() - 60          # 60s with no token yet
+w._heartbeat()
+if not w._running:
+    fail("watchdog still kills a slow first response at <60s")
+else:
+    print(f"  60s waiting for the model -> still running; ticker: {w.live.get_text()!r}")
+if "waiting for the model" not in w.live.get_text():
+    fail("ticker doesn't say what it's waiting on")
+
+print("--- but a truly dead request is still stopped ---")
+w._last_progress = _t.time() - (w.AWAIT_FIRST + 5)
+w._heartbeat()
+if w._running:
+    fail("a request with no response at all was never stopped")
+print(f"  stopped after {w.AWAIT_FIRST}s of total silence")
+
+print("--- stalls BETWEEN steps still use the tight budget ---")
+w2 = cn.ChuckWindow(_app); w2._start_run()
+w2._awaiting_first = False                  # model already spoke; a tool stalled
+w2._run_started = _t.time() - 50
+w2._last_progress = _t.time() - 50
+w2._heartbeat()
+if w2._running:
+    fail("tool-phase watchdog got loosened by mistake")
+print(f"  tool stalled {w2.STUCK_AFTER}s -> stopped, as it should be")
+
+print("--- the connection opening counts as proof of life ---")
+w3 = cn.ChuckWindow(_app); w3._start_run()
+w3._last_progress = _t.time() - 100
+w3._note_progress()
+if _t.time() - w3._last_progress > 2:
+    fail("on_open did not reset the stall clock")
+print("  on_open resets the clock")
+
+print("--- voice is on by default ---")
+if not w3.settings.get("tts", True):
+    fail("tts default is off")
+print("  tts defaults to on")
+
+print("--- header icons all resolve (no missing-image glyph) ---")
+for names in (("sidebar-show-symbolic", "view-list-bullet-symbolic", "document-open-recent-symbolic"),
+              ("go-up-symbolic", "pan-up-symbolic"),
+              ("media-playback-start-symbolic", "audio-volume-high-symbolic")):
+    got = cn._pick_icon(*names)
+    if not got:
+        fail(f"no icon resolved for {names}")
+print("  _pick_icon always returns a usable name")
+
+print("--- font scaling produces valid CSS across the range ---")
+for px in (9, 14, 22, 28, 999, 1):
+    css = cn.font_css(px)
+    if "font-size" not in css:
+        fail(f"font_css({px}) produced nothing usable")
+print("  font_css clamps and renders for every input")
+
 print()
 print("TOTAL STARTUP FAILURES:", len(FAILS))
 for f in FAILS:
