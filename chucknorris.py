@@ -53,7 +53,7 @@ except Exception:
     _builder = None
 
 APP_ID = "org.thepriest.chucknorris"
-VERSION = "10.2.0"
+VERSION = "10.3.0"
 HERE = Path(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_DIR = Path.home() / ".config" / "chucknorris"
 DATA_DIR = Path.home() / ".local" / "share" / "chucknorris"
@@ -206,7 +206,9 @@ prices, versions, dates, who-holds-a-role, docs, package names, how-to — SEARC
 real pages, cross-check 2–3 different sources, answer with URLs, mark single-source claims \
 [UNVERIFIED]. No "I think"/"probably" — go check. Be efficient: one focused search is usually \
 enough — don't fan out into many queries or extra hops when the first couple of sources already \
-answer it. (The user's remembered preferences are yours to use freely; this rule is about the \
+answer it. NEVER re-run a search you've already done in different words — if two good sources \
+don't have the thing, it probably isn't public: say so plainly and move on. "I couldn't find X, \
+here's what I did find" IS a complete answer. (The user's remembered preferences are yours to use freely; this rule is about the \
 outside world.)
 2) FINISH IN ONE RUN. Do the WHOLE task before your final answer: gather → verify → act → report, \
 tool blocks back-to-back in one pass. One short line per step, then fire the block — don't stop \
@@ -1184,6 +1186,10 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._win_start = 0         # index of the first materialised entry
         self._loading_older = False
         self._bot_entry = None
+        self._seen_queries = []     # queries already run this turn
+        self._seen_urls = set()     # pages already read this turn
+        self._dead_urls = set()     # pages that failed — don't retry
+        self._forced_answer = False
         self._activity_box = None
         self._activity_steps = []
         self._activity_lock = threading.Lock()
@@ -1508,6 +1514,10 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._win_start = 0
         self._loading_older = False
         self._bot_entry = None
+        self._seen_queries = []     # queries already run this turn
+        self._seen_urls = set()     # pages already read this turn
+        self._dead_urls = set()     # pages that failed — don't retry
+        self._forced_answer = False
         c = self.msgbox.get_first_child()
         while c:
             n = c.get_next_sibling(); self.msgbox.remove(c); c = n
@@ -2382,6 +2392,8 @@ class ChuckWindow(Adw.ApplicationWindow):
             return
         self.entry.get_buffer().set_text("")
         self._hops = 0
+        self._seen_queries = []; self._seen_urls = set(); self._dead_urls = set()
+        self._forced_answer = False
         self._start_run()
         shot = self.pending_shot
         if self.pending_file:
@@ -2604,6 +2616,9 @@ class ChuckWindow(Adw.ApplicationWindow):
             r"remember|forget|check|project|tree|package|runtests|write|"
             r"python|py|node|javascript|js|bash|sh)\b.*?```",
             "", text, flags=re.DOTALL).strip()
+        if self._forced_answer:
+            # he was told to answer from what he has — ignore any further research
+            searches, fetches = [], []
         acting = bool(searches or fetches or images or vid_searches or videos or junk
                       or skill_blocks or runskills or reads or codes or checks
                       or projects or writes or trees or packages or runtests)
@@ -2700,6 +2715,21 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._hops += 1
             self._run_web_tools(searches_fetches[0], searches_fetches[1], extra_feedback=feedback)
             return
+        if searches_fetches and not self._forced_answer:
+            # Budget spent but he still wants to search. Dropping it silently is
+            # what left him narrating "Working on it..." forever — instead, make
+            # him deliver what he has.
+            self._forced_answer = True
+            self._hops = 0
+            read = ", ".join(sorted(_domain(u) for u in self._seen_urls)[:10]) or "nothing"
+            self.history.append({"role": "user", "content":
+                                 "RESEARCH BUDGET SPENT — no more searching. You already read: "
+                                 f"{read}. Write the FINAL answer now from what you have. State "
+                                 "plainly what you could not confirm. Do NOT emit another search, "
+                                 "fetch or read block."})
+            self._sys_note("⏹ research budget spent — answering from what he has", "dim")
+            GLib.idle_add(self._ask_model)
+            return
         if feedback and self._hops < hop_cap:
             self._hops += 1
             self.history.append({"role": "user",
@@ -2716,6 +2746,26 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._save_chat()
         self._end_run()
 
+    @staticmethod
+    def _qnorm(q):
+        return frozenset(w for w in re.findall(r"[a-z0-9][a-z0-9._/-]*", (q or "").lower())
+                         if len(w) > 1)
+
+    def _is_repeat_query(self, q):
+        """Has he effectively asked this already this run? Re-wording the same
+        search ('X github' → 'github X' → 'X github repository') burns the whole
+        research budget without learning anything new."""
+        toks = self._qnorm(q)
+        if not toks:
+            return True
+        for prev in self._seen_queries:
+            if not prev:
+                continue
+            overlap = len(toks & prev) / max(1, len(toks | prev))
+            if overlap >= 0.7:
+                return True
+        return False
+
     def _run_web_tools(self, searches, fetches, extra_feedback=None):
         self._busy(True)
         self._activity_start("Researching")
@@ -2727,9 +2777,14 @@ class ChuckWindow(Adw.ApplicationWindow):
             n_src = self.cfg('research_sources', RESEARCH_MAX_SOURCES, 1, 10)
             n_q = self.cfg('research_queries', RESEARCH_QUERIES, 1, 4)
             f_timeout = self.cfg('fetch_timeout', 6, 3, 30)
+            skipped = []
             for q in searches[:n_q]:
                 if self._cancelled:
                     return
+                if self._is_repeat_query(q):
+                    skipped.append(q)
+                    continue
+                self._seen_queries.append(self._qnorm(q))
                 self._note_progress()
                 si = self._activity_step(f"searching  {q}")
                 results = web_search(q, n=n_src)
@@ -2739,7 +2794,7 @@ class ChuckWindow(Adw.ApplicationWindow):
                     continue
                 n_new = 0
                 for (title, url, snip) in results:
-                    if url in seen_urls:
+                    if url in seen_urls or url in self._seen_urls or url in self._dead_urls:
                         continue
                     dom = _domain(url)
                     if dom in seen_domains:           # diversity: one read per domain
@@ -2753,6 +2808,9 @@ class ChuckWindow(Adw.ApplicationWindow):
                 if len(candidates) >= n_src:
                     break
             for u in fetches[:n_src]:
+                if u in self._seen_urls or u in self._dead_urls:
+                    skipped.append(u)
+                    continue
                 if u not in seen_urls:
                     seen_urls.add(u); candidates.append((_domain(u), u, ""))
 
@@ -2768,7 +2826,9 @@ class ChuckWindow(Adw.ApplicationWindow):
                 self._note_progress()
                 self._activity_done(si, f"read  {label}", ok=bool(body))
                 if body:
+                    self._seen_urls.add(url)
                     return f"[{title or dom}] {url}\n{body}"
+                self._dead_urls.add(url)
                 return None
 
             got = 0
@@ -2794,10 +2854,30 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._busy(False); self._activity_end()
             if self._cancelled:
                 return
-            note = (f"TOOL RESULTS — {got} distinct sources across "
-                    f"{len(seen_domains)} domains. Cross-check them, cite the URLs, "
-                    "mark single-source claims [UNVERIFIED], and keep going until the "
-                    "whole task is finished before you write your final answer:\n\n")
+            hop_cap = self.cfg("research_hops", MAX_TOOL_HOPS, 1, 8)
+            left = max(0, hop_cap - self._hops)
+            lines = [f"TOOL RESULTS — {got} new source(s) this round."]
+            if skipped:
+                lines.append("ALREADY DONE, do not repeat: " + "; ".join(str(x)[:60]
+                                                                        for x in skipped[:6]))
+            if self._seen_urls:
+                lines.append(f"Pages already read this turn ({len(self._seen_urls)}): "
+                             + ", ".join(sorted(_domain(u) for u in self._seen_urls)[:8]))
+            if self._dead_urls:
+                lines.append("Unreachable, do not retry: "
+                             + ", ".join(sorted(_domain(u) for u in self._dead_urls)[:6]))
+            if left <= 1:
+                lines.append("This is your LAST research round — write the final answer now "
+                             "from what you have.")
+            else:
+                lines.append(f"{left} research rounds left. If what you have answers the "
+                             "question, ANSWER NOW instead of searching again. Only search "
+                             "again for something genuinely NOT covered above — never the "
+                             "same query reworded.")
+            lines.append("Cite URLs; mark single-source claims [UNVERIFIED]. If a thing "
+                         "genuinely cannot be found, say so plainly and move on — that is a "
+                         "complete answer, not a failure.")
+            note = "\n".join(lines) + "\n\n"
             self.history.append({"role": "user", "content": note + "\n\n".join(out)[:16000]})
             GLib.idle_add(self._ask_model)
         threading.Thread(target=worker, daemon=True).start()
