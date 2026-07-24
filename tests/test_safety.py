@@ -80,19 +80,20 @@ if executed: print("   HOLE: verifier executed code!"); fails+=1
 r=cc.check("python","x=1", tests="import os; os.system('rm -rf /')")
 if not r["security"]: print("   HOLE: test block not security-scanned"); fails+=1
 
-# ── 5. executors are only reachable from approve-to-run cards ───────────────
+# ── 5. executors run ONLY from the two gated helpers ─────────────────────
 src=open("chucknorris.py").read()
 callers=[]
 for m in re.finditer(r"\n(\s*)(?:rc, out = )?(run_command|run_code)\(", src):
     ln=src[:m.start()].count("\n")+2
     callers.append((m.group(2), ln))
-# each call site must live inside _run_card / _code_card's go()
 ctx_ok=True
 for name,ln in callers:
     around=src.split("\n")[max(0,ln-25):ln]
-    if not any(("_run_card" in l) or ("def go(" in l) or ("def worker(" in l) for l in around):
-        print(f"   HOLE: {name} called at line {ln} outside an approval card"); ctx_ok=False; fails+=1
-print(f"5. executors only behind approval cards: {ctx_ok} ({len(callers)} call sites)")
+    if not any(("_run_now" in l) or ("_run_code_now" in l) or ("def work(" in l)
+               for l in around):
+        print(f"   HOLE: {name} at line {ln} is not inside a gated run helper")
+        ctx_ok=False; fails+=1
+print(f"5. executors only inside _run_now/_run_code_now: {ctx_ok} ({len(callers)} call sites)")
 
 # ── 6. no shell=True / os.system anywhere in the app ────────────────────────
 app_src = src + open("chucknorris_ext/skills.py").read()
@@ -210,9 +211,31 @@ if "codes = codes[:1]" not in _src:
     fails += 1
 else:
     print("   codes capped to 1 — the user is never handed a wall of commands")
-if "ONE STEP AT A TIME" not in _src:
-    print("   HOLE: the prompt doesn't ask for one step at a time")
+if "YOU ACT, YOU DON'T SUGGEST" not in _src:
+    print("   HOLE: the prompt no longer tells him to act rather than suggest")
     fails += 1
+if "ONE command per reply" not in _src:
+    print("   HOLE: the prompt doesn't limit him to one command per reply")
+    fails += 1
+
+# ── 12. CRITICAL commands never auto-execute ─────────────────────────────
+print("12. auto-run respects the critical gate:")
+_src2 = open("chucknorris.py").read()
+if 'tier == "critical"' not in _src2:
+    print("   HOLE: no critical branch in the card path"); fails += 1
+else:
+    # both card paths must check the tier BEFORE reaching the run helper
+    for _fn in ("_command_card", "_code_card"):
+        _blk = _src2[_src2.index(f"def {_fn}("):]
+        _blk = _blk[:_blk.index("\n    def ", 10)]
+        if 'tier == "critical"' not in _blk:
+            print(f"   HOLE: {_fn} does not gate on the critical tier"); fails += 1
+        _run_at = min([_blk.index(x) for x in ("_run_now(", "_run_code_now(")
+                       if x in _blk] or [10**9])
+        _gate_at = _blk.index('tier == "critical"')
+        if _gate_at > _run_at:
+            print(f"   HOLE: {_fn} runs before checking the tier"); fails += 1
+    print("   both card paths check the tier before executing anything")
 
 print()
 print("TOTAL SAFETY FAILURES:", fails)

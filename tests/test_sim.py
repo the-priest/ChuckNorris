@@ -42,21 +42,16 @@ if not tr or "BODY" not in tr[0]["content"]: fail("S2: fetched bodies never reac
 check_history(w, "S2"); check_finished(w, "S2")
 print("  2 calls, real page bodies fed back, final answer produced")
 
-head("3 clean code -> verify -> card -> approve -> execute -> feed back")
+head("3 clean code -> verify -> RUN -> feed the real result back")
 w = new_win(["```python\ndef add(a,b):\n    return a+b\nprint(add(2,3))\n```", "It printed 5."], tmp)
 type_and_send(w, "adder please")
-cl = cards(w)
-if not cl: fail("S3: no card for clean code")
+_h = " ".join(str(m.get("content", "")) for m in w.history)
+if "SUCCEEDED" not in _h:
+    fail("S3: clean code did not auto-execute")
+elif "5" not in _h:
+    fail("S3: the real output never came back")
 else:
-    rb = [x for x in cl[0].walk() if x.get_label() == "Run"]
-    if not rb or not rb[0].get_sensitive(): fail("S3: Run not armed for clean code")
-    else:
-        rb[0].click(); settle()
-        ran = [m for m in w.history if isinstance(m.get("content"), str)
-               and m["content"].startswith("I ran ")]
-        if not ran: fail("S3: execution output never fed back")
-        elif "5" not in ran[0]["content"]: fail("S3: wrong output returned")
-        else: print("  code ran, produced 5, fed back to model")
+    print("  code ran by itself, produced 5, and the result reached the model")
 check_history(w, "S3"); check_finished(w, "S3")
 
 head("4 broken code withheld -> model fixes -> card appears")

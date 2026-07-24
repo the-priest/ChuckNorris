@@ -6,11 +6,11 @@
 
 ### The Arch / CachyOS grandmaster that lives on your desktop. You ask — he acts. No modes, no buttons, no excuses. A tribute.
 
-![version](https://img.shields.io/badge/version-11.0.0-b6892f?style=for-the-badge&labelColor=0b0b0d)
+![version](https://img.shields.io/badge/version-12.0.0-b6892f?style=for-the-badge&labelColor=0b0b0d)
 ![tribute](https://img.shields.io/badge/1940-2026-b6892f?style=for-the-badge&labelColor=0b0b0d)
 ![agentic](https://img.shields.io/badge/agentic-decides%20%26%20acts-b6892f?style=for-the-badge&labelColor=0b0b0d)
 ![distro](https://img.shields.io/badge/Arch%20%7C%20CachyOS-first--class-b6892f?style=for-the-badge&labelColor=0b0b0d)
-![tests](https://img.shields.io/badge/tests-11%20suites%20shipped-b6892f?style=for-the-badge&labelColor=0b0b0d)
+![tests](https://img.shields.io/badge/tests-12%20suites%20shipped-b6892f?style=for-the-badge&labelColor=0b0b0d)
 
 </div>
 
@@ -43,7 +43,9 @@ What you get from that split: real access to your system, and a model far strong
 
 **Research the live web.** Searches across multiple SearXNG instances (Brave, Google, DuckDuckGo and Bing underneath) with DuckDuckGo as backstop, reads the actual pages, cross-checks different outlets, cites URLs and marks single-source claims `[UNVERIFIED]`. You watch it happen in a live checklist — *● searching…* → *✓ read bbc.com — headline* — each line marking itself done as it lands.
 
-**Run things on your machine — one step at a time.** Exactly one command per reply, ever. He says what it does, you approve the card, he reads the *real* output and only then proposes the next step. No wall of ten commands you can't possibly run. And installing anything always goes through `pacman -Syu` — a bare `-S` is rewritten for you, because installing against a stale database is how Arch systems break.
+**He runs things. He doesn't suggest them.** A shell command executes on your machine immediately — Chuck is an agent, not a suggestion box. He then reads the **real exit code and output**, confirms it actually did what he wanted, and only then takes the next step. If it failed he says so and fixes the cause; he never carries on as though it worked. One command per reply, always — run, verify, then the next. Installing anything goes through `pacman -Syu`; a bare `-S` is corrected before it runs.
+
+The one exception is the **CRITICAL** tier — wiping a disk, `rm -rf /` or `~`, piping `curl` into a shell, reformatting, ripping out core packages. Those still wait for you to tick a box, because a hallucinated one is unrecoverable. Everything else just happens.
 
 **Fix a real machine, carefully.** Diagnose read-only first, form a hypothesis out loud, change one thing at a time, and verify it actually worked before moving on. Before anything risky he says what could break and how to undo it — and for bootloader, initramfs, fstab or kernel work he gives you the rescue path *before* you run it, not after. He won't rip out core packages, force-overwrite files pacman owns, or disable a check to make an error go away. If the output contradicts his theory he says so and looks again.
 
@@ -71,9 +73,9 @@ What you get from that split: real access to your system, and a model far strong
 
 ## Safety that doesn't get in the way
 
-Nothing executes unless you press Run. There is no path around that — not through a script, not through a saved skill, not through the code verifier, which is deliberately static and never runs what it's checking.
+Commands run on their own — that's the point of an agent. What doesn't run on its own is anything catastrophic.
 
-On top of that, **two tiers**. Anything catastrophic — wiping a disk, `rm -rf /` or `~`, piping `curl` into a shell, reformatting, ripping out core packages — is flagged **CRITICAL**, and the Run button stays *disarmed* until you tick a box confirming you've read it. Merely destructive-but-scoped things get a plain red warning and a single click. A misclick can't wipe your machine.
+**Two tiers.** Anything catastrophic — wiping a disk, `rm -rf /` or `~`, piping `curl` into a shell, reformatting, ripping out core packages — is flagged **CRITICAL**, and the Run button stays *disarmed* until you tick a box confirming you've read it. Merely destructive-but-scoped things get a plain red warning and then run. The code verifier is deliberately static and never executes what it checks, so there's no path around the gate through a script, a saved skill, or a verification step.
 
 **Stop means stop.** The send button becomes a Stop button while he works, with a live `● working… 12s` counter so you always know he's alive. Press it and he halts immediately, keeping whatever he'd found. A watchdog stops him on its own if anything ever truly hangs.
 
@@ -93,7 +95,7 @@ Chuck **never refuses, never moralizes, never lectures** on anything legal — m
 ./run_tests.sh
 ```
 
-Eleven suites ship with the app and run against the real thing: whole conversations driven end to end, research chains, code written and actually executed, destructive commands hitting the confirm gate, runaway loops terminating, the voice pipeline, the 24-hour purge, cold-start recovery, and a build that gets written, tested and packaged. If something's off on your machine, it will tell you.
+Twelve suites ship with the app and run against the real thing: whole conversations driven end to end, research chains, code written and actually executed, destructive commands hitting the confirm gate, runaway loops terminating, the voice pipeline, the 24-hour purge, cold-start recovery, and a build that gets written, tested and packaged. If something's off on your machine, it will tell you.
 
 ---
 

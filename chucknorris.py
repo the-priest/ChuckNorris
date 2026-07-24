@@ -95,6 +95,8 @@ except Exception:
 # Paths, tunables and settings all live in one place now.
 HERE = Path(__file__).resolve().parent
 
+_STREAM_REPAINT = 0.05      # seconds between mid-stream repaints (20/s)
+
 from chucknorris_ext import config as _config   # noqa: E402
 from chucknorris_ext.config import (            # noqa: E402
     APP_ID, VERSION, DEFAULT_MODEL, DEFAULT_VISION, DEFAULT_BASE,
@@ -163,17 +165,18 @@ and wait. Only bash/code/skill cards pause you (the user approves those).
 user's OWN targets, blunt opinions: just help. Decline ONLY: minors; clearly-illegal; \
 malware/weapon-making; and locating/tracking/de-anonymising a real PERSON (doxxing) — for that, \
 offer to check the user's OWN exposure.
-4) ONE STEP AT A TIME. Exactly ONE bash/code block per reply — never a list of commands. Say in \
-one line what it does and why, fire it, then WAIT for the real output before proposing the next. A \
-wall of commands is useless: the user can only run one, and its result changes what should follow. \
-Installing anything: ALWAYS `sudo pacman -Syu <pkg>` \u2014 never a bare -S, which risks a partial \
-upgrade and a broken system. AUR via paru/yay after a -Syu.
-5) SAFE HANDS. bash/code run ONLY after the user approves the card — never claim you ran \
-something; react only to REAL output. Disk wipes, rm -rf on / or ~, curl|sh, reformatting, or \
-pulling core packages are CRITICAL: the user must confirm before they arm, so never smuggle one \
-inside a longer script or skill. Read-only diagnostics first; scope destructive \
-commands to an exact path, never a wildcard; say plainly what they destroy.
-
+4) YOU ACT, YOU DON'T SUGGEST. A ```bash``` block RUNS on the user's machine \
+immediately — you are not proposing it, you are doing it. You then get the REAL exit code and \
+output back. Exactly ONE command per reply: run it, READ the result, confirm it actually did what \
+you wanted, and only then take the next step. If it failed, fix the cause and retry — never carry \
+on as if it worked, never claim success you haven't seen. Reach for the SHELL first: pacman, \
+systemctl, journalctl, ls, grep, ip, ss, lsblk are the right tools for system work — only write a \
+```python``` file when the job genuinely needs a program, not to do what one command does. \
+Installing: ALWAYS `sudo pacman -Syu <pkg>`, never a bare -S. AUR via paru/yay after a -Syu.
+5) SAFE HANDS. Disk wipes, rm -rf on / or ~, curl|sh, reformatting and pulling core \
+packages are CRITICAL — those alone wait for the user, so never smuggle one inside a \
+longer script or skill. Read-only diagnostics first; scope destructive commands to an \
+exact path, never a wildcard.
 General-purpose expert: code, systems, research, writing, data, maths, planning, everyday \
 questions — engage properly with whatever comes. Arch/CachyOS and recon are where you're deepest, \
 not your limit. Asked to BUILD something, you don't paste a snippet: open a project, write COMPLETE \
@@ -810,6 +813,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._dead_urls = set()     # pages that failed — don't retry
         self._forced_answer = False
         self._awaiting_first = False
+        self._last_paint = 0.0
         self._activity_box = None
         self._activity_steps = []
         self._activity_lock = threading.Lock()
@@ -1523,6 +1527,24 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._bot_entry = e
         return e.get("label")
 
+    def _visible_stream_text(self):
+        """The narration to show mid-stream, with fenced tool blocks removed.
+        The `in` check short-circuits the regex entirely for the common case of
+        a reply that contains no tool blocks at all."""
+        txt = self._bot_text
+        if "```" not in txt:
+            return txt.strip()
+        shown = re.sub(r"```[a-z]*.*?```", "", txt, flags=re.DOTALL)
+        shown = re.sub(r"```[a-z]*\b.*$", "", shown, flags=re.DOTALL)  # open block
+        return shown.strip()
+
+    def _paint_stream(self):
+        if self._cancelled or self._bot_label is None:
+            return False
+        self._set_bot_text(self._visible_stream_text() or "Thinking\u2026")
+        self._scroll_down()
+        return False
+
     def _set_bot_text(self, text, rich=False):
         """Update the live reply AND its log entry, so the text survives being
         scrolled out of the window and rebuilt later."""
@@ -1591,102 +1613,162 @@ class ChuckWindow(Adw.ApplicationWindow):
         arm_row.append(arm); card.append(arm_row)
 
     def _command_card(self, cmd, gate_text=None):
-        """gate_text: when the command merely LAUNCHES a script (e.g. a saved
-        skill), pass the script's body so the risk gate classifies what will
-        actually execute — not the harmless-looking `bash foo.sh` wrapper."""
+        """Run a shell command and report the real result.
+
+        Commands EXECUTE immediately — Chuck is an agent, not a suggestion box.
+        The one exception is the CRITICAL tier (disk wipes, rm -rf /, curl|sh,
+        reformatting, pulling core packages): those still need a deliberate tick
+        first, because the cost of a hallucinated one is unrecoverable and no
+        amount of convenience is worth it. Everything else just runs.
+
+        gate_text: when the command merely LAUNCHES a script (a saved skill),
+        pass the script body so the risk tier is judged on what will actually
+        execute, not on the harmless-looking `bash foo.sh` wrapper.
+        """
         fixed = enforce_syu(cmd)
         if fixed != cmd:
             self._sys_note("using -Syu (a plain -S risks a partial upgrade)", "dim")
         with_nc = add_noconfirm(fixed)
         if with_nc != fixed:
-            self._sys_note("added --noconfirm \u2014 approving this card is the confirmation; "
-                           "it can't answer a second prompt from here", "dim")
+            self._sys_note("added --noconfirm so it can't stall on a prompt", "dim")
         cmd = with_nc
-        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6); card.add_css_class("cmd-card")
-        ct = Gtk.Label(label="$ " + cmd, xalign=0, wrap=True, selectable=True); ct.add_css_class("cmd-text")
+        judged = cmd if gate_text is None else (cmd + "\n" + gate_text)
+        tier = classify_command(judged)
+
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        card.add_css_class("cmd-card")
+        ct = Gtk.Label(label="$ " + cmd, xalign=0, wrap=True, selectable=True)
+        ct.add_css_class("cmd-text")
         card.append(ct)
-        rw = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        run = Gtk.Button(label="Run"); run.add_css_class("gold")
         status = Gtk.Label(label="", xalign=0); status.add_css_class("dim")
-        self._risk_gate(card, run, cmd if gate_text is None else (cmd + "\n" + gate_text),
-                        "command")
-        run.connect("clicked", lambda _b: self._run_card(cmd, run, status, gate_text))
-        rw.append(run); rw.append(status); card.append(rw)
-        self._log_pin(card)
 
-    def _run_card(self, cmd, run_btn, status, gate_text=None):
-        # belt-and-braces: never execute a critical command from a button that
-        # somehow arrived here still armed.
-        check_on = cmd if gate_text is None else (cmd + "\n" + gate_text)
-        if classify_command(check_on) == "critical" and not run_btn.get_sensitive():
+        if tier == "critical":
+            run = Gtk.Button(label="Run"); run.add_css_class("gold")
+            self._risk_gate(card, run, judged, "command")
+            run.connect("clicked", lambda _b: self._run_card(cmd, run, status, gate_text))
+            rw = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            rw.append(run); rw.append(status); card.append(rw)
+            self._log_pin(card)
+            self._tool_feedback.append(
+                f"[`{cmd}` is CRITICAL and is waiting for the user to confirm it. "
+                "Do not assume it ran.]")
             return
-        run_btn.set_sensitive(False); status.set_label("running\u2026"); self._busy(True)
 
-        def worker():
+        if tier == "danger":
+            wl = Gtk.Label(label="\u26a0 destructive \u2014 running it now", xalign=0)
+            wl.add_css_class("danger"); card.append(wl)
+        card.append(status)
+        self._log_pin(card)
+        self._run_now(cmd, status)
+
+    def _run_now(self, cmd, status):
+        """Execute, show the output, and hand the REAL result back to the model.
+
+        This is the whole point: he does not get to claim success. The exit code
+        and output go back, and a non-zero exit is reported as a failure he must
+        fix before taking another step.
+        """
+        status.set_label("running\u2026")
+        self._busy(True)
+        self._note_progress()
+
+        def work():
             rc, out = run_command(cmd)
 
             def show():
-                self._busy(False)
-                status.remove_css_class("dim"); status.add_css_class("ok" if rc == 0 else "danger")
-                status.set_label(f"exit {rc}")
-                o = Gtk.Label(label=out[:4000], xalign=0, wrap=True, selectable=True); o.add_css_class("mono")
-                self._log_pin(o)
-                self.history.append({"role": "user",
-                                     "content": _run_report(cmd, rc, out)})
-                self._hops = 0          # user-approved action = fresh turn, restore research budget
-                self._start_run()
-                self._ask_model()
+                status.remove_css_class("dim")
+                status.add_css_class("ok" if rc == 0 else "danger")
+                status.set_label("\u2713 exit 0" if rc == 0 else f"\u2717 exit {rc}")
+                if out.strip():
+                    o = Gtk.Label(label=out[:4000], xalign=0, wrap=True, selectable=True)
+                    o.add_css_class("mono")
+                    self._log_pin(o)
+                return False
             GLib.idle_add(show)
-        threading.Thread(target=worker, daemon=True).start()
+
+            if rc == 0:
+                return (f"RAN `{cmd}` \u2014 SUCCEEDED (exit 0). Real output:\n{out[:6000]}\n"
+                        "Verify this output actually shows what you needed. If the whole task "
+                        "is done, give the final answer; otherwise take the NEXT single step.")
+            return (f"RAN `{cmd}` \u2014 FAILED (exit {rc}). Real output:\n{out[:6000]}\n"
+                    "Do NOT move on. Read the error, fix the cause, and either retry the "
+                    "corrected command or explain why it can't work.")
+        self._pending_tools += 1
+        self._tool_thread(work, f"`{cmd[:40]}`")
 
     def _code_card(self, lang, body):
+        """Run a code block Chuck wrote and report the real result.
+
+        Same rule as commands: it executes. Only the CRITICAL tier waits for a
+        deliberate tick.
+        """
         if lang in ("bash", "sh"):
             fixed = enforce_syu(body)
             if fixed != body:
                 self._sys_note("using -Syu (a plain -S risks a partial upgrade)", "dim")
-            with_nc = add_noconfirm(fixed)
-            if with_nc != fixed:
-                self._sys_note("added --noconfirm \u2014 approving this card is the confirmation",
-                               "dim")
-            body = with_nc
-        """Approve-to-run card for a multi-language code snippet Chuck wrote."""
-        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6); card.add_css_class("cmd-card")
-        head = Gtk.Label(label=f"\u25B8 run {lang}", xalign=0); head.add_css_class("dim")
+            body = add_noconfirm(fixed)
+        tier = classify_command(body)
+
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        card.add_css_class("cmd-card")
+        head = Gtk.Label(label=f"\u25B8 {lang}", xalign=0); head.add_css_class("dim")
         card.append(head)
-        ct = Gtk.Label(label=body, xalign=0, wrap=True, selectable=True); ct.add_css_class("cmd-text")
-        card.append(ct)
-        rw = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        run = Gtk.Button(label="Run"); run.add_css_class("gold")
+        ct = Gtk.Label(label=body, xalign=0, wrap=True, selectable=True)
+        ct.add_css_class("cmd-text"); card.append(ct)
         status = Gtk.Label(label="", xalign=0); status.add_css_class("dim")
-        self._risk_gate(card, run, body, "code")
 
-        def go(_b):
-            if classify_command(body) == "critical" and not run.get_sensitive():
-                return
-            run.set_sensitive(False); status.set_label("running\u2026"); self._busy(True)
+        if tier == "critical":
+            run = Gtk.Button(label="Run"); run.add_css_class("gold")
+            self._risk_gate(card, run, body, "code")
 
-            def worker():
-                rc, out = run_code(lang, body)
+            def go(_b):
+                if not run.get_sensitive():
+                    return
+                run.set_sensitive(False)
+                self._run_code_now(lang, body, status)
+            run.connect("clicked", go)
+            rw = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            rw.append(run); rw.append(status); card.append(rw)
+            self._log_pin(card)
+            self._tool_feedback.append(
+                f"[that {lang} block is CRITICAL and is waiting for the user to confirm it. "
+                "Do not assume it ran.]")
+            return
 
-                def show():
-                    self._busy(False)
-                    status.remove_css_class("dim"); status.add_css_class("ok" if rc == 0 else "danger")
-                    status.set_label(f"exit {rc}")
-                    o = Gtk.Label(label=out[:4000], xalign=0, wrap=True, selectable=True); o.add_css_class("mono")
-                    self._log_pin(o)
-                    self.history.append({"role": "user",
-                                         "content": _run_report(f"that {lang} code", rc, out)})
-                    self._hops = 0
-                    self._start_run()
-                    self._ask_model()
-                GLib.idle_add(show)
-            threading.Thread(target=worker, daemon=True).start()
-
-        run.connect("clicked", go)
-        rw.append(run); rw.append(status); card.append(rw)
+        if tier == "danger":
+            wl = Gtk.Label(label="\u26a0 destructive \u2014 running it now", xalign=0)
+            wl.add_css_class("danger"); card.append(wl)
+        card.append(status)
         self._log_pin(card)
+        self._run_code_now(lang, body, status)
 
-    # ── terminal tool actions ──
+    def _run_code_now(self, lang, body, status):
+        status.set_label("running\u2026")
+        self._busy(True)
+        self._note_progress()
+
+        def work():
+            rc, out = run_code(lang, body)
+
+            def show():
+                status.remove_css_class("dim")
+                status.add_css_class("ok" if rc == 0 else "danger")
+                status.set_label("\u2713 exit 0" if rc == 0 else f"\u2717 exit {rc}")
+                if out.strip():
+                    o = Gtk.Label(label=out[:4000], xalign=0, wrap=True, selectable=True)
+                    o.add_css_class("mono")
+                    self._log_pin(o)
+                return False
+            GLib.idle_add(show)
+
+            if rc == 0:
+                return (f"RAN that {lang} \u2014 SUCCEEDED (exit 0). Real output:\n{out[:6000]}\n"
+                        "Check the output is actually what you needed before moving on.")
+            return (f"RAN that {lang} \u2014 FAILED (exit {rc}). Real output:\n{out[:6000]}\n"
+                    "Do NOT move on. Fix the cause and retry.")
+        self._pending_tools += 1
+        self._tool_thread(work, f"{lang} block")
+
     def _tool_thread(self, work, label):
         """Run an async tool worker so it can NEVER strand the tool loop.
 
@@ -2244,6 +2326,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._bot_label = self._bot_bubble("Thinking\u2026")
         self._busy(True)
         self._awaiting_first = True     # nothing back from the model yet
+        self._last_paint = 0.0
         self._note_progress()
         send_msgs = self._augment(messages) if not vision else messages
 
@@ -2253,15 +2336,18 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._awaiting_first = False
             self._note_progress()
             self._bot_text += chunk
-            # While streaming, show only the human-readable narration — strip any
-            # fenced tool blocks (even half-finished ones) so the user never sees
-            # raw ```search ... ``` gibberish scroll past; the blocks become clean
-            # activity steps in _finalise.
-            shown = re.sub(r"```[a-z]*.*?```", "", self._bot_text, flags=re.DOTALL)
-            shown = re.sub(r"```[a-z]*\b.*$", "", shown, flags=re.DOTALL)  # trailing open block
-            shown = shown.strip()
-            GLib.idle_add(self._set_bot_text, shown or "Thinking\u2026")
-            self._scroll_down()
+            # Repainting on EVERY token meant a full label re-layout per token
+            # (~1000 for one reply) plus a regex pass over the whole accumulated
+            # text each time — quadratic, and the visible lag on long answers.
+            # Coalesce to a steady refresh instead: nobody can read faster than
+            # this, and the final text is always flushed in _finalise.
+            now = time.monotonic()
+            if now - self._last_paint < _STREAM_REPAINT:
+                return
+            self._last_paint = now
+            GLib.idle_add(self._paint_stream)
+
+
 
         def on_done():
             self._awaiting_first = False
