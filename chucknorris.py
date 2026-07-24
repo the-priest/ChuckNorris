@@ -16,6 +16,7 @@ import json
 import time
 import html as _html
 import base64
+import random
 import shlex
 import shutil
 import threading
@@ -40,20 +41,24 @@ try:
     from chucknorris_ext import memory as _memory
     from chucknorris_ext import codecheck as _codecheck
     from chucknorris_ext import skill_library as _skill_library
+    from chucknorris_ext import builder as _builder
 except Exception:
     _skills = None
     _specs = None
     _memory = None
     _codecheck = None
     _skill_library = None
+    _builder = None
 
 APP_ID = "org.thepriest.chucknorris"
-VERSION = "9.8.0"
+VERSION = "10.1.0"
 HERE = Path(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_DIR = Path.home() / ".config" / "chucknorris"
 DATA_DIR = Path.home() / ".local" / "share" / "chucknorris"
 CHATS_DIR = DATA_DIR / "chats"
 CHAT_TTL_HOURS = 24        # saved chats self-delete this long after last activity
+RENDER_KEEP = 10           # bubbles kept alive when you're at the bottom of the chat
+RENDER_PAGE = 20           # more revealed each time you scroll to the top
 VOICE_DIR = DATA_DIR / "voices"
 DL_DIR = Path.home() / "Downloads" / "ChuckNorris"
 SETTINGS = CONFIG_DIR / "settings.json"
@@ -173,7 +178,11 @@ fenced block, nothing else. The app runs it and feeds results back so you contin
 <one shell command, user approves>``` · ```python
 <code>``` (also node / bash — write a program; it's AUTO-VERIFIED, then the user approves & runs \
 it and you get the output) · ```check python
-<code>``` (verify code WITHOUT running: syntax + lint + security + tests) · ```skill
+<code>``` (verify code WITHOUT running: syntax + lint + security + tests) · ```project
+<name>``` · ```write
+path/in/project.py
+<COMPLETE file>``` (↑ first line is the path, rest is the file) · ```tree``` · ```runtests``` · \
+```package``` (zip it and hand it over) · ```skill
 name: <slug>
 lang: bash|python
 desc: <one line>
@@ -210,11 +219,12 @@ pulling core packages are CRITICAL: the user must confirm before they arm, so ne
 inside a longer script or skill. Read-only diagnostics first; scope every destructive command to \
 an exact path, never a wildcard; say plainly what it will destroy.
 
-You're elite at Arch/CachyOS, recon/OSINT, and writing+debugging code. When you write code it is \
-verified automatically before the user sees a run button; if the verifier reports issues, FIX them \
-and re-emit — don't argue, don't ship broken code. Write complete files, handle errors, no \
-placeholders. Detailed playbooks and ready-made skills for a task arrive when it needs them — use \
-them. Keep the FINAL reply clean and concise."""
+General-purpose expert: code, systems, research, writing, data, maths, planning, everyday \
+questions — engage properly with whatever comes. Arch/CachyOS and recon are where you're deepest, \
+not your limit. Asked to BUILD something, you don't paste a snippet: open a project, write COMPLETE \
+files (no placeholders, errors handled), write and RUN real tests, then package it and hand it over. \
+Code is auto-verified before the user sees a Run button — if the verifier objects, fix and re-emit. \
+Playbooks and ready-made skills arrive when a task needs them. Keep the FINAL reply clean and short."""
 
 CSS_TMPL = """
 window { background-color: #0e0e10; }
@@ -271,6 +281,7 @@ window { background-color: #0e0e10; }
 .set-section { color: #b6892f; font-size: 12px; font-weight: 700; }
 .set-label   { color: #cfc9bc; font-size: 12px; }
 .set-hint    { color: #6c675d; font-size: 11px; }
+.older-note  { color: #6c675d; font-size: 11px; padding: 6px 0; }
 
 /* saved-chats sidebar */
 .sidebar     { background-color: #121215; border-right: 1px solid #24242b; }
@@ -349,6 +360,19 @@ def _get(url, data=None, timeout=20, headers=None):
         raise ValueError(f"blocked URL scheme {scheme!r} (only http/https allowed)")
     req = urllib.request.Request(url, data=data, headers=headers or {"User-Agent": UA})
     return _opener().open(req, timeout=timeout)
+
+
+def _open_path(path):
+    """Open a folder/file in the user's file manager."""
+    for opener in ("xdg-open", "gio", "nautilus", "thunar", "dolphin"):
+        if shutil.which(opener):
+            try:
+                args = [opener, "open", path] if opener == "gio" else [opener, path]
+                subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return True
+            except Exception:
+                continue
+    return False
 
 
 def open_in_brave(url):
@@ -748,6 +772,7 @@ def _strip(s):
 SEARX_INSTANCES = [
     "https://searx.be", "https://search.inetol.net", "https://priv.au",
     "https://searx.tiekoetter.com", "https://search.rhscz.eu",
+    "https://searxng.site", "https://opnxng.com", "https://search.bus-hit.me",
 ]
 
 
@@ -780,28 +805,63 @@ def _ddg_html_search(query, n):
     return []
 
 
-def _searx_search(query, n, categories="general"):
-    """Query public SearXNG instances (aggregates Brave/Google/DDG/Bing/etc)."""
-    pref = (_SETTINGS.get("searx_url") or "").strip().rstrip("/")
-    hosts = ([pref] if pref else []) + SEARX_INSTANCES
-    for host in hosts:
-        try:
-            url = (host + "/search?format=json&safesearch=0&categories=" + categories +
-                   "&q=" + urllib.parse.quote(query))
-            js = _get(url, timeout=15,
-                      headers={"User-Agent": UA, "Accept": "application/json"}
-                      ).read().decode("utf-8", "ignore")
-            results = json.loads(js).get("results", [])
-        except Exception:
+_IMAGE_EXT = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".avif", ".svg")
+
+
+def _is_image_path(p):
+    return isinstance(p, str) and p.strip().lower().endswith(_IMAGE_EXT)
+
+
+def _searx_one(host, query, n, categories, timeout):
+    url = (host.rstrip("/") + "/search?format=json&safesearch=0&categories=" + categories +
+           "&q=" + urllib.parse.quote(query))
+    js = _get(url, timeout=timeout,
+              headers={"User-Agent": UA, "Accept": "application/json"}
+              ).read().decode("utf-8", "ignore")
+    out = []
+    for r in json.loads(js).get("results", [])[:n * 2]:
+        u = r.get("url") or ""
+        if not u.startswith("http"):
             continue
-        out = []
-        for r in results[:n * 2]:
-            u = r.get("url") or ""
-            if not u.startswith("http"):
+        out.append((_strip(r.get("title", "")), u, _strip(r.get("content", ""))))
+    return out
+
+
+def _searx_search(query, n, categories="general"):
+    """Query SearXNG (which aggregates Brave/Google/DDG/Bing) for real results.
+
+    Instances are hit CONCURRENTLY and the first usable answer wins. Probing
+    them one at a time meant two slow or rate-limited hosts cost 30 seconds
+    before the fallback even started — the single worst case for answer speed.
+    The public list is shuffled so we don't hammer the same host every search.
+    """
+    pref = (_SETTINGS.get("searx_url") or "").strip().rstrip("/")
+    pool = list(SEARX_INSTANCES)
+    random.shuffle(pool)
+    hosts = ([pref] if pref else []) + pool
+    if pref:
+        try:                                    # a self-hosted instance gets first refusal
+            got = _searx_one(pref, query, n, categories, 8)
+            if got:
+                return got[:n]
+        except Exception:
+            pass
+        hosts = pool
+    # NB: a `with ThreadPoolExecutor(...)` block calls shutdown(wait=True) on
+    # exit, so returning early from inside it still blocks until every straggler
+    # finishes — which would defeat the whole point of probing in parallel.
+    ex = ThreadPoolExecutor(max_workers=4)
+    try:
+        futs = {ex.submit(_searx_one, h, query, n, categories, 7): h for h in hosts[:4]}
+        for fut in as_completed(futs):
+            try:
+                got = fut.result()
+            except Exception:
                 continue
-            out.append((_strip(r.get("title", "")), u, _strip(r.get("content", ""))))
-        if out:
-            return out[:n]
+            if got:
+                return got[:n]
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
     return []
 
 
@@ -1053,6 +1113,10 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._pending_tools = 0
         self._tool_feedback = []
         self._loop_web = None
+        self._log = []              # rebuildable transcript entries
+        self._win_start = 0         # index of the first materialised entry
+        self._loading_older = False
+        self._bot_entry = None
         self._activity_box = None
         self._activity_steps = []
         self._activity_lock = threading.Lock()
@@ -1104,6 +1168,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             getattr(self.msgbox, f"set_margin_{m}")(16)
         self.scroller = Gtk.ScrolledWindow(vexpand=True, hexpand=True)
         self.scroller.add_css_class("chat-scroll"); self.scroller.set_child(self.msgbox)
+        self.scroller.get_vadjustment().connect("value-changed", self._on_scroll)
         # centre the conversation column like ChatGPT/Claude
         self.msgbox.set_halign(Gtk.Align.CENTER)
         self.msgbox.set_size_request(720, -1)
@@ -1224,6 +1289,137 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._hint.set_vexpand(True); self._hint.set_valign(Gtk.Align.CENTER)
         self.msgbox.append(self._hint)
 
+    # ── windowed transcript ────────────────────────────────────────────────
+    # A long session used to keep every bubble alive as a GTK widget forever.
+    # Now the transcript lives as a render log of plain data and only a window
+    # of it is materialised: the newest RENDER_KEEP while you're at the bottom,
+    # growing by RENDER_PAGE each time you scroll to the top, and collapsing
+    # again the moment you return to the bottom. Text, notes and images are
+    # rebuilt from their data on demand; interactive cards are pinned, because
+    # their run state (output, whether it was approved) can't be recreated.
+
+    def _log_add(self, kind, data):
+        """Record a rebuildable entry and materialise it at the bottom."""
+        self._drop_hint()
+        entry = {"kind": kind, "data": data, "w": None, "pinned": False}
+        self._log.append(entry)
+        self._collapse_window(scroll=True)
+        return entry
+
+    def _log_pin(self, widget):
+        """Record an interactive widget that must never be torn down."""
+        self._drop_hint()
+        entry = {"kind": "pinned", "data": None, "w": widget, "pinned": True}
+        self._log.append(entry)
+        self._collapse_window(scroll=True)
+        return entry
+
+    def _build_entry(self, e):
+        k, d = e["kind"], e["data"] or {}
+        if k == "user":
+            w = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, halign=Gtk.Align.END, hexpand=True)
+            w.add_css_class("turn-row")
+            lbl = Gtk.Label(label=d.get("text", "") + ("  \U0001F4F7" if d.get("shot") else ""),
+                            xalign=0, wrap=True, selectable=True)
+            lbl.set_max_width_chars(60)
+            card = Gtk.Box(); card.add_css_class("user-bubble"); card.append(lbl)
+            w.append(card)
+            return w
+        if k == "bot":
+            w = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, halign=Gtk.Align.START, hexpand=True)
+            w.add_css_class("turn-row")
+            lbl = Gtk.Label(label="", xalign=0, wrap=True, selectable=True, use_markup=False)
+            lbl.set_max_width_chars(0); lbl.set_hexpand(True)
+            card = Gtk.Box(); card.add_css_class("bot-bubble"); card.set_hexpand(True)
+            card.append(lbl); w.append(card)
+            e["label"] = lbl
+            txt = d.get("text", "")
+            if d.get("rich"):
+                set_rich(lbl, txt)
+            else:
+                lbl.set_text(txt)
+            return w
+        if k == "note":
+            l = Gtk.Label(label=d.get("text", ""), xalign=0, wrap=True)
+            l.add_css_class(d.get("css", "dim"))
+            return l
+        if k == "image":
+            return self._build_image_widget(d.get("path"), d.get("src"))
+        return Gtk.Label(label="")
+
+    def _window_bounds(self):
+        keep = self.cfg("render_keep", RENDER_KEEP, 4, 200)
+        return max(0, len(self._log) - keep)
+
+    def _collapse_window(self, scroll=False):
+        """Drop back to the newest slice — called on new output and when the
+        user returns to the bottom."""
+        self._win_start = self._window_bounds()
+        self._apply_window()
+        if scroll:
+            self._scroll_down()
+
+    def _apply_window(self, keep_offset=False):
+        """Rebuild msgbox to exactly the current window. Widgets outside it lose
+        their last reference here, so GTK frees them."""
+        adj = self.scroller.get_vadjustment()
+        old_upper = adj.get_upper() if keep_offset else 0
+        old_value = adj.get_value() if keep_offset else 0
+        c = self.msgbox.get_first_child()
+        while c:
+            n = c.get_next_sibling(); self.msgbox.remove(c); c = n
+        lo = self._win_start
+        show = []
+        for i, e in enumerate(self._log):          # pinned items above the window
+            if i < lo and e["pinned"] and e["w"] is not None:
+                show.append(e["w"])
+        if lo > 0:
+            show.append(self._older_banner())
+        for i, e in enumerate(self._log):
+            if i < lo:
+                if not e["pinned"]:
+                    e["w"] = None                  # freed
+                continue
+            if e["w"] is None:
+                e["w"] = self._build_entry(e)
+            show.append(e["w"])
+        for w in show:
+            self.msgbox.append(w)
+        if keep_offset:
+            def restore():
+                a = self.scroller.get_vadjustment()
+                a.set_value(max(0, a.get_upper() - old_upper + old_value))
+                return False
+            GLib.idle_add(restore)
+
+    def _older_banner(self):
+        n = self._win_start
+        if self._loading_older:
+            lb = Gtk.Label(label="loading older messages\u2026", xalign=0.5)
+        else:
+            lb = Gtk.Label(label=f"\u2191 {n} older message{'s' if n != 1 else ''} "
+                                 "\u2014 scroll up to load", xalign=0.5)
+        lb.add_css_class("older-note")
+        return lb
+
+    def _on_scroll(self, adj, *_):
+        if not self._log:
+            return
+        v, upper, page = adj.get_value(), adj.get_upper(), adj.get_page_size()
+        if v <= 40 and self._win_start > 0 and not self._loading_older:
+            self._loading_older = True
+            self._apply_window(keep_offset=True)      # swap banner to "loading…"
+            GLib.timeout_add(180, self._load_older)
+        elif upper - (v + page) <= 40 and self._win_start != self._window_bounds():
+            self._collapse_window()                    # back at the bottom: offload
+
+    def _load_older(self):
+        page = self.cfg("render_page", RENDER_PAGE, 5, 200)
+        self._win_start = max(0, self._win_start - page)
+        self._loading_older = False
+        self._apply_window(keep_offset=True)
+        return False
+
     def _drop_hint(self):
         if getattr(self, "_hint", None) is not None:
             try:
@@ -1234,6 +1430,10 @@ class ChuckWindow(Adw.ApplicationWindow):
 
     def _clear_msgs(self):
         self._hint = None
+        self._log = []
+        self._win_start = 0
+        self._loading_older = False
+        self._bot_entry = None
         c = self.msgbox.get_first_child()
         while c:
             n = c.get_next_sibling(); self.msgbox.remove(c); c = n
@@ -1267,6 +1467,29 @@ class ChuckWindow(Adw.ApplicationWindow):
                     pass
             rm.connect("clicked", drop)
             rowb.append(lbl); rowb.append(rm); box.append(rowb)
+
+        # saved skills live alongside memory — same idea, same transparency
+        sk_head = Gtk.Label(label="Saved skills", xalign=0); sk_head.add_css_class("set-section")
+        sk_head.set_margin_top(16); box.append(sk_head)
+        skills = _skills.skill_list() if _skills else []
+        if not skills:
+            box.append(Gtk.Label(label="No skills saved yet.", xalign=0, wrap=True))
+        for name, lang, desc in skills:
+            r2 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            t2 = Gtk.Label(label=f"\u00b7 {name}  ({lang})  \u2014 {desc}", xalign=0,
+                           wrap=True, hexpand=True, selectable=True)
+            d2 = Gtk.Button(icon_name="user-trash-symbolic"); d2.add_css_class("quick")
+            d2.set_tooltip_text("Archive this skill")
+
+            def drop_skill(_b, nm=name, row=r2):
+                if _skills:
+                    _skills.skill_forget(nm)
+                try:
+                    box.remove(row)
+                except Exception:
+                    pass
+            d2.connect("clicked", drop_skill)
+            r2.append(t2); r2.append(d2); box.append(r2)
         dlg.present()
 
     def _save_chat(self):
@@ -1362,7 +1585,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             if m["role"] == "user":
                 self._user_bubble(txt)
             else:
-                set_rich(self._bot_bubble(""), txt)
+                self._log_add("bot", {"text": txt, "rich": True})
         self._refresh_sidebar()
 
     def _on_close(self, *_):
@@ -1476,7 +1699,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         if self._bot_label is not None and self._bot_text:
             shown = re.sub(r"```[a-z]*.*?```", "", self._bot_text, flags=re.DOTALL).strip()
             if shown:
-                set_rich(self._bot_label, shown)
+                self._set_bot_text(shown, rich=True)
         self._end_run()
 
     def _live(self, text):
@@ -1494,7 +1717,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             box.add_css_class("step-box")
             hl = Gtk.Label(label=header, xalign=0); hl.add_css_class("step-head")
             box.append(hl)
-            self.msgbox.append(box)
+            self._log_pin(box)
             self._activity_box = box
             self._activity_steps = []
             self._scroll_down()
@@ -1556,31 +1779,34 @@ class ChuckWindow(Adw.ApplicationWindow):
         GLib.idle_add(go)
 
     def _user_bubble(self, text, shot=False):
-        self._drop_hint()
-        w = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, halign=Gtk.Align.END, hexpand=True)
-        w.add_css_class("turn-row")
-        lbl = Gtk.Label(label=text + ("  \U0001F4F7" if shot else ""), xalign=0, wrap=True, selectable=True)
-        lbl.set_max_width_chars(60)
-        card = Gtk.Box(); card.add_css_class("user-bubble"); card.append(lbl)
-        w.append(card); self.msgbox.append(w); self._scroll_down()
+        self._log_add("user", {"text": text, "shot": shot})
 
     def _bot_bubble(self, text=""):
-        self._drop_hint()
-        w = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, halign=Gtk.Align.START, hexpand=True)
-        w.add_css_class("turn-row")
-        lbl = Gtk.Label(label=text, xalign=0, wrap=True, selectable=True, use_markup=False)
-        lbl.set_max_width_chars(0)
-        lbl.set_hexpand(True)
-        card = Gtk.Box(); card.add_css_class("bot-bubble"); card.set_hexpand(True); card.append(lbl)
-        w.append(card); self.msgbox.append(w); self._scroll_down()
-        return lbl
+        e = self._log_add("bot", {"text": text, "rich": False})
+        self._bot_entry = e
+        return e.get("label")
+
+    def _set_bot_text(self, text, rich=False):
+        """Update the live reply AND its log entry, so the text survives being
+        scrolled out of the window and rebuilt later."""
+        if self._bot_entry is not None:
+            self._bot_entry["data"]["text"] = text
+            self._bot_entry["data"]["rich"] = rich
+        lbl = self._bot_label
+        if lbl is None:
+            return
+        if rich:
+            set_rich(lbl, text)
+        else:
+            lbl.set_text(text)
 
     def _sys_note(self, text, css="dim"):
-        self._drop_hint()
-        l = Gtk.Label(label=text, xalign=0, wrap=True); l.add_css_class(css)
-        self.msgbox.append(l); self._scroll_down()
+        self._log_add("note", {"text": text, "css": css})
 
-    def _image_bubble(self, path, src_url=None):
+    def _build_image_widget(self, path, src_url=None):
+        """Construct (or reconstruct) an image bubble from its path — images are
+        the heaviest thing in a transcript, so they unload with the window and
+        are re-read from disk if you scroll back to them."""
         try:
             pic, pb = _pic_from_file(path, 320, 320)
             pic.set_size_request(-1, pb.get_height())
@@ -1592,9 +1818,12 @@ class ChuckWindow(Adw.ApplicationWindow):
             else:
                 child = pic
             w = Gtk.Box(halign=Gtk.Align.START); w.append(child)
-            self.msgbox.append(w); self._scroll_down()
+            return w
         except Exception:
-            pass
+            return Gtk.Label(label="[image unavailable]", xalign=0)
+
+    def _image_bubble(self, path, src_url=None):
+        self._log_add("image", {"path": path, "src": src_url})
 
     # ── command cards ──
     def _risk_gate(self, card, run_btn, text, what="command"):
@@ -1638,7 +1867,7 @@ class ChuckWindow(Adw.ApplicationWindow):
                         "command")
         run.connect("clicked", lambda _b: self._run_card(cmd, run, status, gate_text))
         rw.append(run); rw.append(status); card.append(rw)
-        self.msgbox.append(card); self._scroll_down()
+        self._log_pin(card)
 
     def _run_card(self, cmd, run_btn, status, gate_text=None):
         # belt-and-braces: never execute a critical command from a button that
@@ -1656,7 +1885,7 @@ class ChuckWindow(Adw.ApplicationWindow):
                 status.remove_css_class("dim"); status.add_css_class("ok" if rc == 0 else "danger")
                 status.set_label(f"exit {rc}")
                 o = Gtk.Label(label=out[:4000], xalign=0, wrap=True, selectable=True); o.add_css_class("mono")
-                self.msgbox.append(o); self._scroll_down()
+                self._log_pin(o)
                 self.history.append({"role": "user",
                                      "content": f"I ran `{cmd}`. Exit {rc}. Output:\n{out[:6000]}"})
                 self._hops = 0          # user-approved action = fresh turn, restore research budget
@@ -1690,7 +1919,7 @@ class ChuckWindow(Adw.ApplicationWindow):
                     status.remove_css_class("dim"); status.add_css_class("ok" if rc == 0 else "danger")
                     status.set_label(f"exit {rc}")
                     o = Gtk.Label(label=out[:4000], xalign=0, wrap=True, selectable=True); o.add_css_class("mono")
-                    self.msgbox.append(o); self._scroll_down()
+                    self._log_pin(o)
                     self.history.append({"role": "user",
                                          "content": f"I ran this {lang}. Exit {rc}. Output:\n{out[:6000]}"})
                     self._hops = 0
@@ -1701,28 +1930,45 @@ class ChuckWindow(Adw.ApplicationWindow):
 
         run.connect("clicked", go)
         rw.append(run); rw.append(status); card.append(rw)
-        self.msgbox.append(card); self._scroll_down()
+        self._log_pin(card)
 
     # ── terminal tool actions ──
     def _do_images(self, query):
         self._sys_note(f"\U0001F5BC images for \u201c{query}\u201d")
-        self._busy(True); self._live(f"\U0001F5BC searching images: {query}")
+        self._busy(True)
+        self._activity_start("Images")
 
         def worker():
+            # Search AND download happen here, off the UI thread. The downloads
+            # used to run inside the idle callback, which froze the whole window
+            # for up to 25s per image.
             urls = image_search(query)
+            got = []
+            if urls:
+                def grab_one(item):
+                    i, u = item
+                    if self._cancelled:
+                        return None
+                    si = self._activity_step(f"fetching image {i}/{len(urls)}")
+                    p = download_image(u)
+                    self._activity_done(si, f"image {i}/{len(urls)}", ok=bool(p))
+                    return (p, u) if p else None
+                with ThreadPoolExecutor(max_workers=4) as ex:
+                    for r in ex.map(grab_one, list(enumerate(urls, 1))):
+                        if r:
+                            got.append(r)
 
             def show():
-                shown = 0
-                if not urls:
-                    self._sys_note("No images came back (search blocked, offline, or nothing found).", "danger")
+                self._busy(False); self._activity_end()
+                if self._cancelled:
+                    return False
+                if not got:
+                    self._sys_note("No images came back (search blocked, offline, "
+                                   "or nothing found).", "danger")
                 else:
-                    for i, u in enumerate(urls, 1):
-                        self._live(f"\U0001F5BC fetching image {i}/{len(urls)}")
-                        p = download_image(u)
-                        if p:
-                            self._image_bubble(p, u); shown += 1
-                self._live(""); self._busy(False)
-                self._tool_done(f"[images '{query}': showed {shown} picture(s) to the user]")
+                    for p, u in got:
+                        self._image_bubble(p, u)
+                self._tool_done(f"[images '{query}': showed {len(got)} picture(s) to the user]")
                 return False
             GLib.idle_add(show)
         threading.Thread(target=worker, daemon=True).start()
@@ -1761,7 +2007,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         dlb = Gtk.Button(label="Download"); dlb.add_css_class("gold")
         dlb.connect("clicked", lambda *_: self._do_video(url))
         rw.append(openb); rw.append(dlb); card.append(rw)
-        self.msgbox.append(card); self._scroll_down()
+        self._log_pin(card)
 
     def _do_video(self, url):
         if not url.startswith("http"):
@@ -1838,7 +2084,16 @@ class ChuckWindow(Adw.ApplicationWindow):
         threading.Thread(target=worker, daemon=True).start()
 
     def _do_read(self, path):
-        """Read a file from disk and feed its contents back into the run."""
+        """Read a file from disk and feed its contents back into the run.
+        An image path is SHOWN in the chat rather than refused as binary."""
+        p = (path or "").strip()
+        if _is_image_path(p):
+            full = os.path.expanduser(p)
+            if os.path.isfile(full):
+                self._sys_note(f"\U0001F5BC {os.path.basename(full)}")
+                self._image_bubble(full)
+                self._tool_done(f"[showed the image {p} to the user]")
+                return
         self._sys_note(f"\U0001F4C4 reading {path}"); self._busy(True)
 
         def worker():
@@ -1890,6 +2145,115 @@ class ChuckWindow(Adw.ApplicationWindow):
                 return False
             GLib.idle_add(show)
         threading.Thread(target=worker, daemon=True).start()
+
+    # ── building things ────────────────────────────────────────────────────
+    def _project_or_note(self):
+        if not _builder:
+            self._sys_note("builder unavailable", "danger")
+            return None
+        p = _builder.current_project()
+        if p is None:
+            p, _ = _builder.project_open("scratch")
+            self._sys_note(f"\U0001F4C1 working in project '{p.name}'", "dim")
+        return p
+
+    def _do_project(self, name):
+        if not _builder:
+            return
+        p, created = _builder.project_open(name)
+        self._sys_note(f"\U0001F4C1 project '{p.name}' "
+                       f"({'created' if created else 'opened'}) \u2014 {p}", "ok")
+        self._tool_feedback.append(
+            f"[project '{p.name}' ready at {p}. Write files with ```write <relpath>```.]")
+
+    def _do_write(self, rel, content):
+        """Write one complete file into the project — and verify it if it's code,
+        so a broken file never sits silently in a deliverable."""
+        p = self._project_or_note()
+        if p is None:
+            return
+        ok, msg, path = _builder.write_file(p, rel, content)
+        if not ok:
+            self._sys_note("\u2717 " + msg, "danger")
+            self._tool_feedback.append(f"[write failed: {msg}]")
+            return
+        note = msg
+        lang = {".py": "python", ".sh": "bash", ".js": "js"}.get(Path(rel).suffix, None)
+        if lang and _codecheck:
+            try:
+                res = _codecheck.check(lang, content)
+                if not res.get("ok"):
+                    self._sys_note(f"\u26a0 {rel}: verification found issues", "danger")
+                    self._tool_feedback.append(
+                        f"[wrote {rel} BUT it does not verify — fix it and write it again:\n"
+                        + _codecheck.report(res) + "]")
+                    return
+                note += "  \u2713 verified"
+            except Exception:
+                pass
+        self._sys_note("\u2713 " + note, "ok")
+        self._tool_feedback.append(f"[{note}]")
+
+    def _do_tree(self):
+        p = self._project_or_note()
+        if p is None:
+            return
+        t = _builder.tree(p)
+        self._sys_note(f"\U0001F5C2 {p.name}\n{t}", "mono")
+        self._tool_feedback.append(f"[project tree of {p.name}:\n{t}]")
+
+    def _do_runtests(self):
+        """Run the project's own tests and feed the REAL result back."""
+        p = self._project_or_note()
+        if p is None:
+            self._tool_done("[no project]")
+            return
+        self._sys_note("\u25B6 running the project's tests\u2026", "dim"); self._busy(True)
+
+        def worker():
+            rc, out = _builder.run_tests(p)
+
+            def show():
+                self._busy(False)
+                if rc == -1:
+                    self._sys_note("no tests found in the project", "danger")
+                    self._tool_done("[no tests found — write tests/test_*.py or run_tests.sh, "
+                                    "then run them]")
+                elif rc == 0:
+                    self._sys_note("\u2713 tests passed", "ok")
+                    self._tool_done(f"[project tests PASSED:\n{out[-2000:]}]")
+                else:
+                    self._sys_note(f"\u2717 tests failed (exit {rc})", "danger")
+                    self._tool_done(f"[project tests FAILED (exit {rc}). Fix the code and run "
+                                    f"them again:\n{out[-4000:]}]")
+                return False
+            GLib.idle_add(show)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _do_package(self):
+        """Zip the project and put a real, openable deliverable in front of the user."""
+        p = self._project_or_note()
+        if p is None:
+            return
+        ok, zpath, msg = _builder.package(p)
+        if not ok:
+            self._sys_note("\u2717 " + msg, "danger")
+            self._tool_feedback.append(f"[packaging failed: {msg}]")
+            return
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        card.add_css_class("cmd-card")
+        t = Gtk.Label(label=f"\U0001F4E6 {Path(zpath).name}", xalign=0, wrap=True, selectable=True)
+        t.add_css_class("cmd-text"); card.append(t)
+        sub = Gtk.Label(label=msg + f"\n{zpath}", xalign=0, wrap=True, selectable=True)
+        sub.add_css_class("dim"); card.append(sub)
+        rw = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        b1 = Gtk.Button(label="Open folder"); b1.add_css_class("gold")
+        b1.connect("clicked", lambda *_: _open_path(str(Path(zpath).parent)))
+        b2 = Gtk.Button(label="Open project"); b2.add_css_class("quick")
+        b2.connect("clicked", lambda *_: _open_path(str(p)))
+        rw.append(b1); rw.append(b2); card.append(rw)
+        self._log_pin(card)
+        self._tool_feedback.append(f"[{msg}. The user has it at {zpath}.]")
 
     # ── screenshot / attach ──
     def on_screenshot(self, *_):
@@ -2072,7 +2436,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             shown = re.sub(r"```[a-z]*.*?```", "", self._bot_text, flags=re.DOTALL)
             shown = re.sub(r"```[a-z]*\b.*$", "", shown, flags=re.DOTALL)  # trailing open block
             shown = shown.strip()
-            GLib.idle_add(self._bot_label.set_text, shown or "Thinking\u2026")
+            GLib.idle_add(self._set_bot_text, shown or "Thinking\u2026")
             self._scroll_down()
 
         def on_done():
@@ -2085,7 +2449,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._busy(False)
             if self._cancelled:
                 return
-            GLib.idle_add(self._bot_label.set_text, "\u26a0 " + msg)
+            GLib.idle_add(self._set_bot_text, "\u26a0 " + msg)
             GLib.idle_add(self._end_run)
 
         threading.Thread(
@@ -2108,6 +2472,11 @@ class ChuckWindow(Adw.ApplicationWindow):
                     re.findall(r"```" + tag + r"(?![A-Za-z])[ \t]*\n?(.*?)```", text, re.DOTALL)
                     if x.strip()]
 
+        def has(tag):
+            """Presence check for bodiless tags (```tree```, ```package```).
+            grab() drops empty bodies, so those tags need their own test."""
+            return bool(re.search(r"```" + tag + r"(?![A-Za-z])", text))
+
         # cap how many of each tool one reply can fire, so a malformed/looping
         # model can't spawn dozens of threads or cards in a single turn.
         CAP = 6
@@ -2124,6 +2493,16 @@ class ChuckWindow(Adw.ApplicationWindow):
         forgets = grab("forget")[:CAP]          # prune a fact
         # ```check lang\n<code>``` — verify code WITHOUT running it (syntax+lint+
         # security+optional tests); feeds the report back so Chuck fixes it.
+        projects = grab("project")[:2]        # open / switch a build workspace
+        trees = has("tree")                    # show what's been built
+        packages = has("package")              # zip the project and hand it over
+        runtests = has("runtests")             # run the project's own tests
+        writes = []                            # ```write <relpath>\n<content>```
+        # The path may sit on the same line as the tag or on the line below it —
+        # accept both, so the parser can never disagree with the prompt.
+        for m in re.finditer(r"```write[ \t]*(?:\n[ \t]*)?([^\n`]+)\n(.*?)```", text, re.DOTALL):
+            writes.append((m.group(1).strip(), m.group(2)))
+        writes = writes[:12]
         checks = []
         for m in re.finditer(r"```check[ \t]+([a-z0-9+]+)[ \t]*\n(.*?)```", text,
                              re.DOTALL | re.IGNORECASE):
@@ -2137,12 +2516,14 @@ class ChuckWindow(Adw.ApplicationWindow):
 
         disp = re.sub(
             r"```(?:search|fetch|images|videos|video|junk|skill|runskill|read|"
-            r"remember|forget|check|python|py|node|javascript|js|bash|sh)\b.*?```",
+            r"remember|forget|check|project|tree|package|runtests|write|"
+            r"python|py|node|javascript|js|bash|sh)\b.*?```",
             "", text, flags=re.DOTALL).strip()
         acting = bool(searches or fetches or images or vid_searches or videos or junk
-                      or skill_blocks or runskills or reads or codes or checks)
+                      or skill_blocks or runskills or reads or codes or checks
+                      or projects or writes or trees or packages or runtests)
         # Chuck's own narration is what shows in chat — never swallow it.
-        set_rich(self._bot_label, disp or ("Working on it\u2026" if acting else "Done."))
+        self._set_bot_text(disp or ("Working on it\u2026" if acting else "Done."), rich=True)
 
         # skills: save any new smart files, then offer run cards
         for blk in skill_blocks:
@@ -2169,6 +2550,17 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._tool_feedback = []
         self._loop_web = (searches, fetches) if (searches or fetches) else None
 
+        for nm in projects:
+            self._do_project(nm.strip())
+        for rel, body in writes:
+            self._do_write(rel, body)
+        if trees:
+            self._do_tree()
+        if runtests:
+            self._pending_tools += 1
+            self._do_runtests()
+        if packages:
+            self._do_package()
         for lang, body in checks:
             self._pending_tools += 1
             self._do_check(lang, body.strip(), run_after=False)
@@ -2296,7 +2688,11 @@ class ChuckWindow(Adw.ApplicationWindow):
 
             got = 0
             if not self._cancelled:
-                with ThreadPoolExecutor(max_workers=6) as ex:
+                # explicit executor, not a `with` block: on Stop we must abandon
+                # in-flight fetches, and shutdown(wait=True) would sit here for
+                # the full fetch timeout before the button responded.
+                ex = ThreadPoolExecutor(max_workers=6)
+                try:
                     futs = {ex.submit(fetch_one, it): it for it in candidates}
                     for fut in as_completed(futs):
                         if self._cancelled:
@@ -2307,6 +2703,8 @@ class ChuckWindow(Adw.ApplicationWindow):
                             r = None
                         if r:
                             out.append(r); got += 1
+                finally:
+                    ex.shutdown(wait=False, cancel_futures=True)
 
             self._busy(False); self._activity_end()
             if self._cancelled:
@@ -2389,6 +2787,13 @@ class ChuckWindow(Adw.ApplicationWindow):
                     slider(1, 168, 1, self.cfg("chat_ttl_hours", CHAT_TTL_HOURS, 1, 720)),
                     "Counted from your last activity in a chat, not from when it started.")
 
+        section("Performance")
+        rkeep = field("Messages kept in memory",
+                      slider(4, 100, 1, self.cfg("render_keep", RENDER_KEEP, 4, 200)),
+                      "Older messages are unloaded and rebuilt only if you scroll back to them.")
+        rpage = field("Messages loaded per scroll-up",
+                      slider(5, 100, 5, self.cfg("render_page", RENDER_PAGE, 5, 200)))
+
         section("Network \u00b7 privacy")
         searx = field("Preferred SearXNG instance (optional)",
                       Gtk.Entry(text=self.settings.get("searx_url", ""),
@@ -2397,6 +2802,20 @@ class ChuckWindow(Adw.ApplicationWindow):
         proxy = field("Proxy for web, images and video (optional)",
                       Gtk.Entry(text=self.settings.get("proxy", ""),
                                 placeholder_text="http://host:port"))
+
+        section("Code verifier")
+        if _codecheck:
+            have = _codecheck.available_tools()
+            on = [k for k, v in have.items() if v] or ["none"]
+            off = [k for k, v in have.items() if not v]
+            note = "Active: " + ", ".join(on)
+            if off:
+                note += "   \u00b7   not installed: " + ", ".join(off)
+            lv = Gtk.Label(label=note, xalign=0, wrap=True); lv.add_css_class("set-hint")
+            box.append(lv)
+            box.append(Gtk.Label(
+                label="Syntax and the security scan always run; linters add depth when present.",
+                xalign=0, wrap=True))
 
         status = Gtk.Label(label="", xalign=0); status.add_css_class("ok")
 
@@ -2415,6 +2834,8 @@ class ChuckWindow(Adw.ApplicationWindow):
                 "research_hops": int(hops.get_value()),
                 "fetch_timeout": int(ftmo.get_value()),
                 "chat_ttl_hours": int(ttl.get_value()),
+                "render_keep": int(rkeep.get_value()),
+                "render_page": int(rpage.get_value()),
                 "searx_url": searx.get_text().strip(),
                 "proxy": proxy.get_text().strip(),
             }
@@ -2426,6 +2847,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             if not self.settings.get("tts"):
                 stop_speaking()
             self._refresh_sidebar()
+            self._collapse_window()
             status.set_label("Saved.")
 
         def test_voice(*_):
@@ -2437,7 +2859,8 @@ class ChuckWindow(Adw.ApplicationWindow):
 
         def reset(*_):
             for k in ("voice_engine", "voice_speed", "voice_pitch", "research_sources",
-                      "research_queries", "research_hops", "fetch_timeout", "chat_ttl_hours"):
+                      "research_queries", "research_hops", "fetch_timeout", "chat_ttl_hours",
+                      "render_keep", "render_page"):
                 self.settings.pop(k, None)
             save_settings(self.settings)
             status.set_label("Tuning reset \u2014 reopen Settings to see the defaults.")

@@ -92,7 +92,7 @@ else
   curl -fsSL "https://raw.githubusercontent.com/${REPO}/${BRANCH}/chucknorris.py" \
     -o "${APP_DIR}/chucknorris.py" || die "could not fetch chucknorris.py"
   mkdir -p "${APP_DIR}/chucknorris_ext"
-  for f in __init__ skills specs memory codecheck skill_library; do
+  for f in __init__ skills specs memory codecheck skill_library builder; do
     curl -fsSL "https://raw.githubusercontent.com/${REPO}/${BRANCH}/chucknorris_ext/${f}.py" \
       -o "${APP_DIR}/chucknorris_ext/${f}.py" \
       || info "could not fetch chucknorris_ext/${f}.py (skills/specs/memory may be limited)"

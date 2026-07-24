@@ -6,7 +6,7 @@
 
 ### The Arch / CachyOS grandmaster that lives on your desktop. You ask — he acts. No modes, no buttons, no excuses. A tribute.
 
-![version](https://img.shields.io/badge/version-9.8.0-b6892f?style=for-the-badge&labelColor=0b0b0d)
+![version](https://img.shields.io/badge/version-10.1.0-b6892f?style=for-the-badge&labelColor=0b0b0d)
 ![tribute](https://img.shields.io/badge/1940-2026-b6892f?style=for-the-badge&labelColor=0b0b0d)
 ![agentic](https://img.shields.io/badge/agentic-decides%20%26%20acts-b6892f?style=for-the-badge&labelColor=0b0b0d)
 ![distro](https://img.shields.io/badge/Arch%20%7C%20CachyOS-first--class-b6892f?style=for-the-badge&labelColor=0b0b0d)
@@ -59,7 +59,9 @@ Ask for anything. Behind the scenes Chuck reaches for the right tool and you wat
 
 **Settings for everything worth tuning.** One panel: API key and models; voice on/off, engine, speed and pitch with a Test voice button; how many sources he reads and how deep he digs (the speed/thoroughness dial); page fetch timeout; how long saved chats live before they self-delete; SearXNG instance and proxy. Reset tuning puts the defaults back.
 
-**Clean output:** real titles, bold, code and bullets — no stray asterisks or hashes. **Enter sends** (Shift+Enter for a newline).
+**Long sessions stay light.** The transcript isn't a pile of widgets that grows forever. Only the newest handful of messages is actually in memory; scroll to the top and the next twenty load in, scroll further for twenty more, and the moment you're back at the bottom they're released again. Nothing is lost \u2014 the text is kept and rebuilt on demand, code cards keep their output, and a three-hundred-message chat opens in a fraction of a second instead of building three hundred bubbles. Both numbers are adjustable in Settings.
+
+**Pictures, in the chat.** Ask for images and he searches, downloads them in parallel and shows them inline \u2014 click one to open the source. Point him at a picture on your own disk and he displays it instead of shrugging at a binary file. Images unload with the rest of the transcript and are re-read from disk if you scroll back.\n\n**Search that keeps working.** He queries several SearXNG instances at once (Brave, Google, DDG and Bing underneath) and takes whichever answers first, with DuckDuckGo as backstop \u2014 so one rate-limited or dead instance costs nothing instead of stalling the answer. Point him at your own instance in Settings if you'd rather keep search private.\n\n**He builds things properly, not snippets.** Ask for a tool and he opens a real project under `~/ChuckProjects/`, writes complete files (every one auto-verified as it lands), writes tests that assert actual behaviour, **runs them**, fixes what fails, then zips the result and hands you a card with an Open folder button. If the tests fail he says so and fixes it \u2014 he doesn't tell you it works because the code looks right. Every path is sandboxed inside the project, so a stray `../..` in a filename goes nowhere.\n\n**General-purpose, not a one-trick box.** Arch and recon are where he's deepest, but he brings the same method to research, data, APIs, writing and everyday questions \u2014 with on-demand playbooks for building, data work and web/APIs that cost nothing until the task calls for them.\n\n**Clean output:** real titles, bold, code and bullets — no stray asterisks or hashes. **Enter sends** (Shift+Enter for a newline).
 
 **Lean by design:** the base system prompt is tiny (~525 tokens) — it ships only *tool names* and the four rules. Deep playbooks (Arch/pacman, recon, code, media) load on demand *only* when a task needs them, so most turns cost almost nothing in tokens. This "mise en place" design lives in the `chucknorris_ext/` sidecar package (`skills.py`, `specs.py`), which is where new capability gets added without bloating every request.
 
