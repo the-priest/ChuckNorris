@@ -6,7 +6,7 @@
 
 ### The Arch / CachyOS grandmaster that lives on your desktop. You ask — he acts. No modes, no buttons, no excuses. A tribute.
 
-![version](https://img.shields.io/badge/version-9.7.0-b6892f?style=for-the-badge&labelColor=0b0b0d)
+![version](https://img.shields.io/badge/version-9.8.0-b6892f?style=for-the-badge&labelColor=0b0b0d)
 ![tribute](https://img.shields.io/badge/1940-2026-b6892f?style=for-the-badge&labelColor=0b0b0d)
 ![agentic](https://img.shields.io/badge/agentic-decides%20%26%20acts-b6892f?style=for-the-badge&labelColor=0b0b0d)
 ![distro](https://img.shields.io/badge/Arch%20%7C%20CachyOS-first--class-b6892f?style=for-the-badge&labelColor=0b0b0d)
@@ -54,6 +54,10 @@ Ask for anything. Behind the scenes Chuck reaches for the right tool and you wat
 **It stays fast in long conversations.** What Chuck *sends* each turn is capped: the system prompt, your recent exchanges, and only the freshest research. Stale research blobs get dropped once he's already answered from them — so turn fifty is as quick as turn one, while your full transcript stays on disk untouched.
 
 **You can verify it yourself.** Run `./run_tests.sh` from the project folder. It drives whole conversations through the real app — research chains, code that gets written, verified, approved and executed, destructive commands hitting the confirm gate, runaway loops terminating, stop mid-run, the 24h chat purge — and tells you if anything is off.
+
+**A voice that finishes the sentence.** Replies are cleaned of code blocks, URLs and markdown, split into natural chunks, and synthesised one chunk ahead of playback — so long answers are read all the way through instead of stopping partway, and there's no gap between chunks. Press Stop (or switch the voice off) and it goes quiet instantly; a new reply never talks over the old one; and if one chunk fails to synthesise, the rest still gets read.
+
+**Settings for everything worth tuning.** One panel: API key and models; voice on/off, engine, speed and pitch with a Test voice button; how many sources he reads and how deep he digs (the speed/thoroughness dial); page fetch timeout; how long saved chats live before they self-delete; SearXNG instance and proxy. Reset tuning puts the defaults back.
 
 **Clean output:** real titles, bold, code and bullets — no stray asterisks or hashes. **Enter sends** (Shift+Enter for a newline).
 

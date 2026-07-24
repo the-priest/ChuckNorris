@@ -48,7 +48,7 @@ except Exception:
     _skill_library = None
 
 APP_ID = "org.thepriest.chucknorris"
-VERSION = "9.7.0"
+VERSION = "9.8.0"
 HERE = Path(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_DIR = Path.home() / ".config" / "chucknorris"
 DATA_DIR = Path.home() / ".local" / "share" / "chucknorris"
@@ -266,6 +266,11 @@ window { background-color: #0e0e10; }
 .mono   { font-family: monospace; font-size: 11px; color: #b3a68a; }
 .sendbtn { background: transparent; border: none; padding: 0; min-width: 0; }
 .empty-hint { color: #55524a; font-size: 15px; }
+
+/* settings */
+.set-section { color: #b6892f; font-size: 12px; font-weight: 700; }
+.set-label   { color: #cfc9bc; font-size: 12px; }
+.set-hint    { color: #6c675d; font-size: 11px; }
 
 /* saved-chats sidebar */
 .sidebar     { background-color: #121215; border-right: 1px solid #24242b; }
@@ -540,39 +545,197 @@ def _find_piper_model():
     return None
 
 
-def _play(path):
-    for player in (["paplay", path], ["aplay", "-q", path], ["ffplay", "-nodisp", "-autoexit", path]):
-        if shutil.which(player[0]):
-            try:
-                subprocess.run(player, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except Exception:
-                pass
-            return
+def _play(path, gen=None):
+    """Play a wav, abortable. Returns True if it played to the end."""
+    for player in (["paplay", path], ["aplay", "-q", path],
+                   ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", path]):
+        if not shutil.which(player[0]):
+            continue
+        try:
+            proc = subprocess.Popen(player, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL)
+            while proc.poll() is None:
+                if gen is not None and gen != _TTS_GEN[0]:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=2)
+                    except Exception:
+                        proc.kill()
+                    return False
+                time.sleep(0.05)
+            return True
+        except Exception:
+            return False
+    return False
 
 
-def speak(text):
-    clean = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
-    clean = re.sub(r"[*_`#>\[\]]", "", clean).strip()[:800]
+# ── voice ───────────────────────────────────────────────────────────────────
+# Speech used to be one subprocess call on text truncated to 800 chars, which
+# meant any longer reply was cut off mid-sentence and never resumed. Now the
+# text is cleaned, split into sentence-sized chunks, and synthesised one chunk
+# ahead of playback — so nothing is dropped, a single bad chunk can't kill the
+# rest, and the whole thing can be stopped instantly.
+_TTS_GEN = [0]                     # bump to cancel whatever is speaking
+_TTS_START = threading.Lock()
+_TTS_CHUNK = 260                   # chars per chunk: short enough to stay responsive
+_TTS_END = object()                # distinct end-of-stream marker (None = failed chunk)
+
+_URL_RE = re.compile(r"https?://\S+|www\.\S+")
+
+
+def stop_speaking():
+    """Cancel any in-flight speech immediately."""
+    _TTS_GEN[0] += 1
+
+
+def tts_clean(text):
+    """Turn a chat reply into something worth listening to."""
+    if not isinstance(text, str):
+        return ""
+    s = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)     # code blocks
+    s = re.sub(r"`[^`]*`", " ", s)                            # inline code
+    s = re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", s)               # images
+    s = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", s)            # links -> label
+    s = _URL_RE.sub(" link ", s)                              # bare URLs
+    s = re.sub(r"^\s*[-*+]\s+", "", s, flags=re.M)            # bullets
+    s = re.sub(r"^\s*#{1,6}\s*", "", s, flags=re.M)           # headings
+    s = re.sub(r"[*_~>#|]", "", s)                            # leftover marks
+    s = re.sub(r"[ \t]+", " ", s)
+    s = re.sub(r"\n{2,}", "\n", s)
+    return s.strip()
+
+
+def tts_chunks(text, size=_TTS_CHUNK):
+    """Split into speakable chunks on sentence boundaries where possible."""
+    text = (text or "").strip()
+    if not text:
+        return []
+    parts = re.split(r"(?<=[.!?:;])\s+|\n+", text)
+    chunks, cur = [], ""
+    for p in parts:
+        p = p.strip()
+        if not p:
+            continue
+        while len(p) > size:                 # a monster sentence: wrap on a space
+            cut = p.rfind(" ", 0, size)
+            if cut <= 0:
+                cut = size
+            if cur:
+                chunks.append(cur.strip()); cur = ""
+            chunks.append(p[:cut].strip())
+            p = p[cut:].strip()
+        if len(cur) + len(p) + 1 <= size:
+            cur = (cur + " " + p).strip()
+        else:
+            if cur:
+                chunks.append(cur.strip())
+            cur = p
+    if cur:
+        chunks.append(cur.strip())
+    return [c for c in chunks if c]
+
+
+def _synth(chunk, gen, s):
+    """Render one chunk to a wav. Piper preferred, espeak-ng as fallback.
+    Returns a path, or None if both engines failed for this chunk."""
+    engine = (s.get("voice_engine") or "auto").lower()
+    # generous but bounded: scales with length so a long chunk isn't cut short
+    tmo = max(20, min(90, 8 + len(chunk) // 8))
+    out = str(CONFIG_DIR / f".say-{gen}-{abs(hash(chunk)) % 10 ** 8}.wav")
+    model = _find_piper_model()
+    if engine in ("auto", "piper") and shutil.which("piper") and model:
+        try:
+            cmd = ["piper", "-m", model, "-f", out]
+            ls = s.get("voice_speed")
+            if ls:
+                # piper: length-scale <1 speaks faster. Map 0.5..2.0 speed -> scale
+                try:
+                    cmd += ["--length-scale", f"{1.0 / float(ls):.3f}"]
+                except Exception:
+                    pass
+            subprocess.run(cmd, input=chunk, text=True, timeout=tmo,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if os.path.exists(out) and os.path.getsize(out) > 64:
+                return out
+        except Exception:
+            pass
+    if engine in ("auto", "espeak") and shutil.which("espeak-ng"):
+        try:
+            rate = int(float(s.get("voice_speed", 1.0)) * 150)
+            pitch = int(s.get("voice_pitch", 28))
+            subprocess.run(["espeak-ng", "-v", "en-us", "-p", str(max(0, min(99, pitch))),
+                            "-s", str(max(80, min(400, rate))), "-g", "3", "-w", out],
+                           input=chunk, text=True, timeout=tmo,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if os.path.exists(out) and os.path.getsize(out) > 64:
+                return out
+        except Exception:
+            pass
+    return None
+
+
+def speak(text, settings=None):
+    """Speak a reply in full. Non-blocking; cancels anything already speaking."""
+    s = settings or {}
+    clean = tts_clean(text)
     if not clean:
         return
+    cap = int(s.get("voice_max_chars", 20000) or 20000)
+    clean = clean[:cap]
+    stop_speaking()
+    with _TTS_START:
+        _TTS_GEN[0] += 1
+        gen = _TTS_GEN[0]
 
     def worker():
-        model = _find_piper_model()
-        if shutil.which("piper") and model:
+        chunks = tts_chunks(clean)
+        if not chunks:
+            return
+        import queue as _q
+        pipe = _q.Queue(maxsize=1)      # synthesise one chunk ahead of playback
+
+        def producer():
+            for ch in chunks:
+                if gen != _TTS_GEN[0]:
+                    break
+                wav = _synth(ch, gen, s)
+                if gen != _TTS_GEN[0]:
+                    if wav:
+                        try:
+                            os.unlink(wav)
+                        except Exception:
+                            pass
+                    break
+                pipe.put(wav)           # None = this chunk failed, keep going
             try:
-                wav = str(CONFIG_DIR / ".say.wav")
-                subprocess.run(["piper", "-m", model, "-f", wav], input=clean, text=True,
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
-                _play(wav)
-                return
+                pipe.put(_TTS_END, timeout=5)
             except Exception:
                 pass
-        if shutil.which("espeak-ng"):
+
+        threading.Thread(target=producer, daemon=True).start()
+        while gen == _TTS_GEN[0]:
             try:
-                subprocess.run(["espeak-ng", "-v", "en-us", "-p", "28", "-s", "150", "-g", "3", clean],
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
+                wav = pipe.get(timeout=120)
             except Exception:
-                pass
+                break
+            if wav is _TTS_END:          # producer finished
+                break
+            if wav is None:              # this chunk failed to synthesise —
+                continue                 # skip it, keep speaking the rest
+            try:
+                _play(wav, gen=gen)
+            finally:
+                try:
+                    os.unlink(wav)
+                except Exception:
+                    pass
+        # tidy any strays from this generation
+        try:
+            for f in Path(CONFIG_DIR).glob(f".say-{gen}-*.wav"):
+                f.unlink()
+        except Exception:
+            pass
+
     threading.Thread(target=worker, daemon=True).start()
 
 
@@ -928,6 +1091,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         self.tts_btn.add_css_class("headerbtn")
         self.tts_btn.set_tooltip_text("Read replies aloud")
         self.tts_btn.set_active(self.settings.get("tts", False))
+        self.tts_btn.connect("toggled", self._on_tts_toggled)
         header.pack_end(self.tts_btn)
         for icon, tip, cb in (
                 ("emblem-system-symbolic", "Settings", self.open_settings),
@@ -1117,6 +1281,13 @@ class ChuckWindow(Adw.ApplicationWindow):
             pass
         self._refresh_sidebar()
 
+    def _on_tts_toggled(self, btn):
+        on = btn.get_active()
+        if not on:
+            stop_speaking()          # switching voice off shuts it up immediately
+        self.settings["tts"] = on
+        save_settings(self.settings)
+
     def _toggle_sidebar(self, btn):
         on = btn.get_active()
         self.sidebar.set_reveal_child(on)
@@ -1129,7 +1300,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         """Runs every 10 min: drop anything past its 24h life, refresh the list
         (so the 'time left' countdowns stay honest). Keeps running forever."""
         try:
-            purge_old_chats()
+            purge_old_chats(self.cfg('chat_ttl_hours', CHAT_TTL_HOURS, 1, 720))
             self._refresh_sidebar()
         except Exception:
             pass
@@ -1298,6 +1469,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         self.spinner.stop(); self.spinner.set_visible(False)
         if getattr(self, "_activity_box", None) is not None:
             self._activity_end()
+        stop_speaking()          # Stop means stop talking, too
         if not auto:
             self._sys_note("\u25A0 stopped.", "dim")
         # finalize whatever partial text exists so it isn't lost
@@ -1798,6 +1970,19 @@ class ChuckWindow(Adw.ApplicationWindow):
     def _ask_model(self, vision=False):
         self._stream_into_bubble(self.history, vision=vision)
 
+    def cfg(self, key, default, lo=None, hi=None, cast=int):
+        """Read a tuned setting, falling back to the shipped default. Values are
+        clamped so a hand-edited settings.json can't put the app in a bad state."""
+        try:
+            v = cast(self.settings.get(key, default))
+        except Exception:
+            return default
+        if lo is not None:
+            v = max(lo, v)
+        if hi is not None:
+            v = min(hi, v)
+        return v
+
     def _trim_for_send(self, messages):
         """Bound the conversation actually sent to the model.
 
@@ -2033,11 +2218,12 @@ class ChuckWindow(Adw.ApplicationWindow):
         feedback = list(self._tool_feedback)
         self._loop_web = None; self._tool_feedback = []
 
-        if searches_fetches and self._hops < MAX_TOOL_HOPS:
+        hop_cap = self.cfg('research_hops', MAX_TOOL_HOPS, 1, 8)
+        if searches_fetches and self._hops < hop_cap:
             self._hops += 1
             self._run_web_tools(searches_fetches[0], searches_fetches[1], extra_feedback=feedback)
             return
-        if feedback and self._hops < MAX_TOOL_HOPS:
+        if feedback and self._hops < hop_cap:
             self._hops += 1
             self.history.append({"role": "user",
                                  "content": "TOOL RESULTS (continue — don't stop until the whole "
@@ -2049,7 +2235,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         # the turn is truly finished
         self._hops = 0
         if self.tts_btn.get_active() and disp:
-            speak(disp)
+            speak(disp, self.settings)
         self._save_chat()
         self._end_run()
 
@@ -2061,12 +2247,15 @@ class ChuckWindow(Adw.ApplicationWindow):
             out = list(extra_feedback or [])
             # 1. gather a diverse candidate list from all queries (fast — snippets)
             candidates, seen_domains, seen_urls = [], set(), set()
-            for q in searches[:RESEARCH_QUERIES]:
+            n_src = self.cfg('research_sources', RESEARCH_MAX_SOURCES, 1, 10)
+            n_q = self.cfg('research_queries', RESEARCH_QUERIES, 1, 4)
+            f_timeout = self.cfg('fetch_timeout', 6, 3, 30)
+            for q in searches[:n_q]:
                 if self._cancelled:
                     return
                 self._note_progress()
                 si = self._activity_step(f"searching  {q}")
-                results = web_search(q, n=RESEARCH_MAX_SOURCES)
+                results = web_search(q, n=n_src)
                 if not results:
                     self._activity_done(si, f"searched  {q}  (no results)", ok=False)
                     out.append(f"[search '{q}': engines returned nothing — try different wording]")
@@ -2081,12 +2270,12 @@ class ChuckWindow(Adw.ApplicationWindow):
                     seen_domains.add(dom); seen_urls.add(url)
                     candidates.append((title, url, snip))
                     n_new += 1
-                    if len(candidates) >= RESEARCH_MAX_SOURCES:
+                    if len(candidates) >= n_src:
                         break
                 self._activity_done(si, f"searched  {q}  ({n_new} new sources)")
-                if len(candidates) >= RESEARCH_MAX_SOURCES:
+                if len(candidates) >= n_src:
                     break
-            for u in fetches[:RESEARCH_MAX_SOURCES]:
+            for u in fetches[:n_src]:
                 if u not in seen_urls:
                     seen_urls.add(u); candidates.append((_domain(u), u, ""))
 
@@ -2098,7 +2287,7 @@ class ChuckWindow(Adw.ApplicationWindow):
                 dom = _domain(url)
                 label = f"{dom}" + (f" — {title[:60]}" if title and title != dom else "")
                 si = self._activity_step(f"reading  {label}")
-                body = web_fetch(url) or snip
+                body = web_fetch(url, timeout=f_timeout) or snip
                 self._note_progress()
                 self._activity_done(si, f"read  {label}", ok=bool(body))
                 if body:
@@ -2133,43 +2322,137 @@ class ChuckWindow(Adw.ApplicationWindow):
     # ── settings ──
     def open_settings(self, *_):
         dlg = Adw.Window(transient_for=self, modal=True, title="Settings",
-                         default_width=560, default_height=430)
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+                         default_width=600, default_height=680)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         for m in ("top", "bottom", "start", "end"):
-            getattr(box, f"set_margin_{m}")(14)
+            getattr(box, f"set_margin_{m}")(16)
         hb = Adw.HeaderBar(); wrap = Adw.ToolbarView()
-        wrap.add_top_bar(hb); wrap.set_content(Gtk.ScrolledWindow(child=box)); dlg.set_content(wrap)
-        box.append(Gtk.Label(label="SiliconFlow API key", xalign=0))
-        key = Gtk.Entry(text=self.settings.get("siliconflow_api_key", ""), visibility=False,
-                        placeholder_text="sk-\u2026"); box.append(key)
-        box.append(Gtk.Label(label="Chat model", xalign=0))
-        model = Gtk.Entry(text=self.settings.get("model", DEFAULT_MODEL)); box.append(model)
-        box.append(Gtk.Label(label="Vision model", xalign=0))
-        vmodel = Gtk.Entry(text=self.settings.get("vision_model", DEFAULT_VISION)); box.append(vmodel)
-        box.append(Gtk.Label(label="Preferred SearXNG instance (optional — your own or a private one)", xalign=0))
-        searx = Gtk.Entry(text=self.settings.get("searx_url", ""),
-                          placeholder_text="https://searx.example.org  (blank = built-in public list)")
-        box.append(searx)
-        box.append(Gtk.Label(label="Proxy for web/images/video (optional, e.g. Mullvad)", xalign=0))
-        proxy = Gtk.Entry(text=self.settings.get("proxy", ""), placeholder_text="http://host:port")
-        box.append(proxy)
-        hint = Gtk.Label(xalign=0, wrap=True); hint.add_css_class("dim")
-        hint.set_label("Key: cloud.siliconflow.com/account/ak (Basilisk's reused if present). "
-                       "Search fans out over SearXNG (Brave+Google+DDG under the hood) with a "
-                       "DuckDuckGo fallback; set your own instance for private search. Proxy routes "
-                       "fetches through Mullvad etc. Voice = Piper if installed, else espeak-ng.")
-        box.append(hint)
+        wrap.add_top_bar(hb); wrap.set_content(Gtk.ScrolledWindow(child=box, vexpand=True))
+        dlg.set_content(wrap)
 
-        def save(*_):
-            self.settings["siliconflow_api_key"] = key.get_text().strip()
-            self.settings["model"] = model.get_text().strip() or DEFAULT_MODEL
-            self.settings["vision_model"] = vmodel.get_text().strip() or DEFAULT_VISION
-            self.settings["searx_url"] = searx.get_text().strip()
-            self.settings["proxy"] = proxy.get_text().strip()
-            self.settings["tts"] = self.tts_btn.get_active()
-            save_settings(self.settings); dlg.close()
-        sv = Gtk.Button(label="Save"); sv.add_css_class("gold"); sv.connect("clicked", save)
-        box.append(sv); dlg.present()
+        def section(title):
+            lb = Gtk.Label(label=title, xalign=0)
+            lb.add_css_class("set-section"); lb.set_margin_top(14); box.append(lb)
+
+        def field(label, widget, hint=None):
+            lb = Gtk.Label(label=label, xalign=0); lb.add_css_class("set-label")
+            box.append(lb); box.append(widget)
+            if hint:
+                h = Gtk.Label(label=hint, xalign=0, wrap=True); h.add_css_class("set-hint")
+                box.append(h)
+            return widget
+
+        def slider(lo, hi, step, value, digits=0):
+            sc = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, lo, hi, step)
+            sc.set_value(value); sc.set_draw_value(True); sc.set_digits(digits)
+            sc.set_hexpand(True)
+            return sc
+
+        section("Model \u00b7 account")
+        key = field("SiliconFlow API key",
+                    Gtk.Entry(text=self.settings.get("siliconflow_api_key", ""),
+                              visibility=False, placeholder_text="sk-\u2026"),
+                    "cloud.siliconflow.com/account/ak \u2014 Basilisk's key is reused if present.")
+        model = field("Chat model", Gtk.Entry(text=self.settings.get("model", DEFAULT_MODEL)))
+        vmodel = field("Vision model",
+                       Gtk.Entry(text=self.settings.get("vision_model", DEFAULT_VISION)))
+
+        section("Voice")
+        tts_on = Gtk.CheckButton(label="Read replies aloud")
+        tts_on.set_active(bool(self.settings.get("tts", False)))
+        box.append(tts_on)
+        eng = Gtk.DropDown.new_from_strings(
+            ["auto (Piper, else espeak-ng)", "piper only", "espeak-ng only"])
+        eng.set_selected({"auto": 0, "piper": 1, "espeak": 2}.get(
+            (self.settings.get("voice_engine") or "auto").lower(), 0))
+        field("Engine", eng)
+        speed = field("Speed",
+                      slider(0.5, 2.0, 0.05, float(self.settings.get("voice_speed", 1.0)), 2),
+                      "1.00 is normal. Higher is faster.")
+        pitch = field("Pitch (espeak-ng only)",
+                      slider(0, 99, 1, int(self.settings.get("voice_pitch", 28))))
+
+        section("Research \u00b7 speed")
+        src = field("Sources read per answer",
+                    slider(1, 10, 1, self.cfg("research_sources", RESEARCH_MAX_SOURCES, 1, 10)),
+                    "Fewer sources = faster answers. 3 is the tuned default.")
+        qs = field("Searches per round",
+                   slider(1, 4, 1, self.cfg("research_queries", RESEARCH_QUERIES, 1, 4)))
+        hops = field("Research depth (rounds)",
+                     slider(1, 8, 1, self.cfg("research_hops", MAX_TOOL_HOPS, 1, 8)),
+                     "Search\u2192read\u2192think rounds allowed before he must answer.")
+        ftmo = field("Page fetch timeout (seconds)",
+                     slider(3, 30, 1, self.cfg("fetch_timeout", 6, 3, 30)))
+
+        section("Chats")
+        ttl = field("Auto-delete saved chats after (hours)",
+                    slider(1, 168, 1, self.cfg("chat_ttl_hours", CHAT_TTL_HOURS, 1, 720)),
+                    "Counted from your last activity in a chat, not from when it started.")
+
+        section("Network \u00b7 privacy")
+        searx = field("Preferred SearXNG instance (optional)",
+                      Gtk.Entry(text=self.settings.get("searx_url", ""),
+                                placeholder_text="https://searx.example.org  (blank = built-in list)"),
+                      "Search fans out over SearXNG (Brave + Google + DDG), DuckDuckGo as fallback.")
+        proxy = field("Proxy for web, images and video (optional)",
+                      Gtk.Entry(text=self.settings.get("proxy", ""),
+                                placeholder_text="http://host:port"))
+
+        status = Gtk.Label(label="", xalign=0); status.add_css_class("ok")
+
+        def collect():
+            eng_key = ["auto", "piper", "espeak"][int(eng.get_selected() or 0)]
+            return {
+                "siliconflow_api_key": key.get_text().strip(),
+                "model": model.get_text().strip() or DEFAULT_MODEL,
+                "vision_model": vmodel.get_text().strip() or DEFAULT_VISION,
+                "tts": tts_on.get_active(),
+                "voice_engine": eng_key,
+                "voice_speed": round(float(speed.get_value()), 2),
+                "voice_pitch": int(pitch.get_value()),
+                "research_sources": int(src.get_value()),
+                "research_queries": int(qs.get_value()),
+                "research_hops": int(hops.get_value()),
+                "fetch_timeout": int(ftmo.get_value()),
+                "chat_ttl_hours": int(ttl.get_value()),
+                "searx_url": searx.get_text().strip(),
+                "proxy": proxy.get_text().strip(),
+            }
+
+        def apply_and_save(*_):
+            self.settings.update(collect())
+            save_settings(self.settings)
+            self.tts_btn.set_active(self.settings.get("tts", False))
+            if not self.settings.get("tts"):
+                stop_speaking()
+            self._refresh_sidebar()
+            status.set_label("Saved.")
+
+        def test_voice(*_):
+            self.settings.update(collect())
+            speak("Chuck Norris does not adjust settings. Settings adjust to Chuck Norris. "
+                  "This line runs long on purpose, so you can hear it keep going all the way "
+                  "to the end without cutting out halfway.", self.settings)
+            status.set_label("Speaking\u2026")
+
+        def reset(*_):
+            for k in ("voice_engine", "voice_speed", "voice_pitch", "research_sources",
+                      "research_queries", "research_hops", "fetch_timeout", "chat_ttl_hours"):
+                self.settings.pop(k, None)
+            save_settings(self.settings)
+            status.set_label("Tuning reset \u2014 reopen Settings to see the defaults.")
+
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        row.set_margin_top(16)
+        sv = Gtk.Button(label="Save"); sv.add_css_class("gold")
+        sv.connect("clicked", apply_and_save)
+        tv = Gtk.Button(label="Test voice"); tv.add_css_class("quick")
+        tv.connect("clicked", test_voice)
+        rs = Gtk.Button(label="Reset tuning"); rs.add_css_class("quick")
+        rs.connect("clicked", reset)
+        row.append(sv); row.append(tv); row.append(rs); row.append(status)
+        box.append(row)
+        dlg.present()
 
 
 class ChuckApp(Adw.Application):
