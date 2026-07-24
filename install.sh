@@ -92,12 +92,19 @@ else
   curl -fsSL "https://raw.githubusercontent.com/${REPO}/${BRANCH}/chucknorris.py" \
     -o "${APP_DIR}/chucknorris.py" || die "could not fetch chucknorris.py"
   mkdir -p "${APP_DIR}/chucknorris_ext"
-  for f in __init__ skills specs memory codecheck skill_library builder; do
+  # config/safety/web/voice/chats are REQUIRED — the app won't import without
+  # them, so a missing one must be a hard error, not a quiet "skipped".
+  for f in __init__ config safety web voice chats \
+           skills specs memory codecheck skill_library builder; do
     curl -fsSL "https://raw.githubusercontent.com/${REPO}/${BRANCH}/chucknorris_ext/${f}.py" \
       -o "${APP_DIR}/chucknorris_ext/${f}.py" \
-      || info "could not fetch chucknorris_ext/${f}.py (skills/specs/memory may be limited)"
+      || case "$f" in
+           __init__|config|safety|web|voice|chats)
+             die "could not fetch required module chucknorris_ext/${f}.py" ;;
+           *) info "could not fetch chucknorris_ext/${f}.py (that feature will be limited)" ;;
+         esac
   done
-  for a in chucknorris-bg chucknorris-icon chucknorris-send \
+  for a in chucknorris-bg chucknorris-icon gi-mark \
            chucknorris-icon-256 chucknorris-icon-128 chucknorris-icon-64 \
            chucknorris-icon-48 chucknorris-icon-32; do
     curl -fsSL "https://raw.githubusercontent.com/${REPO}/${BRANCH}/assets/${a}.png" \

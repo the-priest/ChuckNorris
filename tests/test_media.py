@@ -94,15 +94,15 @@ print("--- a dead search instance cannot stall the search ---")
 # the straggler path every run rather than depending on the shuffle.
 calls = []
 DEAD = "https://dead.example"
-cn.SEARX_INSTANCES = [DEAD] + ["https://good%d.example" % i for i in range(1, 5)]
+cn.web.SEARX_INSTANCES = [DEAD] + ["https://good%d.example" % i for i in range(1, 5)]
 def slow_or_fail(url, **kw):
     host = url.split("/search")[0]; calls.append(host)
     if DEAD in host:
         time.sleep(3); raise RuntimeError("dead host")
     return io.BytesIO(b'{"results":[{"url":"https://good.com/a","title":"T","content":"C"}]}')
-cn._get = slow_or_fail
-cn._SETTINGS = {}
-t0 = time.time(); res = cn._searx_search("test", 3); el = time.time() - t0
+cn.web._get = slow_or_fail
+cn.web._SETTINGS = {}
+t0 = time.time(); res = cn.web._searx_search("test", 3); el = time.time() - t0
 print(f"  probed {len(set(calls))} hosts in {el:.2f}s, got {len(res)} results")
 if el > 2.0:
     fail(f"one dead instance stalled search for {el:.1f}s")
@@ -110,22 +110,22 @@ if not res:
     fail("search returned nothing despite a healthy instance")
 
 print("--- search falls back when every instance fails ---")
-cn._get = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("all down"))
-res2 = cn._searx_search("test", 3)
+cn.web._get = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("all down"))
+res2 = cn.web._searx_search("test", 3)
 if res2 != []:
     fail("expected an empty list when every instance is down")
 try:
-    out = cn.web_search("test", 3)
+    out = cn.web.web_search("test", 3)
     print("  web_search survived a total outage ->", out)
 except Exception as e:
     fail(f"web_search crashed on total outage: {e}")
 
 print("--- results are always http(s), never file:/javascript: ---")
-cn._get = lambda *a, **k: io.BytesIO(
+cn.web._get = lambda *a, **k: io.BytesIO(
     b'{"results":[{"url":"file:///etc/passwd","title":"x","content":"y"},'
     b'{"url":"javascript:alert(1)","title":"x","content":"y"},'
     b'{"url":"https://ok.com/a","title":"ok","content":"c"}]}')
-rows = cn._searx_search("q", 5)
+rows = cn.web._searx_search("q", 5)
 bad = [u for _t, u, _s in rows if not u.startswith(("http://", "https://"))]
 if bad:
     fail(f"search emitted non-http URLs: {bad}")

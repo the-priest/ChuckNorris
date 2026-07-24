@@ -172,6 +172,48 @@ if "gate_text=body" not in appsrc:
 else:
     print("   _run_skill passes the real body to the gate: True")
 
+# ── 10. pacman installs are forced to sync-and-upgrade first ──────────────
+print("10. -Syu enforcement (a bare -S risks a partial upgrade):")
+_syu = [
+    ("sudo pacman -S firefox",           "sudo pacman -Syu firefox"),
+    ("pacman -S neovim",                 "pacman -Syu neovim"),
+    ("sudo pacman -S --needed git base", "sudo pacman -Syu --needed git base"),
+    ("sudo pacman -Sy firefox",          "sudo pacman -Syu firefox"),
+    ("sudo pacman -Syu firefox",         None),
+    ("sudo pacman -Syyu",                None),
+    ("pacman -Ss query",                 None),
+    ("pacman -Si firefox",               None),
+    ("pacman -Sl core",                  None),
+    ("pacman -Sc",                       None),
+    ("pacman -Sg base-devel",            None),
+    ("pacman -Sw firefox",               None),
+    ("pacman -Rns firefox",              None),
+    ("pacman -Qtdq",                     None),
+    ("pacman -U ./local.pkg.tar.zst",    None),
+    ("ls -la",                           None),
+]
+_bad = 0
+for _src, _exp in _syu:
+    _got = cn.enforce_syu(_src)
+    if _got != (_exp or _src):
+        _bad += 1
+        print(f"   WRONG: {_src!r} -> {_got!r}")
+        fails += 1
+print(f"   {len(_syu) - _bad}/{len(_syu)} correct "
+      "(installs upgraded, read-only ops and other operations untouched)")
+
+# ── 11. only ONE runnable card per reply ─────────────────────────────────
+print("11. one command per reply:")
+_src = open("chucknorris.py").read()
+if "codes = codes[:1]" not in _src:
+    print("   HOLE: more than one code/command card can be shown at once")
+    fails += 1
+else:
+    print("   codes capped to 1 — the user is never handed a wall of commands")
+if "ONE STEP AT A TIME" not in _src:
+    print("   HOLE: the prompt doesn't ask for one step at a time")
+    fails += 1
+
 print()
 print("TOTAL SAFETY FAILURES:", fails)
 assert fails==0, "SAFETY HOLES PRESENT"

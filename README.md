@@ -1,16 +1,16 @@
 <div align="center">
 
-<img src="assets/chucknorris-icon.png" alt="Chuck Norris" width="140">
+<img src="assets/gi-mark.png" alt="Chuck Norris" width="150">
 
 # 🥋 CHUCK NORRIS
 
 ### The Arch / CachyOS grandmaster that lives on your desktop. You ask — he acts. No modes, no buttons, no excuses. A tribute.
 
-![version](https://img.shields.io/badge/version-10.4.0-b6892f?style=for-the-badge&labelColor=0b0b0d)
+![version](https://img.shields.io/badge/version-11.0.0-b6892f?style=for-the-badge&labelColor=0b0b0d)
 ![tribute](https://img.shields.io/badge/1940-2026-b6892f?style=for-the-badge&labelColor=0b0b0d)
 ![agentic](https://img.shields.io/badge/agentic-decides%20%26%20acts-b6892f?style=for-the-badge&labelColor=0b0b0d)
 ![distro](https://img.shields.io/badge/Arch%20%7C%20CachyOS-first--class-b6892f?style=for-the-badge&labelColor=0b0b0d)
-![tests](https://img.shields.io/badge/tests-9%20suites%20shipped-b6892f?style=for-the-badge&labelColor=0b0b0d)
+![tests](https://img.shields.io/badge/tests-11%20suites%20shipped-b6892f?style=for-the-badge&labelColor=0b0b0d)
 
 </div>
 
@@ -43,7 +43,11 @@ What you get from that split: real access to your system, and a model far strong
 
 **Research the live web.** Searches across multiple SearXNG instances (Brave, Google, DuckDuckGo and Bing underneath) with DuckDuckGo as backstop, reads the actual pages, cross-checks different outlets, cites URLs and marks single-source claims `[UNVERIFIED]`. You watch it happen in a live checklist — *● searching…* → *✓ read bbc.com — headline* — each line marking itself done as it lands.
 
-**Run things on your machine.** Any shell command arrives as a card **you** approve. He reads the real output and iterates on it — and never claims he ran something he didn't.
+**Run things on your machine — one step at a time.** Exactly one command per reply, ever. He says what it does, you approve the card, he reads the *real* output and only then proposes the next step. No wall of ten commands you can't possibly run. And installing anything always goes through `pacman -Syu` — a bare `-S` is rewritten for you, because installing against a stale database is how Arch systems break.
+
+**Fix a real machine, carefully.** Diagnose read-only first, form a hypothesis out loud, change one thing at a time, and verify it actually worked before moving on. Before anything risky he says what could break and how to undo it — and for bootloader, initramfs, fstab or kernel work he gives you the rescue path *before* you run it, not after. He won't rip out core packages, force-overwrite files pacman owns, or disable a check to make an error go away. If the output contradicts his theory he says so and looks again.
+
+**Commands that actually work unattended.** Anything that would sit waiting for a prompt gets handled: package operations are confirmed by your approval of the card, pagers are disabled, and nothing can block on input it will never receive. He reads the *whole* result — including the error at the end of a thousand-line build, which is exactly the part naive truncation throws away — and a non-zero exit is treated as a failure to fix, not a number to skim past.
 
 **Write, verify and run code.** Python, Node, Bash. Every block is checked before you ever see a Run button: syntax, linting, a static security scan. Broken or unsafe code is withheld and he's told to fix it. He can also verify code *without* running it — useful for reviewing yours.
 
@@ -89,7 +93,26 @@ Chuck **never refuses, never moralizes, never lectures** on anything legal — m
 ./run_tests.sh
 ```
 
-Nine suites ship with the app and run against the real thing: whole conversations driven end to end, research chains, code written and actually executed, destructive commands hitting the confirm gate, runaway loops terminating, the voice pipeline, the 24-hour purge, cold-start recovery, and a build that gets written, tested and packaged. If something's off on your machine, it will tell you.
+Eleven suites ship with the app and run against the real thing: whole conversations driven end to end, research chains, code written and actually executed, destructive commands hitting the confirm gate, runaway loops terminating, the voice pipeline, the 24-hour purge, cold-start recovery, and a build that gets written, tested and packaged. If something's off on your machine, it will tell you.
+
+---
+
+## How it's built
+
+The app is a GTK4 front end over a small set of focused modules, so any one
+piece can be read and changed on its own:
+
+| module | what it owns |
+|---|---|
+| `config.py` | paths, tunables, the settings file — one source of truth |
+| `safety.py` | destructive-command classification, `pacman -Syu` hygiene |
+| `web.py` | multi-engine search, page fetching, images, video |
+| `voice.py` | speech: cleaning, chunking, synthesis, playback |
+| `chats.py` | saved conversations and their retention |
+| `codecheck.py` | static verification: syntax, lint, security scan |
+| `builder.py` | sandboxed projects: write, test, package |
+| `skills.py` · `skill_library.py` | saved and shipped recipes |
+| `memory.py` · `specs.py` | durable facts, on-demand playbooks |
 
 ---
 

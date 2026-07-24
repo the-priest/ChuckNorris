@@ -38,14 +38,15 @@ def settle(limit=120):
         time.sleep(0.05)
 
 
-cn.CONFIG_DIR = pathlib.Path(tempfile.mkdtemp())
-cn.shutil.which = lambda n: "/usr/bin/" + n if n in ("piper", "espeak-ng", "paplay") else None
-cn._find_piper_model = lambda: "/fake/model.onnx"
+cn.voice.CONFIG_DIR = pathlib.Path(tempfile.mkdtemp())
+cn.CONFIG_DIR = cn.voice.CONFIG_DIR
+cn.voice.shutil.which = lambda n: "/usr/bin/" + n if n in ("piper", "espeak-ng", "paplay") else None
+cn.voice._find_piper_model = lambda: "/fake/model.onnx"
 
 print("--- long replies are spoken in full (the 800-char truncation bug) ---")
 long_reply = ("Right, here is the situation you are dealing with. " * 80).strip()
-clean = cn.tts_clean(long_reply)
-chunks = cn.tts_chunks(clean)
+clean = cn.voice.tts_clean(long_reply)
+chunks = cn.voice.tts_chunks(clean)
 queued = sum(len(c) for c in chunks)
 print(f"  reply={len(long_reply)} cleaned={len(clean)} chunks={len(chunks)} queued={queued}")
 if queued < len(clean) - len(chunks):
@@ -60,10 +61,10 @@ for name, txt in [("empty", ""), ("spaces", "   "), ("one word", "hi"),
                   ("unicode", "Grüße — naïve café… 日本語 test."),
                   ("newlines", "\n\n\n"), ("none", None)]:
     try:
-        ch = cn.tts_chunks(cn.tts_clean(txt))
+        ch = cn.voice.tts_chunks(cn.voice.tts_clean(txt))
     except Exception as e:
         fail(f"chunking crashed on {name}: {e}"); continue
-    if any(len(c) > cn._TTS_CHUNK for c in ch):
+    if any(len(c) > cn.voice._TTS_CHUNK for c in ch):
         fail(f"{name}: chunk over the cap")
 print("  all edge inputs chunked safely")
 
@@ -71,7 +72,7 @@ print("--- cleaning: code, URLs and markdown are not read aloud ---")
 msg = ("## Heading\nUse `pacman -Syu`. See [the wiki](https://wiki.archlinux.org/x) "
        "or https://example.com/a/b?q=1\n- **one**\n- _two_\n"
        "```bash\nrm -rf /tmp/x\n```\nDone.")
-c = cn.tts_clean(msg)
+c = cn.voice.tts_clean(msg)
 for bad in ("```", "http", "**", "##", "`", "rm -rf"):
     if bad in c:
         fail(f"{bad!r} survived cleaning: {c!r}")
@@ -94,9 +95,9 @@ class P:
     def terminate(s): pass
     def wait(s, **k): pass
     def kill(s): pass
-cn.subprocess.run = fake_run
-cn.subprocess.Popen = P
-cn.speak(long_reply, {})
+cn.voice.subprocess.run = fake_run
+cn.voice.subprocess.Popen = P
+cn.voice.speak(long_reply, {})
 settle()
 print(f"  chunks={len(chunks)} synthesised={len(synth)}")
 if len(synth) != len(chunks):
@@ -105,7 +106,7 @@ if len(synth) != len(chunks):
 print("--- the worker exits promptly (no 120s park on the sentinel) ---")
 synth.clear()
 t0 = time.time()
-cn.speak("One. Two. Three. Four. Five.", {})
+cn.voice.speak("One. Two. Three. Four. Five.", {})
 settle()
 el = time.time() - t0
 print(f"  finished in {el:.2f}s")
@@ -130,18 +131,18 @@ class P2:
     def terminate(s): pass
     def wait(s, **k): pass
     def kill(s): pass
-cn.subprocess.run = flaky
-cn.subprocess.Popen = P2
+cn.voice.subprocess.run = flaky
+cn.voice.subprocess.Popen = P2
 many = ". ".join(f"Sentence number {i} of this reply" for i in range(30))
-nchunks = len(cn.tts_chunks(cn.tts_clean(many)))
-cn.speak(many, {})
+nchunks = len(cn.voice.tts_chunks(cn.voice.tts_clean(many)))
+cn.voice.speak(many, {})
 settle()
 print(f"  chunks={nchunks} played={len(played)} (one engine failure injected)")
 if len(played) < nchunks - 1:
     fail(f"a single failed chunk aborted playback ({len(played)}/{nchunks})")
 
 print("--- stop silences immediately ---")
-cn.subprocess.run = fake_run
+cn.voice.subprocess.run = fake_run
 class SlowP:
     terms = []
     def __init__(s, cmd, **k): s.t = time.time(); s.k = False
@@ -149,13 +150,13 @@ class SlowP:
     def terminate(s): s.k = True; SlowP.terms.append(1)
     def wait(s, **k): pass
     def kill(s): s.k = True
-cn.subprocess.Popen = SlowP
-cn.speak("One. Two. Three. Four. Five. Six. Seven.", {})
+cn.voice.subprocess.Popen = SlowP
+cn.voice.speak("One. Two. Three. Four. Five. Six. Seven.", {})
 time.sleep(0.3)
-g = cn._TTS_GEN[0]
-cn.stop_speaking()
+g = cn.voice._TTS_GEN[0]
+cn.voice.stop_speaking()
 time.sleep(0.4)
-if cn._TTS_GEN[0] <= g:
+if cn.voice._TTS_GEN[0] <= g:
     fail("stop_speaking did not bump the generation")
 if not SlowP.terms:
     fail("playback was not terminated on stop")
@@ -164,14 +165,14 @@ settle()
 
 print("--- a new reply cancels the previous one (no overlap) ---")
 SlowP.terms.clear()
-cn.speak("First reply speaking.", {})
+cn.voice.speak("First reply speaking.", {})
 time.sleep(0.2)
-g1 = cn._TTS_GEN[0]
-cn.speak("Second reply interrupts.", {})
+g1 = cn.voice._TTS_GEN[0]
+cn.voice.speak("Second reply interrupts.", {})
 time.sleep(0.3)
-if cn._TTS_GEN[0] <= g1:
+if cn.voice._TTS_GEN[0] <= g1:
     fail("new speech did not supersede the old")
-print("  superseded:", cn._TTS_GEN[0] > g1, "| old playback stopped:", bool(SlowP.terms))
+print("  superseded:", cn.voice._TTS_GEN[0] > g1, "| old playback stopped:", bool(SlowP.terms))
 settle()
 
 print("--- voice settings are applied ---")
@@ -182,9 +183,9 @@ def capture(cmd, **kw):
     if o:
         open(o[0], "wb").write(b"RIFF" + b"\0" * 200)
     return R()
-cn.subprocess.run = capture
-cn.subprocess.Popen = P
-cn.speak("Testing speed.", {"voice_engine": "espeak", "voice_speed": 1.5, "voice_pitch": 55})
+cn.voice.subprocess.run = capture
+cn.voice.subprocess.Popen = P
+cn.voice.speak("Testing speed.", {"voice_engine": "espeak", "voice_speed": 1.5, "voice_pitch": 55})
 settle()
 esp = [c for c in seen if c and c[0] == "espeak-ng"]
 if not esp:

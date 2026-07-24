@@ -16,7 +16,6 @@ import json
 import time
 import html as _html
 import base64
-import random
 import shlex
 import shutil
 import socket
@@ -37,6 +36,47 @@ from gi.repository import Gtk, Adw, GLib, Gio, Gdk, GdkPixbuf  # noqa: E402
 # sidecar package (skills = smart files, specs = on-demand expertise). Kept
 # optional so a partial install still launches.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from chucknorris_ext.safety import (            # noqa: E402
+    classify_command, enforce_syu)
+from chucknorris_ext import safety as _safety   # noqa: E402
+CRITICAL = _safety.CRITICAL                     # re-exported: tests + callers
+DANGER = _safety.DANGER
+from chucknorris_ext import chats as _chats     # noqa: E402
+# Module handles, so callers (and tests) can reach a subsystem's internals
+# without every private name being re-exported here.
+from chucknorris_ext import voice as voice      # noqa: E402
+from chucknorris_ext import web as web          # noqa: E402
+
+# Names re-exported into this module so the UI (and the test-suite, which
+# monkeypatches them here) keep a single stable import surface.
+from chucknorris_ext.voice import (             # noqa: E402
+    speak,
+    stop_speaking,
+    tts_clean,          # noqa: F401  (re-export)
+    tts_chunks,         # noqa: F401  (re-export)
+    _find_piper_model,  # noqa: F401  (re-export)
+)
+from chucknorris_ext.web import (               # noqa: E402
+    web_search,
+    web_fetch,
+    image_search,
+    video_search,
+    download_image,
+    _domain,
+    _searx_search,      # noqa: F401  (re-export)
+    _is_image_path,
+)
+from chucknorris_ext.chats import chat_expires_in  # noqa: E402
+
+
+def chat_files():
+    """Saved chats, newest first (module-level CHATS_DIR so tests can redirect)."""
+    return _chats.chat_files(CHATS_DIR)
+
+
+def purge_old_chats(ttl_hours=None):
+    return _chats.purge_old_chats(ttl_hours or CHAT_TTL_HOURS, CHATS_DIR)
+
 try:
     from chucknorris_ext import skills as _skills
     from chucknorris_ext import specs as _specs
@@ -52,114 +92,19 @@ except Exception:
     _skill_library = None
     _builder = None
 
-APP_ID = "org.thepriest.chucknorris"
-VERSION = "10.4.0"
-HERE = Path(os.path.dirname(os.path.abspath(__file__)))
-CONFIG_DIR = Path.home() / ".config" / "chucknorris"
-DATA_DIR = Path.home() / ".local" / "share" / "chucknorris"
-CHATS_DIR = DATA_DIR / "chats"
-CHAT_TTL_HOURS = 24        # saved chats self-delete this long after last activity
-RENDER_KEEP = 10           # bubbles kept alive when you're at the bottom of the chat
-RENDER_PAGE = 20           # more revealed each time you scroll to the top
-FONT_SIZE = 14             # chat text size in px (adjustable in Settings)
-VOICE_DIR = DATA_DIR / "voices"
-DL_DIR = Path.home() / "Downloads" / "ChuckNorris"
-SETTINGS = CONFIG_DIR / "settings.json"
-BASILISK_SETTINGS = Path.home() / ".config" / "basilisk" / "settings.json"
-for d in (CONFIG_DIR, CHATS_DIR, DL_DIR, VOICE_DIR):
-    d.mkdir(parents=True, exist_ok=True)
+# Paths, tunables and settings all live in one place now.
+HERE = Path(__file__).resolve().parent
 
-DEFAULT_BASE = "https://api.siliconflow.com/v1"
-DEFAULT_MODEL = "deepseek-ai/DeepSeek-V4-Flash"
-DEFAULT_VISION = "Qwen/Qwen2.5-VL-32B-Instruct"
-UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-      "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
-MAX_TOOL_HOPS = 4          # research: search→read→think rounds (was 8 — trimmed for speed)
-# What we SEND is capped; what we SAVE is not. The full transcript stays on disk
-# for reloading, but an unbounded payload makes every later turn slower and more
-# expensive, and eventually overflows the model's context outright. Stale research
-# blobs are the worst offenders (up to 16k chars each) and are already digested
-# into the answer that followed them, so only the newest few stay whole.
-SEND_CHAR_BUDGET = 60_000  # ~15k tokens of conversation carried per turn
-TOOL_BLOBS_KEPT = 2        # most recent tool-result blobs sent in full
-RESEARCH_MAX_SOURCES = 3   # distinct pages he'll read before answering (was 10 — fewer = faster)
-RESEARCH_QUERIES = 2       # distinct queries fanned out per hop (was 4)
-
-# ── destructive-command classification ──────────────────────────────────────
-# Two tiers, both purely static regex (microseconds — no cost to answer speed):
-#   CRITICAL  = unrecoverable. Wipes a disk, nukes /, executes remote code,
-#               bricks the boot. These need an EXPLICIT second confirmation
-#               before the Run button will even arm.
-#   DANGER    = destructive but scoped/recoverable. Red warning, single approve.
-# DANGER is a superset: anything CRITICAL is also DANGER.
-
-# block devices, incl. NVMe / virtio / SD / loop / device-mapper (not just sdX)
-_DEV = r"/dev/(?:sd[a-z]|nvme\d+n\d+|vd[a-z]|hd[a-z]|mmcblk\d+|loop\d+|dm-\d+|disk\d+)"
-# a "root-ish" target: / itself, /*, ~, $HOME, a bare wildcard, or cwd
-_NUKE_TARGET = r"(?:/|/\*|~|~/\*|\$HOME(?:/\*)?|\*|\.)"
-# rm with recursive intent, short cluster (-rf/-fr/-Rf) or long flags
-_RM_REC = r"\brm\s+(?:(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive|--force|-[a-zA-Z]*f[a-zA-Z]*)\s+)+"
-
-CRITICAL = re.compile(
-    # rm -rf aimed at root / home / bare wildcard
-    _RM_REC + _NUKE_TARGET + r"\s*(?:$|[;&|])"
-    r"|--no-preserve-root"
-    # filesystem / partition / crypto destruction
-    r"|\bmkfs(?:\.[a-z0-9]+)?\b|\bwipefs\b|\bblkdiscard\b|\bshred\b"
-    r"|\bcryptsetup\s+(?:luksFormat|erase)\b"
-    r"|\b(?:parted|fdisk|sgdisk|cfdisk|gdisk)\b[^|;]*" + _DEV +
-    r"|\bsgdisk\b[^|;]*--zap-all"
-    # raw writes to a block device
-    r"|\bdd\b[^|;]*\bof=" + _DEV +
-    r"|>\s*" + _DEV +
-    # remote code execution: curl/wget piped into a shell
-    r"|\b(?:curl|wget)\b[^|;&]*\|\s*(?:sudo\s+)?(?:ba|z|k)?sh\b"
-    # clobbering critical system files
-    r"|>\s*/etc/(?:passwd|shadow|sudoers|fstab)\b"
-    r"|\btruncate\s+-s\s*0\s+/(?:etc|boot)/"
-    r"|\bmv\s+(?:/|/etc|/boot|/home|~)\S*\s+/dev/null\b"
-    # mass delete via find on a broad path
-    r"|\bfind\s+(?:/|~|\$HOME)\S*[^|;]*-delete\b"
-    r"|\bfind\s+(?:/|~|\$HOME)\S*[^|;]*-exec\s+rm\b"
-    # fork bomb
-    r"|:\(\)\s*\{"
-    # ripping out core packages
-    r"|\bpacman\s+-R[a-z]*\s+[^|;]*\b(?:systemd|glibc|linux|bash|coreutils|pacman)\b"
-    # recursive permission/ownership destruction from root
-    r"|\bchmod\s+-R\s+[0-7]{3,4}\s+/\s*(?:$|[;&|])"
-    r"|\bchown\s+-R\s+\S+\s+/\s*(?:$|[;&|])"
-    # account destruction
-    r"|\buserdel\b|\bpasswd\s+-d\b",
-    re.IGNORECASE)
-
-DANGER = re.compile(
-    # everything critical, plus scoped-but-destructive things worth reading twice
-    CRITICAL.pattern +
-    r"|\brm\s+-[a-zA-Z]*[rR][a-zA-Z]*\b"          # any recursive rm
-    r"|\brm\s+--recursive\b"
-    r"|\bgit\s+clean\s+-[a-z]*[xd][a-z]*f?\b"     # blows away untracked work
-    r"|\bdd\b|\bmkswap\b"
-    r"|\bchmod\s+-R\b|\bchown\s+-R\b"
-    r"|\b(?:reboot|poweroff|shutdown|halt)\b"
-    r"|\bsystemctl\s+(?:mask|disable|stop)\b"
-    r"|\biptables\s+-F\b|\bnft\s+flush\b|\bufw\s+--force\s+reset\b"
-    r"|\bkillall\b|\bpkill\s+-9\b"
-    r"|\bpacman\s+-R"
-    r"|\btruncate\s+-s\s*0\b"
-    r"|\bfind\b[^|;]*-delete\b|\bfind\b[^|;]*-exec\s+rm\b",
-    re.IGNORECASE)
-
-
-def classify_command(cmd):
-    """Return 'critical', 'danger', or '' for a shell command string.
-    Static and fast — this runs on every card, so it must never be slow."""
-    if not cmd:
-        return ""
-    if CRITICAL.search(cmd):
-        return "critical"
-    if DANGER.search(cmd):
-        return "danger"
-    return ""
+from chucknorris_ext import config as _config   # noqa: E402
+from chucknorris_ext.config import (            # noqa: E402
+    APP_ID, VERSION, DEFAULT_MODEL, DEFAULT_VISION, DEFAULT_BASE,
+    DATA_DIR, CONFIG_DIR, CHATS_DIR, DL_DIR, VOICE_DIR,
+    SETTINGS, BASILISK_SETTINGS,
+    MAX_TOOL_HOPS, RESEARCH_MAX_SOURCES, RESEARCH_QUERIES,
+    SEND_CHAR_BUDGET, TOOL_BLOBS_KEPT, CHAT_TTL_HOURS,
+    RENDER_KEEP, RENDER_PAGE, FONT_SIZE, UA,
+    load_settings, save_settings,
+)
 
 SYSTEM_PROMPT = r"""You ARE Chuck Norris — the legend (Carlos Ray "Chuck" Norris, 1940–2026), \
 reborn as an Arch Linux / CachyOS grandmaster living in this machine. A tribute. Deadpan, dry, \
@@ -184,7 +129,8 @@ it and you get the output) · ```check python
 <code>``` (verify code WITHOUT running: syntax + lint + security + tests) · ```project
 <name>``` · ```write
 path/in/project.py
-<COMPLETE file>``` (↑ first line is the path, rest is the file) · ```tree``` · ```runtests``` · \
+<COMPLETE file>``` (↑ first line is the path, rest is the file) · ```tree``` · ```rmfile
+<path>``` · ```runtests``` · \
 ```package``` (zip it and hand it over) · ```skill
 name: <slug>
 lang: bash|python
@@ -201,11 +147,10 @@ building, a standing preference — emit ```remember``` with that ONE fact, ters
 remembered facts are surfaced to you each turn automatically — use them naturally, never announce \
 it, never dump them all. "forget that" → ```forget```.
 
-FOUR RULES:
-1) VERIFY, DON'T RECALL. Never state an external fact from memory. Anything checkable — news, \
-prices, versions, dates, who-holds-a-role, docs, package names, how-to — SEARCH first, READ the \
-real pages, cross-check 2–3 different sources, answer with URLs, mark single-source claims \
-[UNVERIFIED]. No "I think"/"probably" — go check. Be efficient: one focused search is usually \
+FIVE RULES:
+1) VERIFY, DON'T RECALL. Never state a checkable external fact from memory — news, prices, \
+versions, dates, who-holds-a-role, docs, packages, how-to. SEARCH, READ the real pages, cross-check \
+2–3 sources, answer with URLs, mark single-source claims [UNVERIFIED]. No "I think"/"probably" — go check. Be efficient: one focused search is usually \
 enough — don't fan out into many queries or extra hops when the first couple of sources already \
 answer it. NEVER re-run a search you've already done in different words — if two good sources \
 don't have the thing, it probably isn't public: say so plainly and move on. "I couldn't find X, \
@@ -218,11 +163,16 @@ and wait. Only bash/code/skill cards pause you (the user approves those).
 user's OWN targets, blunt opinions: just help. Decline ONLY: minors; clearly-illegal; \
 malware/weapon-making; and locating/tracking/de-anonymising a real PERSON (doxxing) — for that, \
 offer to check the user's OWN exposure.
-4) SAFE HANDS. bash/code run ONLY after the user approves the card — never claim you ran \
+4) ONE STEP AT A TIME. Exactly ONE bash/code block per reply — never a list of commands. Say in \
+one line what it does and why, fire it, then WAIT for the real output before proposing the next. A \
+wall of commands is useless: the user can only run one, and its result changes what should follow. \
+Installing anything: ALWAYS `sudo pacman -Syu <pkg>` \u2014 never a bare -S, which risks a partial \
+upgrade and a broken system. AUR via paru/yay after a -Syu.
+5) SAFE HANDS. bash/code run ONLY after the user approves the card — never claim you ran \
 something; react only to REAL output. Disk wipes, rm -rf on / or ~, curl|sh, reformatting, or \
 pulling core packages are CRITICAL: the user must confirm before they arm, so never smuggle one \
-inside a longer script or skill. Read-only diagnostics first; scope every destructive command to \
-an exact path, never a wildcard; say plainly what it will destroy.
+inside a longer script or skill. Read-only diagnostics first; scope destructive \
+commands to an exact path, never a wildcard; say plainly what they destroy.
 
 General-purpose expert: code, systems, research, writing, data, maths, planning, everyday \
 questions — engage properly with whatever comes. Arch/CachyOS and recon are where you're deepest, \
@@ -316,36 +266,13 @@ window { background-color: #0e0e10; }
 
 
 # ── settings + proxy ────────────────────────────────────────────────────────
-def load_settings():
-    s = {}
-    if SETTINGS.exists():
-        try:
-            s = json.loads(SETTINGS.read_text())
-        except Exception:
-            s = {}
-        # A corrupt-but-parseable settings file ([] or null or "text") would
-        # otherwise sail past the except and blow up on the first .get() —
-        # at startup, meaning the app simply won't launch.
-        if not isinstance(s, dict):
-            s = {}
-    if not s.get("siliconflow_api_key") and BASILISK_SETTINGS.exists():
-        try:
-            b = json.loads(BASILISK_SETTINGS.read_text())
-            if isinstance(b, dict) and b.get("siliconflow_api_key"):
-                s["siliconflow_api_key"] = b["siliconflow_api_key"]
-        except Exception:
-            pass
-    return s
 
 
-def save_settings(s):
-    try:
-        SETTINGS.write_text(json.dumps(s, indent=2))
-    except Exception:
-        pass
-
-
-_SETTINGS = load_settings()
+# ONE settings dict for the whole app. The modules (web, voice) hold a
+# reference to this same object, so a change made in Settings is visible to
+# them immediately — building a second dict here would silently strand the
+# proxy, SearXNG and voice options.
+_SETTINGS = _config.SETTINGS_DATA
 
 
 def _opener():
@@ -405,6 +332,8 @@ def apply_font_size(px):
         return True
     except Exception:
         return False
+
+
 
 
 def _pick_icon(*names):
@@ -526,8 +455,86 @@ def screenshot_to_b64():
         return None
 
 
+# Environment for every command we run for the user. Real system tools assume a
+# terminal: pacman asks "Proceed? [Y/n]", systemctl and git pipe through a pager,
+# and both will sit there forever when there's nobody to answer. We run them
+# non-interactively instead of hanging the app for half an hour.
+_RUN_ENV = {
+    "PAGER": "cat", "GIT_PAGER": "cat", "SYSTEMD_PAGER": "cat", "SYSTEMD_LESS": "",
+    "TERM": "dumb", "DEBIAN_FRONTEND": "noninteractive", "GIT_TERMINAL_PROMPT": "0",
+    "PYTHONUNBUFFERED": "1", "NO_COLOR": "1", "CLICOLOR": "0",
+}
+
+# pacman/paru/yay prompt before acting. The approve-to-run card IS the user's
+# confirmation, so the command must not then sit waiting for a second one it can
+# never receive. Added visibly, so the card shows exactly what will run.
+_NEEDS_NOCONFIRM = re.compile(
+    r"\b(pacman|paru|yay|pamac)\b(?=[^|;&]*\s-{1,2}(?:S|R|U|Syu|Rns|remove|sync)\b)",
+    re.IGNORECASE)
+
+
+def needs_noconfirm(cmd):
+    """True if this is a package operation that will stop and ask."""
+    if not cmd or "--noconfirm" in cmd or "-y " in f" {cmd} ":
+        return False
+    if not _NEEDS_NOCONFIRM.search(cmd):
+        return False
+    # read-only queries never prompt
+    return not re.search(r"-{1,2}(Ss|Si|Sl|Sg|Sw|Q[a-z]*|F[a-z]*|search|info)\b", cmd)
+
+
+def add_noconfirm(cmd):
+    """Insert --noconfirm right after the package manager it belongs to."""
+    if not needs_noconfirm(cmd):
+        return cmd
+    return re.sub(r"\b(pacman|paru|yay|pamac)\b", r"\1 --noconfirm", cmd, count=1)
+
+
+def clip_output(out, limit=7000):
+    """Keep the START and the END of long output.
+
+    Errors almost always land at the END — a failing build prints thousands of
+    'compiling ... ok' lines and then the one line that matters. Truncating from
+    the front threw exactly that line away, so he'd read a failed build as a
+    success. Keep both ends and say what was dropped.
+    """
+    out = out or ""
+    if len(out) <= limit:
+        return out
+    head = limit // 3
+    tail = limit - head
+    dropped = len(out) - limit
+    return (out[:head] + f"\n\n[... {dropped} characters trimmed from the middle ...]\n\n"
+            + out[-tail:])
+
+
+def _run_report(what, rc, out):
+    """What the model is told after a command runs.
+
+    A non-zero exit is stated plainly and first, because the single most useful
+    thing here is that he reacts to a real failure instead of carrying on as if
+    it worked.
+    """
+    body = clip_output(out)
+    if rc == 0:
+        return f"I ran {what}. It SUCCEEDED (exit 0). Output:\n{body}"
+    hint = ""
+    if rc == 124:
+        hint = " It timed out — if it needs input it can't run from here."
+    elif rc == 127:
+        hint = " Exit 127 usually means the command or a package isn't installed."
+    elif rc == 126:
+        hint = " Exit 126 usually means it isn't executable, or permission was denied."
+    elif rc == 1 and "not found" in (out or "").lower():
+        hint = " Something it referenced doesn't exist."
+    return (f"I ran {what}. It FAILED with exit {rc}.{hint} Read the output, say what went "
+            f"wrong in one line, and fix it — do not carry on as though it worked:\n{body}")
+
+
 def run_command(cmd, timeout=1800):
     try:
+        env = dict(os.environ)
+        env.update(_RUN_ENV)
         m = re.match(r"^\s*sudo\s+(.*)$", cmd, re.DOTALL)
         if m:
             if shutil.which("pkexec"):
@@ -536,11 +543,15 @@ def run_command(cmd, timeout=1800):
                 return 127, "pkexec not found — run this sudo command in a terminal yourself."
         else:
             argv = ["sh", "-c", cmd]
-        p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        # stdin=DEVNULL: anything that asks a question gets EOF and gives up
+        # immediately, instead of blocking until the timeout.
+        p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout,
+                           stdin=subprocess.DEVNULL, env=env)
         out = (p.stdout or "") + (p.stderr or "")
         return p.returncode, out.strip() or "(no output)"
     except subprocess.TimeoutExpired:
-        return 124, "(timed out)"
+        return 124, (f"(timed out after {timeout}s — it was still running. If it needed "
+                     "input, it will never get any here: run it in a terminal.)")
     except Exception as ex:
         return 1, f"(error: {ex})"
 
@@ -620,458 +631,6 @@ def read_file_safe(path, limit=180_000):
     except Exception as ex:
         return False, f"couldn't read {path}: {ex}"
 
-
-# ── voice: natural Piper; espeak-ng fallback ────────────────────────────────
-def _find_piper_model():
-    m = (_SETTINGS.get("piper_model") or "").strip()
-    if m and Path(m).exists():
-        return m
-    for f in sorted(VOICE_DIR.glob("*.onnx")):
-        return str(f)
-    return None
-
-
-def _play(path, gen=None):
-    """Play a wav, abortable. Returns True if it played to the end."""
-    for player in (["paplay", path], ["aplay", "-q", path],
-                   ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", path]):
-        if not shutil.which(player[0]):
-            continue
-        try:
-            proc = subprocess.Popen(player, stdout=subprocess.DEVNULL,
-                                    stderr=subprocess.DEVNULL)
-            while proc.poll() is None:
-                if gen is not None and gen != _TTS_GEN[0]:
-                    proc.terminate()
-                    try:
-                        proc.wait(timeout=2)
-                    except Exception:
-                        proc.kill()
-                    return False
-                time.sleep(0.05)
-            return True
-        except Exception:
-            return False
-    return False
-
-
-# ── voice ───────────────────────────────────────────────────────────────────
-# Speech used to be one subprocess call on text truncated to 800 chars, which
-# meant any longer reply was cut off mid-sentence and never resumed. Now the
-# text is cleaned, split into sentence-sized chunks, and synthesised one chunk
-# ahead of playback — so nothing is dropped, a single bad chunk can't kill the
-# rest, and the whole thing can be stopped instantly.
-_TTS_GEN = [0]                     # bump to cancel whatever is speaking
-_TTS_START = threading.Lock()
-_TTS_CHUNK = 260                   # chars per chunk: short enough to stay responsive
-_TTS_END = object()                # distinct end-of-stream marker (None = failed chunk)
-
-_URL_RE = re.compile(r"https?://\S+|www\.\S+")
-
-
-def stop_speaking():
-    """Cancel any in-flight speech immediately."""
-    _TTS_GEN[0] += 1
-
-
-def tts_clean(text):
-    """Turn a chat reply into something worth listening to."""
-    if not isinstance(text, str):
-        return ""
-    s = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)     # code blocks
-    s = re.sub(r"`[^`]*`", " ", s)                            # inline code
-    s = re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", s)               # images
-    s = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", s)            # links -> label
-    s = _URL_RE.sub(" link ", s)                              # bare URLs
-    s = re.sub(r"^\s*[-*+]\s+", "", s, flags=re.M)            # bullets
-    s = re.sub(r"^\s*#{1,6}\s*", "", s, flags=re.M)           # headings
-    s = re.sub(r"[*_~>#|]", "", s)                            # leftover marks
-    s = re.sub(r"[ \t]+", " ", s)
-    s = re.sub(r"\n{2,}", "\n", s)
-    return s.strip()
-
-
-def tts_chunks(text, size=_TTS_CHUNK):
-    """Split into speakable chunks on sentence boundaries where possible."""
-    text = (text or "").strip()
-    if not text:
-        return []
-    parts = re.split(r"(?<=[.!?:;])\s+|\n+", text)
-    chunks, cur = [], ""
-    for p in parts:
-        p = p.strip()
-        if not p:
-            continue
-        while len(p) > size:                 # a monster sentence: wrap on a space
-            cut = p.rfind(" ", 0, size)
-            if cut <= 0:
-                cut = size
-            if cur:
-                chunks.append(cur.strip()); cur = ""
-            chunks.append(p[:cut].strip())
-            p = p[cut:].strip()
-        if len(cur) + len(p) + 1 <= size:
-            cur = (cur + " " + p).strip()
-        else:
-            if cur:
-                chunks.append(cur.strip())
-            cur = p
-    if cur:
-        chunks.append(cur.strip())
-    return [c for c in chunks if c]
-
-
-def _synth(chunk, gen, s):
-    """Render one chunk to a wav. Piper preferred, espeak-ng as fallback.
-    Returns a path, or None if both engines failed for this chunk."""
-    engine = (s.get("voice_engine") or "auto").lower()
-    # generous but bounded: scales with length so a long chunk isn't cut short
-    tmo = max(20, min(90, 8 + len(chunk) // 8))
-    out = str(CONFIG_DIR / f".say-{gen}-{abs(hash(chunk)) % 10 ** 8}.wav")
-    model = _find_piper_model()
-    if engine in ("auto", "piper") and shutil.which("piper") and model:
-        try:
-            cmd = ["piper", "-m", model, "-f", out]
-            ls = s.get("voice_speed")
-            if ls:
-                # piper: length-scale <1 speaks faster. Map 0.5..2.0 speed -> scale
-                try:
-                    cmd += ["--length-scale", f"{1.0 / float(ls):.3f}"]
-                except Exception:
-                    pass
-            subprocess.run(cmd, input=chunk, text=True, timeout=tmo,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            if os.path.exists(out) and os.path.getsize(out) > 64:
-                return out
-        except Exception:
-            pass
-    if engine in ("auto", "espeak") and shutil.which("espeak-ng"):
-        try:
-            rate = int(float(s.get("voice_speed", 1.0)) * 150)
-            pitch = int(s.get("voice_pitch", 28))
-            subprocess.run(["espeak-ng", "-v", "en-us", "-p", str(max(0, min(99, pitch))),
-                            "-s", str(max(80, min(400, rate))), "-g", "3", "-w", out],
-                           input=chunk, text=True, timeout=tmo,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            if os.path.exists(out) and os.path.getsize(out) > 64:
-                return out
-        except Exception:
-            pass
-    return None
-
-
-def speak(text, settings=None):
-    """Speak a reply in full. Non-blocking; cancels anything already speaking."""
-    s = settings or {}
-    clean = tts_clean(text)
-    if not clean:
-        return
-    cap = int(s.get("voice_max_chars", 20000) or 20000)
-    clean = clean[:cap]
-    stop_speaking()
-    with _TTS_START:
-        _TTS_GEN[0] += 1
-        gen = _TTS_GEN[0]
-
-    def worker():
-        chunks = tts_chunks(clean)
-        if not chunks:
-            return
-        import queue as _q
-        pipe = _q.Queue(maxsize=1)      # synthesise one chunk ahead of playback
-
-        def producer():
-            for ch in chunks:
-                if gen != _TTS_GEN[0]:
-                    break
-                wav = _synth(ch, gen, s)
-                if gen != _TTS_GEN[0]:
-                    if wav:
-                        try:
-                            os.unlink(wav)
-                        except Exception:
-                            pass
-                    break
-                pipe.put(wav)           # None = this chunk failed, keep going
-            try:
-                pipe.put(_TTS_END, timeout=5)
-            except Exception:
-                pass
-
-        threading.Thread(target=producer, daemon=True).start()
-        while gen == _TTS_GEN[0]:
-            try:
-                wav = pipe.get(timeout=120)
-            except Exception:
-                break
-            if wav is _TTS_END:          # producer finished
-                break
-            if wav is None:              # this chunk failed to synthesise —
-                continue                 # skip it, keep speaking the rest
-            try:
-                _play(wav, gen=gen)
-            finally:
-                try:
-                    os.unlink(wav)
-                except Exception:
-                    pass
-        # tidy any strays from this generation
-        try:
-            for f in Path(CONFIG_DIR).glob(f".say-{gen}-*.wav"):
-                f.unlink()
-        except Exception:
-            pass
-
-    threading.Thread(target=worker, daemon=True).start()
-
-
-# ── web + images ────────────────────────────────────────────────────────────
-def _strip(s):
-    return _html.unescape(re.sub(r"<[^>]+>", "", s)).strip()
-
-
-# Public SearXNG instances (JSON API). Tried in order; first that answers wins.
-SEARX_INSTANCES = [
-    "https://searx.be", "https://search.inetol.net", "https://priv.au",
-    "https://searx.tiekoetter.com", "https://search.rhscz.eu",
-    "https://searxng.site", "https://opnxng.com", "https://search.bus-hit.me",
-]
-
-
-def _domain(url):
-    try:
-        return urllib.parse.urlparse(url).netloc.lower().replace("www.", "")
-    except Exception:
-        return url
-
-
-def _ddg_html_search(query, n):
-    """DuckDuckGo HTML endpoint — the original engine, now a fallback."""
-    for host in ("https://html.duckduckgo.com/html/", "https://lite.duckduckgo.com/lite/"):
-        try:
-            data = urllib.parse.urlencode({"q": query}).encode()
-            html = _get(host, data=data).read().decode("utf-8", "ignore")
-        except Exception:
-            continue
-        titles = re.findall(r'class="result__a"[^>]*href="([^"]+)".*?>(.*?)</a>', html, re.DOTALL)
-        snips = [_strip(s) for s in re.findall(r'class="result__snippet"[^>]*>(.*?)</a>', html, re.DOTALL)]
-        out = []
-        for i, (href, title) in enumerate(titles[:n]):
-            q = urllib.parse.urlparse(href.replace("&amp;", "&"))
-            real = urllib.parse.parse_qs(q.query).get("uddg", [href])[0]
-            if real.startswith("//"):
-                real = "https:" + real
-            out.append((_strip(title), real, snips[i] if i < len(snips) else ""))
-        if out:
-            return out
-    return []
-
-
-_IMAGE_EXT = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".avif", ".svg")
-
-
-def _is_image_path(p):
-    return isinstance(p, str) and p.strip().lower().endswith(_IMAGE_EXT)
-
-
-def _searx_one(host, query, n, categories, timeout):
-    url = (host.rstrip("/") + "/search?format=json&safesearch=0&categories=" + categories +
-           "&q=" + urllib.parse.quote(query))
-    js = _get(url, timeout=timeout,
-              headers={"User-Agent": UA, "Accept": "application/json"}
-              ).read().decode("utf-8", "ignore")
-    out = []
-    for r in json.loads(js).get("results", [])[:n * 2]:
-        u = r.get("url") or ""
-        if not u.startswith("http"):
-            continue
-        out.append((_strip(r.get("title", "")), u, _strip(r.get("content", ""))))
-    return out
-
-
-def _searx_search(query, n, categories="general"):
-    """Query SearXNG (which aggregates Brave/Google/DDG/Bing) for real results.
-
-    Instances are hit CONCURRENTLY and the first usable answer wins. Probing
-    them one at a time meant two slow or rate-limited hosts cost 30 seconds
-    before the fallback even started — the single worst case for answer speed.
-    The public list is shuffled so we don't hammer the same host every search.
-    """
-    pref = (_SETTINGS.get("searx_url") or "").strip().rstrip("/")
-    pool = list(SEARX_INSTANCES)
-    random.shuffle(pool)
-    hosts = ([pref] if pref else []) + pool
-    if pref:
-        try:                                    # a self-hosted instance gets first refusal
-            got = _searx_one(pref, query, n, categories, 8)
-            if got:
-                return got[:n]
-        except Exception:
-            pass
-        hosts = pool
-    # NB: a `with ThreadPoolExecutor(...)` block calls shutdown(wait=True) on
-    # exit, so returning early from inside it still blocks until every straggler
-    # finishes — which would defeat the whole point of probing in parallel.
-    ex = ThreadPoolExecutor(max_workers=4)
-    try:
-        futs = {ex.submit(_searx_one, h, query, n, categories, 7): h for h in hosts[:4]}
-        for fut in as_completed(futs):
-            try:
-                got = fut.result()
-            except Exception:
-                continue
-            if got:
-                return got[:n]
-    finally:
-        ex.shutdown(wait=False, cancel_futures=True)
-    return []
-
-
-def web_search(query, n=8):
-    """Aggregate across engines and DEDUPE BY DOMAIN so sources are diverse.
-
-    SearXNG (Brave+Google+DDG+Bing under the hood) first, DDG-HTML as fallback.
-    Returns up to n results, at most 2 per domain, so 'cross-check' means
-    genuinely different outlets.
-    """
-    pool = _searx_search(query, n + 6) or []
-    if len(pool) < 3:
-        seen_u = {u for _, u, _ in pool}
-        pool += [r for r in _ddg_html_search(query, n + 6) if r[1] not in seen_u]
-    out, per_dom, seen = [], {}, set()
-    for title, url, snip in pool:
-        if url in seen:
-            continue
-        d = _domain(url)
-        if per_dom.get(d, 0) >= 2:          # cap 2 per outlet → diversity
-            continue
-        seen.add(url); per_dom[d] = per_dom.get(d, 0) + 1
-        out.append((title, url, snip))
-        if len(out) >= n:
-            break
-    return out
-
-
-def video_search(query, n=6):
-    """Find actual videos (title, page-url, thumbnail) via SearXNG video category."""
-    rows = _searx_search(query, n, categories="videos")
-    return [(t, u, s) for (t, u, s) in rows][:n]
-
-
-_ARTICLE_TAGS = re.compile(r"(?is)<(script|style|nav|footer|header|form|aside|noscript|svg).*?</\1>")
-_BLOCK = re.compile(r"(?is)</(p|div|li|h[1-6]|br|tr|section|article)>")
-
-
-def web_fetch(url, limit=4000, timeout=6):
-    """Fetch a page and pull readable body text (keeps paragraph breaks).
-    Returns the body text only; titles for the activity feed come from the
-    search results, so no extra request is made."""
-    try:
-        raw = _get(url, timeout=timeout).read().decode("utf-8", "ignore")
-    except Exception:
-        return ""
-    raw = _ARTICLE_TAGS.sub(" ", raw)
-    # Prefer <article>/<main> if present — that's usually the real story.
-    m = re.search(r"(?is)<article[^>]*>(.*?)</article>", raw) or \
-        re.search(r"(?is)<main[^>]*>(.*?)</main>", raw)
-    body = m.group(1) if m else raw
-    body = _BLOCK.sub("\n", body)
-    text = re.sub(r"[ \t]+", " ", _strip(body))
-    text = re.sub(r"\n\s*\n+", "\n\n", text).strip()
-    return text[:limit]
-
-
-
-
-def image_search(query, n=6):
-    """Images via SearXNG first, DDG i.js as fallback."""
-    rows = _searx_search(query, n, categories="images")
-    urls = []
-    for _, u, _ in rows:
-        if u.startswith("http"):
-            urls.append(u)
-    if urls:
-        return urls[:n]
-    try:
-        page = _get("https://duckduckgo.com/?q=" + urllib.parse.quote(query) +
-                    "&iax=images&ia=images").read().decode("utf-8", "ignore")
-        m = re.search(r'vqd=["\']?([\d-]+)["\']?', page)
-        if not m:
-            return []
-        api = ("https://duckduckgo.com/i.js?l=us-en&o=json&q=" + urllib.parse.quote(query) +
-               "&vqd=" + m.group(1) + "&f=,,,&p=1")
-        js = _get(api, headers={"User-Agent": UA, "Referer": "https://duckduckgo.com/"}
-                  ).read().decode("utf-8", "ignore")
-        return [r["image"] for r in json.loads(js).get("results", [])[:n] if r.get("image")]
-    except Exception:
-        return []
-
-
-def download_image(url, timeout=25):
-    try:
-        hdr = {"User-Agent": UA, "Referer": "https://duckduckgo.com/", "Accept": "image/*"}
-        resp = _get(url, timeout=timeout, headers=hdr)
-        ext = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif",
-               "image/webp": ".webp", "image/avif": ".avif"}.get(
-                   resp.headers.get("Content-Type", "").split(";")[0].strip(), ".img")
-        raw = resp.read()
-        if not raw:
-            return None
-        tmp = CONFIG_DIR / (".img_" + str(abs(hash(url)) % 10**8) + ext)
-        tmp.write_bytes(raw)
-        return str(tmp)
-    except Exception:
-        return None
-
-
-# ── saved-chat retention ────────────────────────────────────────────────────
-_CHAT_NAME = re.compile(r"^\d{8}-\d{6}\.json$")   # exactly the ids we write
-
-
-def chat_files():
-    """Every saved chat, newest first. Only real files we wrote — no symlinks,
-    no recursion, no surprises."""
-    out = []
-    try:
-        for p in CHATS_DIR.iterdir():
-            if p.is_symlink() or not p.is_file():
-                continue
-            if not _CHAT_NAME.match(p.name):
-                continue
-            out.append(p)
-    except Exception:
-        return []
-    return sorted(out, key=lambda p: p.stat().st_mtime, reverse=True)
-
-
-def purge_old_chats(ttl_hours=CHAT_TTL_HOURS):
-    """Delete saved chats untouched for longer than the TTL. Deliberately narrow:
-    it only ever unlinks plain files directly inside CHATS_DIR whose names match
-    the exact id pattern this app writes — it cannot walk out of that directory
-    or touch anything else."""
-    cutoff = time.time() - ttl_hours * 3600
-    removed = 0
-    for p in chat_files():
-        try:
-            if p.stat().st_mtime < cutoff:
-                p.unlink()
-                removed += 1
-        except Exception:
-            continue
-    return removed
-
-
-def chat_expires_in(path, ttl_hours=CHAT_TTL_HOURS):
-    """Human string for how long this chat has left before it self-deletes."""
-    try:
-        left = (Path(path).stat().st_mtime + ttl_hours * 3600) - time.time()
-    except Exception:
-        return ""
-    if left <= 0:
-        return "expiring"
-    h = int(left // 3600)
-    m = int((left % 3600) // 60)
-    return f"{h}h {m}m left" if h else f"{m}m left"
 
 
 def junk_scan():
@@ -1778,8 +1337,8 @@ class ChuckWindow(Adw.ApplicationWindow):
         GLib.idle_add(go)
 
     # ── run lifecycle: send↔stop button, "still working" heartbeat, watchdog ──
-    RUN_HARD_CAP = 300      # seconds: absolute ceiling on one turn, then auto-stop
-    STUCK_AFTER = 45        # seconds with zero progress BETWEEN steps → assume stuck
+    RUN_HARD_CAP = 900      # seconds: absolute ceiling on one turn (long research is fine)
+    STUCK_AFTER = 120       # seconds with zero progress BETWEEN steps → assume stuck
     AWAIT_FIRST = 180       # seconds allowed for the model's FIRST token
     # Waiting on the first token looks identical to being stuck — nothing is
     # arriving — but the request is open and the model is simply thinking or
@@ -2035,6 +1594,14 @@ class ChuckWindow(Adw.ApplicationWindow):
         """gate_text: when the command merely LAUNCHES a script (e.g. a saved
         skill), pass the script's body so the risk gate classifies what will
         actually execute — not the harmless-looking `bash foo.sh` wrapper."""
+        fixed = enforce_syu(cmd)
+        if fixed != cmd:
+            self._sys_note("using -Syu (a plain -S risks a partial upgrade)", "dim")
+        with_nc = add_noconfirm(fixed)
+        if with_nc != fixed:
+            self._sys_note("added --noconfirm \u2014 approving this card is the confirmation; "
+                           "it can't answer a second prompt from here", "dim")
+        cmd = with_nc
         card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6); card.add_css_class("cmd-card")
         ct = Gtk.Label(label="$ " + cmd, xalign=0, wrap=True, selectable=True); ct.add_css_class("cmd-text")
         card.append(ct)
@@ -2065,7 +1632,7 @@ class ChuckWindow(Adw.ApplicationWindow):
                 o = Gtk.Label(label=out[:4000], xalign=0, wrap=True, selectable=True); o.add_css_class("mono")
                 self._log_pin(o)
                 self.history.append({"role": "user",
-                                     "content": f"I ran `{cmd}`. Exit {rc}. Output:\n{out[:6000]}"})
+                                     "content": _run_report(cmd, rc, out)})
                 self._hops = 0          # user-approved action = fresh turn, restore research budget
                 self._start_run()
                 self._ask_model()
@@ -2073,6 +1640,15 @@ class ChuckWindow(Adw.ApplicationWindow):
         threading.Thread(target=worker, daemon=True).start()
 
     def _code_card(self, lang, body):
+        if lang in ("bash", "sh"):
+            fixed = enforce_syu(body)
+            if fixed != body:
+                self._sys_note("using -Syu (a plain -S risks a partial upgrade)", "dim")
+            with_nc = add_noconfirm(fixed)
+            if with_nc != fixed:
+                self._sys_note("added --noconfirm \u2014 approving this card is the confirmation",
+                               "dim")
+            body = with_nc
         """Approve-to-run card for a multi-language code snippet Chuck wrote."""
         card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6); card.add_css_class("cmd-card")
         head = Gtk.Label(label=f"\u25B8 run {lang}", xalign=0); head.add_css_class("dim")
@@ -2099,7 +1675,7 @@ class ChuckWindow(Adw.ApplicationWindow):
                     o = Gtk.Label(label=out[:4000], xalign=0, wrap=True, selectable=True); o.add_css_class("mono")
                     self._log_pin(o)
                     self.history.append({"role": "user",
-                                         "content": f"I ran this {lang}. Exit {rc}. Output:\n{out[:6000]}"})
+                                         "content": _run_report(f"that {lang} code", rc, out)})
                     self._hops = 0
                     self._start_run()
                     self._ask_model()
@@ -2111,15 +1687,48 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._log_pin(card)
 
     # ── terminal tool actions ──
+    def _tool_thread(self, work, label):
+        """Run an async tool worker so it can NEVER strand the tool loop.
+
+        Every counted tool increments _pending_tools; if its worker thread dies
+        on an exception the matching _tool_done is never called, the counter
+        never reaches zero, and the whole turn hangs until the watchdog kills it
+        ("no progress — looks stuck"). One helper, so the guarantee can't be
+        forgotten the next time a tool is added.
+
+        `work` returns the feedback string; anything it raises is reported and
+        the slot is still released.
+        """
+        def runner():
+            fb = None
+            try:
+                fb = work()
+            except Exception as exc:
+                # bind to a plain local: `except ... as exc` unbinds exc when the
+                # block exits, which would break the closure below.
+                why = str(exc)
+                fb = f"[{label} failed: {why}]"
+
+                def note(w=why):
+                    self._sys_note(f"\u2717 {label} failed: {w}", "danger")
+                    return False
+                GLib.idle_add(note)
+            finally:
+                self._busy(False)
+
+                def finish(text=fb):
+                    self._tool_done(text if text is not None else f"[{label}: no result]")
+                    return False
+                GLib.idle_add(finish)
+        threading.Thread(target=runner, daemon=True).start()
+
     def _do_images(self, query):
         self._sys_note(f"\U0001F5BC images for \u201c{query}\u201d")
         self._busy(True)
         self._activity_start("Images")
 
-        def worker():
-            # Search AND download happen here, off the UI thread. The downloads
-            # used to run inside the idle callback, which froze the whole window
-            # for up to 25s per image.
+        def work():
+            # Search AND download off the UI thread; downloads run in parallel.
             urls = image_search(query)
             got = []
             if urls:
@@ -2131,49 +1740,49 @@ class ChuckWindow(Adw.ApplicationWindow):
                     p = download_image(u)
                     self._activity_done(si, f"image {i}/{len(urls)}", ok=bool(p))
                     return (p, u) if p else None
-                with ThreadPoolExecutor(max_workers=4) as ex:
+                ex = ThreadPoolExecutor(max_workers=4)
+                try:
                     for r in ex.map(grab_one, list(enumerate(urls, 1))):
                         if r:
                             got.append(r)
+                finally:
+                    ex.shutdown(wait=False)
 
             def show():
-                self._busy(False); self._activity_end()
-                if self._cancelled:
-                    return False
-                if not got:
-                    self._sys_note("No images came back (search blocked, offline, "
-                                   "or nothing found).", "danger")
-                else:
-                    for p, u in got:
-                        self._image_bubble(p, u)
-                self._tool_done(f"[images '{query}': showed {len(got)} picture(s) to the user]")
+                self._activity_end()
+                if not self._cancelled:
+                    if not got:
+                        self._sys_note("No images came back (search blocked, offline, "
+                                       "or nothing found).", "danger")
+                    else:
+                        for p, u in got:
+                            self._image_bubble(p, u)
                 return False
             GLib.idle_add(show)
-        threading.Thread(target=worker, daemon=True).start()
+            return f"[images '{query}': showed {len(got)} picture(s) to the user]"
+        self._tool_thread(work, f"image search '{query}'")
 
     def _do_video_search(self, query):
-        """Find videos and show them as clickable cards (open source in Brave)."""
         self._sys_note(f"\U0001F3AC videos for \u201c{query}\u201d")
-        self._busy(True); self._live(f"\U0001F3AC searching videos: {query}")
+        self._busy(True)
 
-        def worker():
+        def work():
             rows = video_search(query)
 
             def show():
-                if not rows:
-                    self._sys_note("No videos found (search blocked or nothing matched).", "danger")
-                    self._live(""); self._busy(False)
-                    self._tool_done(f"[videos '{query}': none found]")
-                    return False
-                for (title, url, _snip) in rows:
-                    self._video_card(title, url)
-                self._live(""); self._busy(False)
-                lst = "\n".join(f"- {t} — {u}" for (t, u, _s) in rows)
-                self._tool_done(f"VIDEO RESULTS for '{query}' (you can offer to "
-                                f"download any with the video tool):\n{lst}")
+                if not self._cancelled:
+                    if not rows:
+                        self._sys_note("No videos found.", "danger")
+                    else:
+                        for (title, url) in rows:
+                            self._video_card(title, url)
                 return False
             GLib.idle_add(show)
-        threading.Thread(target=worker, daemon=True).start()
+            if not rows:
+                return f"[videos '{query}': nothing found]"
+            listing = "; ".join(f"{t} {u}" for t, u in rows[:6])
+            return f"[videos '{query}': showed {len(rows)} to the user \u2014 {listing}]"
+        self._tool_thread(work, f"video search '{query}'")
 
     def _video_card(self, title, url):
         card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6); card.add_css_class("cmd-card")
@@ -2191,7 +1800,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         if not url.startswith("http"):
             return
         if not shutil.which("yt-dlp"):
-            self._sys_note("yt-dlp isn't installed:"); self._command_card("sudo pacman -S --needed yt-dlp"); return
+            self._sys_note("yt-dlp isn't installed:"); self._command_card("sudo pacman -Syu --needed yt-dlp"); return
         self._sys_note(f"\u2B07 downloading {url}")
         self._busy(True); self._live("\u2B07 downloading video\u2026")
 
@@ -2246,25 +1855,37 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._command_card(cmd, gate_text=body or None)
 
     def _do_junk(self):
-        self._sys_note("\U0001F9F9 scanning for junk (read-only)\u2026"); self._busy(True)
+        self._sys_note("\U0001F9F9 scanning for junk\u2026")
+        self._busy(True)
 
-        def worker():
+        def work():
             report, cmds = junk_scan()
 
             def show():
-                self._busy(False)
-                for label, cmd in cmds:
-                    self._sys_note("\u2192 " + label); self._command_card(cmd)
-                self._tool_done("JUNK SCAN (read-only):\n" + report +
-                                "\nCleanup cards shown for the user to approve.")
+                if not self._cancelled:
+                    self._sys_note(report, "mono")
+                    for label, cmd in cmds:
+                        self._sys_note("\u2192 " + label)
+                        self._command_card(cmd)
                 return False
             GLib.idle_add(show)
-        threading.Thread(target=worker, daemon=True).start()
+            return f"[junk scan done \u2014 offered {len(cmds)} cleanup command(s)]"
+        self._tool_thread(work, "junk scan")
 
     def _do_read(self, path):
         """Read a file from disk and feed its contents back into the run.
-        An image path is SHOWN in the chat rather than refused as binary."""
+        An image path is SHOWN in the chat rather than refused as binary.
+        A bare relative path resolves inside the open project first, so he can
+        read back a file he just wrote without knowing its absolute path."""
         p = (path or "").strip()
+        if _builder and p and not p.startswith(("/", "~")):
+            proj = _builder.current_project()
+            if proj is not None:
+                ok, content = _builder.read_file(proj, p)
+                if ok:
+                    self._sys_note(f"\U0001F4C4 {proj.name}/{p}")
+                    self._tool_done(f"FILE {proj.name}/{p}:\n{content}")
+                    return
         if _is_image_path(p):
             full = os.path.expanduser(p)
             if os.path.isfile(full):
@@ -2341,8 +1962,10 @@ class ChuckWindow(Adw.ApplicationWindow):
         p, created = _builder.project_open(name)
         self._sys_note(f"\U0001F4C1 project '{p.name}' "
                        f"({'created' if created else 'opened'}) \u2014 {p}", "ok")
+        others = [n for n, _c in _builder.project_list() if n != p.name]
+        extra = f" Other projects: {', '.join(others[:6])}." if others else ""
         self._tool_feedback.append(
-            f"[project '{p.name}' ready at {p}. Write files with ```write <relpath>```.]")
+            f"[project '{p.name}' ready at {p}. Write files with ```write <relpath>```.{extra}]")
 
     def _do_write(self, rel, content):
         """Write one complete file into the project — and verify it if it's code,
@@ -2371,6 +1994,14 @@ class ChuckWindow(Adw.ApplicationWindow):
                 pass
         self._sys_note("\u2713 " + note, "ok")
         self._tool_feedback.append(f"[{note}]")
+
+    def _do_rmfile(self, rel):
+        p = self._project_or_note()
+        if p is None:
+            return
+        ok, msg = _builder.delete_file(p, rel)
+        self._sys_note(("\u2713 " if ok else "\u2717 ") + msg, "ok" if ok else "danger")
+        self._tool_feedback.append(f"[{msg}]")
 
     def _do_tree(self):
         p = self._project_or_note()
@@ -2413,7 +2044,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         p = self._project_or_note()
         if p is None:
             return
-        ok, zpath, msg = _builder.package(p)
+        ok, zpath, msg = _builder.package(p, note=_builder.manifest(p))
         if not ok:
             self._sys_note("\u2717 " + msg, "danger")
             self._tool_feedback.append(f"[packaging failed: {msg}]")
@@ -2570,7 +2201,7 @@ class ChuckWindow(Adw.ApplicationWindow):
                 break
             if m.get("role") == "user" and isinstance(m.get("content"), str):
                 c = m["content"]
-                if c.startswith(("TOOL RESULTS", "I ran `")):
+                if c.startswith(("TOOL RESULTS", "I ran ", "FILE ")):
                     continue
                 scan.append(c)
         task_text = "\n".join(scan)
@@ -2691,6 +2322,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         # security+optional tests); feeds the report back so Chuck fixes it.
         projects = grab("project")[:2]        # open / switch a build workspace
         trees = has("tree")                    # show what's been built
+        rmfiles = grab("rmfile")[:4]           # remove a file from the project
         packages = has("package")              # zip the project and hand it over
         runtests = has("runtests")             # run the project's own tests
         writes = []                            # ```write <relpath>\n<content>```
@@ -2708,11 +2340,16 @@ class ChuckWindow(Adw.ApplicationWindow):
         for lang in ("python", "py", "node", "javascript", "js", "bash", "sh"):
             for body in grab(lang)[:CAP]:
                 codes.append((lang, body))
-        codes = codes[:CAP]
+        # ONE runnable thing per reply. A wall of ten cards is unusable — the
+        # user can't run ten commands at once, and each one's output changes
+        # what the next should be. He proposes a step, sees the result, then
+        # proposes the next.
+        dropped_extra = max(0, len(codes) - 1)
+        codes = codes[:1]
 
         disp = re.sub(
             r"```(?:search|fetch|images|videos|video|junk|skill|runskill|read|"
-            r"remember|forget|check|project|tree|package|runtests|write|"
+            r"remember|forget|check|project|tree|package|runtests|write|rmfile|"
             r"python|py|node|javascript|js|bash|sh)\b.*?```",
             "", text, flags=re.DOTALL).strip()
         if self._forced_answer:
@@ -2720,7 +2357,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             searches, fetches = [], []
         acting = bool(searches or fetches or images or vid_searches or videos or junk
                       or skill_blocks or runskills or reads or codes or checks
-                      or projects or writes or trees or packages or runtests)
+                      or projects or writes or trees or packages or runtests or rmfiles)
         # Chuck's own narration is what shows in chat — never swallow it.
         self._set_bot_text(disp or ("Working on it\u2026" if acting else "Done."), rich=True)
 
@@ -2753,6 +2390,8 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._do_project(nm.strip())
         for rel, body in writes:
             self._do_write(rel, body)
+        for rel in rmfiles:
+            self._do_rmfile(rel.strip())
         if trees:
             self._do_tree()
         if runtests:
@@ -2763,6 +2402,11 @@ class ChuckWindow(Adw.ApplicationWindow):
         for lang, body in checks:
             self._pending_tools += 1
             self._do_check(lang, body.strip(), run_after=False)
+        if dropped_extra:
+            self._sys_note(f"showing the first step only ({dropped_extra} more held back)", "dim")
+            self._tool_feedback.append(
+                f"[You proposed {dropped_extra + 1} commands at once; only the FIRST was shown. "
+                "Give ONE command, wait for its real output, then give the next.]")
         for lang, body in codes:
             if _codecheck:
                 self._pending_tools += 1
@@ -3016,6 +2660,10 @@ class ChuckWindow(Adw.ApplicationWindow):
                               visibility=False, placeholder_text="sk-\u2026"),
                     "cloud.siliconflow.com/account/ak \u2014 Basilisk's key is reused if present.")
         model = field("Chat model", Gtk.Entry(text=self.settings.get("model", DEFAULT_MODEL)))
+        baseurl = field("API base URL",
+                        Gtk.Entry(text=self.settings.get("siliconflow_base_url", "") or "",
+                                  placeholder_text=DEFAULT_BASE),
+                        "Leave blank for the default endpoint.")
         vmodel = field("Vision model",
                        Gtk.Entry(text=self.settings.get("vision_model", DEFAULT_VISION)))
 
@@ -3033,6 +2681,13 @@ class ChuckWindow(Adw.ApplicationWindow):
                       "1.00 is normal. Higher is faster.")
         pitch = field("Pitch (espeak-ng only)",
                       slider(0, 99, 1, int(self.settings.get("voice_pitch", 28))))
+        pmodel = field("Piper voice model (optional)",
+                       Gtk.Entry(text=self.settings.get("piper_model", "") or "",
+                                 placeholder_text="/path/to/voice.onnx"),
+                       "Blank uses the voice the installer set up.")
+        vmax = field("Max characters read aloud per reply",
+                     slider(2000, 40000, 1000,
+                            self.cfg("voice_max_chars", 20000, 2000, 40000)))
 
         section("Research \u00b7 speed")
         src = field("Sources read per answer",
@@ -3093,6 +2748,9 @@ class ChuckWindow(Adw.ApplicationWindow):
             return {
                 "siliconflow_api_key": key.get_text().strip(),
                 "model": model.get_text().strip() or DEFAULT_MODEL,
+                "siliconflow_base_url": baseurl.get_text().strip(),
+                "piper_model": pmodel.get_text().strip(),
+                "voice_max_chars": int(vmax.get_value()),
                 "vision_model": vmodel.get_text().strip() or DEFAULT_VISION,
                 "tts": tts_on.get_active(),
                 "voice_engine": eng_key,
@@ -3131,7 +2789,8 @@ class ChuckWindow(Adw.ApplicationWindow):
         def reset(*_):
             for k in ("voice_engine", "voice_speed", "voice_pitch", "research_sources",
                       "research_queries", "research_hops", "fetch_timeout", "chat_ttl_hours",
-                      "render_keep", "render_page", "font_size"):
+                      "render_keep", "render_page", "font_size", "voice_max_chars",
+                      "piper_model", "siliconflow_base_url"):
                 self.settings.pop(k, None)
             save_settings(self.settings)
             apply_font_size(FONT_SIZE)

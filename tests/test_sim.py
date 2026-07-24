@@ -53,7 +53,7 @@ else:
     else:
         rb[0].click(); settle()
         ran = [m for m in w.history if isinstance(m.get("content"), str)
-               and m["content"].startswith("I ran this")]
+               and m["content"].startswith("I ran ")]
         if not ran: fail("S3: execution output never fed back")
         elif "5" not in ran[0]["content"]: fail("S3: wrong output returned")
         else: print("  code ran, produced 5, fed back to model")

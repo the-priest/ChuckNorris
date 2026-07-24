@@ -44,6 +44,55 @@ _GROUPS = {
         "- Local sockets: `ss -tulpn`   interfaces: `ip a`   wifi: `nmcli dev wifi`\n"
         "- Breach check the USER'S OWN email only. NEVER locate/track/de-anonymise a real person.",
     ),
+    "fixit": (
+        r"\b(fix|broken|broke|error|fail|failed|failing|crash|hang|stuck|issue|problem|"
+        r"debug|troubleshoot|diagnose|repair|recover|unbootable|black screen|"
+        r"no sound|no network|no wifi|no display|won'?t \w+|can'?t \w+|"
+        r"stopped \w+ing|not work\w*|no longer \w+)\b",
+        "FIXING A REAL SYSTEM \u2014 work like an engineer, not a search engine:\n"
+        "1. DIAGNOSE FIRST, always read-only. Get the actual error before touching "
+        "anything: journalctl -p 3 -b, systemctl --failed, dmesg, the service's own "
+        "log. One command, read the real output, THEN think. Never propose a fix for "
+        "an error you haven't seen.\n"
+        "2. FORM A HYPOTHESIS and say it in one line: 'this looks like X because Y'. "
+        "If the output doesn't support it, say so and look again rather than guessing "
+        "louder.\n"
+        "3. ONE CHANGE AT A TIME, smallest first. Never bundle fixes \u2014 if three "
+        "things change at once and it works, you've learned nothing, and if it breaks "
+        "you can't tell which one did it.\n"
+        "4. BEFORE ANY RISKY CHANGE: say what could break and how to undo it. Back up "
+        "the file you're about to edit (cp -a foo foo.bak). For bootloader, initramfs, "
+        "fstab, kernel or driver changes, say plainly that a bad edit can leave the "
+        "machine unbootable, and give the rescue path BEFORE they run it.\n"
+        "5. AFTER EACH STEP: verify it actually worked. Re-run the check that showed "
+        "the problem. 'It should work now' is not verification.\n"
+        "6. NEVER: remove core packages to fix a small thing (systemd, glibc, linux, "
+        "bash, coreutils, pacman), force-overwrite files pacman owns, disable "
+        "checks/signatures to make an error go away, or run something you can't explain. "
+        "If a fix needs any of those, stop and explain the real trade-off instead.\n"
+        "7. If output contradicts your theory, SAY SO and re-diagnose. Admitting the "
+        "first guess was wrong is faster than defending it.",
+    ),
+    "sysadmin": (
+        r"\b(install|remove|uninstall|update|upgrade|downgrade|kernel|driver|nvidia|"
+        r"amdgpu|systemd|service|daemon|enable|disable|mount|fstab|partition|grub|"
+        r"bootloader|initramfs|mkinitcpio|firewall|user|group|permission|chown|chmod)\b",
+        "CHANGING A LIVE SYSTEM:\n"
+        "- Installing ANYTHING: sudo pacman -Syu <pkg>. Never a bare -S \u2014 installing "
+        "against a stale database is the classic partial-upgrade break. AUR after a -Syu, "
+        "via paru/yay, never as root.\n"
+        "- Check before you change: is it already installed (pacman -Qi), is the service "
+        "already running (systemctl status), does the file already say what you want. "
+        "Don't fix what isn't broken.\n"
+        "- Editing a system file: back it up first, change the minimum, show the diff, "
+        "and say what re-reads it (daemon-reload, mkinitcpio -P, grub-mkconfig).\n"
+        "- Kernel/driver/bootloader work: keep the current working kernel installed as a "
+        "fallback, and say how to get back if it doesn't boot.\n"
+        "- Prefer reversible over clever. If two fixes work, pick the one that's easier "
+        "to undo.\n"
+        "- One command per reply, then READ its output before the next \u2014 the result "
+        "usually changes what the right next step is.",
+    ),
     "build": (
         r"\b(build|make me|write me|create|scaffold|package|deliver|project|app|tool|"
         r"script|program|cli|utility|library|module|generate|implement|prototype)\b",

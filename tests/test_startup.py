@@ -163,13 +163,14 @@ _app = cn.ChuckApp()
 w = cn.ChuckWindow(_app)
 w._start_run()
 w._awaiting_first = True
-w._run_started = _t.time() - 60
-w._last_progress = _t.time() - 60          # 60s with no token yet
+_wait = w.STUCK_AFTER + 30         # well past the between-steps budget…
+w._run_started = _t.time() - _wait
+w._last_progress = _t.time() - _wait       # …but still waiting on the first token
 w._heartbeat()
 if not w._running:
-    fail("watchdog still kills a slow first response at <60s")
+    fail(f"watchdog still kills a slow first response at {_wait}s")
 else:
-    print(f"  60s waiting for the model -> still running; ticker: {w.live.get_text()!r}")
+    print(f"  {_wait}s waiting for the model -> still running; ticker: {w.live.get_text()!r}")
 if "waiting for the model" not in w.live.get_text():
     fail("ticker doesn't say what it's waiting on")
 
@@ -183,8 +184,9 @@ print(f"  stopped after {w.AWAIT_FIRST}s of total silence")
 print("--- stalls BETWEEN steps still use the tight budget ---")
 w2 = cn.ChuckWindow(_app); w2._start_run()
 w2._awaiting_first = False                  # model already spoke; a tool stalled
-w2._run_started = _t.time() - 50
-w2._last_progress = _t.time() - 50
+_stall = w2.STUCK_AFTER + 5        # relative, so raising the constant can't stale this
+w2._run_started = _t.time() - _stall
+w2._last_progress = _t.time() - _stall
 w2._heartbeat()
 if w2._running:
     fail("tool-phase watchdog got loosened by mistake")
@@ -218,6 +220,41 @@ for px in (9, 14, 22, 28, 999, 1):
     if "font-size" not in css:
         fail(f"font_css({px}) produced nothing usable")
 print("  font_css clamps and renders for every input")
+
+print("--- settings reach every module (one shared dict) ---")
+# Splitting the app into modules makes it easy to end up with TWO settings
+# dicts, where changing the proxy or the voice in Settings silently does
+# nothing. Everything must reference the same object.
+import chucknorris_ext.web as _w
+import chucknorris_ext.voice as _v
+import chucknorris_ext.config as _c
+_wS = cn.ChuckWindow(_app)
+_wS.settings["searx_url"] = "https://propagation-probe"
+_wS.settings["proxy"] = "http://probe:8080"
+_wS.settings["voice_speed"] = 1.75
+for _name, _ok in (
+        ("searx -> web", _w._SETTINGS.get("searx_url") == "https://propagation-probe"),
+        ("proxy -> config", _c.SETTINGS_DATA.get("proxy") == "http://probe:8080"),
+        ("voice_speed -> voice", _v._SETTINGS.get("voice_speed") == 1.75),
+        ("backend shares the dict", _wS.backend.s is _wS.settings)):
+    if not _ok:
+        fail(f"settings do not propagate: {_name}")
+print("  proxy, SearXNG and voice settings all reach their modules")
+
+print("--- constants are defined in exactly one place ---")
+import re as _re
+_app = dict(_re.findall(r"^([A-Z][A-Z0-9_]+) = (.+?)(?:\s+#.*)?$",
+                        open("chucknorris.py").read(), _re.M))
+_cfg = dict(_re.findall(r"^([A-Z][A-Z0-9_]+) = (.+?)(?:\s+#.*)?$",
+                        open("chucknorris_ext/config.py").read(), _re.M))
+_dupes = sorted(set(_app) & set(_cfg))
+if _dupes:
+    fail(f"constants defined twice (they will drift): {_dupes}")
+else:
+    print("  no constant is defined in both the app and config")
+if cn.DEFAULT_MODEL != "deepseek-ai/DeepSeek-V4-Flash":
+    fail(f"model invariant broken: {cn.DEFAULT_MODEL}")
+print(f"  model invariant holds: {cn.DEFAULT_MODEL}")
 
 print()
 print("TOTAL STARTUP FAILURES:", len(FAILS))
