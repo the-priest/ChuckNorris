@@ -19,8 +19,10 @@ import base64
 import random
 import shlex
 import shutil
+import socket
 import threading
 import subprocess
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -51,7 +53,7 @@ except Exception:
     _builder = None
 
 APP_ID = "org.thepriest.chucknorris"
-VERSION = "10.1.0"
+VERSION = "10.2.0"
 HERE = Path(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_DIR = Path.home() / ".config" / "chucknorris"
 DATA_DIR = Path.home() / ".local" / "share" / "chucknorris"
@@ -1045,6 +1047,35 @@ def junk_scan():
 
 
 # ── SiliconFlow streaming ───────────────────────────────────────────────────
+def _is_transient(ex):
+    """Worth retrying? Cold DNS, a dropped handshake and 5xx/429 are temporary;
+    a rejected key never is, and retrying it just wastes the user's time."""
+    if isinstance(ex, urllib.error.HTTPError):
+        return ex.code in (408, 425, 429, 500, 502, 503, 504)
+    if isinstance(ex, urllib.error.URLError):
+        return True                      # DNS / refused / unreachable / proxy not up
+    if isinstance(ex, (socket.timeout, TimeoutError, ConnectionError, OSError)):
+        return True
+    return False
+
+
+def _explain(ex):
+    """A message the user can act on, instead of a raw traceback string."""
+    if isinstance(ex, urllib.error.HTTPError):
+        if ex.code in (401, 403):
+            return "API key rejected — check it in Settings."
+        if ex.code == 429:
+            return "Rate limited by the API. Give it a moment."
+        if ex.code >= 500:
+            return f"The API is having trouble (HTTP {ex.code}). Try again shortly."
+        return f"API error (HTTP {ex.code})."
+    if isinstance(ex, urllib.error.URLError):
+        return f"Can't reach the API ({getattr(ex, 'reason', ex)}) — check your connection."
+    if isinstance(ex, (socket.timeout, TimeoutError)):
+        return "The API timed out. Try again."
+    return f"backend error: {ex}"
+
+
 class Backend:
     def __init__(self, settings):
         self.s = settings
@@ -1055,7 +1086,26 @@ class Backend:
     def base(self):
         return (self.s.get("siliconflow_base_url") or DEFAULT_BASE).rstrip("/")
 
-    def stream(self, messages, on_delta, on_done, on_error, vision=False, should_stop=None):
+    def warm_up(self):
+        """Open a throwaway connection to the API host in the background.
+
+        The first request of a session otherwise pays for DNS resolution and a
+        TLS handshake at the exact moment the user is waiting on it — and if
+        anything there hiccups (VPN still coming up, resolver cold) the very
+        first message fails while every later one works. Doing it at startup
+        moves that cost off the user's first turn.
+        """
+        def go():
+            try:
+                host = urllib.parse.urlparse(self.base()).hostname
+                if host:
+                    socket.create_connection((host, 443), timeout=5).close()
+            except Exception:
+                pass
+        threading.Thread(target=go, daemon=True).start()
+
+    def stream(self, messages, on_delta, on_done, on_error, vision=False, should_stop=None,
+               attempts=3):
         if not self.key():
             on_error("No SiliconFlow API key. Add one in Settings.")
             return
@@ -1063,37 +1113,54 @@ class Backend:
                  else self.s.get("model", DEFAULT_MODEL))
         body = json.dumps({"model": model, "messages": messages,
                            "stream": True, "temperature": 0.35}).encode()
-        req = urllib.request.Request(
-            self.base() + "/chat/completions", data=body,
-            headers={"Authorization": "Bearer " + self.key(), "Content-Type": "application/json"})
-        try:
-            with urllib.request.urlopen(req, timeout=180) as resp:
-                for raw in resp:
-                    if should_stop and should_stop():
+        url = self.base() + "/chat/completions"
+        headers = {"Authorization": "Bearer " + self.key(),
+                   "Content-Type": "application/json"}
+
+        for attempt in range(attempts):
+            if should_stop and should_stop():
+                return
+            got_any = False
+            try:
+                req = urllib.request.Request(url, data=body, headers=headers)
+                with urllib.request.urlopen(req, timeout=180) as resp:
+                    for raw in resp:
+                        if should_stop and should_stop():
+                            try:
+                                resp.close()
+                            except Exception:
+                                pass
+                            return  # cancelled — the canceller owns cleanup
+                        line = raw.decode("utf-8", "ignore").strip()
+                        if not line.startswith("data:"):
+                            continue
+                        data = line[5:].strip()
+                        if data == "[DONE]":
+                            break
                         try:
-                            resp.close()
+                            d = json.loads(data)["choices"][0]["delta"].get("content")
+                            if d:
+                                got_any = True
+                                on_delta(d)
                         except Exception:
-                            pass
-                        return  # cancelled — no on_done, the canceller owns cleanup
-                    line = raw.decode("utf-8", "ignore").strip()
-                    if not line.startswith("data:"):
-                        continue
-                    data = line[5:].strip()
-                    if data == "[DONE]":
-                        break
-                    try:
-                        d = json.loads(data)["choices"][0]["delta"].get("content")
-                        if d:
-                            on_delta(d)
-                    except Exception:
-                        continue
-            if should_stop and should_stop():
+                            continue
+                if should_stop and should_stop():
+                    return
+                on_done()
                 return
-            on_done()
-        except Exception as ex:
-            if should_stop and should_stop():
-                return
-            on_error(f"backend error: {ex}")
+            except Exception as ex:
+                if should_stop and should_stop():
+                    return
+                if got_any:
+                    # Text already reached the screen — replaying the request
+                    # would duplicate it, so keep what we have and carry on.
+                    on_done()
+                    return
+                last = attempt == attempts - 1
+                if last or not _is_transient(ex):
+                    on_error(_explain(ex))
+                    return
+                time.sleep(0.5 * (attempt + 1))     # brief backoff, then retry
 
 
 # ── UI ──────────────────────────────────────────────────────────────────────
@@ -1258,6 +1325,13 @@ class ChuckWindow(Adw.ApplicationWindow):
         tv = Adw.ToolbarView(); tv.add_top_bar(header); tv.set_content(outer)
         self.set_content(tv)
         self.connect("close-request", self._on_close)
+
+        # Prime DNS/TLS to the API now, so the FIRST message isn't the one
+        # paying for a cold connection.
+        try:
+            self.backend.warm_up()
+        except Exception:
+            pass
 
         # purge on launch, then keep purging + refreshing while the app runs
         purge_old_chats()
@@ -2418,6 +2492,17 @@ class ChuckWindow(Adw.ApplicationWindow):
         return self._trim_for_send(messages) + [ephemeral]
 
     def _stream_into_bubble(self, messages, vision=False):
+        try:
+            self._stream_into_bubble_inner(messages, vision)
+        except Exception as ex:
+            # A throw here used to escape into the GTK signal handler, leaving the
+            # button stuck on Stop and the turn half-dead — which is why a failed
+            # first message could take several tries to recover from.
+            self._sys_note(f"\u26a0 couldn't start that turn: {ex}", "danger")
+            self._busy(False)
+            self._end_run()
+
+    def _stream_into_bubble_inner(self, messages, vision=False):
         self._bot_text = ""
         self._bot_label = self._bot_bubble("Thinking\u2026")
         self._busy(True)
