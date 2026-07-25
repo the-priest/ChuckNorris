@@ -96,3 +96,99 @@ throughout — none of these were covered.
   collide on the ~11.6-day wrap of `int(time.time()*1000) % 10**9`.
 - `Enter` while a turn is running inserts a newline instead of vanishing.
 - `download_image` reads are capped at 12 MB.
+
+## 12.0.2 — sudo storm
+
+**Reported symptom: ~15 sudo dialogs at once, none of them typeable.**
+Reproduced against the old code: 15 concurrent requests raised 15 dialogs.
+
+Three compounding causes, all fixed:
+
+- **No single-flight on the prompt.** `_get_sudo_pw()` was a bare
+  check-then-prompt. Every worker that needed root checked the empty cache at the
+  same moment, all saw it empty, and each called `GLib.idle_add` on its own
+  `Adw.Window(modal=True, transient_for=self)`. N commands meant N stacked modals
+  contending for one keyboard grab — which is exactly why none of them accepted
+  typing. Now one caller opens the dialog and every other blocks on a condition
+  variable and takes that answer. A cancel is remembered for the rest of the
+  turn, so refusing once doesn't produce a second dialog.
+
+- **Nothing serialised execution.** `_execute_shell` had no lock, so cards ran
+  concurrently — interleaved output, and a second prompt arriving mid-run. One
+  command now runs at a time, process-wide; a queued command picks up the
+  password the one ahead of it already collected.
+
+- **The one-command cap didn't cover skills.** `codes = codes[:1]` capped
+  ```` ```bash ```` blocks only. ```` ```runskill ```` and ```` ```skill ````
+  bypassed it, so a reply with five skill blocks launched five commands at once.
+  The cap now pools every runnable source and keeps one, handing the rest back to
+  the model for the next turn.
+
+Also: `_awaiting_input` is depth-counted (a plain bool let the first waiter to
+finish un-pause the watchdog while others were still blocked); the password entry
+explicitly grabs focus; and cancelling now returns a clear "cancelled — nothing
+was changed" rather than running the command password-less and failing obscurely.
+
+`test_safety.py` check 11 was asserting on the literal source string
+`codes = codes[:1]`; it now asserts the cap covers every runnable source.
+
+## 12.0.3 — audit round two, plus the upgrade list
+
+### Two more constant-vs-setting inconsistencies
+
+- **Stop didn't stop the research loop.** `stop_run` set `self._hops =
+  MAX_TOOL_HOPS` with a comment claiming it blocked further hops — but the cap
+  it's compared against is `cfg('research_hops')`, settable up to 8. With the
+  constant at 4 and the setting at 8, Stop set the counter to 4 < 8 and blocked
+  nothing. Swept every other constant/setting pair; the rest were legitimate
+  defaults.
+- **The sidebar lied about retention**, hardcoding `auto-delete after 24h` from
+  the constant while the real TTL is a setting. Now reads the setting and
+  refreshes when it changes.
+
+### From the upgrade list
+
+- **Config permissions (#6).** `save_settings` used `write_text()` — 0644 on a
+  normal box, so the SiliconFlow key was readable by any account on the machine.
+  Now opened 0600 from the descriptor (no chmod window), written to a temp file
+  and renamed; `CONFIG_DIR` forced to 0700; existing installs hardened at launch.
+- **Evidence ledger (#5).** New `ledger.py`: append-only JSONL at 0600, each
+  entry carrying the SHA-256 of the previous one, hooked into `_execute_shell` —
+  the single choke point, so nothing runs unlogged. `verify()` reports the first
+  index where the chain parts. Tamper-EVIDENT, not tamper-proof: anyone who can
+  write the file can rewrite the chain. The guarantee is against accidental loss
+  and casual after-the-fact editing.
+- **Context compression (#4).** New `compress.py`, applied before the fit-or-drop
+  pass so bulky blobs are squeezed rather than discarded whole. Extractive only —
+  head, tail and any error/warning lines kept verbatim, nothing paraphrased, no
+  second model call. The two newest tool blobs are never touched. Measured
+  17,968 -> 1,247 chars with the error line intact.
+- **Memory recall (#2).** IDF-weighted scoring with conservative stemming,
+  recency and hit-count damping, replacing raw token overlap. Coverage gates,
+  IDF ranks — gating on IDF collapses in a small store, which is what broke
+  `test_sim` S10 on the first attempt. Stopword list extended: with a few hundred
+  short facts, a word appearing once looks maximally distinctive, so filler like
+  "like" scored as strongly as "nvidia".
+- **Process containment (#3, corrected).** Chuck's note said skills "run raw
+  in-process" and wanted restricted builtins. They don't — they already execute
+  as `bash /path/skill.sh` via subprocess, so a buggy skill can't crash the app
+  and restricted builtins would achieve nothing. The actual gap was that children
+  inherited no limits: commands now get their own process group plus RLIMIT_NPROC
+  / RLIMIT_AS / RLIMIT_FSIZE / RLIMIT_CORE, and a timeout kills the whole tree.
+  `subprocess.run`'s timeout only kills the direct child — measured, a
+  backgrounding command left 2 orphans before this change and 0 after.
+- **Humour.** The old instruction supplied one template and one example, so every
+  fact came out the same shape. Rewritten: roughly one reply in four, must be
+  specific to what just happened, several forms to rotate between, never used to
+  soften bad news, and an explicit instruction to write nothing rather than
+  reach for a stock line.
+
+### Not done
+
+- **Autonomous mode (#1)** — dropped at the user's request. It was being built
+  SAFE-tier-only regardless; an unrestricted auto-run flag on a tool with an
+  `rm -rf` classifier is not compatible with "no holes where destructive commands
+  can run".
+- **Desktop automation (#7)** — screenshots already work (grim / spectacle /
+  gnome-screenshot). Only synthetic input is missing, and ydotool needs uinput
+  access. Left alone pending an explicit decision.

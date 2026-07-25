@@ -206,11 +206,21 @@ print(f"   {len(_syu) - _bad}/{len(_syu)} correct "
 # ── 11. only ONE runnable card per reply ─────────────────────────────────
 print("11. one command per reply:")
 _src = open("chucknorris.py").read()
-if "codes = codes[:1]" not in _src:
+# The cap used to be `codes = codes[:1]`, which only covered ```bash``` blocks —
+# ```runskill``` and ```skill``` bypassed it entirely and could launch a dozen
+# commands (and a dozen sudo prompts) at once. It now pools every runnable
+# source and keeps one. Behavioural proof lives in test_v12_fixes.py; this is
+# the structural guard.
+if "runnable = (" not in _src or "dropped_extra = max(0, len(runnable) - 1)" not in _src:
     print("   HOLE: more than one code/command card can be shown at once")
     fails += 1
+elif not all(k in _src for k in ('("code", c) for c in codes',
+                                 '("skill", b) for b in skill_blocks',
+                                 '("runskill", n) for n in runskills')):
+    print("   HOLE: the one-command cap doesn't cover every runnable source")
+    fails += 1
 else:
-    print("   codes capped to 1 — the user is never handed a wall of commands")
+    print("   capped to 1 across code/skill/runskill — never a wall of commands")
 if "YOU ACT, YOU DON'T SUGGEST" not in _src:
     print("   HOLE: the prompt no longer tells him to act rather than suggest")
     fails += 1

@@ -203,6 +203,215 @@ for f in list(Path(".").glob("*.sh")) + list(Path(".").glob("*.py")) + \
 check(not offenders, "no bare -S/-Sy in shipped commands", "; ".join(offenders[:3]))
 
 
-print("\nTOTAL V12 FIX FAILURES:", fails)
-assert fails == 0, "v12 fix regressions present"
+# ── 11. ONE sudo prompt, ever ────────────────────────────────────────────────
+# Was: _get_sudo_pw did a bare check-then-prompt with no guard. Every worker
+# that needed root checked the empty cache at the same moment and each called
+# idle_add on its own modal — N commands meant N stacked dialogs contending for
+# the same keyboard grab, so none of them could be typed into.
+print("\n--- concurrent sudo requests raise exactly one dialog ---")
+tmp = Path(tempfile.mkdtemp())
+win = sim.new_win([], tmp)
+prompts = []
+
+
+def fake_prompt(script, cb):
+    prompts.append(script)
+    threading.Timer(0.25, lambda: cb("hunter2")).start()
+
+
+win._sudo_prompt = fake_prompt
+results = {}
+
+
+def ask(i):
+    results[i] = win._get_sudo_pw(f"sudo pacman -Syu pkg{i}")
+
+
+threads = [threading.Thread(target=ask, args=(i,)) for i in range(15)]
+for t in threads:
+    t.start()
+time.sleep(0.05)
+for t in threads:
+    t.join(10)
+check(len(prompts) == 1, "exactly ONE dialog for 15 concurrent requests",
+      f"got {len(prompts)}")
+check(all(v == "hunter2" for v in results.values()),
+      "all 15 workers got the same password", f"{set(results.values())}")
+
+# cancelling once must not produce a second dialog for the rest of the turn
+print("\n--- cancel is remembered for the turn ---")
+win._clear_sudo_pw()
+prompts.clear()
+win._sudo_prompt = lambda script, cb: (prompts.append(script),
+                                       threading.Timer(0.15, lambda: cb(None)).start())[0]
+results.clear()
+threads = [threading.Thread(target=ask, args=(i,)) for i in range(8)]
+for t in threads:
+    t.start()
+time.sleep(0.05)
+for t in threads:
+    t.join(10)
+check(len(prompts) == 1, "cancel raises one dialog, not eight", f"got {len(prompts)}")
+check(all(v is None for v in results.values()), "all workers see the refusal")
+
+
+# ── 12. commands execute one at a time ───────────────────────────────────────
+# Was: nothing serialised _execute_shell, so two cards could run concurrently —
+# interleaved output and a second password prompt mid-run.
+print("\n--- commands are serialised ---")
+overlap = {"max": 0, "cur": 0}
+_ol = threading.Lock()
+
+
+def busy(pw):
+    with _ol:
+        overlap["cur"] += 1
+        overlap["max"] = max(overlap["max"], overlap["cur"])
+    time.sleep(0.15)
+    with _ol:
+        overlap["cur"] -= 1
+    return 0, "ok"
+
+
+ts = [threading.Thread(target=lambda: win._execute_shell("echo hi", busy)) for _ in range(6)]
+for t in ts:
+    t.start()
+for t in ts:
+    t.join(10)
+check(overlap["max"] == 1, "never more than one command at a time",
+      f"peak concurrency {overlap['max']}")
+
+
+# ── 13. one runnable command per turn, skills included ───────────────────────
+# Was: the cap covered ```bash``` blocks only, so five ```runskill``` blocks
+# launched five commands at once.
+print("\n--- skills obey the one-command cap ---")
+for n in ("capa", "capb", "capc"):
+    cn._skills.skill_write(n, "bash", "echo " + n, "cap probe")
+tmp = Path(tempfile.mkdtemp())
+reply = "Doing it.\n\n" + "".join(f"```runskill\n{n}\n```\n\n" for n in ("capa", "capb", "capc"))
+win = sim.new_win([reply, "FINAL."], tmp)
+sim.type_and_send(win, "run all three")
+sim.settle()
+check(len(sim.cards(win)) == 1, "only one run card offered",
+      f"got {len(sim.cards(win))}")
+check(any("held back" in b for b in sim.bubbles(win)), "user told the rest were held back")
+for n in ("capa", "capb", "capc"):
+    cn._skills.skill_forget(n)
+
+
+
+# ── 14. API key file permissions ─────────────────────────────────────────────
+# Was: save_settings used write_text(), which creates 0666 & ~umask = 0644 on a
+# normal box. The SiliconFlow key sat world-readable.
+print("\n--- settings written 0600 ---")
+import chucknorris_ext.config as _cfg
+_old_settings, _old_dir = _cfg.SETTINGS, _cfg.CONFIG_DIR
+_d = Path(tempfile.mkdtemp())
+_cfg.CONFIG_DIR, _cfg.SETTINGS = _d, _d / "settings.json"
+_cfg.save_settings({"siliconflow_api_key": "sk-secret", "tts": True})
+mode = os.stat(_cfg.SETTINGS).st_mode & 0o777
+check(mode == 0o600, "settings.json is 0600", f"got {oct(mode)}")
+check(os.stat(_d).st_mode & 0o777 == 0o700, "config dir is 0700")
+import json as _json
+check(_json.loads(_cfg.SETTINGS.read_text())["siliconflow_api_key"] == "sk-secret",
+      "content still round-trips")
+# a pre-existing 0644 file gets tightened on launch
+os.chmod(_cfg.SETTINGS, 0o644)
+_cfg.harden_existing_permissions()
+check(os.stat(_cfg.SETTINGS).st_mode & 0o777 == 0o600, "existing loose file hardened")
+_cfg.SETTINGS, _cfg.CONFIG_DIR = _old_settings, _old_dir
+
+
+# ── 15. evidence ledger ──────────────────────────────────────────────────────
+print("\n--- ledger records and detects tampering ---")
+import chucknorris_ext.ledger as _L
+_L.LEDGER = Path(tempfile.mkdtemp()) / "ledger.jsonl"
+_L.record("pacman -Syu", 0, "upgraded 412 packages")
+_L.record("systemctl restart nginx", 0, "")
+_L.record("false", 1, "boom")
+ok, n, bad, msg = _L.verify()
+check(ok and n == 3, "chain intact for 3 entries", msg)
+check(os.stat(_L.LEDGER).st_mode & 0o777 == 0o600, "ledger is 0600")
+_lines = _L.LEDGER.read_text().splitlines()
+_e = _json.loads(_lines[1]); _e["command"] = "rm -rf /"
+_lines[1] = _json.dumps(_e)
+_L.LEDGER.write_text("\n".join(_lines) + "\n")
+ok, n, bad, msg = _L.verify()
+check(not ok and bad == 1, "edited entry detected at the right index", f"bad={bad}")
+
+
+# ── 16. context compression ──────────────────────────────────────────────────
+print("\n--- compression keeps errors and recent blobs ---")
+import chucknorris_ext.compress as _C
+_big = "\n".join(f"package-{i} upgraded fine" for i in range(500))
+_big += "\nerror: failed to commit transaction (conflicting files)\n"
+_big += "\n".join(f"tail {i}" for i in range(10))
+_hist = [{"role": "system", "content": "SYS"},
+         {"role": "user", "content": "do it"},
+         {"role": "user", "content": "TOOL RESULTS\n" + _big},
+         {"role": "assistant", "content": "ok"},
+         {"role": "user", "content": "TOOL RESULTS\n" + _big},
+         {"role": "user", "content": "TOOL RESULTS\n" + _big}]
+_new, _saved = _C.compress_history(_hist)
+check(_saved > 10000, "meaningful savings", f"saved {_saved}")
+check(_new[0]["content"] == "SYS", "system prompt untouched")
+check(_new[1]["content"] == "do it", "user's own words untouched")
+check(_new[4]["content"] == _hist[4]["content"] and _new[5]["content"] == _hist[5]["content"],
+      "two newest blobs left whole")
+check("conflicting files" in _new[2]["content"], "the ERROR line survived compression")
+
+
+# ── 17. memory recall quality ────────────────────────────────────────────────
+# Was: raw token overlap, so 'the machine' scored like 'nvidia'. Now IDF-ranked
+# with a coverage gate. Two of my own bugs here: an 'es'-before-'s' stemmer that
+# turned trees->tre, and gating on IDF (which collapses in a small store).
+print("\n--- memory recall ---")
+import chucknorris_ext.memory as _M
+_M.FACTS = Path(tempfile.mkdtemp()) / "facts.jsonl"
+check(_M._stems("trees")[0] == "tree", "trees stems to tree, not tre")
+check(_M._stems("boxes")[0] == "box", "boxes still stems to box")
+for _f in ["luka runs cachyos on the thinkpad",
+           "the nvidia driver needs the dkms package after every kernel bump",
+           "he prefers ripgrep over grep for large trees",
+           "the home server is on the 192.168.1.0/24 subnet",
+           "zfs pool tank is mounted at /mnt/tank"]:
+    _M.remember(_f)
+for _q, _want in [("my nvidia driver broke after the kernel update", "nvidia"),
+                  ("what subnet is the server on", "subnet"),
+                  ("searching a big source tree", "ripgrep"),
+                  ("where is the zfs pool mounted", "zfs")]:
+    _got = _M.recall(_q)
+    check(bool(_got) and any(_want in g for g in _got), f"recalls {_want}", f"got {_got}")
+for _q in ("what is the weather like", "tell me a joke"):
+    check(not _M.recall(_q), f"no spurious recall for {_q!r}", f"got {_M.recall(_q)}")
+# a single-fact store must still recall (this is what broke test_sim S10)
+_M.FACTS = Path(tempfile.mkdtemp()) / "facts.jsonl"
+_M.remember("user's editor is neovim")
+check(bool(_M.recall("what editor do I use")), "tiny store still recalls")
+
+
+# ── 18. child processes are contained ────────────────────────────────────────
+# Was: subprocess.run's timeout kills only the direct child, so a command that
+# backgrounded work left orphans running after Chuck had moved on.
+print("\n--- timed-out commands take their whole tree with them ---")
+_MARK = "chucktestorphan"
+_CHILD = f"python3 -c 'import time; time.sleep(30)' {_MARK}"
+import subprocess as _sp
+_sp.run(["pkill", "-f", _MARK], capture_output=True)
+time.sleep(0.2)
+_rc, _ = cn.run_command(f"{_CHILD} & {_CHILD}", timeout=2)
+time.sleep(0.6)
+_left = int(_sp.run(["pgrep", "-fc", _MARK], capture_output=True,
+                    text=True).stdout.strip() or 0)
+_sp.run(["pkill", "-f", _MARK], capture_output=True)
+check(_rc == 124, "timeout reported", f"rc={_rc}")
+check(_left == 0, "no orphaned children left behind", f"{_left} still running")
+_rc, _out = cn.run_command("bash -c 'ulimit -u'", timeout=10)
+check(_out.strip().isdigit() and int(_out.strip()) <= 512,
+      "child gets a process limit", f"ulimit -u = {_out.strip()}")
+
+
+print("\nTOTAL FIX-SUITE FAILURES:", fails)
+assert fails == 0, "regressions present"
 print("ALL V12 FIX TESTS PASSED")

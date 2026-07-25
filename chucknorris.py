@@ -10,6 +10,7 @@ speaks in a natural voice. No mode buttons — you ask, he acts. Every shell
 command is still a card you approve. Backend: SiliconFlow (reuses Basilisk's key).
 """
 import os
+import signal
 import re
 import sys
 import json
@@ -80,6 +81,8 @@ def purge_old_chats(ttl_hours=None):
 
 try:
     from chucknorris_ext import skills as _skills
+    from chucknorris_ext import ledger as _ledger
+    from chucknorris_ext import compress as _compress
     from chucknorris_ext import specs as _specs
     from chucknorris_ext import memory as _memory
     from chucknorris_ext import codecheck as _codecheck
@@ -87,6 +90,8 @@ try:
     from chucknorris_ext import builder as _builder
 except Exception:
     _skills = None
+    _ledger = None
+    _compress = None
     _specs = None
     _memory = None
     _codecheck = None
@@ -104,17 +109,36 @@ from chucknorris_ext.config import (            # noqa: E402
     DATA_DIR, CONFIG_DIR, CHATS_DIR, DL_DIR,
     MAX_TOOL_HOPS, RESEARCH_MAX_SOURCES, RESEARCH_QUERIES,
     SEND_CHAR_BUDGET, TOOL_BLOBS_KEPT, CHAT_TTL_HOURS,
-    RENDER_KEEP, RENDER_PAGE, FONT_SIZE, UA,
-    save_settings,
+    RENDER_KEEP, RENDER_PAGE, FONT_SIZE,
+    save_settings, harden_existing_permissions,
 )
 
 SYSTEM_PROMPT = r"""You ARE Chuck Norris — the legend (Carlos Ray "Chuck" Norris, 1940–2026), \
 reborn as an Arch Linux / CachyOS grandmaster living in this machine. A tribute. Deadpan, dry, \
 economical, unshakeable — you've seen every error this box throws and none worry you. Short \
 sentences, understated confidence, never showing off. Warm underneath: you're on the user's side \
-and you'll grind a problem to dust for them. No hedging, no padding, no moralising. Now and then \
-— not every reply — close with a dry, Linux-flavoured "Chuck Norris fact" ("Chuck Norris doesn't \
-kill -9 a process; he stares at it and it exits 0."). Earn it.
+and you'll grind a problem to dust for them. No hedging, no padding, no moralising.
+
+HUMOUR — this is a tribute, so the jokes have to actually land. Roughly one reply in four
+closes with a single dry line. Not every reply; a fact after every message stops being funny
+by the third one and starts reading like a screensaver. Never open with one, never explain
+one, never use one to soften bad news — if the upgrade broke his bootloader, say so plainly
+and skip the quip entirely.
+
+What makes one work: it must be SPECIFIC to what just happened. A fact about kill -9 after
+you killed a process is funny; the same fact after a DNS lookup is noise. Build it out of the
+actual thing on screen — the package that conflicted, the service that wouldn't start, the
+regex that matched nothing. Understatement over volume. The joke is the gap between something
+mundane and total unbothered competence, and it dies the instant you seem pleased with it. Six
+to fifteen words. No exclamation marks, no emoji, no "haha", no winking at the reader.
+
+The classic form ("Chuck Norris doesn't X; he Y") is one option among several, not a template
+to fill in every time. Rotate the shape: a flat observation ("The kernel panicked. I did not."),
+a correction ("That's not a race condition. That's the loser conceding."), a plain statement
+delivered without comment ("It compiled on the first try. It usually does."), an
+understatement about something enormous. If the only thing you can think of is a stock fact
+with a Linux noun swapped in, write nothing — a reply with no joke is always better than a
+reply with a limp one. Earn it or skip it.
 
 TOOLS — first a SHORT plain line saying what you're about to do and why (shows in chat), THEN the \
 fenced block, nothing else. The app runs it and feeds results back so you continue:
@@ -670,7 +694,11 @@ def _bash_bin():
 
 
 def _shell_out(p):
-    return ((p.stdout or "") + (p.stderr or "")).strip() or "(no output)"
+    return _shell_out_parts(p.stdout, p.stderr)
+
+
+def _shell_out_parts(stdout, stderr):
+    return ((stdout or "") + (stderr or "")).strip() or "(no output)"
 
 
 def _run_sudo_askpass(script, password, timeout, env):
@@ -859,13 +887,8 @@ def _run_shell(script, timeout=None, sudo_password=None):
     # plain path: no sudo, or the box is already passwordless. stdin=DEVNULL so
     # anything that tries to prompt gets EOF and fails fast instead of hanging.
     try:
-        p = subprocess.run([_bash_bin(), "-c", script],
-                           stdin=subprocess.DEVNULL,
-                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                           timeout=timeout, text=True, errors="replace", env=env)
-        return p.returncode, _shell_out(p)
-    except subprocess.TimeoutExpired:
-        return 124, _timeout_note(script, timeout)
+        return _run_guarded([_bash_bin(), "-c", script], timeout, env,
+                            lambda: _timeout_note(script, timeout))
     except Exception as ex:
         return 1, f"(error: {ex})"
 
@@ -873,6 +896,90 @@ def _run_shell(script, timeout=None, sudo_password=None):
 def run_command(cmd, timeout=None, sudo_password=None):
     """Run a shell command as the user. sudo is handled transparently."""
     return _run_shell(cmd, timeout=timeout, sudo_password=sudo_password)
+
+
+def _run_guarded(argv, timeout, env, timeout_note):
+    """subprocess.run, but the child gets its own process group and resource
+    limits, and a timeout kills the whole tree.
+
+    subprocess.run's own timeout kills only the direct child. A skill that
+    backgrounds work, or a shell that spawned a compile, left orphans running
+    after Chuck had already given up on them and moved on — invisible processes
+    still eating the box.
+    """
+    proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, errors="replace", env=env,
+                            preexec_fn=_sandbox_preexec)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_tree(proc)
+        try:
+            proc.communicate(timeout=5)
+        except Exception:
+            pass
+        return 124, timeout_note()
+    return proc.returncode, _shell_out_parts(out, err)
+
+
+def _sandbox_preexec():
+    """Applied in the child, after fork, before exec.
+
+    Chuck's own note said skills "run raw in-process" and needed restricted
+    builtins — that is not what happens. Skills already execute as
+    `bash /path/skill.sh` through subprocess, so a buggy skill cannot crash the
+    app and restricted builtins would achieve nothing.
+
+    The REAL gap is that the child inherits no limits at all: a runaway skill
+    could fork-bomb, fill the disk, or exhaust RAM on a 16GB box and take the
+    desktop down with it. So: a fresh process group (so a timeout kills the
+    whole tree, not just the shell that spawned it) and soft resource caps.
+
+    Deliberately NOT sandboxed away: filesystem and network. This is a system
+    assistant — a skill that cannot touch the filesystem or reach the network is
+    useless. The safety story here is the approve-to-run card and the risk
+    tiers, not a jail.
+    """
+    try:
+        os.setsid()                       # own process group -> killable as a tree
+    except OSError:
+        pass
+    try:
+        import resource
+        # generous ceilings: high enough that ordinary work never notices,
+        # low enough that a runaway cannot take the machine with it
+        _limit(resource, "RLIMIT_NPROC", 512)          # no fork bombs
+        _limit(resource, "RLIMIT_AS", 4 * 1024 ** 3)   # 4 GiB address space
+        _limit(resource, "RLIMIT_FSIZE", 2 * 1024 ** 3)  # 2 GiB single file
+        _limit(resource, "RLIMIT_CORE", 0)             # no core dumps
+    except Exception:
+        pass
+
+
+def _limit(resource, name, soft_cap):
+    """Lower a soft limit to soft_cap, never raise it, never exceed the hard cap."""
+    try:
+        which = getattr(resource, name, None)
+        if which is None:
+            return
+        soft, hard = resource.getrlimit(which)
+        target = soft_cap if hard == resource.RLIM_INFINITY else min(soft_cap, hard)
+        if soft == resource.RLIM_INFINITY or soft > target:
+            resource.setrlimit(which, (target, hard))
+    except (ValueError, OSError):
+        pass
+
+
+def _kill_tree(proc):
+    """Kill a timed-out command's whole process group, not just its shell."""
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
 
 
 # language -> (interpreter argv builder). Chuck writes code, it runs in a temp
@@ -1157,6 +1264,12 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._sudo_pw = None            # sudo password: memory only, this chat
         self._sudo_pw_time = 0.0        # when it was entered (30-min TTL)
         self._awaiting_input = False    # a modal (sudo prompt) is open — pause the watchdog
+        self._await_lock = threading.Lock()
+        self._await_depth = 0           # how many workers are blocked on a modal
+        self._sudo_cv = threading.Condition()
+        self._sudo_asking = False       # a sudo dialog is open RIGHT NOW
+        self._sudo_denied = False       # user cancelled — don't re-ask this turn
+        self._exec_lock = threading.RLock()   # ONE command runs at a time
         self._run_started = 0.0         # wall-clock start of the current run
         self._heartbeat_id = 0          # GLib timer id for the "still working" ticker
         self._watchdog_id = 0           # GLib timer id for the stuck-detector
@@ -1283,7 +1396,10 @@ class ChuckWindow(Adw.ApplicationWindow):
         side_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         side_box.add_css_class("sidebar")
         side_box.set_size_request(250, -1)
-        ttl_note = Gtk.Label(label=f"auto-delete after {CHAT_TTL_HOURS}h", xalign=0)
+        ttl_note = Gtk.Label(
+            label=f"auto-delete after {self.cfg('chat_ttl_hours', CHAT_TTL_HOURS, 1, 720)}h",
+            xalign=0)
+        self._ttl_note = ttl_note
         ttl_note.add_css_class("side-note")
         for m in ("start", "end", "bottom"):
             getattr(ttl_note, f"set_margin_{m}")(10)
@@ -1306,6 +1422,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         except Exception:
             pass
 
+        harden_existing_permissions()
         _sweep_scratch()
         # purge on launch, then keep purging + refreshing while the app runs.
         # NOTE the argument: purge_old_chats() with no TTL falls back to the
@@ -1611,6 +1728,14 @@ class ChuckWindow(Adw.ApplicationWindow):
         return True
 
     def _refresh_sidebar(self):
+        # keep the retention label honest when the setting changes
+        note = getattr(self, "_ttl_note", None)
+        if note is not None:
+            try:
+                note.set_label(
+                    f"auto-delete after {self.cfg('chat_ttl_hours', CHAT_TTL_HOURS, 1, 720)}h")
+            except Exception:
+                pass
         """Rebuild the saved-chat list. Cheap — a handful of stat() calls."""
         if not hasattr(self, "chat_list"):
             return
@@ -1813,13 +1938,20 @@ class ChuckWindow(Adw.ApplicationWindow):
         if not self._running and not auto:
             return
         self._cancelled = True
-        # reset the tool-loop so nothing re-fires
-        self._hops = MAX_TOOL_HOPS       # blocks any further web hops
+        # reset the tool-loop so nothing re-fires.
+        # This said `self._hops = MAX_TOOL_HOPS` and claimed to block further
+        # hops — but the cap it is compared against is cfg('research_hops'),
+        # which the user can raise to 8. With the constant at 4 and the setting
+        # at 8, Stop set the counter to 4 < 8 and blocked precisely nothing.
+        self._hops = max(MAX_TOOL_HOPS, self.cfg('research_hops', MAX_TOOL_HOPS, 1, 8))
         self._pending_tools = 0
         self._loop_web = None
         self._tool_feedback = []
         self._run_budget = 0
         self._dispatching = False
+        with self._sudo_cv:
+            self._sudo_denied = True    # stop asking; the turn is over
+            self._sudo_cv.notify_all()
         # drain the busy counter
         self._busy_n = 0
         self.spinner.stop(); self.spinner.set_visible(False)
@@ -2094,6 +2226,10 @@ class ChuckWindow(Adw.ApplicationWindow):
     def _clear_sudo_pw(self):
         self._sudo_pw = None
         self._sudo_pw_time = 0.0
+        with self._sudo_cv:
+            self._sudo_denied = False
+            self._sudo_asking = False
+            self._sudo_cv.notify_all()
 
     def _sudo_prompt(self, script, cb):
         """Ask for the sudo password once. Calls cb(password_or_None) exactly
@@ -2154,46 +2290,118 @@ class ChuckWindow(Adw.ApplicationWindow):
         cancel.connect("clicked", do_cancel)
         pw.connect("activate", do_go)
         dlg.connect("close-request", lambda *_: (finish(None), False)[1])
+        try:
+            dlg.set_resizable(False)
+        except Exception:
+            pass
         dlg.present()
+        # Explicit focus: with a modal presented over a busy window the entry
+        # does not reliably get the keyboard grab, which looks identical to a
+        # dialog you "can't type into".
+        try:
+            pw.grab_focus()
+        except Exception:
+            pass
+
+    def _enter_await(self):
+        """A modal is open. Depth-counted: a plain bool let the FIRST waiter to
+        finish clear the flag while others were still blocked, un-pausing the
+        watchdog mid-prompt."""
+        with self._await_lock:
+            self._await_depth += 1
+            self._awaiting_input = True
+
+    def _exit_await(self):
+        with self._await_lock:
+            self._await_depth = max(0, self._await_depth - 1)
+            self._awaiting_input = self._await_depth > 0
 
     def _get_sudo_pw(self, script):
-        """Return a usable sudo password: the cached one, or prompt for it once
-        (blocking this worker thread until the modal is answered). None if the
-        user cancels or walks away."""
+        """Return a usable sudo password: the cached one, or prompt for it ONCE.
+
+        SINGLE FLIGHT. This used to be a bare check-then-prompt with no guard, so
+        every worker thread that needed root checked the cache at the same
+        moment, all saw it empty, and all called GLib.idle_add on their own
+        dialog. Fifteen commands meant fifteen stacked modals, all transient for
+        the same window, contending for the same keyboard grab — which is why
+        none of them could be typed into.
+
+        Now exactly one caller opens a dialog. Everyone else blocks on the
+        condition variable and takes that dialog's answer. If the user cancels,
+        the refusal is remembered for the rest of the turn and later callers get
+        None immediately rather than being asked again.
+        """
         if self._sudo_pw_valid():
             return self._sudo_pw
+        with self._sudo_cv:
+            while True:
+                if self._sudo_pw_valid():
+                    return self._sudo_pw
+                if self._sudo_denied:
+                    return None                 # asked once this turn, refused
+                if not self._sudo_asking:
+                    self._sudo_asking = True    # this thread owns the prompt
+                    break
+                # someone else is asking — wait for THEIR dialog, don't open one
+                if not self._sudo_cv.wait(320):
+                    return None
+
         box = {"pw": None}
         ev = threading.Event()
 
         def show():
             self._sudo_prompt(script, lambda p: (box.__setitem__("pw", p), ev.set()))
             return False
-        self._awaiting_input = True
+
+        self._enter_await()
         try:
             GLib.idle_add(show)
             ev.wait(300)              # bounded: if they walk away, give up rather than hang
         finally:
-            self._awaiting_input = False
-        pw = box["pw"]
-        if pw:
-            self._cache_sudo_pw(pw)
-        return pw
+            self._exit_await()
+            with self._sudo_cv:
+                self._sudo_asking = False
+                if box["pw"]:
+                    self._cache_sudo_pw(box["pw"])
+                else:
+                    self._sudo_denied = True
+                self._sudo_cv.notify_all()   # release everyone waiting on this answer
+        return box["pw"]
 
     def _execute_shell(self, script, execute):
         """Run a shell script through `execute(password) -> (rc, out)`, collecting
         the sudo password first if the script needs root and the box isn't already
         passwordless, and re-prompting once if a cached password was rejected.
-        Returns (rc, out); rc 97 means sudo could not authenticate."""
-        pw = None
-        if command_needs_sudo(script) and not _sudo_ready():
-            pw = self._get_sudo_pw(script)
-        rc, out = execute(pw)
-        if rc == _SUDO_AUTH_FAILED and pw is not None:   # the password was wrong
-            self._clear_sudo_pw()
-            pw2 = self._get_sudo_pw(script)
-            if pw2:
-                rc, out = execute(pw2)
-        return rc, out
+        Returns (rc, out); rc 97 means sudo could not authenticate.
+
+        SERIALISED. One command runs at a time, process-wide. Nothing here is
+        safe to overlap: two commands racing means two sudo prompts, interleaved
+        output, and a user who has to approve things in an order nobody chose.
+        A queued command also picks up the password the one ahead of it already
+        collected, so a turn asks once and only once.
+        """
+        with self._exec_lock:
+            started = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+            pw = None
+            if command_needs_sudo(script) and not _sudo_ready():
+                pw = self._get_sudo_pw(script)
+                if pw is None and not _sudo_ready():
+                    return _SUDO_AUTH_FAILED, ("sudo: cancelled \u2014 not running this. "
+                                               "Nothing was changed.")
+            rc, out = execute(pw)
+            if rc == _SUDO_AUTH_FAILED and pw is not None:   # the password was wrong
+                self._clear_sudo_pw()
+                with self._sudo_cv:
+                    self._sudo_denied = False    # a WRONG password earns one retry
+                pw2 = self._get_sudo_pw(script)
+                if pw2:
+                    rc, out = execute(pw2)
+            # Every command that actually ran, recorded — regardless of outcome,
+            # and regardless of whether the model ever reports it honestly.
+            if _ledger is not None:
+                _ledger.record(script, rc, out, kind="shell",
+                               chat_id=getattr(self, "chat_id", ""), started=started)
+            return rc, out
 
     def _run_card(self, cmd, run_btn, status, gate_text=None):
         """Run a gated (CRITICAL) command card once the user has armed the risk
@@ -2836,6 +3044,17 @@ class ChuckWindow(Adw.ApplicationWindow):
         """
         if not messages:
             return messages
+        # Compress BEFORE deciding what fits. The old order dropped whole blobs
+        # the moment the budget was tight, which threw away the middle of a
+        # research chain entirely; squeezing them first means more of the chain
+        # survives in the same number of characters. Extractive only — head,
+        # tail and any error lines are kept verbatim, nothing is paraphrased.
+        if _compress is not None:
+            messages, saved = _compress.compress_history(
+                messages, keep_recent=2, budget_chars=3000)
+            if saved > 2000:
+                self._sys_note(f"\u2702 trimmed {saved // 1000}k chars of older tool "
+                               "output to save context", "dim")
         sys_msgs = [m for m in messages if m.get("role") == "system"]
         rest = [m for m in messages if m.get("role") != "system"]
         kept, used, blobs = [], 0, 0
@@ -3025,8 +3244,21 @@ class ChuckWindow(Adw.ApplicationWindow):
         # user can't run ten commands at once, and each one's output changes
         # what the next should be. He proposes a step, sees the result, then
         # proposes the next.
-        dropped_extra = max(0, len(codes) - 1)
-        codes = codes[:1]
+        # ONE runnable command per turn — across EVERY source of them.
+        # The cap used to apply to ```bash``` blocks only, so a reply with five
+        # ```runskill``` blocks launched five commands at once. Each took a
+        # worker, each needed root, and the result was a stack of sudo dialogs
+        # nobody could type into. Skills are commands; they are capped with the
+        # rest of them, and the remainder is handed back to the model to offer
+        # again on the next turn.
+        runnable = ([("code", c) for c in codes]
+                    + [("skill", b) for b in skill_blocks]
+                    + [("runskill", n) for n in runskills])
+        dropped_extra = max(0, len(runnable) - 1)
+        keep = runnable[:1]
+        codes = [v for k, v in keep if k == "code"]
+        skill_blocks = [v for k, v in keep if k == "skill"]
+        runskills = [v for k, v in keep if k == "runskill"]
 
         disp = re.sub(
             r"```(?:search|fetch|images|videos|video|junk|skill|runskill|read|"

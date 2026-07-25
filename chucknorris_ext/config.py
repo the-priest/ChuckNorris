@@ -2,13 +2,14 @@
 Every other module reads its defaults from here, so there is exactly one place
 to look when you want to know where something lives or what a limit is.
 """
+import os
 import json
 
 import urllib.request
 from pathlib import Path
 
 APP_ID = "org.thepriest.chucknorris"
-VERSION = "12.0.1"
+VERSION = "12.0.3"
 
 DEFAULT_MODEL = "deepseek-ai/DeepSeek-V4-Flash"
 DEFAULT_VISION = "Qwen/Qwen2.5-VL-32B-Instruct"
@@ -66,11 +67,49 @@ def load_settings():
 
 
 def save_settings(s):
+    """Write settings 0600, atomically.
+
+    This file holds the SiliconFlow API key in plaintext. write_text() creates
+    with 0666 & ~umask — 0644 on a normal box — so the key was readable by every
+    account on the machine. Writing then chmod'ing leaves a window where it is
+    briefly world-readable, so the descriptor is opened 0600 from the start and
+    renamed into place.
+    """
     try:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        SETTINGS.write_text(json.dumps(s, indent=2))
+        try:
+            os.chmod(CONFIG_DIR, 0o700)
+        except OSError:
+            pass
+        tmp = SETTINGS.with_suffix(".tmp")
+        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            with os.fdopen(fd, "w") as fh:
+                fh.write(json.dumps(s, indent=2))
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+        os.replace(str(tmp), str(SETTINGS))
+        os.chmod(SETTINGS, 0o600)
     except Exception:
         pass
+
+
+def harden_existing_permissions():
+    """Tighten anything already on disk from a previous version."""
+    try:
+        os.chmod(CONFIG_DIR, 0o700)
+    except OSError:
+        pass
+    for f in (SETTINGS,):
+        try:
+            if f.exists():
+                os.chmod(f, 0o600)
+        except OSError:
+            pass
 
 
 SETTINGS_DATA = load_settings()
