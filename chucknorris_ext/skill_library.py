@@ -41,8 +41,8 @@ ps aux --sort=-%mem | awk 'NR<=6{printf "%-8s %5s%%  %s\n",$1,$4,$11}'
 # Safe update sequence for Arch/CachyOS. Uses sudo — you approve the card.
 set -e
 echo ">> refreshing keyring (prevents signature errors)"
-sudo pacman -Sy --needed --noconfirm archlinux-keyring 2>/dev/null || true
-command -v cachyos-keyring >/dev/null 2>&1 && sudo pacman -S --needed --noconfirm cachyos-keyring 2>/dev/null || true
+sudo pacman -Syu --needed --noconfirm archlinux-keyring 2>/dev/null || true
+command -v cachyos-keyring >/dev/null 2>&1 && sudo pacman -Syu --needed --noconfirm cachyos-keyring 2>/dev/null || true
 echo ">> full system upgrade"
 sudo pacman -Syu --noconfirm
 if command -v paru >/dev/null; then echo ">> AUR (paru)"; paru -Sua --noconfirm || true
@@ -60,7 +60,7 @@ sudo rm -rf /etc/pacman.d/gnupg 2>/dev/null || true
 sudo pacman-key --init
 sudo pacman-key --populate archlinux
 command -v cachyos-keyring >/dev/null 2>&1 && sudo pacman-key --populate cachyos 2>/dev/null || true
-sudo pacman -Sy --needed --noconfirm archlinux-keyring
+sudo pacman -Syu --needed --noconfirm archlinux-keyring
 echo ">> keyring rebuilt — retry your install now"
 """,
     ),
@@ -75,7 +75,7 @@ elif command -v rate-mirrors >/dev/null; then
 elif command -v reflector >/dev/null; then
   sudo reflector --latest 20 --sort rate --protocol https --save /etc/pacman.d/mirrorlist
 else
-  echo "install one first: sudo pacman -S reflector   (or cachyos-rate-mirrors on CachyOS)"
+  echo "install one first: sudo pacman -Syu reflector   (or cachyos-rate-mirrors on CachyOS)"
 fi
 """,
     ),
@@ -85,7 +85,7 @@ fi
 if command -v expac >/dev/null; then
   expac -H M '%m\t%n' | sort -h | tail -15
 else
-  echo "needs 'expac': sudo pacman -S expac"
+  echo "needs 'expac': sudo pacman -Syu expac"
   echo "fallback (slower):"
   pacman -Qi | awk '/^Name/{n=$3} /^Installed Size/{print $4$5, n}' | sort -h | tail -15
 fi

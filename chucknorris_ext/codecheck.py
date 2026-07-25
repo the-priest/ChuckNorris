@@ -21,38 +21,57 @@ import shutil
 import subprocess
 import tempfile
 
-# ── security footgun patterns (language-tagged, low false-positive) ──────────
-# Each entry: (pattern, message). Patterns are matched case-insensitively.
+# ── security footgun patterns (language-tagged) ──────────────────────────────
+# Each entry: (pattern, message, severity). Patterns match case-insensitively.
+#
+# SEVERITY MATTERS, and getting it wrong is expensive in both directions:
+#   BLOCK  — a genuine defect with an obvious fix (injection, RCE, a shell built
+#            from a string). The Run button is withheld and the model is told to
+#            fix it. Only patterns precise enough that "fix it" is always the
+#            right answer belong here.
+#   ADVISE — a real footgun, but the pattern is broad enough to fire on correct
+#            code. `\bmd5\b` hits `hashlib.md5(chunk)` used as a content
+#            checksum; `verify=False` hits recon tooling pointed at a box with a
+#            self-signed cert. These used to block, which meant the model was
+#            handed "CODE VERIFICATION FAILED — fix every issue" for code with
+#            nothing to fix, and it looped until the hop budget ran out. They are
+#            now surfaced on the card and in the report without withholding it.
+BLOCK, ADVISE = "block", "advise"
+
 _SEC = {
     "python": [
-        (r"\beval\s*\(", "eval() on dynamic input is RCE-prone — use ast.literal_eval"),
-        (r"\bexec\s*\(", "exec() executes arbitrary code — avoid on untrusted input"),
+        (r"\beval\s*\(", "eval() on dynamic input is RCE-prone — use ast.literal_eval", BLOCK),
+        (r"\bexec\s*\(", "exec() executes arbitrary code — avoid on untrusted input", BLOCK),
         (r"subprocess\.(?:call|run|Popen|check_output)\([^)]*shell\s*=\s*True",
-         "shell=True with a built string is command-injection-prone — pass a list"),
-        (r"os\.system\s*\(", "os.system() is injection-prone — use subprocess with a list"),
-        (r"\bpickle\.loads?\s*\(", "pickle on untrusted data is RCE — use json"),
+         "shell=True with a built string is command-injection-prone — pass a list", BLOCK),
+        (r"os\.system\s*\(", "os.system() is injection-prone — use subprocess with a list", BLOCK),
         (r"yaml\.load\s*\((?![^)]*Loader\s*=\s*yaml\.SafeLoader)",
-         "yaml.load without SafeLoader is unsafe — use yaml.safe_load"),
-        (r"\bmd5\b|\bsha1\b", "MD5/SHA1 are weak for security — use SHA-256+"),
-        (r"verify\s*=\s*False", "TLS verify=False disables cert checking"),
+         "yaml.load without SafeLoader is unsafe — use yaml.safe_load", BLOCK),
         (r"(password|secret|api[_-]?key|token)\s*=\s*['\"][^'\"]{6,}['\"]",
-         "hard-coded secret — load from env/secret store instead"),
+         "hard-coded secret — load from env/secret store instead", BLOCK),
+        (r"\bpickle\.loads?\s*\(", "pickle on untrusted data is RCE — use json", ADVISE),
+        (r"\bmd5\b|\bsha1\b", "MD5/SHA1 are weak for security — fine for checksums, "
+                              "use SHA-256+ if this is security-relevant", ADVISE),
+        (r"verify\s*=\s*False", "TLS verify=False disables cert checking", ADVISE),
         (r"random\.(?:random|randint|choice)\b.*(token|password|secret|key)",
-         "random module isn't cryptographically secure — use secrets"),
+         "random module isn't cryptographically secure — use secrets", ADVISE),
     ],
     "js": [
-        (r"\beval\s*\(", "eval() is RCE-prone"),
-        (r"child_process\.exec\s*\(", "child_process.exec runs a shell — use execFile/spawn with args"),
-        (r"innerHTML\s*=", "innerHTML with dynamic data is XSS-prone — use textContent"),
+        (r"\beval\s*\(", "eval() is RCE-prone", BLOCK),
+        (r"child_process\.exec\s*\(",
+         "child_process.exec runs a shell — use execFile/spawn with args", BLOCK),
         (r"(password|secret|api[_-]?key|token)\s*[:=]\s*['\"][^'\"]{6,}['\"]",
-         "hard-coded secret"),
-        (r"Math\.random\(\).*(token|password|secret)", "Math.random isn't cryptographically secure"),
+         "hard-coded secret", BLOCK),
+        (r"innerHTML\s*=", "innerHTML with dynamic data is XSS-prone — use textContent", ADVISE),
+        (r"Math\.random\(\).*(token|password|secret)",
+         "Math.random isn't cryptographically secure", ADVISE),
     ],
     "bash": [
-        (r"\beval\s+", "eval in bash is injection-prone"),
-        (r"rm\s+-rf\s+\$", "rm -rf on an unquoted/var path — guard it"),
-        (r"curl\s+[^|]*\|\s*(?:sudo\s+)?(?:bash|sh)\b", "curl | bash executes remote code unread"),
-        (r"chmod\s+777", "chmod 777 is world-writable — tighten permissions"),
+        (r"\beval\s+", "eval in bash is injection-prone", BLOCK),
+        (r"rm\s+-rf\s+\$", "rm -rf on an unquoted/var path — guard it", BLOCK),
+        (r"curl\s+[^|]*\|\s*(?:sudo\s+)?(?:bash|sh)\b",
+         "curl | bash executes remote code unread", BLOCK),
+        (r"chmod\s+777", "chmod 777 is world-writable — tighten permissions", ADVISE),
     ],
 }
 
@@ -192,21 +211,23 @@ def _lint_js(body):
 
 # ── security scan ────────────────────────────────────────────────────────────
 def security_scan(lang, body):
+    """Return (blocking, advisory) lists of 'L<n>: message' findings."""
     lang = _LANG_NORM.get(lang, lang)
     pats = _SEC.get(lang, [])
-    hits = []
-    lines = body.splitlines()
-    for i, line in enumerate(lines, 1):
-        for pat, msg in pats:
+    block_hits, advise_hits = [], []
+    for i, line in enumerate(body.splitlines(), 1):
+        for pat, msg, sev in pats:
             if re.search(pat, line, re.IGNORECASE):
-                hits.append(f"L{i}: {msg}")
-    # de-dup identical messages
-    seen, out = set(), []
-    for h in hits:
-        key = h.split(": ", 1)[-1]
-        if key not in seen:
-            seen.add(key); out.append(h)
-    return out
+                (block_hits if sev == BLOCK else advise_hits).append(f"L{i}: {msg}")
+    # de-dup identical messages, keeping the first line number for each
+    def _dedup(hits):
+        seen, out = set(), []
+        for h in hits:
+            key = h.split(": ", 1)[-1]
+            if key not in seen:
+                seen.add(key); out.append(h)
+        return out
+    return _dedup(block_hits), _dedup(advise_hits)
 
 
 # ── public: full pipeline ────────────────────────────────────────────────────
@@ -223,7 +244,7 @@ def check(lang, body, tests=None):
     """
     lang = _LANG_NORM.get((lang or "").lower(), (lang or "").lower())
     res = {"lang": lang, "syntax_ok": True, "syntax_err": "",
-           "lint": [], "security": [], "tests": None, "ok": True}
+           "lint": [], "security": [], "advisory": [], "tests": None, "ok": True}
 
     # 1. syntax
     if lang == "python":
@@ -246,8 +267,9 @@ def check(lang, body, tests=None):
         elif lang == "js":
             res["lint"] = _lint_js(body)
 
-    # 3. security scan (always — cheap, static)
-    res["security"] = security_scan(lang, body)
+    # 3. security scan (always — cheap, static). Blocking findings withhold the
+    #    Run button; advisory ones are reported but never block (see _SEC).
+    res["security"], res["advisory"] = security_scan(lang, body)
 
     # 4. tests are NOT run here (see the safety invariant above). If the model
     #    supplied tests, statically check them too and fold the findings in.
@@ -257,7 +279,9 @@ def check(lang, body, tests=None):
             t_syntax_ok, t_err = _syntax_python(tests)
             if not t_syntax_ok:
                 res["lint"].append(f"test block: {t_err}")
-        res["security"] += security_scan(lang, tests)
+        t_block, t_advise = security_scan(lang, tests)
+        res["security"] += t_block
+        res["advisory"] += t_advise
         res["tests"] = {"ran": False, "reason": "not executed by design "
                         "(verification is static; run it via the approve-to-run card)"}
 
@@ -265,10 +289,21 @@ def check(lang, body, tests=None):
     return res
 
 
+def _advisory_lines(res):
+    return [f"  NOTE (not blocking): {a}" for a in (res.get("advisory") or [])[:10]]
+
+
 def report(res):
-    """Compact human/model-readable report string from a check() result."""
+    """Compact human/model-readable report string from a check() result.
+
+    Advisories are appended to BOTH the clean and the failing report, clearly
+    marked as non-blocking, so the model is never told to "fix every issue"
+    about something that isn't withholding the card.
+    """
     if res.get("ok"):
-        return f"\u2713 {res['lang']} verified: syntax OK, no lint or security issues."
+        head = f"\u2713 {res['lang']} verified: syntax OK, no blocking issues."
+        adv = _advisory_lines(res)
+        return "\n".join([head] + adv) if adv else head
     lines = [f"Verification of the {res['lang']} code found issues:"]
     if not res["syntax_ok"]:
         lines.append(f"  SYNTAX: {res['syntax_err']}")
@@ -279,6 +314,7 @@ def report(res):
     for s in res["security"][:20]:
         lines.append(f"  SECURITY: {s}")
     lines.append("Fix these, then re-verify.")
+    lines += _advisory_lines(res)
     return "\n".join(lines)
 
 

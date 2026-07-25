@@ -82,12 +82,17 @@ def classify_command(cmd):
     return ""
 
 
+# pacman AND its AUR wrappers: paru/yay take the same flag grammar, and a bare
+# `paru -S pkg` is the same partial-upgrade footgun as `pacman -S pkg`. Anchoring
+# this on "pacman" alone let every AUR install through un-rewritten.
+_PAC_TOOLS = r"(?:pacman|paru|yay)"
 _PAC_INSTALL = re.compile(
-    r"\bpacman\s+(?P<flags>-{1,2}[A-Za-z-]+(?:\s+-{1,2}[A-Za-z-]+)*)", re.IGNORECASE)
+    r"\b(?P<tool>" + _PAC_TOOLS + r")\s+(?P<flags>-{1,2}[A-Za-z-]+(?:\s+-{1,2}[A-Za-z-]+)*)",
+    re.IGNORECASE)
 
 
 def enforce_syu(cmd):
-    """Rewrite `pacman -S pkg` into `pacman -Syu pkg`.
+    """Rewrite `pacman -S pkg` into `pacman -Syu pkg` (also paru / yay).
 
     On Arch a plain -S installs against a stale local database, which is the
     classic partial-upgrade footgun: you end up with a package built for a newer
@@ -96,7 +101,9 @@ def enforce_syu(cmd):
     here rather than merely requested in the prompt, because a rule the model
     can forget isn't a rule.
     """
-    if not cmd or "pacman" not in cmd:
+    if not cmd:
+        return cmd
+    if not re.search(r"\b" + _PAC_TOOLS + r"\b", cmd, re.IGNORECASE):
         return cmd
 
     # Sync sub-operations that only READ (search/info/list/clean/groups/print/
@@ -106,6 +113,7 @@ def enforce_syu(cmd):
     OTHER_OPS = set("RQUDFT")
 
     def fix(m):
+        tool = m.group("tool")
         parts = m.group("flags").split()
         out, changed = [], False
         for p_ in parts:
@@ -119,6 +127,6 @@ def enforce_syu(cmd):
             # a real install: make sure it syncs AND upgrades first
             rest = "".join(c for c in body if c not in "Syu")
             out.append("-Syu" + rest); changed = True
-        return "pacman " + " ".join(out) if changed else m.group(0)
+        return f"{tool} " + " ".join(out) if changed else m.group(0)
 
     return _PAC_INSTALL.sub(fix, cmd)

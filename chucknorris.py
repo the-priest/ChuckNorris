@@ -18,6 +18,7 @@ import html as _html
 import base64
 import shlex
 import shutil
+import tempfile
 import socket
 import threading
 import subprocess
@@ -99,13 +100,12 @@ _STREAM_REPAINT = 0.05      # seconds between mid-stream repaints (20/s)
 
 from chucknorris_ext import config as _config   # noqa: E402
 from chucknorris_ext.config import (            # noqa: E402
-    APP_ID, VERSION, DEFAULT_MODEL, DEFAULT_VISION, DEFAULT_BASE,
-    DATA_DIR, CONFIG_DIR, CHATS_DIR, DL_DIR, VOICE_DIR,
-    SETTINGS, BASILISK_SETTINGS,
+    APP_ID, DEFAULT_MODEL, DEFAULT_VISION, DEFAULT_BASE,
+    DATA_DIR, CONFIG_DIR, CHATS_DIR, DL_DIR,
     MAX_TOOL_HOPS, RESEARCH_MAX_SOURCES, RESEARCH_QUERIES,
     SEND_CHAR_BUDGET, TOOL_BLOBS_KEPT, CHAT_TTL_HOURS,
     RENDER_KEEP, RENDER_PAGE, FONT_SIZE, UA,
-    load_settings, save_settings,
+    save_settings,
 )
 
 SYSTEM_PROMPT = r"""You ARE Chuck Norris — the legend (Carlos Ray "Chuck" Norris, 1940–2026), \
@@ -172,7 +172,12 @@ you wanted, and only then take the next step. If it failed, fix the cause and re
 on as if it worked, never claim success you haven't seen. Reach for the SHELL first: pacman, \
 systemctl, journalctl, ls, grep, ip, ss, lsblk are the right tools for system work — only write a \
 ```python``` file when the job genuinely needs a program, not to do what one command does. \
-Installing: ALWAYS `sudo pacman -Syu <pkg>`, never a bare -S. AUR via paru/yay after a -Syu.
+Installing: ALWAYS `sudo pacman -Syu <pkg>`, never a bare -S; AUR via paru/yay after a -Syu. \
+sudo WORKS — write `sudo ...` yourself and Chuck handles authentication (asks the user for the \
+password once per chat, or runs straight through on a passwordless box); NEVER tell the user to go \
+run a sudo command in a terminal themselves. A server or daemon (a dev server, npm start, nginx, a \
+Flask app) NEVER returns on its own — start it in the BACKGROUND (`nohup CMD >/tmp/srv.log 2>&1 &`), \
+then verify it came up by probing the port/URL; a foreground start just blocks until the timeout.
 5) SAFE HANDS. Disk wipes, rm -rf on / or ~, curl|sh, reformatting and pulling core \
 packages are CRITICAL — those alone wait for the user, so never smuggle one inside a \
 longer script or skill. Read-only diagnostics first; scope destructive commands to an \
@@ -278,27 +283,9 @@ window { background-color: #0e0e10; }
 _SETTINGS = _config.SETTINGS_DATA
 
 
-def _opener():
-    proxy = (_SETTINGS.get("proxy") or "").strip()
-    if proxy:
-        return urllib.request.build_opener(
-            urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
-    return urllib.request.build_opener()
-
-
-_ALLOWED_SCHEMES = ("http", "https")
-
-
-def _get(url, data=None, timeout=20, headers=None):
-    """Open a URL. Only http/https are permitted — urllib also speaks file:,
-    ftp: and friends, and a `file:///home/you/.ssh/id_rsa` fetch would quietly
-    read a local secret into the conversation. Scheme is checked here so every
-    caller (search, fetch, images, video) inherits the restriction."""
-    scheme = urllib.parse.urlparse(url).scheme.lower()
-    if scheme not in _ALLOWED_SCHEMES:
-        raise ValueError(f"blocked URL scheme {scheme!r} (only http/https allowed)")
-    req = urllib.request.Request(url, data=data, headers=headers or {"User-Agent": UA})
-    return _opener().open(req, timeout=timeout)
+# NB: there is no _get/_opener here any more. Both were dead — every network
+# call in the app goes through config.get(), which is where the http/https
+# scheme allowlist lives. Two copies of that check meant one could drift.
 
 
 _FONT_PROVIDER = None
@@ -337,6 +324,21 @@ def apply_font_size(px):
         return False
 
 
+
+
+def _sweep_scratch(max_age_hours=6):
+    """Drop stale scratch files in CONFIG_DIR (fetched images, synthesised wavs,
+    interpreter temp files, an old screenshot). Each of these is now unlinked by
+    the code that creates it, but an existing install has a backlog, and a hard
+    kill can still strand one."""
+    cutoff = time.time() - max_age_hours * 3600
+    for pat in (".img_*", ".say-*.wav", ".run_*", ".shot.png"):
+        for f in CONFIG_DIR.glob(pat):
+            try:
+                if f.is_file() and f.stat().st_mtime < cutoff:
+                    f.unlink()
+            except OSError:
+                continue
 
 
 def _pick_icon(*names):
@@ -456,6 +458,13 @@ def screenshot_to_b64():
         return base64.b64encode(Path(tmp).read_bytes()).decode()
     except Exception:
         return None
+    finally:
+        # A full capture of the user's desktop is not something to leave lying
+        # in ~/.config once it has been encoded and sent.
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
 
 
 # Environment for every command we run for the user. Real system tools assume a
@@ -471,8 +480,18 @@ _RUN_ENV = {
 # pacman/paru/yay prompt before acting. The approve-to-run card IS the user's
 # confirmation, so the command must not then sit waiting for a second one it can
 # never receive. Added visibly, so the card shows exactly what will run.
+# pacman/paru/yay prompt before acting. The approve-to-run card IS the user's
+# confirmation, so the command must not then sit waiting for a second one it can
+# never receive. Added visibly, so the card shows exactly what will run.
+#
+# The operation is matched as a FLAG CLUSTER (-R, -Rs, -Rsn, -Rns, -S, -Syu, -U),
+# not as a fixed list of spellings. The old list-of-alternatives regex happened
+# to contain `Rns` but not `Rs` or `Rsn`, so the two removal forms people
+# actually type never got --noconfirm — pacman then hit `[Y/n]` against a
+# stdin of /dev/null and aborted.
 _NEEDS_NOCONFIRM = re.compile(
-    r"\b(pacman|paru|yay|pamac)\b(?=[^|;&]*\s-{1,2}(?:S|R|U|Syu|Rns|remove|sync)\b)",
+    r"\b(pacman|paru|yay|pamac)\b(?=[^|;&]*\s(?:-[A-Za-z]*[SRU][A-Za-z]*"
+    r"|--(?:sync|remove|upgrade))\b)",
     re.IGNORECASE)
 
 
@@ -534,33 +553,330 @@ def _run_report(what, rc, out):
             f"wrong in one line, and fix it — do not carry on as though it worked:\n{body}")
 
 
-def run_command(cmd, timeout=1800):
+# ── privilege escalation ────────────────────────────────────────────────────
+# Chuck is an agent that installs and fixes things, so `sudo` has to actually
+# work — not pop a per-command pkexec dialog and give up when it isn't there.
+# This is the same escalation model a good sysadmin agent uses: detect the tool,
+# skip the whole dance when the box is passwordless, otherwise authenticate ONCE
+# with a password held only in memory. The password never touches disk, the log,
+# the model, or a command's own stdin.
+_SUDO_AUTH_FAILED = 97          # private rc: sudo could not authenticate
+_PRIV_ESC_CACHE = None
+
+
+def _ro(argv, timeout=8):
+    """Run a read-only helper command; return (rc, stdout, stderr)."""
     try:
-        env = dict(os.environ)
-        env.update(_RUN_ENV)
-        m = re.match(r"^\s*sudo\s+(.*)$", cmd, re.DOTALL)
-        if m:
-            if shutil.which("pkexec"):
-                argv = ["pkexec", "sh", "-c", m.group(1)]
-            else:
-                return 127, "pkexec not found — run this sudo command in a terminal yourself."
-        else:
-            argv = ["sh", "-c", cmd]
-        # stdin=DEVNULL: anything that asks a question gets EOF and gives up
-        # immediately, instead of blocking until the timeout.
-        p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout,
-                           stdin=subprocess.DEVNULL, env=env)
-        out = (p.stdout or "") + (p.stderr or "")
-        return p.returncode, out.strip() or "(no output)"
+        p = subprocess.run(argv, stdin=subprocess.DEVNULL,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           timeout=timeout, text=True, errors="replace")
+        return p.returncode, p.stdout or "", p.stderr or ""
+    except Exception:
+        return 1, "", ""
+
+
+def detect_priv_esc():
+    """How to become root on THIS box. CachyOS may ship sudo-rs (the Rust
+    rewrite, missing -A/SUDO_ASKPASS on older builds) or doas instead of classic
+    sudo. Keys: tool ('sudo'|'sudo-rs'|'doas'|None), bin, askpass (bool),
+    stdin (bool), version. Cached; runs only --version/--help once."""
+    global _PRIV_ESC_CACHE
+    if _PRIV_ESC_CACHE is not None:
+        return _PRIV_ESC_CACHE
+    tool = bin_ = None
+    version = ""
+    if shutil.which("sudo"):
+        bin_ = "sudo"
+        rc, out, err = _ro(["sudo", "--version"], timeout=5)
+        first = (out or err or "").splitlines()
+        version = first[0].strip() if first else ""
+        tool = "sudo-rs" if "sudo-rs" in version.lower() else "sudo"
+    elif shutil.which("doas"):
+        tool, bin_ = "doas", "doas"
+    askpass = stdin = False
+    if tool == "sudo":
+        askpass = stdin = True
+    elif tool == "sudo-rs":
+        stdin = True
+        rc, out, err = _ro(["sudo", "--help"], timeout=5)
+        askpass = "-A" in (out or "") or "askpass" in (out or "").lower()
+    _PRIV_ESC_CACHE = {"tool": tool, "bin": bin_, "askpass": askpass,
+                       "stdin": stdin, "version": version}
+    return _PRIV_ESC_CACHE
+
+
+def priv_esc_prefix():
+    """'sudo ' / 'doas ' (or '' if neither exists) — so install hints match the box."""
+    pe = detect_priv_esc()
+    return f"{pe['bin']} " if pe["bin"] else ""
+
+
+def _sudo_ready():
+    """True if we can escalate RIGHT NOW with no password — a NOPASSWD sudoers
+    rule or a still-valid cached timestamp (common on single-user CachyOS). Cheap
+    (`sudo -n true`); when true the whole password dance is skipped."""
+    pe = detect_priv_esc()
+    if pe["tool"] in ("sudo", "sudo-rs"):
+        rc, _, _ = _ro(["sudo", "-n", "true"], timeout=5)
+        return rc == 0
+    if pe["tool"] == "doas":
+        rc, _, _ = _ro(["doas", "-n", "true"], timeout=5)
+        return rc == 0
+    return False
+
+
+# `sudo` at command position (start, after a separator, or after leading env
+# assignments) — so `echo pseudo`, `/opt/sudoku`, `# sudo …` don't false-match.
+_SUDO_RE = re.compile(r'(?:^|[\n;&|(]\s*|\b&&\s*|\b\|\|\s*)(?:\w+=\S*\s+)*sudo\b')
+_SUDO_INJECT_RE = re.compile(r'(^|[\n;&|(]\s*|&&\s*|\|\|\s*)sudo(?=\s|$)')
+
+
+def command_needs_sudo(command):
+    """True if the command contains a real `sudo` invocation."""
+    return bool(command) and bool(_SUDO_RE.search(command))
+
+
+def _inject_askpass(command):
+    """Turn each `sudo` into `sudo -A` (use SUDO_ASKPASS). Unlike -S, askpass
+    never reads the command's stdin, so `sudo -A tee file` still works."""
+    if "sudo -A" in command:
+        return command
+    return _SUDO_INJECT_RE.sub(r'\1sudo -A', command)
+
+
+def _ensure_askpass_helper():
+    """Write (once, 0700) a tiny askpass helper that echoes $CHUCK_SUDO_PW. The
+    script holds NO secret — the password reaches it only via the environment of
+    the single sudo call."""
+    path = CONFIG_DIR / ".chuck-askpass.sh"
+    try:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o700)
+        try:
+            os.fchmod(fd, 0o700)          # defeat umask before content lands
+            os.write(fd, b'#!/bin/sh\nprintf "%s\\n" "$CHUCK_SUDO_PW"\n')
+        finally:
+            os.close(fd)
+        return str(path)
+    except Exception:
+        return None
+
+
+def _bash_bin():
+    return shutil.which("bash") or "sh"
+
+
+def _shell_out(p):
+    return ((p.stdout or "") + (p.stderr or "")).strip() or "(no output)"
+
+
+def _run_sudo_askpass(script, password, timeout, env):
+    """Fallback for hardened sudoers (timestamp_timeout=0) or sudo-rs where the
+    inline cached credential won't carry to the command's own sudo. SUDO_ASKPASS
+    authenticates each sudo independently. Returns (rc, out) or None if the helper
+    can't be set up."""
+    helper = _ensure_askpass_helper()
+    if not helper:
+        return None
+    e2 = dict(env)
+    e2["SUDO_ASKPASS"] = helper
+    e2["CHUCK_SUDO_PW"] = password
+    try:
+        p = subprocess.run([_bash_bin(), "-c", _inject_askpass(script)],
+                           stdin=subprocess.DEVNULL,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           timeout=timeout, text=True, errors="replace", env=e2)
+        low = (p.stderr or "").lower()
+        if p.returncode != 0 and ("a terminal is required" in low or "askpass" in low
+                                  or "no password was provided" in low
+                                  or "a password is required" in low):
+            return _SUDO_AUTH_FAILED, "sudo: askpass authentication failed."
+        return p.returncode, _shell_out(p)
     except subprocess.TimeoutExpired:
-        return 124, (f"(timed out after {timeout}s — it was still running. If it needed "
-                     "input, it will never get any here: run it in a terminal.)")
+        return 124, _timeout_note(script, timeout)
+    except Exception as ex:
+        return 1, f"(error: {ex})"
+    finally:
+        e2["CHUCK_SUDO_PW"] = ""
+
+
+def _run_sudo(script, password, timeout, env):
+    """Authenticate and run in ONE bash session so the fresh credential applies
+    to the script's own sudo calls, with an askpass fallback for hardened boxes.
+    Returns (rc, out); rc 97 == authentication failed."""
+    pe = detect_priv_esc()
+    binname = pe["bin"] or "sudo"
+    if pe["tool"] == "doas":
+        return _SUDO_AUTH_FAILED, ("this box uses doas, which can't take a password "
+                                   "on stdin. Add a persist/nopass rule in "
+                                   "/etc/doas.conf, or install sudo.")
+    # -k clears any stale timestamp so -S -v truly validates the piped password;
+    # rc 97 is our private "auth failed" sentinel.
+    prelude = f"{binname} -k 2>/dev/null\n{binname} -S -p '' -v || exit 97\n"
+    try:
+        p = subprocess.run([_bash_bin(), "-c", prelude + script],
+                           input=password + "\n",
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           timeout=timeout, text=True, errors="replace", env=env)
+    except subprocess.TimeoutExpired:
+        return 124, _timeout_note(script, timeout)
+    except Exception as ex:
+        return 1, f"(error: {ex})"
+    if p.returncode == 97:
+        err = (p.stderr or "").lower()
+        if "not in the sudoers" in err or "not allowed" in err:
+            return _SUDO_AUTH_FAILED, "sudo: this account isn't permitted to use sudo."
+        if pe["askpass"]:
+            alt = _run_sudo_askpass(script, password, timeout, env)
+            if alt is not None and alt[0] != _SUDO_AUTH_FAILED:
+                return alt
+        return _SUDO_AUTH_FAILED, ("sudo: password rejected. On CachyOS this is usually "
+                                   "a typo, a `Defaults rootpw/targetpw` policy (sudo "
+                                   "wants ROOT's password, not yours), or your user not "
+                                   "being in the wheel group.")
+    # -v succeeded but an inner sudo still failed (timestamp didn't carry) → askpass
+    low = (p.stderr or "").lower()
+    if p.returncode != 0 and pe["askpass"] and (
+            "a terminal is required" in low or "no password was provided" in low
+            or "a password is required" in low or "askpass" in low):
+        alt = _run_sudo_askpass(script, password, timeout, env)
+        if alt is not None:
+            return alt
+    return p.returncode, _shell_out(p)
+
+
+# ── command runtime awareness: how long should this take, when to give up ─────
+_QUICK_CMDS = {
+    "ls", "cat", "echo", "whoami", "id", "pwd", "cd", "head", "tail", "grep",
+    "which", "whereis", "type", "stat", "file", "wc", "date", "uname",
+    "hostname", "env", "printenv", "ps", "df", "du", "free", "ping", "dig",
+    "host", "nslookup", "cut", "awk", "sed", "sort", "uniq", "tr", "chmod",
+    "chown", "mkdir", "touch", "rm", "cp", "mv", "ln", "kill", "pkill",
+    "export", "readlink", "basename", "dirname", "test", "true", "false",
+    "sleep", "systemctl", "service", "ss", "netstat", "ip", "ifconfig",
+}
+_LONG_CMDS = {
+    "apt", "apt-get", "dpkg", "yay", "paru", "pamac", "yum", "dnf", "pacman",
+    "zypper", "make", "cmake", "gcc", "g++", "clang", "cargo", "go", "pip",
+    "pip3", "pipx", "npm", "yarn", "pnpm", "docker", "podman", "docker-compose",
+    "rsync", "dd", "wget", "curl", "git", "gem", "bundle", "mvn", "gradle",
+    "nmap", "meson", "ninja", "makepkg", "flatpak", "snap",
+}
+_LONG_WORDS = {"upgrade", "dist-upgrade", "install", "update", "build",
+               "compile", "pull", "clone", "download", "-Syu", "-S"}
+# Long-running servers / daemons — these do NOT return on their own.
+_SERVER_CMDS = {
+    "flask", "uvicorn", "gunicorn", "hypercorn", "daphne", "streamlit", "gradio",
+    "node", "nodemon", "deno", "bun", "rails", "puma", "jekyll", "hugo",
+    "http-server", "serve", "ng", "next", "nuxt", "vite", "webpack-dev-server",
+    "php-fpm", "nginx", "httpd", "caddy", "mongod", "mysqld", "mariadbd",
+    "postgres", "redis-server", "ncat", "socat",
+}
+
+
+def estimate_runtime(command):
+    """Estimate how long a command should take and the hard timeout to enforce,
+    so a hung command (classically a server that won't start) is killed fast
+    instead of blocking the full window. Pure heuristic; runs nothing.
+    Returns {kind, expected_seconds, hard_timeout_seconds, is_server, backgrounded}."""
+    cmd = (command or "").strip()
+    low = cmd.lower()
+    backgrounded = bool(re.search(r"(?<!&)&\s*$", cmd)) or "nohup " in low \
+        or " disown" in low
+    heads = []
+    server_hit = False
+    for seg in re.split(r"[\n;|]+|&&|\|\|", low):
+        words = seg.split()
+        i = 0
+        while i < len(words) and ("=" in words[i] or words[i] in (
+                "sudo", "nohup", "time", "env", "exec", "setsid", "stdbuf")):
+            i += 1
+        if i >= len(words):
+            continue
+        head = os.path.basename(words[i])
+        heads.append(head)
+        rest = words[i + 1:]
+        if head in _SERVER_CMDS:
+            server_hit = True
+        elif head in ("python", "python3", "py") and (
+                "runserver" in " ".join(rest) or "http.server" in " ".join(rest)):
+            server_hit = True
+        elif head in ("npm", "yarn", "pnpm") and any(
+                w in ("start", "dev", "serve", "preview", "watch") for w in rest):
+            server_hit = True
+    if server_hit and not backgrounded:
+        return {"kind": "server", "expected_seconds": 8, "hard_timeout_seconds": 25,
+                "is_server": True, "backgrounded": False}
+    if backgrounded:
+        return {"kind": "background", "expected_seconds": 3, "hard_timeout_seconds": 15,
+                "is_server": server_hit, "backgrounded": True}
+    is_long = any(h in _LONG_CMDS for h in heads) or \
+        any(w in _LONG_WORDS for w in low.split())
+    if is_long:
+        return {"kind": "long", "expected_seconds": 300, "hard_timeout_seconds": 1800,
+                "is_server": False, "backgrounded": False}
+    if heads and all(h in _QUICK_CMDS for h in heads):
+        return {"kind": "quick", "expected_seconds": 5, "hard_timeout_seconds": 30,
+                "is_server": False, "backgrounded": False}
+    return {"kind": "unknown", "expected_seconds": 30, "hard_timeout_seconds": 120,
+            "is_server": False, "backgrounded": False}
+
+
+def _timeout_note(command, timeout):
+    """An informative timeout message so Chuck knows the command didn't finish
+    (and what to do about a server) instead of pretending it hung by accident."""
+    est = estimate_runtime(command)
+    note = (f"(timed out after {timeout}s — expected ~{est['expected_seconds']}s for a "
+            f"{est['kind']} command. It did NOT complete and was killed; do not just "
+            f"wait for it, it won't finish as-is.")
+    if est["is_server"] and not est["backgrounded"]:
+        note += (" This looks like a server/daemon: start it in the BACKGROUND "
+                 "(nohup CMD >/tmp/srv.log 2>&1 &), then confirm it came up by probing "
+                 "the port/URL — a foreground start blocks until timeout regardless.")
+    return note + ")"
+
+
+def _run_shell(script, timeout=None, sudo_password=None):
+    """Run a shell script (one line or many) as the operator's user, with real
+    sudo handling. Returns (rc, output). rc 97 == sudo needs a password / auth
+    failed, so the caller can prompt once and retry. Timeout is auto-estimated
+    (a package build gets 30 min; a server that never returns is capped fast)."""
+    if timeout is None:
+        timeout = estimate_runtime(script)["hard_timeout_seconds"]
+    env = dict(os.environ)
+    env.update(_RUN_ENV)
+    if command_needs_sudo(script) and not _sudo_ready():
+        pe = detect_priv_esc()
+        if pe["tool"] is None:
+            return 127, ("no privilege-escalation tool on PATH (looked for sudo, "
+                         "sudo-rs, doas). Install sudo, or launch Chuck from a root shell.")
+        if sudo_password:
+            return _run_sudo(script, sudo_password, timeout, env)
+        return _SUDO_AUTH_FAILED, "sudo password required (none provided)."
+    # plain path: no sudo, or the box is already passwordless. stdin=DEVNULL so
+    # anything that tries to prompt gets EOF and fails fast instead of hanging.
+    try:
+        p = subprocess.run([_bash_bin(), "-c", script],
+                           stdin=subprocess.DEVNULL,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           timeout=timeout, text=True, errors="replace", env=env)
+        return p.returncode, _shell_out(p)
+    except subprocess.TimeoutExpired:
+        return 124, _timeout_note(script, timeout)
     except Exception as ex:
         return 1, f"(error: {ex})"
 
 
-# language -> (interpreter argv builder). Chuck writes code, you approve, it runs
-# in a temp file so multi-line programs work (not just one-liners).
+def run_command(cmd, timeout=None, sudo_password=None):
+    """Run a shell command as the user. sudo is handled transparently."""
+    return _run_shell(cmd, timeout=timeout, sudo_password=sudo_password)
+
+
+# language -> (interpreter argv builder). Chuck writes code, it runs in a temp
+# file so multi-line programs work; bash/sh route through the sudo-aware runner.
 _LANG_RUN = {
     "python": lambda p: ["python3", p], "py": lambda p: ["python3", p],
     "node": lambda p: ["node", p], "javascript": lambda p: ["node", p],
@@ -573,29 +889,48 @@ _LANG_BIN = {"python": "python3", "py": "python3", "node": "node", "javascript":
              "js": "node", "bash": "bash", "sh": "sh"}
 
 
-def run_code(lang, body, timeout=600):
-    """Run a snippet in the given language via a temp file. Returns (rc, output)."""
+def run_code(lang, body, timeout=None, sudo_password=None):
+    """Run a snippet in the given language. Returns (rc, output).
+
+    bash/sh go through the sudo-aware shell runner (so `sudo pacman …` in a code
+    block actually authenticates); other languages run from a temp file."""
     lang = (lang or "bash").lower()
+    if lang in ("bash", "sh"):
+        return _run_shell(body, timeout=timeout, sudo_password=sudo_password)
     if lang not in _LANG_RUN:
         return 2, f"(unsupported language: {lang})"
     binname = _LANG_BIN[lang]
     if not shutil.which(binname):
         return 127, f"({binname} not installed — need it to run {lang})"
+    if timeout is None:
+        timeout = estimate_runtime(body)["hard_timeout_seconds"]
+    tmp = None
     try:
-        tmp = CONFIG_DIR / (".run_" + str(abs(hash(body)) % 10**8) + "." + _LANG_EXT[lang])
+        # tempfile, not hash(body): a collision would have one run clobber
+        # another's source mid-execution.
+        fd, name = tempfile.mkstemp(prefix=".run_", suffix="." + _LANG_EXT[lang],
+                                    dir=str(CONFIG_DIR))
+        os.close(fd)
+        tmp = Path(name)
         tmp.write_text(body)
         argv = _LANG_RUN[lang](str(tmp))
-        p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
-        out = (p.stdout or "") + (p.stderr or "")
-        try:
-            tmp.unlink()
-        except Exception:
-            pass
-        return p.returncode, out.strip() or "(no output)"
+        env = dict(os.environ)
+        env.update(_RUN_ENV)
+        p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout,
+                           stdin=subprocess.DEVNULL, env=env)
+        return p.returncode, _shell_out(p)
     except subprocess.TimeoutExpired:
-        return 124, "(timed out)"
+        return 124, _timeout_note(body, timeout)
     except Exception as ex:
         return 1, f"(error: {ex})"
+    finally:
+        # was skipped entirely on the timeout path, so every killed run left
+        # its source behind in ~/.config/chucknorris
+        if tmp is not None:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
 
 
 def read_file_safe(path, limit=180_000):
@@ -651,7 +986,7 @@ def junk_scan():
         lines.append(f"pacman package cache: {sz('/var/cache/pacman/pkg')}")
         cmds.append(("Trim pacman cache (keep 1)",
                      "sudo paccache -rk1" if shutil.which("paccache")
-                     else "sudo pacman -S --needed pacman-contrib && sudo paccache -rk1"))
+                     else "sudo pacman -Syu --needed pacman-contrib && sudo paccache -rk1"))
         orph = _run_ro(["sh", "-c", "pacman -Qtdq 2>/dev/null | wc -l"])
         lines.append(f"orphan packages: {orph}")
         if orph and orph != "0":
@@ -819,10 +1154,15 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._activity_lock = threading.Lock()
         self._running = False           # a turn is in progress
         self._cancelled = False         # user pressed Stop
+        self._sudo_pw = None            # sudo password: memory only, this chat
+        self._sudo_pw_time = 0.0        # when it was entered (30-min TTL)
+        self._awaiting_input = False    # a modal (sudo prompt) is open — pause the watchdog
         self._run_started = 0.0         # wall-clock start of the current run
         self._heartbeat_id = 0          # GLib timer id for the "still working" ticker
         self._watchdog_id = 0           # GLib timer id for the stuck-detector
         self._last_progress = 0.0       # last time anything happened (for watchdog)
+        self._run_budget = 0            # seconds the currently-running command is allowed
+        self._dispatching = False       # _finalise is still handing out tool work
         self.chat_id = datetime.now().strftime("%Y%m%d-%H%M%S")
         self._new_history()
 
@@ -966,8 +1306,13 @@ class ChuckWindow(Adw.ApplicationWindow):
         except Exception:
             pass
 
-        # purge on launch, then keep purging + refreshing while the app runs
-        purge_old_chats()
+        _sweep_scratch()
+        # purge on launch, then keep purging + refreshing while the app runs.
+        # NOTE the argument: purge_old_chats() with no TTL falls back to the
+        # shipped 24h default, so raising "auto-delete after" to a week in
+        # Settings still lost everything over 24h on the next launch. The
+        # timed sweep already used cfg(); the launch purge did not.
+        purge_old_chats(self.cfg('chat_ttl_hours', CHAT_TTL_HOURS, 1, 720))
         self._refresh_sidebar()
         GLib.timeout_add_seconds(600, self._sweep_chats)
 
@@ -981,7 +1326,14 @@ class ChuckWindow(Adw.ApplicationWindow):
                          "content": SYSTEM_PROMPT + "\n\nCurrent machine:\n" + gather_context()}]
 
     def new_chat(self):
+        # Cancel first. Without this the in-flight stream's _finalise appended
+        # the OLD question's answer to the NEW history — leaving a chat whose
+        # first message is an assistant turn with no user turn before it, which
+        # then got sent to the API and written to disk.
+        if self._running:
+            self.stop_run(auto=True)
         self._save_chat()
+        self._clear_sudo_pw()           # a fresh chat re-asks for root; never carry it over
         self.chat_id = datetime.now().strftime("%Y%m%d-%H%M%S")
         self._new_history()
         self._clear_msgs()
@@ -1284,7 +1636,8 @@ class ChuckWindow(Adw.ApplicationWindow):
             inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
             tl = Gtk.Label(label=title or "chat", xalign=0, wrap=True)
             tl.add_css_class("chat-title")
-            ml = Gtk.Label(label=chat_expires_in(f), xalign=0)
+            ml = Gtk.Label(label=chat_expires_in(
+                f, self.cfg("chat_ttl_hours", CHAT_TTL_HOURS, 1, 720)), xalign=0)
             ml.add_css_class("chat-meta")
             inner.append(tl); inner.append(ml)
             open_b.set_child(inner)
@@ -1300,7 +1653,12 @@ class ChuckWindow(Adw.ApplicationWindow):
             meta = json.loads(Path(path).read_text())
         except Exception:
             return
+        # Same reason as new_chat: an in-flight answer would otherwise land in
+        # the chat we just switched to.
+        if self._running:
+            self.stop_run(auto=True)
         self._save_chat()
+        self._clear_sudo_pw()
         self.history = meta.get("history", [])
         self.chat_id = meta.get("ts", datetime.now().strftime("%Y%m%d-%H%M%S"))
         self._clear_msgs()
@@ -1324,8 +1682,9 @@ class ChuckWindow(Adw.ApplicationWindow):
     # ── enter to send ──
     def _on_key(self, ctrl, keyval, keycode, state):
         if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) and not (state & Gdk.ModifierType.SHIFT_MASK):
-            if not self._running:
-                self.on_send()
+            if self._running:
+                return False    # busy: let Enter insert a newline rather than vanish
+            self.on_send()
             return True
         return False
 
@@ -1348,6 +1707,25 @@ class ChuckWindow(Adw.ApplicationWindow):
     # arriving — but the request is open and the model is simply thinking or
     # queued. Judging that by the tight between-steps timer is what killed
     # perfectly healthy first messages at 45s.
+    #
+    # The same mistake applied to COMMANDS. A shell command blocks its worker
+    # thread with nothing to report until it exits, so `pacman -Syu`, a makepkg
+    # build or a large npm install went 120s without progress and got shot as
+    # "stuck" — while estimate_runtime had already granted the same command up
+    # to 1800s. The turn was cancelled, and the real output was then dropped on
+    # arrival because _tool_done early-returns on _cancelled. So: while a
+    # command is running, the watchdog uses THAT command's own budget, and the
+    # hard cap stretches to cover it.
+
+    def _arm_run_budget(self, command):
+        """A command is about to block a worker: give the watchdog its real
+        expected runtime, so a legitimately slow one isn't mistaken for a hang."""
+        try:
+            est = estimate_runtime(command)
+            self._run_budget = int(est["hard_timeout_seconds"]) + 30   # + grace
+        except Exception:
+            self._run_budget = self.STUCK_AFTER
+        self._note_progress()
 
     def _note_progress(self):
         """Anything happening (a delta, a step, a hop) calls this — resets the
@@ -1392,14 +1770,26 @@ class ChuckWindow(Adw.ApplicationWindow):
         if not self._running:
             return False  # stop the timer
         now = time.time()
+        # A modal password prompt is open and we're blocked waiting on the user —
+        # that's not "stuck", so keep the progress clock fresh so the watchdog
+        # doesn't kill the turn out from under the dialog.
+        if getattr(self, "_awaiting_input", False):
+            self._last_progress = now
         elapsed = now - self._run_started
         self._tick(elapsed)
-        if elapsed > self.RUN_HARD_CAP:
-            self._sys_note(f"\u23f1 hit the {self.RUN_HARD_CAP}s time cap \u2014 stopping.", "danger")
+        run_budget = getattr(self, "_run_budget", 0)
+        # A command that is legitimately allowed 1800s must not be guillotined
+        # by a 900s turn cap; the cap stretches to cover whatever is running.
+        cap = max(self.RUN_HARD_CAP, run_budget + self.STUCK_AFTER)
+        if elapsed > cap:
+            self._sys_note(f"\u23f1 hit the {cap}s time cap \u2014 stopping.", "danger")
             self.stop_run(auto=True)
             return False
         waiting = getattr(self, "_awaiting_first", False)
-        budget = self.AWAIT_FIRST if waiting else self.STUCK_AFTER
+        if waiting:
+            budget = self.AWAIT_FIRST
+        else:
+            budget = max(self.STUCK_AFTER, run_budget)
         if now - self._last_progress > budget:
             if waiting:
                 self._sys_note(f"\u26a0 the model didn't respond within {budget}s. "
@@ -1428,6 +1818,8 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._pending_tools = 0
         self._loop_web = None
         self._tool_feedback = []
+        self._run_budget = 0
+        self._dispatching = False
         # drain the busy counter
         self._busy_n = 0
         self.spinner.stop(); self.spinner.set_visible(False)
@@ -1612,6 +2004,27 @@ class ChuckWindow(Adw.ApplicationWindow):
         arm.connect("toggled", on_arm)
         arm_row.append(arm); card.append(arm_row)
 
+    def _sanitise_skill_body(self, body, launch_cmd):
+        """Apply pacman hygiene to a skill BODY and rewrite it in place.
+
+        Returns the corrected body (also used for risk classification). If the
+        file can't be rewritten the corrected text is still returned, so the
+        classifier judges the worse of the two.
+        """
+        fixed = add_noconfirm(enforce_syu(body))
+        if fixed == body:
+            return body
+        self._sys_note("corrected pacman flags inside the skill (-Syu / --noconfirm)", "dim")
+        m = re.match(r"^(?:bash|sh|python3?)\s+(.+)$", (launch_cmd or "").strip())
+        if m:
+            try:
+                target = Path(shlex.split(m.group(1))[0]).expanduser()
+                if target.is_file():
+                    target.write_text(fixed)
+            except Exception:
+                pass
+        return fixed
+
     def _command_card(self, cmd, gate_text=None):
         """Run a shell command and report the real result.
 
@@ -1632,6 +2045,13 @@ class ChuckWindow(Adw.ApplicationWindow):
         if with_nc != fixed:
             self._sys_note("added --noconfirm so it can't stall on a prompt", "dim")
         cmd = with_nc
+        # A skill launches as `bash /path/to/skill.sh`, so the rewriters above
+        # only ever saw the wrapper — a bare `pacman -S` inside the BODY sailed
+        # through un-rewritten and un-noconfirmed. The risk classifier already
+        # judged gate_text; now the pacman hygiene does too, and the body is
+        # rewritten on disk so what runs is what was checked.
+        if gate_text is not None:
+            gate_text = self._sanitise_skill_body(gate_text, cmd)
         judged = cmd if gate_text is None else (cmd + "\n" + gate_text)
         tier = classify_command(judged)
 
@@ -1661,6 +2081,132 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._log_pin(card)
         self._run_now(cmd, status)
 
+    # ── sudo credential: memory only, this chat, 30-min TTL ──────────────────
+    def _sudo_pw_valid(self):
+        return bool(self._sudo_pw) and (time.time() - self._sudo_pw_time) < 1800
+
+    def _cache_sudo_pw(self, pw):
+        """Hold the sudo password in memory for this chat. Never written to disk,
+        the log, or the conversation — the model has no way to read it."""
+        self._sudo_pw = pw or None
+        self._sudo_pw_time = time.time() if pw else 0.0
+
+    def _clear_sudo_pw(self):
+        self._sudo_pw = None
+        self._sudo_pw_time = 0.0
+
+    def _sudo_prompt(self, script, cb):
+        """Ask for the sudo password once. Calls cb(password_or_None) exactly
+        once. Runs on the main thread (a worker marshals here via idle_add)."""
+        state = {"done": False}
+
+        def finish(pw):
+            if state["done"]:
+                return
+            state["done"] = True
+            cb(pw)
+
+        dlg = Adw.Window(transient_for=self, modal=True, title="sudo password")
+        dlg.set_default_size(460, -1)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        for m in ("top", "bottom", "start", "end"):
+            getattr(box, f"set_margin_{m}")(16)
+        msg = Gtk.Label(
+            label="This step needs root. Enter your sudo password so Chuck can run "
+                  "it — kept in memory for this chat only, never written or logged.",
+            xalign=0, wrap=True)
+        box.append(msg)
+        cl = Gtk.Label(label=(script or "").strip()[:200], xalign=0, wrap=True,
+                       selectable=True)
+        cl.add_css_class("mono")
+        box.append(cl)
+        pw = Gtk.PasswordEntry()
+        try:
+            pw.set_show_peek_icon(True)
+            pw.set_property("placeholder-text", "sudo password")
+        except Exception:
+            pass
+        box.append(pw)
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
+                      halign=Gtk.Align.END)
+        cancel = Gtk.Button(label="Cancel")
+        go = Gtk.Button(label="Authenticate & run")
+        go.add_css_class("suggested-action")
+        row.append(cancel)
+        row.append(go)
+        box.append(row)
+        hb = Adw.HeaderBar()
+        wrap = Adw.ToolbarView()
+        wrap.add_top_bar(hb)
+        wrap.set_content(box)
+        dlg.set_content(wrap)
+
+        def do_go(*_):
+            p = pw.get_text()
+            dlg.close()
+            finish(p or None)
+
+        def do_cancel(*_):
+            dlg.close()
+            finish(None)
+
+        go.connect("clicked", do_go)
+        cancel.connect("clicked", do_cancel)
+        pw.connect("activate", do_go)
+        dlg.connect("close-request", lambda *_: (finish(None), False)[1])
+        dlg.present()
+
+    def _get_sudo_pw(self, script):
+        """Return a usable sudo password: the cached one, or prompt for it once
+        (blocking this worker thread until the modal is answered). None if the
+        user cancels or walks away."""
+        if self._sudo_pw_valid():
+            return self._sudo_pw
+        box = {"pw": None}
+        ev = threading.Event()
+
+        def show():
+            self._sudo_prompt(script, lambda p: (box.__setitem__("pw", p), ev.set()))
+            return False
+        self._awaiting_input = True
+        try:
+            GLib.idle_add(show)
+            ev.wait(300)              # bounded: if they walk away, give up rather than hang
+        finally:
+            self._awaiting_input = False
+        pw = box["pw"]
+        if pw:
+            self._cache_sudo_pw(pw)
+        return pw
+
+    def _execute_shell(self, script, execute):
+        """Run a shell script through `execute(password) -> (rc, out)`, collecting
+        the sudo password first if the script needs root and the box isn't already
+        passwordless, and re-prompting once if a cached password was rejected.
+        Returns (rc, out); rc 97 means sudo could not authenticate."""
+        pw = None
+        if command_needs_sudo(script) and not _sudo_ready():
+            pw = self._get_sudo_pw(script)
+        rc, out = execute(pw)
+        if rc == _SUDO_AUTH_FAILED and pw is not None:   # the password was wrong
+            self._clear_sudo_pw()
+            pw2 = self._get_sudo_pw(script)
+            if pw2:
+                rc, out = execute(pw2)
+        return rc, out
+
+    def _run_card(self, cmd, run_btn, status, gate_text=None):
+        """Run a gated (CRITICAL) command card once the user has armed the risk
+        checkbox and pressed Run. Disarms the button so a second click can't
+        double-fire it, then hands off to the same execute-and-report path plain
+        commands use. gate_text was only needed to classify the risk tier up
+        front — at run time the command itself is what executes.
+        """
+        if not run_btn.get_sensitive():
+            return
+        run_btn.set_sensitive(False)
+        self._run_now(cmd, status)
+
     def _run_now(self, cmd, status):
         """Execute, show the output, and hand the REAL result back to the model.
 
@@ -1668,17 +2214,26 @@ class ChuckWindow(Adw.ApplicationWindow):
         and output go back, and a non-zero exit is reported as a failure he must
         fix before taking another step.
         """
+        # A gated card can be approved AFTER the turn that proposed it has already
+        # ended. Executing it feeds the result back into the model and resumes
+        # streaming, so the run lifecycle (Stop button + stuck-watchdog + the
+        # "working" indicator) must be live again. _start_run is a no-op when a
+        # turn is already active, so this is safe on the normal auto-run path too.
+        self._start_run()
         status.set_label("running\u2026")
         self._busy(True)
-        self._note_progress()
+        self._arm_run_budget(cmd)
 
         def work():
-            rc, out = run_command(cmd)
+            rc, out = self._execute_shell(cmd, lambda pw: run_command(cmd, sudo_password=pw))
+            auth_failed = (rc == _SUDO_AUTH_FAILED)
 
             def show():
                 status.remove_css_class("dim")
                 status.add_css_class("ok" if rc == 0 else "danger")
-                status.set_label("\u2713 exit 0" if rc == 0 else f"\u2717 exit {rc}")
+                status.set_label("\u2713 exit 0" if rc == 0
+                                 else ("\u2717 sudo auth failed" if auth_failed
+                                       else f"\u2717 exit {rc}"))
                 if out.strip():
                     o = Gtk.Label(label=out[:4000], xalign=0, wrap=True, selectable=True)
                     o.add_css_class("mono")
@@ -1686,6 +2241,11 @@ class ChuckWindow(Adw.ApplicationWindow):
                 return False
             GLib.idle_add(show)
 
+            if auth_failed:
+                return (f"COULD NOT RUN `{cmd}` \u2014 sudo authentication failed. {out}\n"
+                        "Do NOT retry the same sudo command blindly. Root access is needed "
+                        "(a wrong/absent password or a sudoers policy); tell the user and "
+                        "either wait for them or suggest they run it in a terminal.")
             if rc == 0:
                 return (f"RAN `{cmd}` \u2014 SUCCEEDED (exit 0). Real output:\n{out[:6000]}\n"
                         "Verify this output actually shows what you needed. If the whole task "
@@ -1743,17 +2303,28 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._run_code_now(lang, body, status)
 
     def _run_code_now(self, lang, body, status):
+        # Same reason as _run_now: a CRITICAL code card can be approved after its
+        # turn has ended, and running it resumes the model — so re-arm the run
+        # lifecycle (Stop + watchdog). No-op when a turn is already active.
+        self._start_run()
         status.set_label("running\u2026")
         self._busy(True)
-        self._note_progress()
+        self._arm_run_budget(body)
 
         def work():
-            rc, out = run_code(lang, body)
+            if lang in ("bash", "sh"):
+                rc, out = self._execute_shell(
+                    body, lambda pw: run_code(lang, body, sudo_password=pw))
+            else:
+                rc, out = run_code(lang, body)
+            auth_failed = (rc == _SUDO_AUTH_FAILED)
 
             def show():
                 status.remove_css_class("dim")
                 status.add_css_class("ok" if rc == 0 else "danger")
-                status.set_label("\u2713 exit 0" if rc == 0 else f"\u2717 exit {rc}")
+                status.set_label("\u2713 exit 0" if rc == 0
+                                 else ("\u2717 sudo auth failed" if auth_failed
+                                       else f"\u2717 exit {rc}"))
                 if out.strip():
                     o = Gtk.Label(label=out[:4000], xalign=0, wrap=True, selectable=True)
                     o.add_css_class("mono")
@@ -1761,6 +2332,9 @@ class ChuckWindow(Adw.ApplicationWindow):
                 return False
             GLib.idle_add(show)
 
+            if auth_failed:
+                return (f"COULD NOT RUN that {lang} \u2014 sudo authentication failed. {out}\n"
+                        "Do NOT blindly retry. Root access is needed; tell the user.")
             if rc == 0:
                 return (f"RAN that {lang} \u2014 SUCCEEDED (exit 0). Real output:\n{out[:6000]}\n"
                         "Check the output is actually what you needed before moving on.")
@@ -1856,13 +2430,17 @@ class ChuckWindow(Adw.ApplicationWindow):
                     if not rows:
                         self._sys_note("No videos found.", "danger")
                     else:
-                        for (title, url) in rows:
+                        # video_search returns (title, url, snippet) — the same
+                        # 3-tuple shape as web_search. Unpacking two here meant
+                        # every ```videos``` block died with a ValueError before
+                        # a single card was drawn.
+                        for (title, url, _snip) in rows:
                             self._video_card(title, url)
                 return False
             GLib.idle_add(show)
             if not rows:
                 return f"[videos '{query}': nothing found]"
-            listing = "; ".join(f"{t} {u}" for t, u in rows[:6])
+            listing = "; ".join(f"{t} {u}" for t, u, _s in rows[:6])
             return f"[videos '{query}': showed {len(rows)} to the user \u2014 {listing}]"
         self._tool_thread(work, f"video search '{query}'")
 
@@ -2009,9 +2587,16 @@ class ChuckWindow(Adw.ApplicationWindow):
                 self._busy(False)
                 if clean:
                     self._sys_note("\u2713 " + rep.split("\n")[0].lstrip("\u2713 "), "ok")
+                    # Advisory findings no longer block the Run button, so they
+                    # have to be VISIBLE — otherwise demoting them would just be
+                    # hiding them. The user sees them next to the card.
+                    adv = (res or {}).get("advisory") or []
+                    for a in adv[:4]:
+                        self._sys_note("\u26a0 " + a, "danger")
                     if run_after:
                         self._code_card(lang, body)
-                    self._tool_done(f"[verify {lang}: clean]")
+                    self._tool_done(f"[verify {lang}: clean]" +
+                                    (" advisories: " + "; ".join(adv[:4]) if adv else ""))
                 else:
                     self._sys_note("\u26a0 verification found issues \u2014 fixing", "danger")
                     if not run_after:
@@ -2422,10 +3007,20 @@ class ChuckWindow(Adw.ApplicationWindow):
                              re.DOTALL | re.IGNORECASE):
             checks.append((m.group(1).strip().lower(), m.group(2)))
         checks = checks[:CAP]
-        codes = []                              # (lang, body) code to run
+        # Runnable code/shell blocks, in the order they appear in the reply.
+        # Collecting per-language and concatenating would order them by language
+        # priority instead — so a shell step written FIRST could be dropped in
+        # favour of a python step written later. Capture each block's position
+        # and sort by it, so "the first runnable thing" is the first one written.
+        code_hits = []
         for lang in ("python", "py", "node", "javascript", "js", "bash", "sh"):
-            for body in grab(lang)[:CAP]:
-                codes.append((lang, body))
+            for m in re.finditer(r"```" + lang + r"(?![A-Za-z])[ \t]*\n?(.*?)```",
+                                 text, re.DOTALL):
+                cbody = m.group(1).strip()
+                if cbody:
+                    code_hits.append((m.start(), lang, cbody))
+        code_hits.sort(key=lambda t: t[0])
+        codes = [(lang, body) for _pos, lang, body in code_hits]   # (lang, body)
         # ONE runnable thing per reply. A wall of ten cards is unusable — the
         # user can't run ten commands at once, and each one's output changes
         # what the next should be. He proposes a step, sees the result, then
@@ -2447,7 +3042,26 @@ class ChuckWindow(Adw.ApplicationWindow):
         # Chuck's own narration is what shows in chat — never swallow it.
         self._set_bot_text(disp or ("Working on it\u2026" if acting else "Done."), rich=True)
 
-        # skills: save any new smart files, then offer run cards
+        # ── ONE owner for the tool counter ───────────────────────────────────
+        # Reset FIRST, then count the whole turn, then dispatch. Two bugs lived
+        # in the old ordering:
+        #   * the reset sat BELOW the skill loops, so a ```runskill``` card that
+        #     had already incremented the counter got it zeroed underneath it,
+        #     along with its "waiting for the user to confirm" feedback;
+        #   * counting one-at-a-time inside the dispatch loop meant any tool
+        #     that finishes SYNCHRONOUSLY (_do_read on a project file or an
+        #     image, _do_runtests with no project) dropped the counter to zero
+        #     mid-loop and fired _continue_or_finish while later tools were
+        #     still queued — two model round-trips, two "final" answers.
+        # _dispatching additionally holds the turn open for the duration of the
+        # dispatch block, so a synchronous _tool_done can never end it early.
+        self._pending_tools = 0
+        self._tool_feedback = []
+        self._loop_web = (searches, fetches) if (searches or fetches) else None
+        self._dispatching = True
+
+        # skills: save any new smart files, then offer run cards. These go
+        # through _command_card, which counts itself — hence: after the reset.
         for blk in skill_blocks:
             self._save_skill(blk)
         for name in runskills:
@@ -2468,9 +3082,10 @@ class ChuckWindow(Adw.ApplicationWindow):
         # either feed problems back for Chuck to fix, or show an approve-to-run
         # card. This moves correctness into the scaffolding — less pressure on
         # the model to be perfect first try.
-        self._pending_tools = 0
-        self._tool_feedback = []
-        self._loop_web = (searches, fetches) if (searches or fetches) else None
+        self._pending_tools += (
+            (1 if runtests else 0) + len(checks) + len(images)
+            + len(vid_searches) + (1 if junk else 0) + len(reads)
+            + (len(codes) if _codecheck else 0))
 
         for nm in projects:
             self._do_project(nm.strip())
@@ -2481,12 +3096,10 @@ class ChuckWindow(Adw.ApplicationWindow):
         if trees:
             self._do_tree()
         if runtests:
-            self._pending_tools += 1
             self._do_runtests()
         if packages:
             self._do_package()
         for lang, body in checks:
-            self._pending_tools += 1
             self._do_check(lang, body.strip(), run_after=False)
         if dropped_extra:
             self._sys_note(f"showing the first step only ({dropped_extra} more held back)", "dim")
@@ -2495,27 +3108,23 @@ class ChuckWindow(Adw.ApplicationWindow):
                 "Give ONE command, wait for its real output, then give the next.]")
         for lang, body in codes:
             if _codecheck:
-                self._pending_tools += 1
                 self._do_check(lang, body.strip(), run_after=True)
             else:
                 self._code_card(lang, body.strip())
 
         for q in images:
-            self._pending_tools += 1
             self._do_images(q)
         for q in vid_searches:
-            self._pending_tools += 1
             self._do_video_search(q)
         if junk:
-            self._pending_tools += 1
             self._do_junk()
         for path in reads:
-            self._pending_tools += 1
             self._do_read(path.strip())
         for u in videos:                     # fire-and-forget download; not gated
             self._do_video(u)
 
-        # If nothing async is outstanding, decide the loop now.
+        # Dispatch is over: release the guard and decide the loop exactly once.
+        self._dispatching = False
         if self._pending_tools == 0:
             self._continue_or_finish(disp)
         return False
@@ -2525,10 +3134,13 @@ class ChuckWindow(Adw.ApplicationWindow):
         if self._cancelled:
             return
         self._note_progress()
+        self._run_budget = 0            # no command is holding the watchdog open
         if feedback_text:
             self._tool_feedback.append(feedback_text)
         self._pending_tools = max(0, self._pending_tools - 1)
-        if self._pending_tools == 0:
+        # While _finalise is still handing out work, "zero outstanding" only
+        # means "nothing outstanding YET" — the turn is not over.
+        if self._pending_tools == 0 and not getattr(self, "_dispatching", False):
             self._continue_or_finish(self._bot_text and
                                      re.sub(r"```.*?```", "", self._bot_text, flags=re.DOTALL).strip())
 

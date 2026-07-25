@@ -36,7 +36,10 @@ if command -v pacman >/dev/null; then
   if [ "$SESS" = "wayland" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then PKGS="$PKGS grim"; else PKGS="$PKGS scrot"; fi
   case "$DE" in *KDE*|*kde*|*plasma*|*Plasma*) PKGS="$PKGS spectacle" ;; esac
   # shellcheck disable=SC2086
-  sudo pacman -Sy --needed --noconfirm $PKGS || die "pacman install failed"
+  # -Syu, never -Sy: a bare -Sy installs against a freshly-synced database
+  # without upgrading, which is the partial-upgrade footgun the app itself
+  # rewrites away. The installer must not do what the app forbids.
+  sudo pacman -Syu --needed --noconfirm $PKGS || die "pacman install failed"
   sudo pkgfile --update 2>/dev/null || true
 elif command -v apt-get >/dev/null; then
   sudo apt-get update

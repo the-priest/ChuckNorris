@@ -20,6 +20,7 @@ Design (Basilisk memory.py lineage, stdlib-only):
 import re
 import json
 import time
+import threading
 from pathlib import Path
 
 MEM_DIR = Path.home() / ".local" / "share" / "chucknorris" / "memory"
@@ -42,6 +43,12 @@ def _tokens(text):
             if w not in _STOP and len(w) > 2}
 
 
+# recall() rewrites the whole store every turn (to bump hit counts) while
+# remember() may be rewriting it from another thread. Both are full-file
+# replacements, so an interleave loses one side's write entirely.
+_LOCK = threading.RLock()
+
+
 def _load():
     out = []
     if FACTS.exists():
@@ -62,6 +69,20 @@ def _save_all(facts):
     tmp.replace(FACTS)
 
 
+_ID_SEQ = [0]
+
+
+def _new_id(existing):
+    """A unique id. int(time.time()*1000) % 10**9 wraps every ~11.6 days, and
+    recall() bumps hit counts by id — a collision credited the wrong fact."""
+    used = {f.get("id") for f in existing}
+    while True:
+        _ID_SEQ[0] += 1
+        cand = (int(time.time() * 1000) + _ID_SEQ[0]) % 10 ** 9
+        if cand not in used:
+            return cand
+
+
 def _norm(text):
     return re.sub(r"\s+", " ", (text or "").strip())
 
@@ -73,6 +94,11 @@ def remember(text, kind="fact", weight=1.0):
         return False, "nothing to remember"
     if len(text) > 400:
         text = text[:400]
+    with _LOCK:
+        return _remember_locked(text, kind, weight)
+
+
+def _remember_locked(text, kind, weight):
     facts = _load()
     ntok = _tokens(text)
     for f in facts:
@@ -85,7 +111,7 @@ def remember(text, kind="fact", weight=1.0):
             f["ts"] = time.time(); f["weight"] = max(f.get("weight", 1.0), weight)
             _save_all(facts)
             return True, "already knew that (refreshed)"
-    facts.append({"id": int(time.time() * 1000) % 10**9, "text": text,
+    facts.append({"id": _new_id(facts), "text": text,
                   "kind": "core" if kind == "core" else "fact",
                   "weight": float(weight), "ts": time.time(), "hits": 0})
     # prune if over cap: drop lowest weight*recency, keep all core
@@ -101,6 +127,11 @@ def remember(text, kind="fact", weight=1.0):
 
 def forget(query):
     """Remove facts matching query (substring or strong keyword overlap)."""
+    with _LOCK:
+        return _forget_locked(query)
+
+
+def _forget_locked(query):
     facts = _load()
     if not facts:
         return False, "nothing stored"
@@ -125,9 +156,10 @@ def recall(context_text):
 
     This is what gets injected — deliberately tiny. Never returns the whole store.
     """
-    facts = _load()
-    if not facts:
-        return []
+    with _LOCK:
+        facts = _load()
+        if not facts:
+            return []
     ctok = _tokens(context_text)
     core = [f for f in facts if f["kind"] == "core"][:_MAX_CORE]
     scored = []
@@ -143,10 +175,12 @@ def recall(context_text):
     # bump hit counts for recalled facts (so useful ones survive pruning)
     if picked:
         ids = {f["id"] for f in picked}
-        for f in facts:
-            if f["id"] in ids:
-                f["hits"] = f.get("hits", 0) + 1
-        _save_all(facts)
+        with _LOCK:
+            fresh = _load()                 # re-read: another thread may have written
+            for f in fresh:
+                if f["id"] in ids:
+                    f["hits"] = f.get("hits", 0) + 1
+            _save_all(fresh)
     # de-dup while preserving order
     seen, out = set(), []
     for f in picked:

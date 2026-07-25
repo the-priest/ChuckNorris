@@ -8,7 +8,7 @@ import urllib.request
 from pathlib import Path
 
 APP_ID = "org.thepriest.chucknorris"
-VERSION = "12.0.0"
+VERSION = "12.0.1"
 
 DEFAULT_MODEL = "deepseek-ai/DeepSeek-V4-Flash"
 DEFAULT_VISION = "Qwen/Qwen2.5-VL-32B-Instruct"

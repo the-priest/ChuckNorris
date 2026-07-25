@@ -14,6 +14,7 @@ import os
 import re
 import json
 import time
+import shlex
 from pathlib import Path
 
 SKILLS_DIR = Path.home() / ".local" / "share" / "chucknorris" / "skills"
@@ -67,6 +68,16 @@ def skill_write(name, lang, body, description=""):
         os.chmod(bpath, 0o755)
     except Exception:
         pass
+    # Drop a stale body left by a previous save in the OTHER language, so
+    # skill_run_cmd (which prefers .py) can't launch the superseded script.
+    for other in set(_LANG_EXT.values()) - {_LANG_EXT[lang]}:
+        stale = SKILLS_DIR / (slug + "." + other)
+        if stale.exists():
+            try:
+                ts2 = time.strftime("%Y%m%d-%H%M%S")
+                stale.rename(ARCHIVE_DIR / f"{slug}.{ts2}.stale.{other}")
+            except Exception:
+                pass
     meta = {"name": slug, "lang": lang, "description": description.strip()[:200],
             "file": bpath.name, "created": time.time()}
     _meta_path(slug).write_text(json.dumps(meta, indent=2))
@@ -74,14 +85,17 @@ def skill_write(name, lang, body, description=""):
 
 
 def skill_run_cmd(name):
-    """The shell command that runs a saved skill (for an approve-to-run card)."""
+    """The shell command that runs a saved skill (for an approve-to-run card).
+
+    The path is shell-quoted: it is interpolated into a command line that bash
+    will parse, and $HOME can contain a space.
+    """
     slug = _slug(name)
     for ext in ("py", "sh"):
         p = SKILLS_DIR / (slug + "." + ext)
         if p.exists():
-            if ext == "py":
-                return f"python3 {p}"
-            return f"bash {p}"
+            q = shlex.quote(str(p))
+            return f"python3 {q}" if ext == "py" else f"bash {q}"
     return None
 
 

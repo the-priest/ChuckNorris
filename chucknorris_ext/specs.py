@@ -18,7 +18,7 @@ _GROUPS = {
         "ARCH/CACHYOS PLAYBOOK:\n"
         "- Update: `sudo pacman -Syu` (never -Sy alone → partial-upgrade breakage). "
         "AUR: paru/yay -Sua. CachyOS mirror refresh: `sudo cachyos-rate-mirrors`.\n"
-        "- Keyring/PGP errors: `sudo pacman -Sy archlinux-keyring cachyos-keyring` "
+        "- Keyring/PGP errors: `sudo pacman -Syu archlinux-keyring cachyos-keyring` "
         "then -Su; if still broken `sudo pacman-key --init && sudo pacman-key --populate`.\n"
         "- 'invalid or corrupted package': clear cache `sudo paccache -rk1` / remove the "
         "bad .pkg from /var/cache/pacman/pkg then retry.\n"

@@ -26,10 +26,18 @@ def chat_files(chats_dir=None):
                 continue
             if not _CHAT_NAME.match(p.name):
                 continue
-            out.append(p)
+            try:
+                out.append((p.stat().st_mtime, p))
+            except OSError:
+                continue          # vanished between iterdir() and stat()
+        # Sorting INSIDE the guard, on mtimes already captured: the retention
+        # sweep runs on a timer and can unlink a file between the listing and
+        # the sort, which used to raise FileNotFoundError straight into the
+        # GTK callback that rebuilds the sidebar.
+        out.sort(key=lambda t: t[0], reverse=True)
     except Exception:
         return []
-    return sorted(out, key=lambda p: p.stat().st_mtime, reverse=True)
+    return [p for _mtime, p in out]
 
 
 def purge_old_chats(ttl_hours=CHAT_TTL_HOURS, chats_dir=None):

@@ -170,35 +170,62 @@ def read_file(project, rel, limit=60000):
 
 
 def test_command(project):
-    """The right way to test THIS project, discovered rather than assumed."""
+    """The right way to test THIS project, discovered rather than assumed.
+
+    Returns a LIST OF COMMANDS — every one must pass. Returning a single
+    ["python3", "<first test file>"] meant a project with ten test files ran one
+    of them and reported "tests passed", which is exactly the false green this
+    whole pipeline exists to prevent.
+    """
     root = Path(project)
     if (root / "run_tests.sh").is_file():
-        return ["bash", "run_tests.sh"]
+        return [["bash", "run_tests.sh"]]
     tests = sorted(root.glob("tests/test_*.py")) + sorted(root.glob("test_*.py"))
     if tests:
         if shutil.which("pytest"):
-            return ["pytest", "-q"]
-        return ["python3", str(tests[0].relative_to(root))]
+            return [["pytest", "-q"]]
+        return [["python3", str(t.relative_to(root))] for t in tests]
     if (root / "package.json").is_file():
-        return ["npm", "test", "--silent"]
+        return [["npm", "test", "--silent"]]
     if (root / "Makefile").is_file():
-        return ["make", "test"]
+        return [["make", "test"]]
     return None
 
 
+def test_command_str(project):
+    """The discovered test command(s) as one readable line (for the manifest)."""
+    cmds = test_command(project)
+    if not cmds:
+        return None
+    return " && ".join(" ".join(c) for c in cmds)
+
+
 def run_tests(project, timeout=300):
-    """Run the project's own tests. Returns (rc, output). rc=-1 means none found."""
+    """Run the project's own tests. Returns (rc, output). rc=-1 means none found.
+
+    Every discovered command runs; the first failure is returned, but the output
+    of all of them is kept so the model sees the whole picture.
+    """
     root = Path(project)
-    cmd = test_command(root)
-    if not cmd:
+    cmds = test_command(root)
+    if not cmds:
         return -1, "no tests found (add tests/test_*.py or run_tests.sh)"
-    try:
-        p = subprocess.run(cmd, cwd=str(root), capture_output=True, text=True, timeout=timeout)
-        return p.returncode, ((p.stdout or "") + (p.stderr or ""))[-8000:]
-    except subprocess.TimeoutExpired:
-        return 124, f"tests timed out after {timeout}s"
-    except Exception as ex:
-        return 1, f"couldn't run tests: {ex}"
+    chunks, worst = [], 0
+    budget = max(30, timeout // max(1, len(cmds)))
+    for cmd in cmds:
+        label = " ".join(cmd)
+        try:
+            p = subprocess.run(cmd, cwd=str(root), capture_output=True,
+                               text=True, timeout=budget)
+            rc, out = p.returncode, (p.stdout or "") + (p.stderr or "")
+        except subprocess.TimeoutExpired:
+            rc, out = 124, f"timed out after {budget}s"
+        except Exception as ex:
+            rc, out = 1, f"couldn't run: {ex}"
+        chunks.append(f"$ {label}  -> exit {rc}\n{out}")
+        if rc != 0 and worst == 0:
+            worst = rc
+    return worst, "\n\n".join(chunks)[-8000:]
 
 
 def package(project, note=None):
@@ -237,6 +264,6 @@ def manifest(project):
             if f.endswith(".pyc"):
                 continue
             files.append(str((Path(dirpath) / f).relative_to(root)))
-    cmd = test_command(root)
+    cmd = test_command_str(root)
     return json.dumps({"project": root.name, "files": sorted(files),
-                       "test_command": " ".join(cmd) if cmd else None}, indent=2)
+                       "test_command": cmd}, indent=2)

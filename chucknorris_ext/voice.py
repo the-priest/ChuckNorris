@@ -5,6 +5,7 @@ Part of Chuck Norris — split out of the original single file.
 import os
 import re
 import shutil
+import itertools
 import subprocess
 import threading
 import time
@@ -116,13 +117,19 @@ def tts_chunks(text, size=_TTS_CHUNK):
     return [c for c in chunks if c]
 
 
+_SYNTH_SEQ = itertools.count()
+
+
 def _synth(chunk, gen, s):
     """Render one chunk to a wav. Piper preferred, espeak-ng as fallback.
     Returns a path, or None if both engines failed for this chunk."""
     engine = (s.get("voice_engine") or "auto").lower()
     # generous but bounded: scales with length so a long chunk isn't cut short
     tmo = max(20, min(90, 8 + len(chunk) // 8))
-    out = str(CONFIG_DIR / f".say-{gen}-{abs(hash(chunk)) % 10 ** 8}.wav")
+    # A monotonic counter, NOT hash(chunk): a reply that repeats a sentence
+    # produced two chunks with the same filename, and the consumer's unlink of
+    # the first silently deleted the second out from under the producer.
+    out = str(CONFIG_DIR / f".say-{gen}-{next(_SYNTH_SEQ)}.wav")
     model = _find_piper_model()
     if engine in ("auto", "piper") and shutil.which("piper") and model:
         try:
@@ -163,7 +170,9 @@ def speak(text, settings=None):
         return
     cap = int(s.get("voice_max_chars", 20000) or 20000)
     clean = clean[:cap]
-    stop_speaking()
+    # ONE bump, under the lock: it both cancels whatever is speaking and claims
+    # this utterance's generation. Bumping outside the lock as well meant two
+    # concurrent speak() calls could interleave and each think it was current.
     with _TTS_START:
         _TTS_GEN[0] += 1
         gen = _TTS_GEN[0]
@@ -187,7 +196,26 @@ def speak(text, settings=None):
                         except Exception:
                             pass
                     break
-                pipe.put(wav)           # None = this chunk failed, keep going
+                # Bounded, cancellable hand-off. A plain blocking put would hang
+                # this thread forever if speech is cancelled while the queue is
+                # full (maxsize=1) — the consumer exits and never drains it, so
+                # the put never returns and the thread leaks. Retry on a short
+                # timeout, re-checking the generation each time, and bail if a
+                # newer utterance has superseded this one.  (None = failed chunk,
+                # still enqueued so the consumer skips it and keeps going.)
+                while gen == _TTS_GEN[0]:
+                    try:
+                        pipe.put(wav, timeout=0.2)
+                        break
+                    except _q.Full:
+                        continue
+                else:
+                    if wav:
+                        try:
+                            os.unlink(wav)
+                        except Exception:
+                            pass
+                    break
             try:
                 pipe.put(_TTS_END, timeout=5)
             except Exception:

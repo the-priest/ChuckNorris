@@ -149,7 +149,12 @@ def web_search(query, n=8):
 
 
 def video_search(query, n=6):
-    """Find actual videos (title, page-url, thumbnail) via SearXNG video category."""
+    """Find actual videos via the SearXNG video category.
+
+    Returns 3-tuples (title, page_url, snippet) — the SAME shape as
+    web_search(), deliberately, so callers can't get the arity wrong by
+    guessing. Callers that only want two fields must still unpack three.
+    """
     rows = _searx_search(query, n, categories="videos")
     return [(t, u, s) for (t, u, s) in rows][:n]
 
@@ -203,6 +208,9 @@ def image_search(query, n=6):
         return []
 
 
+MAX_IMAGE_BYTES = 12_000_000        # nothing legitimate in a chat bubble is bigger
+
+
 def download_image(url, timeout=25):
     try:
         hdr = {"User-Agent": UA, "Referer": "https://duckduckgo.com/", "Accept": "image/*"}
@@ -210,8 +218,10 @@ def download_image(url, timeout=25):
         ext = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif",
                "image/webp": ".webp", "image/avif": ".avif"}.get(
                    resp.headers.get("Content-Type", "").split(";")[0].strip(), ".img")
-        raw = resp.read()
-        if not raw:
+        # Bounded read. Content-Length is a hint from the server, not a promise,
+        # so the cap is enforced on what actually arrives.
+        raw = resp.read(MAX_IMAGE_BYTES + 1)
+        if not raw or len(raw) > MAX_IMAGE_BYTES:
             return None
         tmp = CONFIG_DIR / (".img_" + str(abs(hash(url)) % 10**8) + ext)
         tmp.write_bytes(raw)

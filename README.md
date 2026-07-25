@@ -6,11 +6,11 @@
 
 ### The Arch / CachyOS grandmaster that lives on your desktop. You ask — he acts. No modes, no buttons, no excuses. A tribute.
 
-![version](https://img.shields.io/badge/version-12.0.0-b6892f?style=for-the-badge&labelColor=0b0b0d)
+![version](https://img.shields.io/badge/version-12.0.1-b6892f?style=for-the-badge&labelColor=0b0b0d)
 ![tribute](https://img.shields.io/badge/1940-2026-b6892f?style=for-the-badge&labelColor=0b0b0d)
 ![agentic](https://img.shields.io/badge/agentic-decides%20%26%20acts-b6892f?style=for-the-badge&labelColor=0b0b0d)
 ![distro](https://img.shields.io/badge/Arch%20%7C%20CachyOS-first--class-b6892f?style=for-the-badge&labelColor=0b0b0d)
-![tests](https://img.shields.io/badge/tests-12%20suites%20shipped-b6892f?style=for-the-badge&labelColor=0b0b0d)
+![tests](https://img.shields.io/badge/tests-15%20suites%20shipped-b6892f?style=for-the-badge&labelColor=0b0b0d)
 
 </div>
 
