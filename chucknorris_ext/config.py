@@ -5,11 +5,14 @@ to look when you want to know where something lives or what a limit is.
 import os
 import json
 
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
+from . import net as _net
+
 APP_ID = "org.thepriest.chucknorris"
-VERSION = "12.0.3"
+VERSION = "12.1.0"
 
 DEFAULT_MODEL = "deepseek-ai/DeepSeek-V4-Flash"
 DEFAULT_VISION = "Qwen/Qwen2.5-VL-32B-Instruct"
@@ -118,21 +121,92 @@ SETTINGS_DATA = load_settings()
 _ALLOWED_SCHEMES = ("http", "https")
 
 
-def _opener():
-    px = (SETTINGS_DATA.get("proxy") or "").strip()
-    if px:
-        return urllib.request.build_opener(
-            urllib.request.ProxyHandler({"http": px, "https": px}))
-    return urllib.request.build_opener()
+def proxy():
+    """The configured proxy, or "". One reader, so nothing can disagree."""
+    return (SETTINGS_DATA.get("proxy") or "").strip()
 
 
-def get(url, data=None, timeout=20, headers=None):
+def proxy_covers_api():
+    """Whether the MODEL API goes through the proxy too.
+
+    Defaults to True whenever a proxy is set, and that default is the honest
+    one: someone who points this at Mullvad and then watches their prompts
+    leave over the bare connection has been misled by their own settings panel.
+    Page fetches were always proxied; the API call was not, which meant the
+    single most identifying stream of traffic the app produces was the one
+    thing the proxy never touched.
+    """
+    if not proxy():
+        return False
+    return bool(SETTINGS_DATA.get("proxy_api", True))
+
+
+def _cache_ttl():
+    try:
+        v = float(SETTINGS_DATA.get("web_cache_seconds", _net.CACHE_TTL))
+    except Exception:
+        return _net.CACHE_TTL
+    return max(0.0, min(600.0, v))
+
+
+def get(url, data=None, timeout=20, headers=None, cache=False, max_bytes=None):
     """Open a URL. http/https only — urllib also speaks file: and ftp:, and a
     `file:///home/you/.ssh/id_rsa` fetch would quietly read a local secret into
-    the conversation. Checked here so every caller inherits the restriction."""
-    import urllib.parse
+    the conversation. Checked here so every caller inherits the restriction.
+
+    Connections are pooled and kept alive (see net.py), so the second request to
+    a host in the same turn skips DNS and the TLS handshake entirely. Pass
+    cache=True for a plain page read: identical GETs inside the cache window are
+    served from memory instead of the network, which is what makes a re-read of
+    the same source during a multi-hop research turn free.
+    """
     scheme = urllib.parse.urlparse(url).scheme.lower()
     if scheme not in _ALLOWED_SCHEMES:
         raise ValueError(f"blocked URL scheme {scheme!r} (only http/https allowed)")
-    req = urllib.request.Request(url, data=data, headers=headers or {"User-Agent": UA})
-    return _opener().open(req, timeout=timeout)
+    return _net.request(url, data=data, timeout=timeout,
+                        headers=headers or {"User-Agent": UA},
+                        proxy=proxy(),
+                        cache_ttl=_cache_ttl() if cache else 0.0,
+                        max_bytes=max_bytes)
+
+
+def api_opener():
+    """A urllib opener for the MODEL API, or None to use the plain default.
+
+    Returning None in the ordinary case is deliberate: the default path stays
+    exactly `urllib.request.urlopen`, which is what the startup tests drive and
+    what has always been in use. The opener only appears when the user has
+    actually asked for the API to be proxied.
+    """
+    if not proxy_covers_api():
+        return None
+    px = proxy()
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler({"http": px, "https": px}))
+
+
+def api_connect_host(base_url):
+    """(host, port) worth warming before the first request.
+
+    With the API proxied, the useful handshake to pre-open is the one to the
+    PROXY — warming the API's own host would be both useless and, on a privacy
+    setup, a direct connection to the one host the user asked not to contact
+    directly.
+    """
+    if proxy_covers_api():
+        p = urllib.parse.urlsplit(proxy() if "//" in proxy() else "//" + proxy())
+        return (p.hostname, p.port or 8080) if p.hostname else (None, None)
+    host = urllib.parse.urlparse(base_url).hostname
+    return (host, 443) if host else (None, None)
+
+
+def network_settings_changed():
+    """Drop pooled sockets and cached bodies after a settings change.
+
+    A connection opened before the proxy was switched on is still a direct
+    connection; reusing it would quietly defeat the setting the user just
+    changed. Cheap to rebuild, so it is always dropped rather than reasoned
+    about.
+    """
+    _net.close_all()
+    _net.cache_clear()

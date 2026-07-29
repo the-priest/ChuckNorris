@@ -15,10 +15,16 @@ from .config import CONFIG_DIR, UA  # noqa: F401
 _SETTINGS = config.SETTINGS_DATA
 
 
-def _get(url, data=None, timeout=20, headers=None):
+def _get(url, data=None, timeout=20, headers=None, cache=False, max_bytes=None):
     """Single network entry point — delegates to config.get so the scheme
-    allowlist is enforced in exactly one place."""
-    return config.get(url, data=data, timeout=timeout, headers=headers)
+    allowlist is enforced (and connection pooling applied) in exactly one place.
+
+    cache=True is for idempotent reads of a page's text. max_bytes stops a
+    hostile or merely enormous response from being pulled entirely into RAM
+    before anyone looks at its length.
+    """
+    return config.get(url, data=data, timeout=timeout, headers=headers,
+                      cache=cache, max_bytes=max_bytes)
 
 
 # ── web + images ────────────────────────────────────────────────────────────
@@ -73,7 +79,7 @@ def _is_image_path(p):
 def _searx_one(host, query, n, categories, timeout):
     url = (host.rstrip("/") + "/search?format=json&safesearch=0&categories=" + categories +
            "&q=" + urllib.parse.quote(query))
-    js = _get(url, timeout=timeout,
+    js = _get(url, timeout=timeout, cache=True, max_bytes=_MAX_SEARCH_BYTES,
               headers={"User-Agent": UA, "Accept": "application/json"}
               ).read().decode("utf-8", "ignore")
     out = []
@@ -159,6 +165,9 @@ def video_search(query, n=6):
     return [(t, u, s) for (t, u, s) in rows][:n]
 
 
+MAX_PAGE_BYTES = 3_000_000       # a readable article is never bigger than this
+_MAX_SEARCH_BYTES = 4_000_000    # a JSON result page, generously
+
 _ARTICLE_TAGS = re.compile(r"(?is)<(script|style|nav|footer|header|form|aside|noscript|svg).*?</\1>")
 _BLOCK = re.compile(r"(?is)</(p|div|li|h[1-6]|br|tr|section|article)>")
 
@@ -168,9 +177,15 @@ def web_fetch(url, limit=4000, timeout=6):
     Returns the body text only; titles for the activity feed come from the
     search results, so no extra request is made."""
     try:
-        raw = _get(url, timeout=timeout).read().decode("utf-8", "ignore")
+        raw = _get(url, timeout=timeout, cache=True,
+                   max_bytes=MAX_PAGE_BYTES).read().decode("utf-8", "ignore")
     except Exception:
         return ""
+    if len(raw) > MAX_PAGE_BYTES:
+        # A 40MB "page" is a download, not an article. Truncating before the
+        # regex passes matters: _ARTICLE_TAGS over tens of megabytes is where a
+        # fetch stops being slow and starts looking like a hang.
+        raw = raw[:MAX_PAGE_BYTES]
     raw = _ARTICLE_TAGS.sub(" ", raw)
     # Prefer <article>/<main> if present — that's usually the real story.
     m = re.search(r"(?is)<article[^>]*>(.*?)</article>", raw) or \
@@ -214,7 +229,8 @@ MAX_IMAGE_BYTES = 12_000_000        # nothing legitimate in a chat bubble is big
 def download_image(url, timeout=25):
     try:
         hdr = {"User-Agent": UA, "Referer": "https://duckduckgo.com/", "Accept": "image/*"}
-        resp = _get(url, timeout=timeout, headers=hdr)
+        resp = _get(url, timeout=timeout, headers=hdr,
+                    max_bytes=MAX_IMAGE_BYTES)
         ext = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif",
                "image/webp": ".webp", "image/avif": ".avif"}.get(
                    resp.headers.get("Content-Type", "").split(";")[0].strip(), ".img")

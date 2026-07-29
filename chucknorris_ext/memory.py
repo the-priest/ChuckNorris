@@ -46,6 +46,8 @@ _MAX_CORE = 4            # always-on core facts cap
 _COVERAGE_FLOOR = 0.34   # a third of the question's content words must match
 _RARE_TERM_SCORE = 1.2   # ...unless a single genuinely rare term matched
 _MAX_FACTS = 400         # hard cap on stored facts (prune weakest beyond this)
+_HIT_FLUSH_SECS = 120    # how often recall() may write hit counts back to disk
+_HIT_FLUSH = [0.0]
 
 
 def _tokens(text):
@@ -59,17 +61,40 @@ def _tokens(text):
 _LOCK = threading.RLock()
 
 
+# The store is re-read, re-parsed and re-scored on EVERY turn. It is small, but
+# "small" work done unconditionally on the critical path before the model is
+# even called is still latency the user sits through. Cache it against the
+# file's mtime+size so an unchanged store is parsed exactly once per process,
+# and derive the expensive bits (per-fact stems, IDF) alongside it.
+_CACHE = {"sig": None, "facts": [], "stems": {}, "idf": None}
+
+
+def _sig():
+    try:
+        st = FACTS.stat()
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+
 def _load():
+    sig = _sig()
+    if sig is not None and _CACHE["sig"] == sig:
+        return _CACHE["facts"]
     out = []
     if FACTS.exists():
-        for line in FACTS.read_text().splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                out.append(json.loads(line))
-            except Exception:
-                continue
+        try:
+            for line in FACTS.read_text().splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    out.append(json.loads(line))
+                except Exception:
+                    continue
+        except OSError:
+            return _CACHE["facts"] if _CACHE["sig"] else []
+    _CACHE.update({"sig": sig, "facts": out, "stems": {}, "idf": None})
     return out
 
 
@@ -77,6 +102,21 @@ def _save_all(facts):
     tmp = FACTS.with_suffix(".tmp")
     tmp.write_text("\n".join(json.dumps(f, ensure_ascii=False) for f in facts))
     tmp.replace(FACTS)
+    # Re-point the cache at what we just wrote rather than invalidating it: the
+    # next recall() would otherwise re-read and re-parse a file this process
+    # already holds in memory.
+    _CACHE.update({"sig": _sig(), "facts": facts, "stems": {}, "idf": None})
+
+
+def _fact_stems(f):
+    """Stems for one fact, memoised by id. Recomputed for every fact on every
+    turn otherwise — twice, once for IDF and once for scoring."""
+    key = f.get("id")
+    hit = _CACHE["stems"].get(key)
+    if hit is None:
+        hit = set(_stems(f["text"]))
+        _CACHE["stems"][key] = hit
+    return hit
 
 
 _ID_SEQ = [0]
@@ -169,12 +209,16 @@ def _idf(facts):
     'zfs'. Common words are down-weighted, distinctive ones dominate. No model,
     no server — it is arithmetic over a few hundred short strings.
     """
+    if _CACHE["idf"] is not None:
+        return _CACHE["idf"]
     n = max(1, len(facts))
     df = {}
     for f in facts:
-        for t in set(_stems(f["text"])):
+        for t in _fact_stems(f):
             df[t] = df.get(t, 0) + 1
-    return {t: math.log(1 + n / (1 + c)) for t, c in df.items()}, n
+    out = ({t: math.log(1 + n / (1 + c)) for t, c in df.items()}, n)
+    _CACHE["idf"] = out
+    return out
 
 
 def _stems(text):
@@ -201,6 +245,66 @@ def _stems(text):
     return out
 
 
+# ── category → instance bridging ────────────────────────────────────────────
+# The gap this closes: people ask by CATEGORY and facts are stored as
+# INSTANCES. "what distro am I on" shares not one token with "User runs CachyOS
+# on a ThinkPad X395", so the store held the answer and recalled nothing — the
+# single most obvious question you can ask a memory, missed.
+#
+# This is a small hand-written map, not a thesaurus and not a model. It covers
+# the vocabulary this tool actually lives in: distros, hardware, the shell.
+# Matches through it are scored at HALF weight, so a real token match always
+# beats a bridged one and a bridge alone can never drag in a fact that a direct
+# match wouldn't have reached. Anything outside the map behaves exactly as
+# before — "what's the weather like" still recalls nothing at all.
+_RELATED_RAW = {
+    "distro": "cachyos arch linux endeavouros manjaro fedora debian ubuntu nixos",
+    "os": "cachyos arch linux distro kernel",
+    "laptop": "thinkpad x395 framework macbook notebook dell lenovo asus",
+    "machine": "laptop desktop thinkpad server box rig",
+    "computer": "laptop desktop thinkpad machine box",
+    "pc": "laptop desktop machine rig",
+    "gpu": "nvidia amdgpu radeon intel graphics driver dkms nouveau",
+    "graphics": "nvidia amdgpu radeon gpu driver",
+    "cpu": "ryzen intel amd processor core",
+    "network": "subnet ip vlan router wifi ethernet dns gateway lan",
+    "wifi": "wireless wlan ssid network",
+    "shell": "bash zsh fish terminal prompt",
+    "editor": "vim neovim nvim emacs helix nano vscode",
+    "browser": "firefox brave chromium librewolf",
+    "terminal": "kitty alacritty foot wezterm konsole shell",
+    "desktop": "kde plasma gnome hyprland sway i3 xfce wayland",
+    "package": "pacman paru yay aur repo",
+    "disk": "nvme ssd hdd btrfs ext4 zfs partition filesystem",
+    "filesystem": "btrfs ext4 zfs xfs disk partition",
+    "language": "python rust go bash javascript",
+    "handle": "username nickname github alias",
+    "repo": "github gitlab repository git",
+    "project": "repo tool app build",
+    "job": "work role employer",
+    "phone": "android pixel samsung iphone",
+    "vpn": "mullvad wireguard proxy tailscale",
+    "firewall": "iptables nftables ufw firewalld",
+}
+_RELATED = {}
+for _k, _v in _RELATED_RAW.items():
+    _ks = _stems(_k)
+    _vs = set(_stems(_v))
+    for _kk in _ks:
+        _RELATED.setdefault(_kk, set()).update(_vs)
+_BRIDGE_WEIGHT = 0.5     # a bridged match is worth half a real one
+
+
+def _bridge(cstem):
+    """Extra stems worth looking for, given what the user actually typed."""
+    out = set()
+    for t in cstem:
+        rel = _RELATED.get(t)
+        if rel:
+            out |= rel
+    return out - cstem
+
+
 def recall(context_text):
     """Return a short list of fact strings relevant to context_text, plus core.
 
@@ -219,25 +323,36 @@ def recall(context_text):
         if not facts:
             return []
     cstem = set(_stems(context_text))
+    bridged = _bridge(cstem)
     idf, _n = _idf(facts)
+    answerable = max(1, len([t for t in cstem if t in idf or t in _RELATED])
+                     or len(cstem))
     core = [f for f in facts if f["kind"] == "core"][:_MAX_CORE]
     now = time.time()
     scored = []
     for f in facts:
         if f["kind"] == "core":
             continue
-        ft = set(_stems(f["text"]))
+        ft = _fact_stems(f)
         shared = cstem & ft
-        if not shared:
+        soft = (bridged & ft) - shared
+        if not shared and not soft:
             continue
-        weighted = sum(idf.get(t, 0.5) for t in shared)
+        weighted = (sum(idf.get(t, 0.5) for t in shared)
+                    + _BRIDGE_WEIGHT * sum(idf.get(t, 0.5) for t in soft))
         # GATE on coverage, RANK by IDF. Gating on the IDF sum looked right but
         # collapses in a small store: with a handful of facts the maximum
         # possible idf is ~0.4, so a perfect single-word match scored under any
         # sensible floor and recalled nothing. Coverage — how much of the
         # question's content actually matched — is scale-free, and a lone but
         # genuinely rare term still gets in via the absolute escape hatch.
-        coverage = len(shared) / max(1, len(cstem))
+        # Coverage is measured against the ANSWERABLE part of the question,
+        # not its raw word count. "what language do I write in" carries one
+        # word the store could possibly speak to ("language") and one it could
+        # not ("write") — dividing by both halved the score of a perfectly good
+        # match and pushed it under the floor. A word that appears in no fact
+        # and bridges to nothing is not evidence of a miss; it is just a word.
+        coverage = (len(shared) + _BRIDGE_WEIGHT * len(soft)) / answerable
         if coverage < _COVERAGE_FLOOR and weighted < _RARE_TERM_SCORE:
             continue
         # normalise by the fact's own length so a rambling fact can't win on
@@ -252,15 +367,22 @@ def recall(context_text):
         scored.append((score, f))
     scored.sort(key=lambda x: x[0], reverse=True)
     picked = core + [f for _s, f in scored[:_MAX_INJECT]]
-    # bump hit counts for recalled facts (so useful ones survive pruning)
+    # Bump hit counts for recalled facts (so useful ones survive pruning) —
+    # in memory now, on disk at most every _HIT_FLUSH_SECS. Rewriting the whole
+    # store on every single turn just to increment a counter meant a full
+    # serialise + fsync + rename on the critical path of every message, for a
+    # number nothing reads until the store overflows 400 facts.
     if picked:
         ids = {f["id"] for f in picked}
         with _LOCK:
-            fresh = _load()                 # re-read: another thread may have written
+            fresh = _load()
             for f in fresh:
                 if f["id"] in ids:
                     f["hits"] = f.get("hits", 0) + 1
-            _save_all(fresh)
+            now = time.time()
+            if now - _HIT_FLUSH[0] >= _HIT_FLUSH_SECS:
+                _HIT_FLUSH[0] = now
+                _save_all(fresh)
     # de-dup while preserving order
     seen, out = set(), []
     for f in picked:
@@ -276,6 +398,17 @@ def memory_block(context_text):
         return ""
     return "What you remember about this user (use if relevant, don't force it):\n- " + \
            "\n- ".join(hits)
+
+
+def flush():
+    """Persist any in-memory hit counts. Called when the window closes so a
+    session's worth of counters isn't lost to the batching above."""
+    with _LOCK:
+        try:
+            _save_all(_load())
+            _HIT_FLUSH[0] = time.time()
+        except Exception:
+            pass
 
 
 def all_facts():

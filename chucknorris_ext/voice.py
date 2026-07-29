@@ -18,20 +18,46 @@ VOICE_DIR = config.VOICE_DIR
 _SETTINGS = config.SETTINGS_DATA
 
 # ── voice: natural Piper; espeak-ng fallback ────────────────────────────────
+_WHICH_CACHE = {}
+
+
+def _have(name):
+    """shutil.which(), memoised. Called per synthesis chunk and again per
+    playback — a long reply is dozens of chunks, so this was dozens of PATH
+    walks per spoken answer for an answer that cannot change at runtime."""
+    hit = _WHICH_CACHE.get(name)
+    if hit is None:
+        hit = shutil.which(name) or ""
+        _WHICH_CACHE[name] = hit
+    return hit or None
+
+
+_MODEL_CACHE = {"key": object(), "path": None}
+
+
 def _find_piper_model():
+    """The voice model to speak with. Cached against the configured path, so
+    the VOICE_DIR glob happens once rather than once per chunk — and still
+    re-resolves the moment the user points at a different model in Settings."""
     m = (_SETTINGS.get("piper_model") or "").strip()
+    if _MODEL_CACHE["key"] == m:
+        return _MODEL_CACHE["path"]
+    found = None
     if m and Path(m).exists():
-        return m
-    for f in sorted(VOICE_DIR.glob("*.onnx")):
-        return str(f)
-    return None
+        found = m
+    else:
+        for f in sorted(VOICE_DIR.glob("*.onnx")):
+            found = str(f)
+            break
+    _MODEL_CACHE.update({"key": m, "path": found})
+    return found
 
 
 def _play(path, gen=None):
     """Play a wav, abortable. Returns True if it played to the end."""
     for player in (["paplay", path], ["aplay", "-q", path],
                    ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", path]):
-        if not shutil.which(player[0]):
+        if not _have(player[0]):
             continue
         try:
             proc = subprocess.Popen(player, stdout=subprocess.DEVNULL,
@@ -131,7 +157,7 @@ def _synth(chunk, gen, s):
     # the first silently deleted the second out from under the producer.
     out = str(CONFIG_DIR / f".say-{gen}-{next(_SYNTH_SEQ)}.wav")
     model = _find_piper_model()
-    if engine in ("auto", "piper") and shutil.which("piper") and model:
+    if engine in ("auto", "piper") and _have("piper") and model:
         try:
             cmd = ["piper", "-m", model, "-f", out]
             ls = s.get("voice_speed")
@@ -147,7 +173,7 @@ def _synth(chunk, gen, s):
                 return out
         except Exception:
             pass
-    if engine in ("auto", "espeak") and shutil.which("espeak-ng"):
+    if engine in ("auto", "espeak") and _have("espeak-ng"):
         try:
             rate = int(float(s.get("voice_speed", 1.0)) * 150)
             pitch = int(s.get("voice_pitch", 28))
@@ -182,7 +208,13 @@ def speak(text, settings=None):
         if not chunks:
             return
         import queue as _q
-        pipe = _q.Queue(maxsize=1)      # synthesise one chunk ahead of playback
+        # Two chunks of lookahead, not one. With maxsize=1 the producer is
+        # blocked from starting chunk N+2 until chunk N has finished PLAYING,
+        # so every synthesis after the first is serialised behind real-time
+        # audio — and any chunk slower to render than the previous one is
+        # audible as a gap. One more slot costs a few hundred KB of wav and
+        # keeps the pipeline ahead of the speaker.
+        pipe = _q.Queue(maxsize=2)
 
         def producer():
             for ch in chunks:

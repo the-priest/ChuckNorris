@@ -1,5 +1,124 @@
 # Changelog
 
+## 12.1.0 — the gaps, and the handshakes
+
+Every item below was reproduced first and is locked shut by a named check in
+`tests/test_v13.py`. The 12.0.3 suite passed throughout — none of these were
+covered by it.
+
+### Things that were shipped broken
+
+- **The code verifier did nothing without `ruff`.** `_lint_python`'s stdlib
+  fallback called `compile()`, which only repeats the syntax check that already
+  ran a step earlier — so on a machine with no linter installed the entire lint
+  stage was a no-op that could never return a finding, and `x = undefined_name`
+  reached a Run button. The README's "no runtime dependency beyond the stdlib"
+  was true of the code and false of the guarantee. There is now a real stdlib
+  AST analyser behind it (undefined names, unused imports), deliberately
+  conservative: it flattens scopes rather than modelling them, and stands down
+  entirely on a star-import or a visible `exec`/`globals()`. It can under-report;
+  it is not allowed to false-positive, because a false finding withholds working
+  code and loops the model over nothing to fix — the md5 failure of 12.0.1 in a
+  different coat. 26 valid constructs are in the suite as proof.
+
+- **The evidence ledger could not be read.** `ledger.summary()` carried a
+  docstring promising a ` ```ledger ` request that did not exist anywhere — no
+  tool tag, no parser branch, no button. Every command since 12.0.3 was recorded
+  into a file nothing could display, and `verify()` was equally unreachable. A
+  record you cannot inspect is not evidence. There is now a ` ```ledger ` tool
+  and a Settings panel with Re-verify.
+
+- **The proxy did not cover the model API.** `Backend.stream` built its request
+  through `urllib.request.urlopen` directly, bypassing the opener where the
+  proxy lives. Page fetches, images and `yt-dlp` all went through the tunnel;
+  every prompt the user typed went out over the bare connection. That is exactly
+  backwards, and the settings panel said "Proxy for web, images and video"
+  without ever saying so. The API is now proxied by default whenever a proxy is
+  set, with an explicit opt-out, and warm-up targets the proxy rather than
+  opening a direct connection to the API host.
+
+- **The one-line installer had been fetching an incomplete app since 12.0.3.**
+  The curl path fetches a hand-written list of modules and `ledger.py` and
+  `compress.py` were never added to it — so every `curl | bash` install ran with
+  no evidence ledger and no context compression, while a git clone had both, and
+  nothing anywhere reported the difference. Both added; a suite check now
+  compares the list against what is actually on disk so it cannot drift again.
+
+- **Memory could not answer the most obvious question you can ask it.** Facts
+  are stored as instances ("User runs CachyOS on a ThinkPad X395") and people
+  ask by category ("what distro am I on"), which shares not one token with it —
+  so the store held the answer and recalled nothing. A small hand-written
+  category map now bridges the two at half weight, so a real token match always
+  beats a bridged one. Coverage is also measured against the *answerable* part
+  of a question: a word appearing in no fact and bridging to nothing was
+  diluting the score of the words that did match.
+
+### Speed
+
+Numbers are from the suite, old path against new.
+
+- **New `net.py`: connections are pooled and kept alive.** urllib has no
+  connection reuse, so every request paid a fresh TCP and TLS handshake. A
+  research round probing four SearXNG instances and reading three pages paid
+  seven of them. Measured: six requests to one host now open **one** connection
+  instead of six. Redirects are followed, 4xx still raises `HTTPError` so every
+  existing `except` behaves identically, the http/https allowlist is enforced in
+  the new path too, and any trouble inside it falls back to plain urllib rather
+  than surfacing an error the old code would not have produced.
+
+- **Page reads are cached for 90s** (settable, 0 disables). Re-reading the same
+  URL across hops of one turn now costs nothing. POSTs are never cached.
+
+- **Searches within a round now run concurrently.** The page fetches were
+  already parallel; the searches feeding them ran strictly one after another, so
+  two queries against a slow instance cost the sum of both before the first page
+  was fetched. Measured: two 0.6s searches complete in **0.60s**, not 1.2s. The
+  ordered repeat-query check stays serial (it has to — it compares against
+  queries already accepted this round) and results are merged in ask-order, so a
+  fast follow-up cannot crowd out the main question.
+
+- **The ledger no longer re-reads itself to append.** `_last_hash()` walked
+  every line of the file on every single command, so the cost of running a
+  command grew with the number of commands ever run. Now cached against the
+  file's identity with a tail-seek on a cold read: measured **zero** reads per
+  append. It also rotates at 8MB — via an anchor, so the chain still verifies
+  across the rotation rather than silently restarting — and `record()` is
+  serialised, so two commands finishing together can no longer write two entries
+  claiming the same predecessor and break the chain by accident.
+
+- **Memory stopped rewriting the whole store every turn.** `recall()` re-read,
+  re-parsed and re-scored the file on each message, then rewrote it end to end
+  just to increment a hit counter nothing reads until the store overflows 400
+  facts. Now cached against mtime with stems and IDF memoised, and counters
+  batched with a flush on close. Measured: ten recalls now perform **zero**
+  re-parses and **zero** writes.
+
+- **Machine facts are probed once, in parallel, at startup.** `gather_context()`
+  fired five subprocesses on the GTK main thread — one of them a full
+  `pacman -Qq` walk of the local package database — every time a chat was
+  created. That is a visible freeze on every New chat for an answer that was
+  already known. Now primed in the background at launch and cached for the
+  session.
+
+- Smaller: `shutil.which` memoised in the verifier and the voice pipeline (a
+  long reply was doing dozens of PATH walks per spoken answer), the Piper model
+  resolved once rather than per chunk, the security patterns compiled at import
+  rather than resolved per line, and TTS lookahead raised from one chunk to two
+  — at a depth of one the producer could not start chunk N+2 until chunk N had
+  finished *playing*, so every synthesis after the first was serialised behind
+  real-time audio and any slow chunk was audible as a gap.
+
+### Also
+
+- Settings gained **temperature**, **proxy-covers-API**, **page-cache seconds**
+  and an **Evidence ledger** section with Re-verify and Open folder. Changing
+  the proxy now drops every pooled socket, because a connection opened before
+  the change is still a direct connection and reusing it would quietly defeat
+  the setting that was just changed.
+- Closing the window now stops speech (a daemon thread kept feeding `paplay`,
+  so closing mid-answer left a disembodied voice finishing the reply) and
+  flushes the batched memory counters.
+
 ## 12.0.1 — audit fixes
 
 Every item below was reproduced against `tests/gtkstub.py` before it was fixed,

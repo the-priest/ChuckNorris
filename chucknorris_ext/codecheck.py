@@ -17,6 +17,7 @@ come back as a compact report the model can act on.
 import os
 import re
 import ast
+import builtins as _builtins
 import shutil
 import subprocess
 import tempfile
@@ -75,15 +76,37 @@ _SEC = {
     ],
 }
 
+# Compiled once at import. security_scan() runs every pattern against every
+# line of every block; re-resolving them through re's cache on each call was
+# pure overhead on the hottest loop in the verifier.
+_SEC_COMPILED = {lang: [(re.compile(pat, re.IGNORECASE), msg, sev)
+                        for pat, msg, sev in pats]
+                 for lang, pats in _SEC.items()}
+
 _LANG_NORM = {"py": "python", "python": "python", "python3": "python",
               "js": "js", "javascript": "js", "node": "js",
               "sh": "bash", "bash": "bash"}
 
 
+_WHICH_CACHE = {}
+
+
 def _which(*names):
+    """First of these that exists on PATH, memoised.
+
+    shutil.which() stats every PATH entry. This is called several times per
+    verification and a verification happens on every code block Chuck writes,
+    so the lookups were being redone constantly for an answer that cannot
+    change while the app is running.
+    """
+    hit = _WHICH_CACHE.get(names)
+    if hit is not None:
+        return hit or None
     for n in names:
         if shutil.which(n):
+            _WHICH_CACHE[names] = n
             return n
+    _WHICH_CACHE[names] = ""
     return None
 
 
@@ -117,6 +140,200 @@ def _syntax_via(body, ext, argv_builder):
             os.unlink(path)
         except Exception:
             pass
+
+
+
+# ── stdlib static analysis (the no-linter-installed path) ────────────────────
+# Before this existed, a box without ruff or pyflakes got a "lint" step that
+# called compile() — which only repeats the syntax check that already ran. So
+# the verifier's whole middle stage was silently a no-op on a clean install, and
+# `x = undefined_name` sailed through to a Run button. The README's "no runtime
+# dependency beyond the stdlib" was true of the code and false of the guarantee.
+#
+# The design rule here is asymmetric on purpose: a MISSED defect costs one
+# round-trip, a FALSE defect withholds working code and sends the model into a
+# fix loop with nothing to fix — the exact failure that made md5 unrunnable in
+# v12.0.1. So every check below is deliberately conservative, and where a
+# construct is ambiguous the analyzer stays quiet.
+
+# NB: `dir(__builtins__)` is wrong inside an imported module — there
+# __builtins__ is the builtins *dict*, so dir() returns dict's own methods and
+# every real builtin goes missing. `print` then reads as an undefined name and
+# the verifier blocks every script that prints anything. Import the module.
+_ALWAYS_DEFINED = frozenset(dir(_builtins)) | frozenset((
+    "__name__", "__file__", "__doc__", "__package__", "__spec__",
+    "__loader__", "__builtins__", "__debug__", "__all__", "__version__",
+    "WindowsError", "reveal_type", "_",
+))
+
+
+class _Bindings(ast.NodeVisitor):
+    """Every name this module binds ANYWHERE, flattened across all scopes.
+
+    Flattening is the conservative choice. Real scope analysis would catch more
+    (a local used outside its function), but it also has to model closures,
+    comprehension scopes, class bodies, global/nonlocal, star-imports and
+    conditional definitions correctly — and every corner it gets wrong is a
+    false positive on working code. A flat set can only ever under-report.
+    """
+
+    def __init__(self):
+        self.bound = set()
+        self.star_import = False
+        self.imported = {}          # name -> (lineno, module_text)
+        self.dynamic = False        # globals()/locals()/exec seen: stop guessing
+
+    # -- definitions
+    def visit_FunctionDef(self, node):
+        self.bound.add(node.name)
+        for a in (node.args.posonlyargs + node.args.args + node.args.kwonlyargs):
+            self.bound.add(a.arg)
+        if node.args.vararg:
+            self.bound.add(node.args.vararg.arg)
+        if node.args.kwarg:
+            self.bound.add(node.args.kwarg.arg)
+        self.generic_visit(node)
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    def visit_Lambda(self, node):
+        for a in (node.args.posonlyargs + node.args.args + node.args.kwonlyargs):
+            self.bound.add(a.arg)
+        if node.args.vararg:
+            self.bound.add(node.args.vararg.arg)
+        if node.args.kwarg:
+            self.bound.add(node.args.kwarg.arg)
+        self.generic_visit(node)
+
+    def visit_ClassDef(self, node):
+        self.bound.add(node.name)
+        self.generic_visit(node)
+
+    def visit_Name(self, node):
+        if isinstance(node.ctx, (ast.Store, ast.Del)):
+            self.bound.add(node.id)
+        elif node.id in ("globals", "locals", "vars", "eval", "exec"):
+            self.dynamic = True
+        self.generic_visit(node)
+
+    def visit_Global(self, node):
+        self.bound.update(node.names)
+        self.generic_visit(node)
+
+    visit_Nonlocal = visit_Global
+
+    def visit_ExceptHandler(self, node):
+        if node.name:
+            self.bound.add(node.name)
+        self.generic_visit(node)
+
+    def visit_Import(self, node):
+        for a in node.names:
+            local = a.asname or a.name.split(".")[0]
+            self.bound.add(local)
+            self.imported.setdefault(local, (node.lineno, a.name))
+        self.generic_visit(node)
+
+    def visit_ImportFrom(self, node):
+        for a in node.names:
+            if a.name == "*":
+                # A star import can bind anything at all. Any undefined-name
+                # claim after this is a guess, so we stop making them.
+                self.star_import = True
+                continue
+            local = a.asname or a.name
+            self.bound.add(local)
+            self.imported.setdefault(local, (node.lineno,
+                                             f"{node.module or ''}.{a.name}".strip(".")))
+        self.generic_visit(node)
+
+    def visit_MatchAs(self, node):
+        if node.name:
+            self.bound.add(node.name)
+        self.generic_visit(node)
+
+    def visit_MatchStar(self, node):
+        if node.name:
+            self.bound.add(node.name)
+        self.generic_visit(node)
+
+    def visit_MatchMapping(self, node):
+        if node.rest:
+            self.bound.add(node.rest)
+        self.generic_visit(node)
+
+
+def _loaded_names(tree):
+    """Names read (not written) anywhere, plus every attribute base."""
+    used = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load):
+            used.add(n.id)
+        elif isinstance(n, ast.Attribute):
+            base = n
+            while isinstance(base, ast.Attribute):
+                base = base.value
+            if isinstance(base, ast.Name):
+                used.add(base.id)
+    return used
+
+
+def _string_mentions(tree):
+    """Words appearing inside string literals — annotations like `x: "Foo"`,
+    __all__ entries, and TYPE_CHECKING-guarded names all live there. Treating
+    them as uses is crude, and that is the point: it cannot produce a false
+    'unused import', only miss a real one."""
+    words = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Constant) and isinstance(n.value, str):
+            words.update(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", n.value))
+    return words
+
+
+def _analyze_python(body):
+    """Real findings from the stdlib alone. Returns a list of strings."""
+    try:
+        tree = ast.parse(body)
+    except SyntaxError:
+        return []                      # syntax is reported by its own stage
+    b = _Bindings()
+    try:
+        b.visit(tree)
+        used = _loaded_names(tree)
+        strings = _string_mentions(tree)
+    except Exception:
+        return []                      # never fail a verification on our own bug
+
+    findings = []
+
+    # 1. undefined names — the one that matters. A typo'd variable is a crash
+    #    the user would otherwise discover by pressing Run.
+    if not (b.star_import or b.dynamic):
+        known = b.bound | _ALWAYS_DEFINED
+        seen = set()
+        for n in ast.walk(tree):
+            if not (isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)):
+                continue
+            if n.id in known or n.id in seen:
+                continue
+            seen.add(n.id)
+            findings.append(f"code.py:{n.lineno}: undefined name '{n.id}'")
+            if len(findings) >= 10:
+                break
+
+    # 2. unused imports — never blocking-worthy on their own, but they are a
+    #    reliable sign the model pasted something it then rewrote, and they are
+    #    free to detect.
+    for name, (line, mod) in sorted(b.imported.items(), key=lambda kv: kv[1][0]):
+        if name in ("annotations",) or mod.startswith("__future__"):
+            continue
+        if name in used or name in strings:
+            continue
+        findings.append(f"code.py:{line}: '{mod}' imported but unused")
+        if len(findings) >= 16:
+            break
+
+    return findings
 
 
 # ── lint ─────────────────────────────────────────────────────────────────────
@@ -171,11 +388,10 @@ def _lint_python(body):
         finally:
             os.unlink(p)
     else:
-        # stdlib fallback: compile catches a lot on its own
-        try:
-            compile(body, "code.py", "exec")
-        except Exception as e:
-            findings.append(str(e))
+        # No external linter: fall back to the stdlib AST analysis above rather
+        # than to compile(), which only re-runs the syntax check that already
+        # passed and therefore found nothing, ever.
+        findings += _analyze_python(body)
     return findings
 
 
@@ -213,11 +429,11 @@ def _lint_js(body):
 def security_scan(lang, body):
     """Return (blocking, advisory) lists of 'L<n>: message' findings."""
     lang = _LANG_NORM.get(lang, lang)
-    pats = _SEC.get(lang, [])
+    pats = _SEC_COMPILED.get(lang, [])
     block_hits, advise_hits = [], []
     for i, line in enumerate(body.splitlines(), 1):
-        for pat, msg, sev in pats:
-            if re.search(pat, line, re.IGNORECASE):
+        for rx, msg, sev in pats:
+            if rx.search(line):
                 (block_hits if sev == BLOCK else advise_hits).append(f"L{i}: {msg}")
     # de-dup identical messages, keeping the first line number for each
     def _dedup(hits):

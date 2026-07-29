@@ -163,7 +163,8 @@ lang: bash|python
 desc: <one line>
 ---
 <body>``` (save a reusable smart file) · ```runskill
-<name>``` · ```remember
+<name>``` · ```ledger``` (show the tamper-evident record of every command run \
+— use it when asked what you have run, or to prove nothing was quietly changed) · ```remember
 <one durable fact>``` · ```forget
 <what to drop>```
 
@@ -450,20 +451,60 @@ def _now_line():
     return now.strftime("Today is %A, %d %B %Y, %H:%M ") + tz
 
 
-def gather_context():
-    facts = ["Distro: " + (_run_ro(["sh", "-c",
-             ". /etc/os-release 2>/dev/null; echo \"$PRETTY_NAME\""]) or "unknown"),
-             "Kernel: " + _run_ro(["uname", "-r"]),
-             f"Session: {os.environ.get('XDG_SESSION_TYPE','?')} / "
-             f"{os.environ.get('XDG_CURRENT_DESKTOP','?')}"]
-    if shutil.which("pacman"):
-        facts.append("Packages: " + _run_ro(["sh", "-c", "pacman -Qq | wc -l"]))
-        facts.append("AUR helper: " + ("paru" if shutil.which("paru")
-                     else ("yay" if shutil.which("yay") else "none")))
-    gpu = _run_ro(["sh", "-c", "lspci | grep -iE 'vga|3d|display' | sed 's/.*: //'"])
-    if gpu:
-        facts.append("GPU: " + gpu.replace("\n", "; "))
-    return "\n".join(facts)
+# The machine's distro, kernel and GPU do not change while the app is open, but
+# this was re-probed from scratch every time a chat was created — five
+# subprocesses ON THE GTK MAIN THREAD, one of them a full `pacman -Qq` walk of
+# the local package database. On a large Arch install that is a visible freeze
+# every single time you click New chat, for an answer that was already known.
+_CTX = {"text": None}
+_CTX_LOCK = threading.Lock()
+
+
+def prime_context():
+    """Work the machine facts out in the background, before anything wants them."""
+    threading.Thread(target=gather_context, daemon=True).start()
+
+
+def gather_context(refresh=False):
+    with _CTX_LOCK:
+        if not refresh and _CTX["text"] is not None:
+            return _CTX["text"]
+
+        # The probes are independent, so they run CONCURRENTLY: the cost is the
+        # slowest one rather than the sum of all of them.
+        jobs = {
+            "distro": ["sh", "-c",
+                       ". /etc/os-release 2>/dev/null; echo \"$PRETTY_NAME\""],
+            "kernel": ["uname", "-r"],
+            "gpu": ["sh", "-c",
+                    "lspci | grep -iE 'vga|3d|display' | sed 's/.*: //'"],
+        }
+        if shutil.which("pacman"):
+            jobs["packages"] = ["sh", "-c", "pacman -Qq | wc -l"]
+        ex = ThreadPoolExecutor(max_workers=len(jobs))
+        try:
+            futs = {k: ex.submit(_run_ro, v) for k, v in jobs.items()}
+            got = {}
+            for k, f in futs.items():
+                try:
+                    got[k] = f.result(timeout=10)
+                except Exception:
+                    got[k] = ""
+        finally:
+            ex.shutdown(wait=False)
+
+        facts = ["Distro: " + (got.get("distro") or "unknown"),
+                 "Kernel: " + got.get("kernel", ""),
+                 f"Session: {os.environ.get('XDG_SESSION_TYPE','?')} / "
+                 f"{os.environ.get('XDG_CURRENT_DESKTOP','?')}"]
+        if "packages" in got:
+            facts.append("Packages: " + got["packages"])
+            facts.append("AUR helper: " + ("paru" if shutil.which("paru")
+                         else ("yay" if shutil.which("yay") else "none")))
+        if got.get("gpu"):
+            facts.append("GPU: " + got["gpu"].replace("\n", "; "))
+        _CTX["text"] = "\n".join(facts)
+        return _CTX["text"]
 
 
 def screenshot_to_b64():
@@ -1161,9 +1202,9 @@ class Backend:
         """
         def go():
             try:
-                host = urllib.parse.urlparse(self.base()).hostname
+                host, port = _config.api_connect_host(self.base())
                 if host:
-                    socket.create_connection((host, 443), timeout=5).close()
+                    socket.create_connection((host, port), timeout=5).close()
             except Exception:
                 pass
         threading.Thread(target=go, daemon=True).start()
@@ -1175,8 +1216,12 @@ class Backend:
             return
         model = (self.s.get("vision_model", DEFAULT_VISION) if vision
                  else self.s.get("model", DEFAULT_MODEL))
+        try:
+            temp = min(1.5, max(0.0, float(self.s.get("temperature", 0.35))))
+        except Exception:
+            temp = 0.35
         body = json.dumps({"model": model, "messages": messages,
-                           "stream": True, "temperature": 0.35}).encode()
+                           "stream": True, "temperature": temp}).encode()
         url = self.base() + "/chat/completions"
         headers = {"Authorization": "Bearer " + self.key(),
                    "Content-Type": "application/json"}
@@ -1187,7 +1232,14 @@ class Backend:
             got_any = False
             try:
                 req = urllib.request.Request(url, data=body, headers=headers)
-                with urllib.request.urlopen(req, timeout=180) as resp:
+                # The proxy setting used to cover page fetches, images and video
+                # but NOT this call — so a user who pointed Chuck at Mullvad had
+                # every prompt they typed leave over the bare connection while
+                # the browsing traffic went through the tunnel. That is the
+                # opposite of what the setting appears to promise.
+                _op = _config.api_opener()
+                _open = _op.open if _op else urllib.request.urlopen
+                with _open(req, timeout=180) as resp:
                     if on_open:
                         on_open()          # connection is live — proof of life
                     for raw in resp:
@@ -1802,6 +1854,22 @@ class ChuckWindow(Adw.ApplicationWindow):
 
     def _on_close(self, *_):
         self._save_chat()
+        # Speech outlives the window otherwise — the process keeps a daemon
+        # thread feeding paplay, so closing mid-answer left a disembodied voice
+        # finishing the reply.
+        try:
+            stop_speaking()
+        except Exception:
+            pass
+        # recall() batches hit-count writes to keep them off the per-turn
+        # critical path, so a session's worth of counters is still in memory
+        # here. Without this they are lost, and the ranking that decides which
+        # facts survive pruning never learns anything from a short session.
+        if _memory is not None:
+            try:
+                _memory.flush()
+            except Exception:
+                pass
         return False
 
     # ── enter to send ──
@@ -2740,6 +2808,36 @@ class ChuckWindow(Adw.ApplicationWindow):
             return f"[junk scan done \u2014 offered {len(cmds)} cleanup command(s)]"
         self._tool_thread(work, "junk scan")
 
+    def _do_ledger(self):
+        """Show the tamper-evident command record, and check its chain.
+
+        The ledger has been written on every command since 12.0.3, but nothing
+        could ever display it — ledger.summary() had a docstring promising a
+        ```ledger``` request that did not exist, so the whole subsystem wrote
+        evidence nobody could read. A record you cannot inspect is not evidence.
+        """
+        if not _ledger:
+            self._sys_note("ledger unavailable.", "danger")
+            self._tool_done("[ledger: module not installed]")
+            return
+        self._sys_note("\U0001F4D3 evidence ledger", "dim")
+        self._busy(True)
+
+        def work():
+            text = _ledger.summary(limit=15)
+            ok, count, bad, msg = _ledger.verify()
+
+            def show():
+                self._sys_note(text, "mono")
+                self._sys_note(("\u2713 " if ok else "\u26a0 ") + msg,
+                               "ok" if ok else "danger")
+                return False
+            GLib.idle_add(show)
+            return (f"[ledger: {count} commands recorded; chain "
+                    f"{'VERIFIED' if ok else f'BROKEN at entry {bad}'} — {msg}]\n"
+                    + text[:4000])
+        self._tool_thread(work, "ledger")
+
     def _do_read(self, path):
         """Read a file from disk and feed its contents back into the run.
         An image path is SHOWN in the chat rather than refused as binary.
@@ -3215,6 +3313,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         rmfiles = grab("rmfile")[:4]           # remove a file from the project
         packages = has("package")              # zip the project and hand it over
         runtests = has("runtests")             # run the project's own tests
+        ledger_req = has("ledger")             # show the command record + verify it
         writes = []                            # ```write <relpath>\n<content>```
         # The path may sit on the same line as the tag or on the line below it —
         # accept both, so the parser can never disagree with the prompt.
@@ -3262,7 +3361,7 @@ class ChuckWindow(Adw.ApplicationWindow):
 
         disp = re.sub(
             r"```(?:search|fetch|images|videos|video|junk|skill|runskill|read|"
-            r"remember|forget|check|project|tree|package|runtests|write|rmfile|"
+            r"ledger|remember|forget|check|project|tree|package|runtests|write|rmfile|"
             r"python|py|node|javascript|js|bash|sh)\b.*?```",
             "", text, flags=re.DOTALL).strip()
         if self._forced_answer:
@@ -3270,7 +3369,8 @@ class ChuckWindow(Adw.ApplicationWindow):
             searches, fetches = [], []
         acting = bool(searches or fetches or images or vid_searches or videos or junk
                       or skill_blocks or runskills or reads or codes or checks
-                      or projects or writes or trees or packages or runtests or rmfiles)
+                      or projects or writes or trees or packages or runtests or rmfiles
+                      or ledger_req)
         # Chuck's own narration is what shows in chat — never swallow it.
         self._set_bot_text(disp or ("Working on it\u2026" if acting else "Done."), rich=True)
 
@@ -3317,6 +3417,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._pending_tools += (
             (1 if runtests else 0) + len(checks) + len(images)
             + len(vid_searches) + (1 if junk else 0) + len(reads)
+            + (1 if ledger_req else 0)
             + (len(codes) if _codecheck else 0))
 
         for nm in projects:
@@ -3350,6 +3451,8 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._do_video_search(q)
         if junk:
             self._do_junk()
+        if ledger_req:
+            self._do_ledger()
         for path in reads:
             self._do_read(path.strip())
         for u in videos:                     # fire-and-forget download; not gated
@@ -3451,6 +3554,12 @@ class ChuckWindow(Adw.ApplicationWindow):
             n_q = self.cfg('research_queries', RESEARCH_QUERIES, 1, 4)
             f_timeout = self.cfg('fetch_timeout', 6, 3, 30)
             skipped = []
+            # ── admission: sequential, because the repeat-check is ORDERED ───
+            # _is_repeat_query compares against queries already accepted this
+            # run, so "X github" and "github X" arriving together must be judged
+            # one after the other or both get in. This pass is pure arithmetic —
+            # no network — so keeping it serial costs nothing.
+            admitted = []
             for q in searches[:n_q]:
                 if self._cancelled:
                     return
@@ -3458,9 +3567,40 @@ class ChuckWindow(Adw.ApplicationWindow):
                     skipped.append(q)
                     continue
                 self._seen_queries.append(self._qnorm(q))
+                admitted.append(q)
+
+            # ── the searches themselves: CONCURRENT ─────────────────────────
+            # Each query is an independent round-trip to a search engine, and
+            # they were being run strictly one after the other — so two queries
+            # against a slow instance cost the sum of both before the first page
+            # was even fetched. The page fetches below were already parallel;
+            # this was the remaining serial leg of every research round.
+            found = {}
+            if admitted and not self._cancelled:
+                def search_one(q):
+                    if self._cancelled:
+                        return q, None, -1
+                    si = self._activity_step(f"searching  {q}")
+                    try:
+                        return q, web_search(q, n=n_src), si
+                    except Exception:
+                        return q, None, si
+
+                ex_s = ThreadPoolExecutor(max_workers=min(4, len(admitted)))
+                try:
+                    for q, res, si in ex_s.map(search_one, admitted):
+                        found[q] = (res, si)
+                finally:
+                    ex_s.shutdown(wait=False)
+
+            # ── merge in the ORDER THEY WERE ASKED ──────────────────────────
+            # Results arrive in whatever order the engines answered, but the
+            # first query is the user's actual question and the later ones are
+            # follow-ups. Merging by completion order would let a fast follow-up
+            # fill the source budget and crowd the main query out.
+            for q in admitted:
                 self._note_progress()
-                si = self._activity_step(f"searching  {q}")
-                results = web_search(q, n=n_src)
+                results, si = found.get(q, (None, -1))
                 if not results:
                     self._activity_done(si, f"searched  {q}  (no results)", ok=False)
                     out.append(f"[search '{q}': engines returned nothing — try different wording]")
@@ -3596,6 +3736,11 @@ class ChuckWindow(Adw.ApplicationWindow):
                         "Leave blank for the default endpoint.")
         vmodel = field("Vision model",
                        Gtk.Entry(text=self.settings.get("vision_model", DEFAULT_VISION)))
+        temp = field("Temperature",
+                     slider(0.0, 1.2, 0.05,
+                            self.cfg("temperature", 0.35, 0.0, 1.2, float), 2),
+                     "Lower is more literal and repeatable \u2014 better for shell work "
+                     "and code. Higher loosens him up. 0.35 is the tuned default.")
 
         section("Voice")
         tts_on = Gtk.CheckButton(label="Read replies aloud")
@@ -3653,9 +3798,23 @@ class ChuckWindow(Adw.ApplicationWindow):
                       Gtk.Entry(text=self.settings.get("searx_url", ""),
                                 placeholder_text="https://searx.example.org  (blank = built-in list)"),
                       "Search fans out over SearXNG (Brave + Google + DDG), DuckDuckGo as fallback.")
-        proxy = field("Proxy for web, images and video (optional)",
+        proxy = field("Proxy (optional)",
                       Gtk.Entry(text=self.settings.get("proxy", ""),
                                 placeholder_text="http://host:port"))
+        proxy_api = Gtk.CheckButton(
+            label="Send the model API through the proxy as well")
+        proxy_api.set_active(bool(self.settings.get("proxy_api", True)))
+        box.append(proxy_api)
+        pah = Gtk.Label(
+            label="On by default. With this off, page fetches are proxied but your "
+                  "prompts still leave over the bare connection \u2014 which is almost "
+                  "certainly not what setting a proxy was meant to do.",
+            xalign=0, wrap=True)
+        pah.add_css_class("set-hint"); box.append(pah)
+        wcache = field("Reuse fetched pages for (seconds)",
+                       slider(0, 600, 15, self.cfg("web_cache_seconds", 90, 0, 600)),
+                       "Re-reading the same URL inside this window costs nothing. "
+                       "0 disables it and every read hits the network again.")
 
         section("Code verifier")
         if _codecheck:
@@ -3670,6 +3829,30 @@ class ChuckWindow(Adw.ApplicationWindow):
             box.append(Gtk.Label(
                 label="Syntax and the security scan always run; linters add depth when present.",
                 xalign=0, wrap=True))
+
+        if _ledger:
+            section("Evidence ledger")
+            lg_note = Gtk.Label(label="", xalign=0, wrap=True, selectable=True)
+            lg_note.add_css_class("set-hint")
+
+            def refresh_ledger(*_a):
+                try:
+                    ok, count, bad, msg = _ledger.verify()
+                except Exception as ex:
+                    lg_note.set_label(f"couldn't read the ledger: {ex}")
+                    return
+                where = "" if bad is None else f"  (first break at entry {bad})"
+                lg_note.set_label(f"{count} commands recorded \u00b7 "
+                                  f"{'chain intact' if ok else 'CHAIN BROKEN'}{where}\n"
+                                  f"{msg}\n{_ledger.LEDGER}")
+            refresh_ledger()
+            box.append(lg_note)
+            lrow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            vb = Gtk.Button(label="Re-verify"); vb.add_css_class("quick")
+            vb.connect("clicked", refresh_ledger)
+            ob = Gtk.Button(label="Open folder"); ob.add_css_class("quick")
+            ob.connect("clicked", lambda *_a: _open_path(str(_ledger.LEDGER.parent)))
+            lrow.append(vb); lrow.append(ob); box.append(lrow)
 
         status = Gtk.Label(label="", xalign=0); status.add_css_class("ok")
 
@@ -3696,11 +3879,20 @@ class ChuckWindow(Adw.ApplicationWindow):
                 "render_page": int(rpage.get_value()),
                 "searx_url": searx.get_text().strip(),
                 "proxy": proxy.get_text().strip(),
+                "proxy_api": proxy_api.get_active(),
+                "web_cache_seconds": int(wcache.get_value()),
+                "temperature": round(float(temp.get_value()), 2),
             }
 
         def apply_and_save(*_):
+            before = (self.settings.get("proxy"), self.settings.get("proxy_api"))
             self.settings.update(collect())
             save_settings(self.settings)
+            # A socket opened before the proxy was switched on is still a direct
+            # socket. Reusing it would silently defeat the setting that was just
+            # changed, so the pool and the page cache are dropped on any change.
+            if (self.settings.get("proxy"), self.settings.get("proxy_api")) != before:
+                _config.network_settings_changed()
             self.tts_btn.set_active(self.settings.get("tts", True))
             if not self.settings.get("tts"):
                 stop_speaking()
@@ -3720,7 +3912,8 @@ class ChuckWindow(Adw.ApplicationWindow):
             for k in ("voice_engine", "voice_speed", "voice_pitch", "research_sources",
                       "research_queries", "research_hops", "fetch_timeout", "chat_ttl_hours",
                       "render_keep", "render_page", "font_size", "voice_max_chars",
-                      "piper_model", "siliconflow_base_url"):
+                      "piper_model", "siliconflow_base_url", "temperature",
+                      "web_cache_seconds", "proxy_api"):
                 self.settings.pop(k, None)
             save_settings(self.settings)
             apply_font_size(FONT_SIZE)
@@ -3753,6 +3946,9 @@ class ChuckApp(Adw.Application):
         Gtk.StyleContext.add_provider_for_display(
             Gdk.Display.get_default(), prov, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         apply_font_size(_SETTINGS.get("font_size", FONT_SIZE))
+        # Probe the machine now, off the main thread, so the first chat never
+        # waits on `pacman -Qq` to find out what distro it is running on.
+        prime_context()
         # seed the ready-made skill library once (idempotent; never clobbers
         # user skills). Runs in a thread so it never delays the window.
         if _skill_library and _skills:

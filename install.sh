@@ -95,14 +95,21 @@ else
   curl -fsSL "https://raw.githubusercontent.com/${REPO}/${BRANCH}/chucknorris.py" \
     -o "${APP_DIR}/chucknorris.py" || die "could not fetch chucknorris.py"
   mkdir -p "${APP_DIR}/chucknorris_ext"
-  # config/safety/web/voice/chats are REQUIRED — the app won't import without
-  # them, so a missing one must be a hard error, not a quiet "skipped".
-  for f in __init__ config safety web voice chats \
-           skills specs memory codecheck skill_library builder; do
+  # config/net/safety/web/voice/chats are REQUIRED — the app won't import
+  # without them, so a missing one must be a hard error, not a quiet "skipped".
+  #
+  # This list is hand-maintained and it has drifted before: ledger.py and
+  # compress.py both shipped in 12.0.3 and were never added here, so every
+  # curl-installed copy silently ran with no evidence ledger and no context
+  # compression while the git-cloned copy had both. If you add a module, add it
+  # HERE as well — the check below exists because that is easy to forget.
+  for f in __init__ config net safety web voice chats \
+           skills specs memory codecheck skill_library builder \
+           ledger compress; do
     curl -fsSL "https://raw.githubusercontent.com/${REPO}/${BRANCH}/chucknorris_ext/${f}.py" \
       -o "${APP_DIR}/chucknorris_ext/${f}.py" \
       || case "$f" in
-           __init__|config|safety|web|voice|chats)
+           __init__|config|net|safety|web|voice|chats)
              die "could not fetch required module chucknorris_ext/${f}.py" ;;
            *) info "could not fetch chucknorris_ext/${f}.py (that feature will be limited)" ;;
          esac

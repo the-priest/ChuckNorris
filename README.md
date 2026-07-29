@@ -9,13 +9,13 @@
 <br><br>
 
 [![tests](https://github.com/the-priest/ChuckNorris/actions/workflows/tests.yml/badge.svg)](https://github.com/the-priest/ChuckNorris/actions/workflows/tests.yml)
-![version](https://img.shields.io/badge/version-12.0.3-b6892f?style=for-the-badge&labelColor=0b0b0d)
+![version](https://img.shields.io/badge/version-12.1.0-b6892f?style=for-the-badge&labelColor=0b0b0d)
 ![tribute](https://img.shields.io/badge/1940--2026-a_tribute-b6892f?style=for-the-badge&labelColor=0b0b0d)
 ![distro](https://img.shields.io/badge/Arch_%7C_CachyOS-first--class-b6892f?style=for-the-badge&labelColor=0b0b0d)
 
 ![gtk](https://img.shields.io/badge/GTK4-libadwaita-b6892f?style=flat-square&labelColor=0b0b0d)
 ![python](https://img.shields.io/badge/Python-3.11_·_3.12_·_3.13-b6892f?style=flat-square&labelColor=0b0b0d)
-![suites](https://img.shields.io/badge/suites-15-2ea043?style=flat-square&labelColor=0b0b0d)
+![suites](https://img.shields.io/badge/suites-16-2ea043?style=flat-square&labelColor=0b0b0d)
 ![skills](https://img.shields.io/badge/skills-14_shipped-b6892f?style=flat-square&labelColor=0b0b0d)
 ![deps](https://img.shields.io/badge/runtime_deps-stdlib_+_GTK-2ea043?style=flat-square&labelColor=0b0b0d)
 ![licence](https://img.shields.io/badge/licence-MIT-b6892f?style=flat-square&labelColor=0b0b0d)
@@ -96,7 +96,7 @@ flowchart LR
 
 ### 🌐 Research the live web
 
-Searches multiple SearXNG instances — Brave, Google, DuckDuckGo and Bing underneath — with DuckDuckGo as backstop. Reads real pages. Cross-checks outlets. Cites URLs. Marks single-source claims `[UNVERIFIED]` rather than quietly promoting them to fact.
+Searches multiple SearXNG instances — Brave, Google, DuckDuckGo and Bing underneath — with DuckDuckGo as backstop. Instances are probed in parallel, the searches in a round run concurrently, connections are pooled and kept alive, and a page read twice in one turn is read from memory the second time. Reads real pages. Cross-checks outlets. Cites URLs. Marks single-source claims `[UNVERIFIED]` rather than quietly promoting them to fact.
 
 You watch it happen in a **live checklist** — `● searching…` → `✓ read bbc.com — headline` — each line ticking itself off as it lands. No mystery spinner, no wondering whether it died.
 
@@ -222,7 +222,7 @@ The tier is judged on **what will actually execute**, including a saved skill's 
 
 **Your API key is 0600**, opened from the descriptor so there's never a window where it's world-readable.
 
-**Every command is logged** — append-only, hash-chained JSONL. Edit an entry and verification names the index. That's tamper-*evident*, not tamper-*proof*: anyone who can write the file can rewrite the chain. It guards against accidental loss and quiet after-the-fact editing, not against someone who already owns your account.
+**Every command is logged** — append-only, hash-chained JSONL, rotated at 8MB with an anchor so the chain survives the rollover. Ask him for the ` ```ledger ` or hit **Re-verify** in Settings; edit an entry and verification names the index. That's tamper-*evident*, not tamper-*proof*: anyone who can write the file can rewrite the chain. It guards against accidental loss and quiet after-the-fact editing, not against someone who already owns your account.
 
 ---
 
@@ -239,6 +239,13 @@ Every number here comes from a test in the suite, old code versus new.
 | memory recall on the probe set | 4 / 7 | **7 / 7** |
 | `settings.json` mode | `0644` | **`0600`** |
 | test files run by `runtests` | first one only | **all of them** |
+| connections opened for 6 requests to one host | 6 | **1** |
+| two 0.6s searches in one round | 1.2s (serial) | **0.60s** |
+| file reads to append one ledger entry | every line in the file | **0** |
+| store re-parses across ten recalls | 10 | **0** |
+| store rewrites across ten recalls | 10 | **0** |
+| lint findings with no linter installed | 0, always | **real ones** |
+| modules fetched by `curl \| bash` | 12 of 14 | **all 15** |
 
 ---
 
@@ -258,7 +265,7 @@ Everything else, he simply does — and he does the whole job in one run before 
 ./run_tests.sh
 ```
 
-**Fifteen suites, run against the real thing** — and against a stubbed GTK, so they run headless in CI on 3.11, 3.12 and 3.13.
+**Sixteen suites, run against the real thing** — and against a stubbed GTK, so they run headless in CI on 3.11, 3.12 and 3.13.
 
 Whole conversations driven end to end · research chains · code written and actually executed · destructive commands hitting the confirm gate · runaway loops terminating · the voice pipeline · the 24-hour purge · cold-start recovery · a project written, tested and packaged · fifteen concurrent sudo requests raising exactly **one** dialog · timed-out commands leaving **zero** orphans.
 
@@ -277,6 +284,7 @@ Flashy README, so here's the deflating bit. Every project this size has one.
 - **The model is remote.** See above. Your prompts leave your box.
 - **He's deepest on Arch and CachyOS.** He'll help on other distros; he just won't know them in his bones.
 - **He is not infallible, and neither is the tiering.** A regex classifier is a good safety net, not a proof. Read the CRITICAL cards. The tick box is there for a reason.
+- **v12 shipped with real bugs, and 12.0.3 shipped four more.** The verifier did nothing without `ruff`, the evidence ledger could not be displayed, the proxy did not cover the API, and the one-line installer had been quietly fetching an incomplete app. All in `CHANGELOG.md`, each with a test.
 - **v12 shipped with real bugs** — a sudo storm that opened fifteen modals at once, a watchdog that shot healthy upgrades at the two-minute mark, a `videos` tool that had never once worked. All in `CHANGELOG.md`, described plainly, each with a test. A project claiming it never had bugs is a project that isn't looking.
 
 > *Chuck Norris has never lost an argument with a compiler.*
@@ -306,6 +314,7 @@ flowchart TB
     end
 
     subgraph reach [reach]
+        NET["net.py<br/><i>pooled HTTP · cache</i>"]
         WEB["web.py<br/><i>search · fetch · media</i>"]
         CMP["compress.py<br/><i>extractive trim</i>"]
     end
@@ -336,6 +345,7 @@ flowchart TB
 |---|---|
 | `config.py` | paths, tunables, settings — one source of truth, written `0600` |
 | `safety.py` | destructive-command classification, `pacman -Syu` hygiene |
+| `net.py` | pooled keep-alive HTTP, page cache, proxy — one network layer |
 | `web.py` | multi-engine search, page fetching, images, video |
 | `voice.py` | speech: cleaning, chunking, synthesis, playback |
 | `chats.py` | saved conversations and retention |
