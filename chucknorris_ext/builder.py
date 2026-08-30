@@ -182,8 +182,9 @@ def test_command(project):
         return [["bash", "run_tests.sh"]]
     tests = sorted(root.glob("tests/test_*.py")) + sorted(root.glob("test_*.py"))
     if tests:
-        if shutil.which("pytest"):
-            return [["pytest", "-q"]]
+        # Run each test file individually with python3 rather than using pytest.
+        # pytest collection can fail on files that call sys.exit() during import,
+        # and individual runs give clearer output per file.
         return [["python3", str(t.relative_to(root))] for t in tests]
     if (root / "package.json").is_file():
         return [["npm", "test", "--silent"]]
@@ -225,7 +226,7 @@ def run_tests(project, timeout=300):
         chunks.append(f"$ {label}  -> exit {rc}\n{out}")
         if rc != 0 and worst == 0:
             worst = rc
-    return worst, "\n\n".join(chunks)[-8000:]
+    return worst, ("\n\n".join(chunks))[:32000]
 
 
 def package(project, note=None):

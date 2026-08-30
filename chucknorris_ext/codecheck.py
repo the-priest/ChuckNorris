@@ -401,7 +401,8 @@ def _lint_shell(body):
         ok, out = _syntax_via(body, "sh", lambda p: ["bash", "-n", p])
         return [] if ok else [out]
     with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as f:
-        f.write(body); p = f.name
+        src = ("#!/bin/bash\n" + body) if not body.startswith("#!") else body
+        f.write(src); p = f.name
     try:
         rc, out = _run([tool, "-f", "gcc", p])
         return _clean_lint_output(rc, out, p, "script.sh")

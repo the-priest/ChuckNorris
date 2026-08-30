@@ -14,6 +14,9 @@ attacker who already owns the account.
 
 Entries are written after the command completes, so a hard kill mid-command
 leaves no entry. The `started` timestamp records when it began.
+
+Concurrency: the write lock covers both prev-read and the append, so two
+commands finishing at the same clock tick cannot claim the same predecessor.
 """
 
 import os
@@ -74,33 +77,32 @@ def _last_hash():
     scan before every single run. The head is cached in memory after the first
     read, and a cold read seeks to the tail instead of walking from the start.
     """
-    with _LOCK:
-        cached = _LAST[0]
-        sig = _sig()
-        if cached and cached[0] == str(LEDGER) and cached[1] == sig:
-            return cached[2]
-        head = _anchor()
-        if LEDGER.exists():
-            try:
-                size = LEDGER.stat().st_size
-                with LEDGER.open("rb") as fh:
-                    if size > _TAIL_BYTES:
-                        fh.seek(-_TAIL_BYTES, os.SEEK_END)
-                        fh.readline()          # discard the partial first line
-                    tail = fh.read().decode("utf-8", "replace")
-                for line in reversed(tail.splitlines()):
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        head = json.loads(line).get("hash", head)
-                        break
-                    except Exception:
-                        continue
-            except OSError:
-                pass
-        _LAST[0] = (str(LEDGER), sig, head)
-        return head
+    cached = _LAST[0]
+    sig = _sig()
+    if cached and cached[0] == str(LEDGER) and cached[1] == sig:
+        return cached[2]
+    head = _anchor()
+    if LEDGER.exists():
+        try:
+            size = LEDGER.stat().st_size
+            with LEDGER.open("rb") as fh:
+                if size > _TAIL_BYTES:
+                    fh.seek(-_TAIL_BYTES, os.SEEK_END)
+                    fh.readline()          # discard the partial first line
+                tail = fh.read().decode("utf-8", "replace")
+            for line in reversed(tail.splitlines()):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    head = json.loads(line).get("hash", head)
+                    break
+                except Exception:
+                    continue
+        except OSError:
+            pass
+    _LAST[0] = (str(LEDGER), sig, head)
+    return head
 
 
 def _rotate():
@@ -131,11 +133,17 @@ def record(command, rc, output, kind="shell", chat_id=None, started=None):
 
     Never raises: a ledger failure must not take down a run that already
     happened. The command's own result is the thing that matters.
+
+    Concurrency: prev is read UNDER THE LOCK, so two threads that finish
+    simultaneously cannot both claim the same predecessor.  The entry body
+    is built outside the lock, but the hash is re-computed after reading
+    the actual prev, because prev changes what the hash covers.
     """
     try:
         config.DATA_DIR.mkdir(parents=True, exist_ok=True)
         _rotate()
         out = (output or "")
+        out_bytes = out.encode("utf-8", "replace")
         entry = {
             "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "started": started or time.strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -143,19 +151,14 @@ def record(command, rc, output, kind="shell", chat_id=None, started=None):
             "chat": chat_id or "",
             "command": (command or "")[:2000],
             "rc": rc,
-            # the full output is hashed, only a head is stored — so a truncated
-            # record can still be checked against the real output if kept
-            "output_sha256": hashlib.sha256(out.encode("utf-8", "replace")).hexdigest(),
-            "output_bytes": len(out.encode("utf-8", "replace")),
+            "output_sha256": hashlib.sha256(out_bytes).hexdigest(),
+            "output_bytes": len(out_bytes),
             "output_head": out[:MAX_OUTPUT_KEPT],
-            "prev": _last_hash(),
         }
-        entry["hash"] = _digest(entry)
-        # Under the lock: two commands finishing together would otherwise read
-        # the same `prev` and write two entries claiming the same predecessor —
-        # a chain that verify() correctly reports as broken, caused by nothing
-        # more sinister than concurrency.
+        # Secure the chain under the lock: read prev, sign, write, update cache.
         with _LOCK:
+            entry["prev"] = _last_hash()
+            entry["hash"] = _digest(entry)
             fd = os.open(str(LEDGER), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
             with os.fdopen(fd, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
