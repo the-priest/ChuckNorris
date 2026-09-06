@@ -252,7 +252,7 @@ if _dupes:
     fail(f"constants defined twice (they will drift): {_dupes}")
 else:
     print("  no constant is defined in both the app and config")
-if cn.DEFAULT_MODEL != "deepseek-ai/DeepSeek-V4-Flash":
+if cn.DEFAULT_MODEL != "zai-org/GLM-5.3-Flash":
     fail(f"model invariant broken: {cn.DEFAULT_MODEL}")
 print(f"  model invariant holds: {cn.DEFAULT_MODEL}")
 

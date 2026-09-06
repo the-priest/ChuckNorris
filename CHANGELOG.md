@@ -1,5 +1,45 @@
 # Changelog
 
+## 13.0.0 — a face worth looking at, and a sharper brain
+
+### The model
+
+- **Default backend is now `zai-org/GLM-5.3-Flash` (Z.ai), for both chat and
+  vision.** It replaces `deepseek-ai/DeepSeek-V4-Flash`, which had been treated
+  as a fixed invariant. The swap is a straight upgrade: GLM-5.3-Flash tops
+  SiliconFlow's intelligence board, is built for coding and long-horizon agent
+  work, and is *natively multimodal* — so it also retires the separate
+  `Qwen2.5-VL` vision model. One model, one bill. Blended cost with prompt
+  caching sits at or below V4-Flash, which is what a tight agent loop actually
+  pays, so it is both stronger and cheaper. It needed no wiring change: the API
+  is OpenAI-compatible and the stream reader takes only `delta.content`, so the
+  model's reasoning never leaks into a reply. Anyone who wants the old model
+  types it back into the Chat-model field in Settings. `tests/test_startup.py`
+  now pins the new default.
+
+### The look
+
+The report was blunt and correct: it looked bad and the text was a wall. Root
+cause was mechanical, not taste — GTK labels have no line spacing by default, so
+every reply rendered as cramped lines with no air, over a flat near-black theme
+with a muddy mustard accent and harsh pure-white body text.
+
+- **Real line spacing** on every message, via a font-size-independent Pango
+  line-height attribute, so the Settings font slider still works. This is the
+  single biggest change to how a reply reads.
+- **A proper palette**, defined once as named colours so surfaces stay in tune:
+  layered card backgrounds that actually separate from the page, a brighter
+  gold accent with subtle gradients on the user chip and the Run/Send buttons,
+  a gold accent bar down the side of command cards, and softened body ink.
+- **Typography** — Inter/system UI for chrome, JetBrains Mono for code,
+  letter-spaced title and section labels, gold headings.
+- **A rewritten markdown → Pango renderer.** Parsed a line at a time, so a lone
+  `#` or `-` mid-sentence is no longer mistaken for a heading or bullet. Adds
+  numbered lists and block-quotes, renders inline code as a subtle chip instead
+  of bare backticks, and HTML-escapes first so `<`, `>` and `&` are always safe.
+
+All sixteen suites pass.
+
 ## 12.1.0 — the gaps, and the handshakes
 
 Every item below was reproduced first and is locked shut by a named check in

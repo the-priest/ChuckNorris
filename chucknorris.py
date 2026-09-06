@@ -214,87 +214,115 @@ files (no placeholders, errors handled), write and RUN real tests, then package 
 Code is auto-verified before the user sees a Run button — if the verifier objects, fix and re-emit. \
 Playbooks and ready-made skills arrive when a task needs them. Keep the FINAL reply clean and short."""
 
+# ── theme ────────────────────────────────────────────────────────────────────
+# One warm-dark palette, defined once as named colours so every surface stays in
+# tune. The old sheet was flat near-black with a muddy mustard accent and pure
+# white body text jammed together with no line spacing; this one layers the
+# surfaces, brightens the gold into a proper accent, softens the body ink and
+# gives text room to breathe (line spacing is applied per-label in set_rich).
 CSS_TMPL = """
-window { background-color: #0e0e10; }
-.title  { font-weight: 700; color: #ececf1; font-size: 15px; }
-.sub    { color: #8a8578; font-size: 11px; }
+@define-color bg        #0c0c0e;
+@define-color surface   #17171c;
+@define-color surface2  #1d1d23;
+@define-color line      #2c2c34;
+@define-color line2     #383842;
+@define-color gold      #e0a63a;
+@define-color gold_hi   #f3bd52;
+@define-color gold_dim  #c68f2e;
+@define-color ink       #f4f2ec;
+@define-color body      #d9d5cc;
+@define-color mute      #918b7d;
+@define-color faint     #5f5b52;
+
+window { background-color: @bg; color: @body;
+         font-family: "Inter", "Cantarell", "Segoe UI", system-ui, sans-serif; }
+
+.title  { font-weight: 800; color: @ink; font-size: 17px; letter-spacing: 1.2px; }
+.sub    { color: @mute; font-size: 11.5px; letter-spacing: 0.2px; }
 .chat-scroll, .chat-scroll viewport { background: transparent; }
 
-/* message bubbles — ChatGPT/Claude style: user chip on the right, assistant
-   as open text on the left with generous width */
-.user-bubble { background-color: #b6892f; border-radius: 18px; padding: 10px 14px; }
-.user-bubble label { color: #14110a; }
-.bot-bubble  { background-color: transparent; padding: 2px 2px; }
-.bot-bubble label { color: #ececf1; }
-.turn-row { padding: 2px 4px; }
+/* message bubbles — assistant as open text on the left, user as a gold chip */
+.turn-row { padding: 3px 2px; }
+.user-bubble { background-image: linear-gradient(160deg, @gold_hi, @gold_dim);
+               border-radius: 16px 16px 4px 16px; padding: 9px 14px; }
+.user-bubble label { color: #1b1610; font-weight: 500; }
+.bot-bubble  { background: transparent; padding: 2px; }
+.bot-bubble label { color: @body; }
 
 /* cards for commands / code / video */
-.cmd-card { background-color: #16161a; border: 1px solid #26262c; border-radius: 12px; padding: 10px; }
-.cmd-text { font-family: monospace; color: #e6cfa0; font-size: 12px; }
+.cmd-card { background-color: @surface; border: 1px solid @line;
+            border-left: 3px solid @gold; border-radius: 12px; padding: 12px 14px; }
+.cmd-text { font-family: "JetBrains Mono", "Fira Code", "DejaVu Sans Mono", monospace;
+            color: #f0d9a8; font-size: 12.5px; }
 
 /* buttons */
-.gold  { background-color: #b6892f; color: #14110a; font-weight: 700; border-radius: 10px; }
-.gold:hover { background-color: #d4a23c; }
-.quick { background-color: transparent; color: #b9b4a6; border-radius: 10px; }
-.quick:hover { background-color: #26262c; color: #ececf1; }
-.headerbtn { background: transparent; border-radius: 8px; min-width: 32px; min-height: 32px; }
-.headerbtn:hover { background-color: #26262c; }
+.gold  { background-image: linear-gradient(160deg, @gold_hi, @gold_dim); color: #1b1610;
+         font-weight: 700; border-radius: 10px; padding: 6px 16px; border: none; }
+.gold:hover { background-image: linear-gradient(160deg, #ffca5e, @gold); }
+.quick { background: transparent; color: @body; border-radius: 10px; border: 1px solid @line; }
+.quick:hover { background-color: @surface2; color: @ink; border-color: @line2; }
+.headerbtn { background: transparent; border-radius: 9px; min-width: 34px; min-height: 34px;
+             color: @mute; }
+.headerbtn:hover { background-color: @surface2; color: @ink; }
 
 /* the composer pill */
-.composer { background-color: #1a1a1f; border: 1px solid #2c2c34; border-radius: 22px;
-            padding: 4px 6px; }
-.composer:focus-within { border-color: #b6892f; }
-.composer-entry { background: transparent; color: #ececf1; font-size: 14px; }
-.composer-entry text { background: transparent; color: #ececf1; }
-.icon-btn { background: transparent; border-radius: 16px; min-width: 34px; min-height: 34px;
-            color: #9a9484; padding: 0; }
-.icon-btn:hover { background-color: #2c2c34; color: #ececf1; }
-.send-fab { background-color: #b6892f; border-radius: 17px; min-width: 34px; min-height: 34px;
-            padding: 0; }
-.send-fab:hover { background-color: #d4a23c; }
-.stop-fab { background-color: #c0392b; border-radius: 17px; min-width: 34px; min-height: 34px;
+.composer { background-color: @surface; border: 1px solid @line; border-radius: 24px;
+            padding: 5px 6px; }
+.composer:focus-within { border-color: @gold; }
+.composer-entry { background: transparent; color: @ink; font-size: 14px; }
+.composer-entry text { background: transparent; color: @ink; }
+.icon-btn { background: transparent; border-radius: 16px; min-width: 36px; min-height: 36px;
+            color: @mute; padding: 0; }
+.icon-btn:hover { background-color: @surface2; color: @ink; }
+.send-fab { background-image: linear-gradient(160deg, @gold_hi, @gold_dim); border-radius: 18px;
+            min-width: 36px; min-height: 36px; padding: 0; color: #1b1610; }
+.send-fab:hover { background-image: linear-gradient(160deg, #ffca5e, @gold); }
+.stop-fab { background-color: #c0392b; border-radius: 18px; min-width: 36px; min-height: 36px;
             padding: 0; color: #fff; }
 .stop-fab:hover { background-color: #e04a3a; }
 
-.danger { color: #ff7a5c; font-weight: 700; font-size: 11px; }
-.critical { color: #ff4d4d; font-weight: 700; font-size: 12px; }
-.ok     { color: #6ddf87; font-size: 11px; }
-.dim    { color: #7a7268; font-size: 11px; }
-.live   { color: #b6892f; font-size: 12px; font-family: monospace; }
-.mono   { font-family: monospace; font-size: 11px; color: #b3a68a; }
+.danger { color: #ff8264; font-weight: 700; font-size: 11px; }
+.critical { color: #ff5a5a; font-weight: 700; font-size: 12px; }
+.ok     { color: #63d689; font-size: 11px; }
+.dim    { color: @mute; font-size: 11px; }
+.live   { color: @gold; font-size: 12px;
+          font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace; }
+.mono   { font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace;
+          font-size: 11px; color: #b8ab8d; }
 .sendbtn { background: transparent; border: none; padding: 0; min-width: 0; }
-.empty-hint { color: #55524a; font-size: 15px; }
+.empty-hint { color: @faint; font-size: 15px; }
 
 /* settings */
-.set-section { color: #b6892f; font-size: 12px; font-weight: 700; }
-.set-label   { color: #cfc9bc; font-size: 12px; }
-.set-hint    { color: #6c675d; font-size: 11px; }
-.older-note  { color: #6c675d; font-size: 11px; padding: 6px 0; }
-.msg-tools   { margin-top: 2px; }
-.playbtn     { background: transparent; border: none; padding: 2px 4px; min-width: 0;
-               min-height: 0; color: #6c675d; }
-.playbtn:hover { color: #e6b25a; background-color: #1c1c22; border-radius: 8px; }
+.set-section { color: @gold; font-size: 12px; font-weight: 700; letter-spacing: 0.4px; }
+.set-label   { color: #d3cec1; font-size: 12.5px; }
+.set-hint    { color: @faint; font-size: 11px; }
+.older-note  { color: @faint; font-size: 11px; padding: 6px 0; }
+.msg-tools   { margin-top: 3px; opacity: 0.65; }
+.playbtn     { background: transparent; border: none; padding: 2px 6px; min-width: 0;
+               min-height: 0; color: @mute; }
+.playbtn:hover { color: @gold; background-color: @surface2; border-radius: 8px; }
 
 /* saved-chats sidebar */
-.sidebar     { background-color: #121215; border-right: 1px solid #24242b; }
-.side-head   { color: #ececf1; font-weight: 700; font-size: 13px; }
-.side-note   { color: #6c675d; font-size: 11px; }
+.sidebar     { background-color: #101014; border-right: 1px solid @line; }
+.side-head   { color: @ink; font-weight: 700; font-size: 13px; }
+.side-note   { color: @faint; font-size: 10.5px; }
 .chat-row    { border-radius: 10px; }
-.chat-open   { background: transparent; border: none; border-radius: 10px; padding: 7px 9px; }
-.chat-open:hover { background-color: #1e1e24; }
-.chat-title  { color: #d8d3c7; font-size: 12px; }
-.chat-meta   { color: #6c675d; font-size: 10px; }
-.chat-current .chat-open { background-color: #23201a; }
-.chat-current .chat-title { color: #e6b25a; }
+.chat-open   { background: transparent; border: none; border-radius: 10px; padding: 8px 10px; }
+.chat-open:hover { background-color: @surface2; }
+.chat-title  { color: #d8d3c7; font-size: 12.5px; }
+.chat-meta   { color: @faint; font-size: 10px; }
+.chat-current .chat-open { background-color: rgba(224,166,58,0.12); }
+.chat-current .chat-title { color: @gold_hi; }
 
 /* live activity steps — a running checklist of exactly what Chuck is doing */
-.step-box   { background-color: #141418; border: 1px solid #24242b; border-radius: 12px;
-              padding: 6px 10px; }
-.step-run   { color: #e6b25a; font-size: 12px; }
-.step-done  { color: #6f6a5e; font-size: 12px; }
-.step-fail  { color: #c96a52; font-size: 12px; }
-.step-head  { color: #8a8578; font-size: 11px; font-weight: 700; }
-.working    { color: #e6b25a; font-size: 12px; font-family: monospace; }
+.step-box   { background-color: @surface; border: 1px solid @line; border-radius: 12px;
+              padding: 9px 13px; }
+.step-run   { color: @gold_hi; font-size: 12px; }
+.step-done  { color: #7a746a; font-size: 12px; }
+.step-fail  { color: #e07a62; font-size: 12px; }
+.step-head  { color: @mute; font-size: 10.5px; font-weight: 700; letter-spacing: 1px; }
+.working    { color: @gold_hi; font-size: 12px;
+              font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace; }
 """
 
 
@@ -407,24 +435,78 @@ def open_in_brave(url):
 
 
 # ── markdown -> Pango (clean titles, no raw asterisks) ──────────────────────
-def md_to_pango(text):
-    if not isinstance(text, str):
-        text = "" if text is None else str(text)
-    s = _html.escape(text, quote=False)
-    s = re.sub(r"`([^`]+)`", r"<tt>\1</tt>", s)
-    s = re.sub(r"(?m)^\s{0,3}#{1,6}\s+(.*)$", r"<big><b>\1</b></big>", s)
-    s = re.sub(r"(?m)^\s*[-*]\s+", "  \u2022 ", s)
+def _md_inline(s):
+    """Inline spans, run on already-escaped text: `code`, **bold**, *italic*.
+    Inline code gets a subtle chip (bg + amber) so it reads as code without the
+    raw backticks; no padding spaces, which would create ugly wrap points."""
+    s = re.sub(r"`([^`]+)`",
+               r'<span font_family="monospace" background="#242832" '
+               r'foreground="#f0d9a8">\1</span>', s)
     s = re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", s)
     s = re.sub(r"__([^_]+)__", r"<b>\1</b>", s)
     s = re.sub(r"(?<![\w*])\*([^*\n]+)\*(?![\w*])", r"<i>\1</i>", s)
     return s
 
 
+def md_to_pango(text):
+    """Markdown-ish → Pango markup, processed a line at a time so a lone '#' or
+    '-' mid-sentence is never mistaken for a heading or a bullet. Headings turn
+    gold and large, bullets/numbers get a gold marker, block-quotes get a bar.
+    Everything is HTML-escaped first, so user/model text can contain <, > and &
+    safely. Fenced ``` tool blocks are stripped upstream before we ever see the
+    text, so there is no code-fence case to handle here."""
+    if not isinstance(text, str):
+        text = "" if text is None else str(text)
+    esc = lambda x: _html.escape(x, quote=False)
+    out = []
+    for raw in text.split("\n"):
+        m = re.match(r"^\s{0,3}(#{1,6})\s+(.*)$", raw)
+        if m:
+            out.append('<span size="x-large" foreground="#f3bd52" weight="bold">'
+                       f'{_md_inline(esc(m.group(2)))}</span>')
+            continue
+        m = re.match(r"^\s{0,3}>\s?(.*)$", raw)
+        if m:
+            out.append('<span foreground="#b8ab8d"><i>\u258e '
+                       f'{_md_inline(esc(m.group(1)))}</i></span>')
+            continue
+        m = re.match(r"^\s*[-*]\s+(.*)$", raw)
+        if m:
+            out.append('<span foreground="#e0a63a">\u2022</span>  '
+                       f'{_md_inline(esc(m.group(1)))}')
+            continue
+        m = re.match(r"^\s*(\d+)\.\s+(.*)$", raw)
+        if m:
+            out.append(f'<span foreground="#e0a63a">{m.group(1)}.</span>  '
+                       f'{_md_inline(esc(m.group(2)))}')
+            continue
+        out.append(_md_inline(esc(raw)))
+    return "\n".join(out)
+
+
+def _apply_line_height(label, mult=1.4):
+    """Give a label real line spacing. GTK labels have none by default, which is
+    why long replies used to look like a cramped wall; Pango's line-height attr
+    is font-size independent, so the Settings font slider still works. Guarded:
+    older Pango or the test stub simply skip it."""
+    try:
+        from gi.repository import Pango
+        attrs = Pango.AttrList()
+        attrs.insert(Pango.attr_line_height_new(mult))
+        label.set_attributes(attrs)
+    except Exception:
+        pass
+
+
 def set_rich(label, text):
     try:
         label.set_markup(md_to_pango(text))
     except Exception:
-        label.set_text(text)
+        try:
+            label.set_text(text)
+        except Exception:
+            pass
+    _apply_line_height(label)
 
 
 def _pic_from_file(path, w=-1, h=-1):
@@ -1550,6 +1632,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             lbl = Gtk.Label(label=d.get("text", "") + ("  \U0001F4F7" if d.get("shot") else ""),
                             xalign=0, wrap=True, selectable=True)
             lbl.set_max_width_chars(60)
+            _apply_line_height(lbl)
             card = Gtk.Box(); card.add_css_class("user-bubble"); card.append(lbl)
             w.append(card)
             return w
@@ -1582,6 +1665,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         if k == "note":
             l = Gtk.Label(label=d.get("text", ""), xalign=0, wrap=True)
             l.add_css_class(d.get("css", "dim"))
+            _apply_line_height(l, 1.3)
             return l
         if k == "image":
             return self._build_image_widget(d.get("path"), d.get("src"))

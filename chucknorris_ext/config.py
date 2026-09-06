@@ -12,10 +12,20 @@ from pathlib import Path
 from . import net as _net
 
 APP_ID = "org.thepriest.chucknorris"
-VERSION = "12.1.0"
+VERSION = "13.0.0"
 
-DEFAULT_MODEL = "deepseek-ai/DeepSeek-V4-Flash"
-DEFAULT_VISION = "Qwen/Qwen2.5-VL-32B-Instruct"
+# Backend model. GLM-5.3-Flash (Z.ai) replaced DeepSeek-V4-Flash in v13: it
+# tops SiliconFlow's intelligence board, is the strongest coder / long-horizon
+# agent in the catalogue, and is *natively multimodal* (text+image+video) so it
+# doubles as the vision model — one model, one bill. Blended cost with prompt
+# caching (~$0.06/M) sits at or below V4-Flash, which is what a tight agent loop
+# actually pays, so this is both better AND cheaper. Both are reasoning models;
+# the stream reader takes only delta.content, so GLM's thinking never leaks into
+# a reply. Anyone who preferred the old model can type it straight back into the
+# Chat-model field in Settings — e.g. deepseek-ai/DeepSeek-V4-Flash (cheapest)
+# or deepseek-ai/DeepSeek-V4-Pro (heaviest).
+DEFAULT_MODEL = "zai-org/GLM-5.3-Flash"
+DEFAULT_VISION = "zai-org/GLM-5.3-Flash"
 DEFAULT_BASE = "https://api.siliconflow.com/v1"
 
 DATA_DIR = Path.home() / ".local" / "share" / "chucknorris"
