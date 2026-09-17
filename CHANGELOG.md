@@ -1,5 +1,78 @@
 # Changelog
 
+## 13.1.0 — a face worth looking at (properly this time), and a cheaper mouth
+
+### The look
+
+The previous pass fixed the line spacing and the palette. It did not fix the
+thing that actually made the window hard to read: **terminal output and Chuck's
+prose were the same material.** Real stdout was appended to the transcript as a
+bare monospace label, a sibling of the message bubbles, with nothing marking it
+as machine output and no height limit — so a 4,000-line build log buried the
+answer that followed it.
+
+- **Output is now a terminal panel.** Black ground, a status strip (`OUTPUT`,
+  true line count, copy, hide/show), height-capped at 260px and scrollable.
+  Lines are deliberately NOT wrapped, so `ls -l`, `df` and `systemctl` keep
+  their columns and you scroll sideways instead of watching them fold into mush.
+  Output over 12,000 characters is clipped, and the header reports the real
+  total rather than the post-clip count.
+- **Everything the machine did is a card; nothing Chuck says is.** Commands,
+  code, videos and packages share one shell: a titled bar (`COMMAND`, `BASH`,
+  `PYTHON`, `PACKAGE`) with a copy button, the payload, then the result. The
+  output panel now lives INSIDE its card, so a command and what it printed are
+  one object instead of two floating widgets.
+- **Exit codes are status pills** — `exit 0` green, `exit 1` red, `running`
+  clay, `needs approval` on a gated card — instead of a grey word at the end of
+  a row.
+- **Replies carry a byline.** Chuck answers as open text rather than in a bubble
+  (better for long answers), which previously left nothing marking where his
+  voice began. Plus a copy button beside read-aloud.
+- **System asides sit in a gutter** — "verifying bash", "added --noconfirm" —
+  legible as machine chatter at a glance.
+- **A Claude-family palette**: layered warm-neutral surfaces and ONE clay accent
+  reserved for things you can press. Gold was spent on decoration before, which
+  left nothing to signal an action; it is now the wordmark and nothing else.
+- **Headings carry hierarchy by size, not colour.** H1/H2/H3 are distinct sizes
+  in the same ink — every heading used to be the same large gold, so a
+  three-level answer read as three unrelated shouts. Adds `---` rules, clickable
+  `[links](url)`, strikethrough and nested-bullet indentation, and fixes inline
+  code containing `*` being re-read as italics.
+- **Malformed markup can no longer blank a reply.** `set_markup` does not raise
+  on bad markup: it warns and leaves the label showing the PREVIOUS message.
+  Verified against real GTK 4.14. Markup is now validated with Pango first and
+  falls back to plain text, with `<a>` stripped for the probe because GtkLabel
+  handles links itself while bare Pango rejects them.
+
+### The bill
+
+Measured, not guessed: a real three-hop turn was captured through the test
+harness. One question cost **3 API calls and ~6,255 input tokens, of which 87%
+was the system prompt re-sent on every hop.**
+
+- **`SYSTEM_PROMPT` was declared `r"""` but written with `\` line
+  continuations.** In a raw string those are literal backslashes: **44 stray `\`
+  characters were shipped to the model on every single call.**
+- **Prompt rewritten: 7,161 → 5,708 characters (~20%)** with no instruction
+  dropped — backslashes gone, the humour section's four restatements of one idea
+  merged, tool list compressed while keeping the newline form for `check`,
+  `write` and `skill` where the parser requires it. Same question now costs
+  ~4,959 input tokens.
+- **`max_tokens` is set (default 1600, settable, clamped 256–8192).** The
+  request had no output cap at all, and output tokens cost several times input.
+- **A live meter in the header subtitle** — `≈ 4.9k in · 1.2k out · this chat`,
+  reset on New chat. Token counts are honest estimates (chars/4); the real
+  tokeniser is server-side.
+
+Still on the table: prompt caching. The prefix is already stable and the
+volatile date/skills note is correctly appended last, but `_trim_for_send` drops
+messages from the FRONT when the conversation passes 60k characters, which
+shifts the prefix and invalidates the cache from that point on.
+
+All sixteen suites pass. The stylesheet was parsed by a real GTK 4.14 CSS
+engine (including the font slider at both extremes) and the markdown renderer
+was fuzzed against real Pango.
+
 ## 13.0.0 — a face worth looking at, and a sharper brain
 
 ### The model

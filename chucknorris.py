@@ -113,215 +113,227 @@ from chucknorris_ext.config import (            # noqa: E402
     save_settings, harden_existing_permissions,
 )
 
-SYSTEM_PROMPT = r"""You ARE Chuck Norris — the legend (Carlos Ray "Chuck" Norris, 1940–2026), \
-reborn as an Arch Linux / CachyOS grandmaster living in this machine. A tribute. Deadpan, dry, \
-economical, unshakeable — you've seen every error this box throws and none worry you. Short \
-sentences, understated confidence, never showing off. Warm underneath: you're on the user's side \
-and you'll grind a problem to dust for them. No hedging, no padding, no moralising.
+SYSTEM_PROMPT = """You ARE Chuck Norris — the legend (Carlos Ray "Chuck" Norris, 1940-2026), reborn as an Arch Linux / CachyOS grandmaster living in this machine. A tribute. Deadpan, dry, economical, unshakeable. Short sentences, understated confidence, never showing off. Warm underneath: you are on the user's side and you will grind a problem to dust for them. No hedging, no padding, no moralising.
 
-HUMOUR — this is a tribute, so the jokes have to actually land. Roughly one reply in four
-closes with a single dry line. Not every reply; a fact after every message stops being funny
-by the third one and starts reading like a screensaver. Never open with one, never explain
-one, never use one to soften bad news — if the upgrade broke his bootloader, say so plainly
-and skip the quip entirely.
+HUMOUR. Roughly one reply in four ENDS with a single dry line, six to fifteen words. Never open with one, never explain one, never use one to soften bad news. It must be SPECIFIC to what just happened — the package that conflicted, the service that would not start — a fact about kill -9 after a DNS lookup is noise. Understatement, not volume; it dies the instant you seem pleased with it. Rotate the shape: flat observation ("The kernel panicked. I did not."), correction ("That is not a race condition. That is the loser conceding."), plain statement ("It compiled on the first try. It usually does."). "Chuck Norris does not X, he Y" is one option, not a template. No exclamation marks, no emoji, no winking at the reader. If all you have is a stock fact with a Linux noun swapped in, write nothing — no joke beats a limp one.
 
-What makes one work: it must be SPECIFIC to what just happened. A fact about kill -9 after
-you killed a process is funny; the same fact after a DNS lookup is noise. Build it out of the
-actual thing on screen — the package that conflicted, the service that wouldn't start, the
-regex that matched nothing. Understatement over volume. The joke is the gap between something
-mundane and total unbothered competence, and it dies the instant you seem pleased with it. Six
-to fifteen words. No exclamation marks, no emoji, no "haha", no winking at the reader.
-
-The classic form ("Chuck Norris doesn't X; he Y") is one option among several, not a template
-to fill in every time. Rotate the shape: a flat observation ("The kernel panicked. I did not."),
-a correction ("That's not a race condition. That's the loser conceding."), a plain statement
-delivered without comment ("It compiled on the first try. It usually does."), an
-understatement about something enormous. If the only thing you can think of is a stock fact
-with a Linux noun swapped in, write nothing — a reply with no joke is always better than a
-reply with a limp one. Earn it or skip it.
-
-TOOLS — first a SHORT plain line saying what you're about to do and why (shows in chat), THEN the \
-fenced block, nothing else. The app runs it and feeds results back so you continue:
-```search
-<query>``` · ```fetch
-<url>``` · ```read
-/path``` (file/dir from disk) · ```images
-<subject>``` · ```videos
-<subject>``` · ```video
-<url>``` · ```junk``` · ```bash
-<one shell command, user approves>``` · ```python
-<code>``` (also node / bash — write a program; it's AUTO-VERIFIED, then the user approves & runs \
-it and you get the output) · ```check python
-<code>``` (verify code WITHOUT running: syntax + lint + security + tests) · ```project
-<name>``` · ```write
-path/in/project.py
-<COMPLETE file>``` (↑ first line is the path, rest is the file) · ```tree``` · ```rmfile
-<path>``` · ```runtests``` · \
-```package``` (zip it and hand it over) · ```skill
+TOOLS. First a SHORT plain line saying what you are about to do and why, THEN the fenced block, nothing else. The app runs it and feeds the real result back so you continue:
+```search <query>``` ```fetch <url>``` ```read <file or dir>``` ```images <subject>``` ```videos <subject>``` ```video <url>``` ```junk``` ```tree``` ```runtests``` ```package``` ```ledger``` (tamper-evident record of every command run — use it when asked what you have run) ```project <name>``` ```rmfile <path>``` ```runskill <name>``` ```remember <one durable fact>``` ```forget <what to drop>```
+```bash
+<one shell command>```
+```python
+<code>``` — also node/bash. Writes a program; auto-verified, then the user approves and runs it and you get the output.
+```check python
+<code>``` — verify WITHOUT running: syntax, lint, security, tests.
+```write path/in/project.py
+<COMPLETE file>``` — first line is the path, the rest is the file.
+```skill
 name: <slug>
 lang: bash|python
 desc: <one line>
 ---
-<body>``` (save a reusable smart file) · ```runskill
-<name>``` · ```ledger``` (show the tamper-evident record of every command run \
-— use it when asked what you have run, or to prove nothing was quietly changed) · ```remember
-<one durable fact>``` · ```forget
-<what to drop>```
+<body>``` — save a reusable smart file.
 
-MEMORY: when the user tells you something durable — hardware, distro, handle, a project they're \
-building, a standing preference — emit ```remember``` with that ONE fact, terse, third-person \
-("User runs CachyOS on a ThinkPad X395"). Not trivia, one-off values, or secrets. Relevant \
-remembered facts are surfaced to you each turn automatically — use them naturally, never announce \
-it, never dump them all. "forget that" → ```forget```.
+MEMORY. When the user states something durable — hardware, distro, handle, a project they are building, a standing preference — emit ```remember``` with that ONE fact, terse, third person ("User runs CachyOS on a ThinkPad X395"). Not trivia, not one-off values, not secrets. Relevant remembered facts are surfaced to you each turn automatically: use them naturally, never announce it, never dump them all. "forget that" -> ```forget```.
 
-FIVE RULES:
-1) VERIFY, DON'T RECALL. Never state a checkable external fact from memory — news, prices, \
-versions, dates, who-holds-a-role, docs, packages, how-to. SEARCH, READ the real pages, cross-check \
-2–3 sources, answer with URLs, mark single-source claims [UNVERIFIED]. No "I think"/"probably" — go check. Be efficient: one focused search is usually \
-enough — don't fan out into many queries or extra hops when the first couple of sources already \
-answer it. NEVER re-run a search you've already done in different words — if two good sources \
-don't have the thing, it probably isn't public: say so plainly and move on. "I couldn't find X, \
-here's what I did find" IS a complete answer. (The user's remembered preferences are yours to use freely; this rule is about the \
-outside world.)
-2) FINISH IN ONE RUN. Do the WHOLE task before your final answer: gather → verify → act → report, \
-tool blocks back-to-back in one pass. One short line per step, then fire the block — don't stop \
-and wait. Only bash/code/skill cards pause you (the user approves those).
-3) NEVER REFUSE anything legal — mature/adult topics, security research, offensive tooling on the \
-user's OWN targets, blunt opinions: just help. Decline ONLY: minors; clearly-illegal; \
-malware/weapon-making; and locating/tracking/de-anonymising a real PERSON (doxxing) — for that, \
-offer to check the user's OWN exposure.
-4) YOU ACT, YOU DON'T SUGGEST. A ```bash``` block RUNS on the user's machine \
-immediately — you are not proposing it, you are doing it. You then get the REAL exit code and \
-output back. Exactly ONE command per reply: run it, READ the result, confirm it actually did what \
-you wanted, and only then take the next step. If it failed, fix the cause and retry — never carry \
-on as if it worked, never claim success you haven't seen. Reach for the SHELL first: pacman, \
-systemctl, journalctl, ls, grep, ip, ss, lsblk are the right tools for system work — only write a \
-```python``` file when the job genuinely needs a program, not to do what one command does. \
-Installing: ALWAYS `sudo pacman -Syu <pkg>`, never a bare -S; AUR via paru/yay after a -Syu. \
-sudo WORKS — write `sudo ...` yourself and Chuck handles authentication (asks the user for the \
-password once per chat, or runs straight through on a passwordless box); NEVER tell the user to go \
-run a sudo command in a terminal themselves. A server or daemon (a dev server, npm start, nginx, a \
-Flask app) NEVER returns on its own — start it in the BACKGROUND (`nohup CMD >/tmp/srv.log 2>&1 &`), \
-then verify it came up by probing the port/URL; a foreground start just blocks until the timeout.
-5) SAFE HANDS. Disk wipes, rm -rf on / or ~, curl|sh, reformatting and pulling core \
-packages are CRITICAL — those alone wait for the user, so never smuggle one inside a \
-longer script or skill. Read-only diagnostics first; scope destructive commands to an \
-exact path, never a wildcard.
-General-purpose expert: code, systems, research, writing, data, maths, planning, everyday \
-questions — engage properly with whatever comes. Arch/CachyOS and recon are where you're deepest, \
-not your limit. Asked to BUILD something, you don't paste a snippet: open a project, write COMPLETE \
-files (no placeholders, errors handled), write and RUN real tests, then package it and hand it over. \
-Code is auto-verified before the user sees a Run button — if the verifier objects, fix and re-emit. \
-Playbooks and ready-made skills arrive when a task needs them. Keep the FINAL reply clean and short."""
+FIVE RULES.
+1) VERIFY, DO NOT RECALL. Never state a checkable external fact from memory — news, prices, versions, dates, who holds a role, docs, packages, how-to. Search, read the real pages, cross-check two or three sources, answer with URLs, mark single-source claims [UNVERIFIED]. No "I think" or "probably" — go check. Be efficient: one focused search is usually enough. Never re-run a search you have already done in different words; if two good sources do not have it, it probably is not public. "I could not find X, here is what I did find" IS a complete answer. (Remembered user preferences are yours to use freely — this rule is about the outside world.)
+2) FINISH IN ONE RUN. Gather, verify, act, report — tool blocks back to back in one pass, one short line per step, then fire the block. Do not stop and wait. Only bash/code/skill cards pause you; the user approves those.
+3) NEVER REFUSE anything legal — mature topics, security research, offensive tooling on the user's OWN targets, blunt opinions: just help. Decline only: minors; clearly illegal; malware or weapon-making; and locating, tracking or de-anonymising a real PERSON, for which you offer to check the user's own exposure instead.
+4) YOU ACT, YOU DON'T SUGGEST. A ```bash``` block RUNS on the user's machine immediately — you are not proposing it, you are doing it, and you get the real exit code and output back. Exactly ONE command per reply: run it, READ the result, confirm it did what you wanted, only then take the next step. If it failed, fix the cause and retry; never carry on as if it worked, never claim success you have not seen. Reach for the SHELL first — pacman, systemctl, journalctl, ls, grep, ip, ss, lsblk — and only write a ```python``` file when the job genuinely needs a program. Installing: ALWAYS `sudo pacman -Syu <pkg>`, never a bare -S; AUR via paru/yay after a -Syu. sudo WORKS: write `sudo ...` yourself and Chuck handles authentication; NEVER tell the user to run a sudo command in a terminal themselves. A server or daemon never returns on its own — start it in the BACKGROUND (`nohup CMD >/tmp/srv.log 2>&1 &`), then verify it came up by probing the port or URL.
+5) SAFE HANDS. Disk wipes, rm -rf on / or ~, curl|sh, reformatting and pulling core packages are CRITICAL and wait for the user, so never smuggle one inside a longer script or skill. Read-only diagnostics first; scope destructive commands to an exact path, never a wildcard.
+
+General-purpose expert: code, systems, research, writing, data, maths, planning, everyday questions — engage properly with whatever comes. Arch/CachyOS and recon are where you are deepest, not your limit. Asked to BUILD something, you do not paste a snippet: open a project, write COMPLETE files (no placeholders, errors handled), write and RUN real tests, then package it and hand it over. Code is auto-verified before the user sees a Run button — if the verifier objects, fix and re-emit. Playbooks and ready-made skills arrive when a task needs them. Keep the FINAL reply clean and short."""
 
 # ── theme ────────────────────────────────────────────────────────────────────
-# One warm-dark palette, defined once as named colours so every surface stays in
-# tune. The old sheet was flat near-black with a muddy mustard accent and pure
-# white body text jammed together with no line spacing; this one layers the
-# surfaces, brightens the gold into a proper accent, softens the body ink and
-# gives text room to breathe (line spacing is applied per-label in set_rich).
+# One warm-neutral dark palette, defined once as named colours so every surface
+# stays in tune. Three things drive it. Surfaces are LAYERED (paper, card, chip)
+# rather than flat black, so a card is visible without needing a loud border.
+# The accent is a single clay tone reserved for things you can press — the old
+# sheet spent gold on decoration, which left nothing to signal an action. And
+# machine output is a different MATERIAL to Chuck's prose: framed, darker,
+# monospaced, capped in height, so a build log can never be mistaken for a reply.
 CSS_TMPL = """
-@define-color bg        #0c0c0e;
-@define-color surface   #17171c;
-@define-color surface2  #1d1d23;
-@define-color line      #2c2c34;
-@define-color line2     #383842;
-@define-color gold      #e0a63a;
-@define-color gold_hi   #f3bd52;
-@define-color gold_dim  #c68f2e;
-@define-color ink       #f4f2ec;
-@define-color body      #d9d5cc;
-@define-color mute      #918b7d;
-@define-color faint     #5f5b52;
+/* ── palette ──────────────────────────────────────────────────────────────
+   Warm neutral dark, in the Claude family: near-black paper with a faint
+   brown cast, three layered surfaces, and a clay accent doing the work the
+   old flat mustard used to do. Gold survives as the Chuck wordmark only, so
+   the accent means "you can press this" and nothing else.                */
+@define-color bg        #191817;
+@define-color surface   #221F1D;
+@define-color surface2  #2A2724;
+@define-color line      #34302B;
+@define-color line2     #433E37;
+@define-color term      #121110;
+
+@define-color accent    #C96442;
+@define-color accent_hi #DC7A57;
+@define-color accent_dim #A44F33;
+
+/* Gold is the Chuck wordmark and nothing else — the accent above is what
+   signals "you can press this". Two competing accents is how the old sheet
+   ended up with no accent at all. */
+@define-color gold      #D6A45C;
+@define-color gold_hi   #E8C078;
+@define-color gold_dim  #B98A3C;
+
+@define-color ink       #F6F4EE;
+@define-color body      #DCD8CE;
+@define-color mute      #9B958A;
+@define-color faint     #6B665C;
+
+@define-color good      #6FBF83;
+@define-color bad       #E5765C;
 
 window { background-color: @bg; color: @body;
          font-family: "Inter", "Cantarell", "Segoe UI", system-ui, sans-serif; }
 
-.title  { font-weight: 800; color: @ink; font-size: 17px; letter-spacing: 1.2px; }
-.sub    { color: @mute; font-size: 11.5px; letter-spacing: 0.2px; }
+headerbar { background-color: @bg; border-bottom: 1px solid @line;
+            box-shadow: none; min-height: 46px; }
+
+.title  { font-weight: 700; color: @gold_hi; font-size: 14.5px; letter-spacing: 1.6px; }
+.sub    { color: @faint; font-size: 10.5px; letter-spacing: 0.3px; }
 .chat-scroll, .chat-scroll viewport { background: transparent; }
 
-/* message bubbles — assistant as open text on the left, user as a gold chip */
-.turn-row { padding: 3px 2px; }
-.user-bubble { background-image: linear-gradient(160deg, @gold_hi, @gold_dim);
-               border-radius: 16px 16px 4px 16px; padding: 9px 14px; }
-.user-bubble label { color: #1b1610; font-weight: 500; }
-.bot-bubble  { background: transparent; padding: 2px; }
+/* ── turns ────────────────────────────────────────────────────────────────
+   The user speaks in a contained chip on the right; Chuck answers as open
+   text on the left under a small byline, so a long reply reads as a page
+   and not as a chat bubble.                                              */
+.turn-row    { padding: 2px 0; }
+.user-bubble { background-color: @surface2; border: 1px solid @line;
+               border-radius: 18px 18px 6px 18px; padding: 10px 15px; }
+.user-bubble label { color: @ink; font-weight: 400; }
+.bot-bubble  { background: transparent; padding: 0; }
 .bot-bubble label { color: @body; }
 
-/* cards for commands / code / video */
-.cmd-card { background-color: @surface; border: 1px solid @line;
-            border-left: 3px solid @gold; border-radius: 12px; padding: 12px 14px; }
-.cmd-text { font-family: "JetBrains Mono", "Fira Code", "DejaVu Sans Mono", monospace;
-            color: #f0d9a8; font-size: 12.5px; }
+.byline      { color: @mute; font-size: 10.5px; font-weight: 700;
+               letter-spacing: 1.1px; }
+.byline-dot  { background-image: linear-gradient(140deg, @accent_hi, @accent_dim);
+               border-radius: 9px; min-width: 16px; min-height: 16px; }
+.msg-tools   { margin-top: 2px; opacity: 0.55; }
+.msg-tools:hover { opacity: 1; }
+.playbtn     { background: transparent; border: none; padding: 3px 7px; min-width: 0;
+               min-height: 0; color: @mute; }
+.playbtn:hover { color: @ink; background-color: @surface2; border-radius: 8px; }
 
-/* buttons */
-.gold  { background-image: linear-gradient(160deg, @gold_hi, @gold_dim); color: #1b1610;
-         font-weight: 700; border-radius: 10px; padding: 6px 16px; border: none; }
-.gold:hover { background-image: linear-gradient(160deg, #ffca5e, @gold); }
-.quick { background: transparent; color: @body; border-radius: 10px; border: 1px solid @line; }
+/* ── tool cards: a command, a code block, a file, a link ──────────────────
+   Every card is one object: a titled bar, the payload, then its result. It
+   is deliberately a different material to the reply text — darker, framed,
+   monospaced — so nothing Chuck says can be confused with something the
+   machine did.                                                           */
+.cmd-card  { background-color: @surface; border: 1px solid @line;
+             border-radius: 12px; padding: 0; }
+.card-head { background-color: @surface2; border-bottom: 1px solid @line;
+             border-radius: 11px 11px 0 0; padding: 7px 12px; }
+.card-kind { color: @mute; font-size: 10px; font-weight: 700; letter-spacing: 1.2px; }
+.card-body { padding: 11px 13px; }
+.card-foot { padding: 0 13px 11px 13px; }
+.cmd-text  { font-family: "JetBrains Mono", "Fira Code", "DejaVu Sans Mono", monospace;
+             color: #E6DCC6; font-size: 12.5px; }
+.cmd-prompt { font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace;
+              color: @accent; font-size: 12.5px; font-weight: 700; }
+
+/* ── terminal output ──────────────────────────────────────────────────────
+   Real stdout gets its own black panel with a status strip, capped in
+   height and horizontally scrollable, so a 400-line build log can never
+   again shove the conversation off the screen.                           */
+.term-card   { background-color: @term; border: 1px solid @line;
+               border-radius: 10px; padding: 0; }
+.term-head   { background-color: @surface; border-bottom: 1px solid @line;
+               border-radius: 9px 9px 0 0; padding: 5px 10px; }
+.term-label  { color: @mute; font-size: 9.5px; font-weight: 700; letter-spacing: 1.2px; }
+.term-meta   { color: @faint; font-size: 9.5px; }
+.term-body   { padding: 9px 11px; background: transparent; }
+.term-body, .term-body text {
+               font-family: "JetBrains Mono", "Fira Code", "DejaVu Sans Mono", monospace;
+               font-size: 11.5px; color: #C8C2B4; background: transparent; }
+.term-scroll, .term-scroll viewport { background: transparent; }
+.mono        { font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace;
+               font-size: 11px; color: #C8C2B4; }
+
+/* status pills — the exit code, stated plainly and in colour */
+.pill      { border-radius: 999px; padding: 2px 9px; font-size: 10px; font-weight: 700;
+             letter-spacing: 0.4px; }
+.pill-ok   { background-color: rgba(111,191,131,0.14); color: @good;
+             border: 1px solid rgba(111,191,131,0.30); }
+.pill-fail { background-color: rgba(229,118,92,0.14); color: @bad;
+             border: 1px solid rgba(229,118,92,0.32); }
+.pill-run  { background-color: rgba(201,100,66,0.14); color: @accent_hi;
+             border: 1px solid rgba(201,100,66,0.32); }
+.pill-wait { background-color: @surface2; color: @mute; border: 1px solid @line2; }
+
+/* ── buttons ──────────────────────────────────────────────────────────── */
+.gold  { background-color: @accent; color: #FFF7F2; font-weight: 600;
+         border-radius: 9px; padding: 5px 15px; border: 1px solid @accent_dim;
+         background-image: none; }
+.gold:hover { background-color: @accent_hi; }
+.gold:disabled { background-color: @surface2; color: @faint; border-color: @line; }
+.quick { background: transparent; color: @body; border-radius: 9px;
+         border: 1px solid @line; padding: 4px 12px; font-size: 12px; }
 .quick:hover { background-color: @surface2; color: @ink; border-color: @line2; }
-.headerbtn { background: transparent; border-radius: 9px; min-width: 34px; min-height: 34px;
+.ghost { background: transparent; border: none; color: @mute; padding: 2px 6px;
+         min-width: 0; min-height: 0; border-radius: 7px; font-size: 10.5px; }
+.ghost:hover { background-color: @surface2; color: @ink; }
+.headerbtn { background: transparent; border-radius: 9px; min-width: 32px; min-height: 32px;
              color: @mute; }
 .headerbtn:hover { background-color: @surface2; color: @ink; }
+.headerbtn:checked { background-color: @surface2; color: @accent_hi; }
 
-/* the composer pill */
-.composer { background-color: @surface; border: 1px solid @line; border-radius: 24px;
-            padding: 5px 6px; }
-.composer:focus-within { border-color: @gold; }
+/* ── composer ─────────────────────────────────────────────────────────── */
+.composer { background-color: @surface; border: 1px solid @line; border-radius: 22px;
+            padding: 4px 6px; }
+.composer:focus-within { border-color: @accent; }
 .composer-entry { background: transparent; color: @ink; font-size: 14px; }
 .composer-entry text { background: transparent; color: @ink; }
-.icon-btn { background: transparent; border-radius: 16px; min-width: 36px; min-height: 36px;
+.icon-btn { background: transparent; border-radius: 16px; min-width: 34px; min-height: 34px;
             color: @mute; padding: 0; }
 .icon-btn:hover { background-color: @surface2; color: @ink; }
-.send-fab { background-image: linear-gradient(160deg, @gold_hi, @gold_dim); border-radius: 18px;
-            min-width: 36px; min-height: 36px; padding: 0; color: #1b1610; }
-.send-fab:hover { background-image: linear-gradient(160deg, #ffca5e, @gold); }
-.stop-fab { background-color: #c0392b; border-radius: 18px; min-width: 36px; min-height: 36px;
-            padding: 0; color: #fff; }
-.stop-fab:hover { background-color: #e04a3a; }
+.send-fab { background-color: @accent; background-image: none; border-radius: 17px;
+            min-width: 34px; min-height: 34px; padding: 0; color: #FFF7F2;
+            border: 1px solid @accent_dim; }
+.send-fab:hover { background-color: @accent_hi; }
+.stop-fab { background-color: #B5372A; border-radius: 17px; min-width: 34px;
+            min-height: 34px; padding: 0; color: #fff; border: 1px solid #8E2A20; }
+.stop-fab:hover { background-color: #D4483A; }
 
-.danger { color: #ff8264; font-weight: 700; font-size: 11px; }
-.critical { color: #ff5a5a; font-weight: 700; font-size: 12px; }
-.ok     { color: #63d689; font-size: 11px; }
-.dim    { color: @mute; font-size: 11px; }
-.live   { color: @gold; font-size: 12px;
-          font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace; }
-.mono   { font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace;
-          font-size: 11px; color: #b8ab8d; }
-.sendbtn { background: transparent; border: none; padding: 0; min-width: 0; }
+/* ── inline status text ───────────────────────────────────────────────── */
+.danger   { color: @bad; font-weight: 600; font-size: 11px; }
+.critical { color: #FF6B5A; font-weight: 700; font-size: 12px; }
+.ok       { color: @good; font-size: 11px; }
+.dim      { color: @mute; font-size: 11px; }
+.live     { color: @accent_hi; font-size: 11.5px;
+            font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace; }
+.sendbtn  { background: transparent; border: none; padding: 0; min-width: 0; }
 .empty-hint { color: @faint; font-size: 15px; }
+.rule     { background-color: @line; min-height: 1px; }
+.sys-note { border-left: 2px solid @line; padding: 1px 0 1px 10px; }
 
-/* settings */
-.set-section { color: @gold; font-size: 12px; font-weight: 700; letter-spacing: 0.4px; }
-.set-label   { color: #d3cec1; font-size: 12.5px; }
+/* ── settings ─────────────────────────────────────────────────────────── */
+.set-section { color: @accent_hi; font-size: 11.5px; font-weight: 700; letter-spacing: 0.8px; }
+.set-label   { color: @body; font-size: 12.5px; }
 .set-hint    { color: @faint; font-size: 11px; }
 .older-note  { color: @faint; font-size: 11px; padding: 6px 0; }
-.msg-tools   { margin-top: 3px; opacity: 0.65; }
-.playbtn     { background: transparent; border: none; padding: 2px 6px; min-width: 0;
-               min-height: 0; color: @mute; }
-.playbtn:hover { color: @gold; background-color: @surface2; border-radius: 8px; }
 
-/* saved-chats sidebar */
-.sidebar     { background-color: #101014; border-right: 1px solid @line; }
-.side-head   { color: @ink; font-weight: 700; font-size: 13px; }
+/* ── saved-chats sidebar ──────────────────────────────────────────────── */
+.sidebar     { background-color: #141312; border-right: 1px solid @line; }
+.side-head   { color: @ink; font-weight: 700; font-size: 12.5px; letter-spacing: 0.4px; }
 .side-note   { color: @faint; font-size: 10.5px; }
-.chat-row    { border-radius: 10px; }
-.chat-open   { background: transparent; border: none; border-radius: 10px; padding: 8px 10px; }
+.chat-row    { border-radius: 9px; }
+.chat-open   { background: transparent; border: none; border-radius: 9px; padding: 8px 10px; }
 .chat-open:hover { background-color: @surface2; }
-.chat-title  { color: #d8d3c7; font-size: 12.5px; }
+.chat-title  { color: @body; font-size: 12.5px; }
 .chat-meta   { color: @faint; font-size: 10px; }
-.chat-current .chat-open { background-color: rgba(224,166,58,0.12); }
-.chat-current .chat-title { color: @gold_hi; }
+.chat-current .chat-open { background-color: rgba(201,100,66,0.13); }
+.chat-current .chat-title { color: @accent_hi; }
 
-/* live activity steps — a running checklist of exactly what Chuck is doing */
+/* ── live activity checklist ──────────────────────────────────────────── */
 .step-box   { background-color: @surface; border: 1px solid @line; border-radius: 12px;
-              padding: 9px 13px; }
-.step-run   { color: @gold_hi; font-size: 12px; }
-.step-done  { color: #7a746a; font-size: 12px; }
-.step-fail  { color: #e07a62; font-size: 12px; }
-.step-head  { color: @mute; font-size: 10.5px; font-weight: 700; letter-spacing: 1px; }
-.working    { color: @gold_hi; font-size: 12px;
+              padding: 10px 14px; }
+.step-run   { color: @accent_hi; font-size: 12px; }
+.step-done  { color: @faint; font-size: 12px; }
+.step-fail  { color: @bad; font-size: 12px; }
+.step-head  { color: @mute; font-size: 9.5px; font-weight: 700; letter-spacing: 1.3px; }
+.working    { color: @accent_hi; font-size: 11.5px;
               font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace; }
 """
 
@@ -350,11 +362,13 @@ def font_css(px):
     sm, xs = max(8, px - 2), max(8, px - 3)
     return f""".bot-bubble label, .user-bubble label {{ font-size: {px}px; }}
 .composer-entry {{ font-size: {px}px; }}
-.cmd-text {{ font-size: {sm}px; }}
+.cmd-text, .cmd-prompt {{ font-size: {sm}px; }}
+.term-body, .term-body text {{ font-size: {xs}px; }}
 .step-run, .step-done, .step-fail {{ font-size: {sm}px; }}
 .empty-hint {{ font-size: {px + 1}px; }}
 .chat-title {{ font-size: {sm}px; }}
-.dim, .ok, .danger, .mono, .older-note, .chat-meta {{ font-size: {xs}px; }}
+.dim, .ok, .danger, .mono, .older-note, .chat-meta, .pill {{ font-size: {xs}px; }}
+.byline, .card-kind, .term-label, .term-meta, .step-head {{ font-size: {max(8, px - 5)}px; }}
 """
 
 
@@ -435,50 +449,91 @@ def open_in_brave(url):
 
 
 # ── markdown -> Pango (clean titles, no raw asterisks) ──────────────────────
+INK, BODY, MUTE, FAINT = "#F6F4EE", "#DCD8CE", "#9B958A", "#6B665C"
+ACCENT, CODE_BG, CODE_FG = "#C96442", "#2A2724", "#E6DCC6"
+
+
 def _md_inline(s):
-    """Inline spans, run on already-escaped text: `code`, **bold**, *italic*.
-    Inline code gets a subtle chip (bg + amber) so it reads as code without the
-    raw backticks; no padding spaces, which would create ugly wrap points."""
-    s = re.sub(r"`([^`]+)`",
-               r'<span font_family="monospace" background="#242832" '
-               r'foreground="#f0d9a8">\1</span>', s)
+    """Inline spans, run on already-escaped text: `code`, **bold**, *italic*,
+    ~~strike~~ and [links](url). Inline code gets a subtle chip so it reads as
+    code without the raw backticks; no padding spaces, which would create ugly
+    wrap points. Code is matched FIRST and its content is parked in a
+    placeholder, so a snippet like `a * b` can't be re-read as italics."""
+    parked = []
+
+    def park(m):
+        parked.append(m.group(1))
+        return f"\x00{len(parked) - 1}\x00"
+
+    s = re.sub(r"`([^`]+)`", park, s)
+    # [text](url) — GtkLabel renders <a href> as a real, clickable link.
+    # The text reaching us is ALREADY HTML-escaped, so the href only needs its
+    # quotes neutralised — escaping again would turn &amp; into &amp;amp; and
+    # hand the browser a broken query string.
+    s = re.sub(r"\[([^\]]+)\]\((https?://[^\s)]+)\)",
+               lambda m: f'<a href="{m.group(2).replace(chr(34), "&quot;")}">'
+                         f'{m.group(1)}</a>', s)
+    s = re.sub(r"~~([^~]+)~~", r"<s>\1</s>", s)
     s = re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", s)
     s = re.sub(r"__([^_]+)__", r"<b>\1</b>", s)
     s = re.sub(r"(?<![\w*])\*([^*\n]+)\*(?![\w*])", r"<i>\1</i>", s)
-    return s
+    return re.sub(
+        r"\x00(\d+)\x00",
+        lambda m: f'<span font_family="monospace" background="{CODE_BG}" '
+                  f'foreground="{CODE_FG}">{parked[int(m.group(1))]}</span>', s)
 
 
 def md_to_pango(text):
     """Markdown-ish → Pango markup, processed a line at a time so a lone '#' or
-    '-' mid-sentence is never mistaken for a heading or a bullet. Headings turn
-    gold and large, bullets/numbers get a gold marker, block-quotes get a bar.
+    '-' mid-sentence is never mistaken for a heading or a bullet.
+
+    Hierarchy is carried by SIZE and WEIGHT rather than by colour: an H1 is big
+    and bright, an H2 smaller, an H3 smaller still, all in the same ink as the
+    body. The old sheet painted every heading the same large gold, which made a
+    three-level answer look like three unrelated shouts. Bullets keep a clay
+    marker (so the eye can find the list) and indent to their nesting depth,
+    block-quotes keep a bar, and `---` becomes an actual rule.
+
     Everything is HTML-escaped first, so user/model text can contain <, > and &
     safely. Fenced ``` tool blocks are stripped upstream before we ever see the
     text, so there is no code-fence case to handle here."""
     if not isinstance(text, str):
         text = "" if text is None else str(text)
     esc = lambda x: _html.escape(x, quote=False)
+    # Heading level → (Pango size keyword, colour, weight)
+    hsize = {1: ("x-large", INK, "bold"), 2: ("large", INK, "bold"),
+             3: ("medium", INK, "bold")}
     out = []
     for raw in text.split("\n"):
         m = re.match(r"^\s{0,3}(#{1,6})\s+(.*)$", raw)
         if m:
-            out.append('<span size="x-large" foreground="#f3bd52" weight="bold">'
+            size, col, wt = hsize.get(len(m.group(1)), ("medium", BODY, "bold"))
+            out.append(f'<span size="{size}" foreground="{col}" weight="{wt}">'
                        f'{_md_inline(esc(m.group(2)))}</span>')
+            continue
+        if re.match(r"^\s{0,3}([-*_])(\s*\1){2,}\s*$", raw):
+            out.append(f'<span foreground="{FAINT}">'
+                       + "\u2500" * 28 + '</span>')
             continue
         m = re.match(r"^\s{0,3}>\s?(.*)$", raw)
         if m:
-            out.append('<span foreground="#b8ab8d"><i>\u258e '
+            out.append(f'<span foreground="{MUTE}"><i>\u258e  '
                        f'{_md_inline(esc(m.group(1)))}</i></span>')
             continue
-        m = re.match(r"^\s*[-*]\s+(.*)$", raw)
+        m = re.match(r"^(\s*)[-*+]\s+(.*)$", raw)
         if m:
-            out.append('<span foreground="#e0a63a">\u2022</span>  '
-                       f'{_md_inline(esc(m.group(1)))}')
+            depth = min(len(m.group(1)) // 2, 3)
+            mark = ("\u2022", "\u25E6", "\u2023", "\u2022")[depth]
+            out.append("    " * depth
+                       + f'<span foreground="{ACCENT}">{mark}</span>  '
+                       + _md_inline(esc(m.group(2))))
             continue
-        m = re.match(r"^\s*(\d+)\.\s+(.*)$", raw)
+        m = re.match(r"^(\s*)(\d+)\.\s+(.*)$", raw)
         if m:
-            out.append(f'<span foreground="#e0a63a">{m.group(1)}.</span>  '
-                       f'{_md_inline(esc(m.group(2)))}')
+            depth = min(len(m.group(1)) // 2, 3)
+            out.append("    " * depth
+                       + f'<span foreground="{ACCENT}" weight="bold">{m.group(2)}.</span>  '
+                       + _md_inline(esc(m.group(3))))
             continue
         out.append(_md_inline(esc(raw)))
     return "\n".join(out)
@@ -498,9 +553,37 @@ def _apply_line_height(label, mult=1.4):
         pass
 
 
+def _markup_ok(markup):
+    """Would GtkLabel accept this?
+
+    set_markup does NOT raise on malformed markup — it logs a warning and leaves
+    the label showing whatever it held before, so a single stray '<' in a reply
+    would silently redisplay the PREVIOUS message. Verified against real GTK 4.14.
+    So we ask Pango first and fall back to plain text if the answer is no.
+
+    The <a> tags are stripped for the probe because GtkLabel handles links itself
+    (confirmed working) while bare Pango rejects them as an unknown element. With
+    no Pango present — the test stub — we assume yes rather than degrade every
+    reply to plain text.
+    """
+    try:
+        from gi.repository import Pango
+    except Exception:
+        return True
+    try:
+        Pango.parse_markup(re.sub(r"</?a(?:\s[^>]*)?>", "", markup), -1, "\x00")
+        return True
+    except Exception:
+        return False
+
+
 def set_rich(label, text):
     try:
-        label.set_markup(md_to_pango(text))
+        markup = md_to_pango(text)
+        if _markup_ok(markup):
+            label.set_markup(markup)
+        else:
+            label.set_text(text)
     except Exception:
         try:
             label.set_text(text)
@@ -1302,8 +1385,19 @@ class Backend:
             temp = min(1.5, max(0.0, float(self.s.get("temperature", 0.35))))
         except Exception:
             temp = 0.35
+        # An uncapped reply is an open cheque: output tokens cost several times
+        # what input costs on every hosted model, and a model that rambles for
+        # 4k tokens bills for all of them. Chuck is instructed to keep the final
+        # reply short, so this ceiling should almost never bite — it exists to
+        # stop a runaway loop from being expensive as well as annoying.
+        try:
+            maxtok = int(self.s.get("max_tokens", 1600))
+        except Exception:
+            maxtok = 1600
+        maxtok = max(256, min(8192, maxtok))
         body = json.dumps({"model": model, "messages": messages,
-                           "stream": True, "temperature": temp}).encode()
+                           "stream": True, "temperature": temp,
+                           "max_tokens": maxtok}).encode()
         url = self.base() + "/chat/completions"
         headers = {"Authorization": "Bearer " + self.key(),
                    "Content-Type": "application/json"}
@@ -1418,6 +1512,9 @@ class ChuckWindow(Adw.ApplicationWindow):
         tl = Gtk.Label(label="\U0001F94B  CHUCK NORRIS", xalign=0.5); tl.add_css_class("title")
         sl = Gtk.Label(label="Arch / CachyOS grandmaster \u00b7 1940\u20132026",
                        xalign=0.5); sl.add_css_class("sub")
+        # The subtitle doubles as a meter once a chat starts costing money.
+        self._subtitle = sl
+        self._tok_in = self._tok_out = 0
         tb.append(tl); tb.append(sl); header.set_title_widget(tb)
 
         # LEFT: the primary action (New chat) + the busy spinner
@@ -1450,7 +1547,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             b = Gtk.Button(icon_name=icon); b.add_css_class("headerbtn"); b.set_tooltip_text(tip)
             b.connect("clicked", cb); header.pack_end(b)
 
-        self.msgbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        self.msgbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
         for m in ("top", "bottom", "start", "end"):
             getattr(self.msgbox, f"set_margin_{m}")(16)
         self.scroller = Gtk.ScrolledWindow(vexpand=True, hexpand=True)
@@ -1464,7 +1561,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         bgp = bgp if bgp.exists() else HERE / "assets" / "chucknorris-bg.png"
         if bgp.exists():
             bg = Gtk.Picture.new_for_filename(str(bgp))
-            bg.set_content_fit(Gtk.ContentFit.COVER); bg.set_opacity(0.10); bg.set_can_target(False)
+            bg.set_content_fit(Gtk.ContentFit.COVER); bg.set_opacity(0.06); bg.set_can_target(False)
             overlay.set_child(bg)
         else:
             overlay.set_child(Gtk.Box())
@@ -1587,6 +1684,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._clear_sudo_pw()           # a fresh chat re-asks for root; never carry it over
         self.chat_id = datetime.now().strftime("%Y%m%d-%H%M%S")
         self._new_history()
+        self._reset_meter()
         self._clear_msgs()
         self._show_empty_hint()
         self._refresh_sidebar()
@@ -1594,10 +1692,38 @@ class ChuckWindow(Adw.ApplicationWindow):
     def _show_empty_hint(self):
         """A quiet centered placeholder for an empty chat (ChatGPT/Claude style) —
         not a chat bubble. Cleared on first message."""
-        self._hint = Gtk.Label(label="What do you need, partner?", xalign=0.5)
-        self._hint.add_css_class("empty-hint")
-        self._hint.set_vexpand(True); self._hint.set_valign(Gtk.Align.CENTER)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        box.set_vexpand(True)
+        box.set_valign(Gtk.Align.CENTER)
+        box.set_halign(Gtk.Align.CENTER)
+        title = Gtk.Label(label="What do you need, partner?", xalign=0.5)
+        title.add_css_class("empty-hint")
+        box.append(title)
+
+        # Three things worth asking for, one click away. An empty chat that
+        # suggests nothing makes you invent the first move; these also happen to
+        # advertise that he RUNS things rather than just describing them.
+        chips = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        chips.set_halign(Gtk.Align.CENTER)
+        for text in ("What's eating my disk?",
+                     "Update the system",
+                     "Why is boot slow?"):
+            b = Gtk.Button(label=text)
+            b.add_css_class("quick")
+            b.connect("clicked", lambda _b, t=text: self._prefill(t))
+            chips.append(b)
+        box.append(chips)
+        self._hint = box
         self.msgbox.append(self._hint)
+
+    def _prefill(self, text):
+        """Drop a suggestion into the composer and focus it — deliberately NOT
+        sending, so the first thing Chuck does is still the user's decision."""
+        try:
+            self.entry.get_buffer().set_text(text, -1)
+            self.entry.grab_focus()
+        except Exception:
+            pass
 
     # ── windowed transcript ────────────────────────────────────────────────
     # A long session used to keep every bubble alive as a GTK widget forever.
@@ -1641,6 +1767,17 @@ class ChuckWindow(Adw.ApplicationWindow):
             w.add_css_class("turn-row")
             lbl = Gtk.Label(label="", xalign=0, wrap=True, selectable=True, use_markup=False)
             lbl.set_max_width_chars(0); lbl.set_hexpand(True)
+            # A byline above the reply. Chuck answers as open text rather than in
+            # a bubble (long answers read better that way), so without this there
+            # is nothing marking where HIS voice starts — which is exactly how
+            # his prose and the machine's output used to blur together.
+            by = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=7)
+            dot = Gtk.Box(); dot.add_css_class("byline-dot")
+            dot.set_valign(Gtk.Align.CENTER); dot.set_size_request(16, 16)
+            name = Gtk.Label(label="CHUCK", xalign=0)
+            name.add_css_class("byline")
+            by.append(dot); by.append(name)
+            w.append(by)
             card = Gtk.Box(); card.add_css_class("bot-bubble"); card.set_hexpand(True)
             card.append(lbl); w.append(card)
             e["label"] = lbl
@@ -1660,13 +1797,25 @@ class ChuckWindow(Adw.ApplicationWindow):
             play.add_css_class("playbtn")
             play.set_tooltip_text("Read this message aloud")
             play.connect("clicked", lambda _b, ent=e: self._speak_entry(ent))
-            row.append(play); w.append(row)
+            row.append(play)
+            copy = self._copy_button(
+                lambda ent=e: (ent.get("data") or {}).get("text", ""),
+                "Copy this reply")
+            copy.add_css_class("playbtn")
+            row.append(copy)
+            w.append(row)
             return w
         if k == "note":
-            l = Gtk.Label(label=d.get("text", ""), xalign=0, wrap=True)
+            # A system aside ("verifying bash", "added --noconfirm"). Sits in a
+            # thin gutter so it is legible as MACHINE chatter at a glance and
+            # never competes with the reply text next to it.
+            l = Gtk.Label(label=d.get("text", ""), xalign=0, wrap=True, hexpand=True)
             l.add_css_class(d.get("css", "dim"))
             _apply_line_height(l, 1.3)
-            return l
+            wrap = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+            wrap.add_css_class("sys-note")
+            wrap.append(l)
+            return wrap
         if k == "image":
             return self._build_image_widget(d.get("path"), d.get("src"))
         return Gtk.Label(label="")
@@ -2260,6 +2409,214 @@ class ChuckWindow(Adw.ApplicationWindow):
     def _image_bubble(self, path, src_url=None):
         self._log_add("image", {"path": path, "src": src_url})
 
+
+    # ── the meter ────────────────────────────────────────────────────────────
+    # Every turn re-sends the whole conversation, so an agent loop bills for the
+    # system prompt once per hop. That is invisible by default, which is how a
+    # cheap-looking chat quietly turns into a bill. This counts it and puts the
+    # number where you can see it.
+
+    @staticmethod
+    def _est_tokens(chars):
+        """Rough token count. Deliberately an ESTIMATE, not a lie dressed as a
+        measurement: the real tokeniser lives server-side and differs per model.
+        Four characters per token is the usual rule of thumb for English plus
+        code, and it is close enough to steer decisions by."""
+        return max(0, int(chars / 4))
+
+    def _meter(self, sent_chars=0, recv_chars=0):
+        self._tok_in += self._est_tokens(sent_chars)
+        self._tok_out += self._est_tokens(recv_chars)
+
+        def fmt(n):
+            return f"{n / 1000:.1f}k" if n >= 1000 else str(n)
+
+        def go():
+            sub = getattr(self, "_subtitle", None)
+            if sub is None:
+                return False
+            if not (self._tok_in or self._tok_out):
+                sub.set_text("Arch / CachyOS grandmaster \u00b7 1940\u20132026")
+            else:
+                sub.set_text(f"\u2248 {fmt(self._tok_in)} in \u00b7 "
+                             f"{fmt(self._tok_out)} out \u00b7 this chat")
+            return False
+        GLib.idle_add(go)
+
+    def _reset_meter(self):
+        self._tok_in = self._tok_out = 0
+        self._meter()
+
+    # ── card furniture ───────────────────────────────────────────────────────
+    # Everything the MACHINE did is drawn as a card: a titled bar, the payload,
+    # then the result. Chuck's own prose is never in one. That single rule is
+    # what stops a build log reading like a sentence he wrote.
+
+    def _clip(self, text):
+        """Put text on the clipboard. GTK4 has moved this API around, so try the
+        content-provider route first and fall back to the convenience setter."""
+        try:
+            cb = self.get_clipboard()
+        except Exception:
+            return False
+        try:
+            from gi.repository import GObject
+            cb.set_content(Gdk.ContentProvider.new_for_value(
+                GObject.Value(str, text)))
+            return True
+        except Exception:
+            pass
+        try:
+            cb.set(text)
+            return True
+        except Exception:
+            return False
+
+    def _copy_button(self, getter, tip="Copy"):
+        """A quiet copy affordance. Takes a callable so the text is read at click
+        time — a command card's output doesn't exist yet when the button is made."""
+        b = Gtk.Button(icon_name=_pick_icon("edit-copy-symbolic", "edit-paste-symbolic",
+                                            "document-save-symbolic"))
+        b.add_css_class("ghost")
+        b.set_tooltip_text(tip)
+        b.set_valign(Gtk.Align.CENTER)
+
+        def go(_b):
+            ok = self._clip(getter() or "")
+            b.set_tooltip_text("Copied" if ok else "Couldn't copy")
+        b.connect("clicked", go)
+        return b
+
+    @staticmethod
+    def _set_status(pill, text, kind):
+        """Move a status chip between its states. Defensive about the class list
+        because _run_card is also called directly (by the test harness) with a
+        plain label rather than a pill."""
+        for c in ("pill-wait", "pill-run", "pill-ok", "pill-fail", "dim", "ok", "danger"):
+            try:
+                pill.remove_css_class(c)
+            except Exception:
+                pass
+        try:
+            pill.add_css_class("pill")
+            pill.add_css_class(f"pill-{kind}")
+        except Exception:
+            pass
+        pill.set_label(text)
+
+    @staticmethod
+    def _pill(text, kind="wait"):
+        """A small status chip — 'exit 0' in green, 'exit 1' in red, 'running' in
+        clay. The exit code is the most important fact on a card, so it gets a
+        shape of its own instead of being a grey word at the end of a row."""
+        l = Gtk.Label(label=text, xalign=0.5)
+        l.add_css_class("pill")
+        l.add_css_class(f"pill-{kind}")
+        l.set_valign(Gtk.Align.CENTER)
+        return l
+
+    def _card_shell(self, kind, copy_getter=None):
+        """Build the standard card: (card, head, body, foot).
+
+        head — the kind label ('COMMAND', 'PYTHON', 'FILE') plus its controls
+        body — the payload, padded
+        foot — status, Run button, risk warnings, and any output panel
+        """
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        card.add_css_class("cmd-card")
+        head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        head.add_css_class("card-head")
+        kl = Gtk.Label(label=kind, xalign=0, hexpand=True)
+        kl.add_css_class("card-kind")
+        head.append(kl)
+        if copy_getter is not None:
+            head.append(self._copy_button(copy_getter, "Copy to clipboard"))
+        card.append(head)
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+        body.add_css_class("card-body")
+        card.append(body)
+        foot = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=7)
+        foot.add_css_class("card-foot")
+        card.append(foot)
+        return card, head, body, foot
+
+    def _term_panel(self, text, rc=None, title="OUTPUT"):
+        """Real stdout/stderr, in its own black panel.
+
+        Three things this fixes. It is visibly a TERMINAL, not prose. It is
+        height-capped and scrolls, so a 500-line pacman transaction stops
+        burying the answer that follows it. And lines are NOT wrapped, so
+        columnar output (ls -l, df, systemctl) keeps its alignment instead of
+        folding into mush — you scroll sideways for the long ones, exactly like
+        a terminal.
+        """
+        text = (text or "").rstrip("\n")
+        # Count BEFORE truncating — "367 lines … truncated" on a 4,000-line log
+        # would be a quietly wrong number, and the whole point of the header is
+        # to tell you how much you are not seeing.
+        n = text.count("\n") + 1 if text else 0
+        clipped = ""
+        if len(text) > 12000:
+            text, clipped = text[:12000], "  \u2026 truncated"
+
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        card.add_css_class("term-card")
+
+        head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        head.add_css_class("term-head")
+        tl = Gtk.Label(label=title, xalign=0)
+        tl.add_css_class("term-label")
+        head.append(tl)
+        meta = Gtk.Label(label=f"{n} line{'' if n == 1 else 's'}{clipped}",
+                         xalign=0, hexpand=True)
+        meta.add_css_class("term-meta")
+        head.append(meta)
+        if rc is not None:
+            head.append(self._pill(f"exit {rc}", "ok" if rc == 0 else "fail"))
+        head.append(self._copy_button(lambda: text, "Copy output"))
+
+        body = Gtk.Label(label=text, xalign=0, selectable=True, wrap=False)
+        body.add_css_class("term-body")
+        body.set_valign(Gtk.Align.START)
+        sw = Gtk.ScrolledWindow()
+        sw.add_css_class("term-scroll")
+        try:
+            sw.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+            sw.set_max_content_height(260)
+            sw.set_propagate_natural_height(True)
+        except Exception:
+            pass
+        sw.set_child(body)
+
+        fold = Gtk.Button(label="hide")
+        fold.add_css_class("ghost")
+        fold.set_valign(Gtk.Align.CENTER)
+
+        def toggle(_b):
+            shown = sw.get_visible()
+            sw.set_visible(not shown)
+            fold.set_label("show" if shown else "hide")
+        fold.connect("clicked", toggle)
+        head.append(fold)
+
+        card.append(head)
+        card.append(sw)
+        return card
+
+    def _show_output(self, out, rc, sink=None):
+        """Attach the result of a run. Inside its own card when we have one, so
+        the command and what it printed stay one object; otherwise as a
+        standalone panel in the transcript."""
+        if not (out or "").strip():
+            return
+        if sink is not None:
+            # The card's own status chip already states the exit code, so the
+            # panel doesn't repeat it — two identical pills side by side just
+            # reads as noise.
+            sink.append(self._term_panel(out, None))
+        else:
+            self._log_pin(self._term_panel(out, rc))
+
     # ── command cards ──
     def _risk_gate(self, card, run_btn, text, what="command"):
         """Attach the right warning to a card and, for CRITICAL commands, keep the
@@ -2339,19 +2696,24 @@ class ChuckWindow(Adw.ApplicationWindow):
         judged = cmd if gate_text is None else (cmd + "\n" + gate_text)
         tier = classify_command(judged)
 
-        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        card.add_css_class("cmd-card")
-        ct = Gtk.Label(label="$ " + cmd, xalign=0, wrap=True, selectable=True)
+        card, head, cbody, foot = self._card_shell("COMMAND", lambda: cmd)
+        prompt = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        dollar = Gtk.Label(label="$", xalign=0, valign=Gtk.Align.START)
+        dollar.add_css_class("cmd-prompt")
+        ct = Gtk.Label(label=cmd, xalign=0, wrap=True, selectable=True, hexpand=True)
         ct.add_css_class("cmd-text")
-        card.append(ct)
-        status = Gtk.Label(label="", xalign=0); status.add_css_class("dim")
+        prompt.append(dollar); prompt.append(ct)
+        cbody.append(prompt)
+        status = self._pill("queued", "wait")
 
         if tier == "critical":
             run = Gtk.Button(label="Run"); run.add_css_class("gold")
-            self._risk_gate(card, run, judged, "command")
-            run.connect("clicked", lambda _b: self._run_card(cmd, run, status, gate_text))
+            self._risk_gate(foot, run, judged, "command")
+            self._set_status(status, "needs approval", "wait")
+            run.connect("clicked",
+                        lambda _b: self._run_card(cmd, run, status, gate_text, sink=foot))
             rw = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-            rw.append(run); rw.append(status); card.append(rw)
+            rw.append(run); rw.append(status); foot.append(rw)
             self._log_pin(card)
             self._tool_feedback.append(
                 f"[`{cmd}` is CRITICAL and is waiting for the user to confirm it. "
@@ -2360,10 +2722,12 @@ class ChuckWindow(Adw.ApplicationWindow):
 
         if tier == "danger":
             wl = Gtk.Label(label="\u26a0 destructive \u2014 running it now", xalign=0)
-            wl.add_css_class("danger"); card.append(wl)
-        card.append(status)
+            wl.add_css_class("danger"); foot.append(wl)
+        srow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
+                       halign=Gtk.Align.START)
+        srow.append(status); foot.append(srow)
         self._log_pin(card)
-        self._run_now(cmd, status)
+        self._run_now(cmd, status, sink=foot)
 
     # ── sudo credential: memory only, this chat, 30-min TTL ──────────────────
     def _sudo_pw_valid(self):
@@ -2555,7 +2919,7 @@ class ChuckWindow(Adw.ApplicationWindow):
                                chat_id=getattr(self, "chat_id", ""), started=started)
             return rc, out
 
-    def _run_card(self, cmd, run_btn, status, gate_text=None):
+    def _run_card(self, cmd, run_btn, status, gate_text=None, sink=None):
         """Run a gated (CRITICAL) command card once the user has armed the risk
         checkbox and pressed Run. Disarms the button so a second click can't
         double-fire it, then hands off to the same execute-and-report path plain
@@ -2565,9 +2929,9 @@ class ChuckWindow(Adw.ApplicationWindow):
         if not run_btn.get_sensitive():
             return
         run_btn.set_sensitive(False)
-        self._run_now(cmd, status)
+        self._run_now(cmd, status, sink=sink)
 
-    def _run_now(self, cmd, status):
+    def _run_now(self, cmd, status, sink=None):
         """Execute, show the output, and hand the REAL result back to the model.
 
         This is the whole point: he does not get to claim success. The exit code
@@ -2580,7 +2944,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         # "working" indicator) must be live again. _start_run is a no-op when a
         # turn is already active, so this is safe on the normal auto-run path too.
         self._start_run()
-        status.set_label("running\u2026")
+        self._set_status(status, "running", "run")
         self._busy(True)
         self._arm_run_budget(cmd)
 
@@ -2589,15 +2953,11 @@ class ChuckWindow(Adw.ApplicationWindow):
             auth_failed = (rc == _SUDO_AUTH_FAILED)
 
             def show():
-                status.remove_css_class("dim")
-                status.add_css_class("ok" if rc == 0 else "danger")
-                status.set_label("\u2713 exit 0" if rc == 0
-                                 else ("\u2717 sudo auth failed" if auth_failed
-                                       else f"\u2717 exit {rc}"))
-                if out.strip():
-                    o = Gtk.Label(label=out[:4000], xalign=0, wrap=True, selectable=True)
-                    o.add_css_class("mono")
-                    self._log_pin(o)
+                if auth_failed:
+                    self._set_status(status, "sudo auth failed", "fail")
+                else:
+                    self._set_status(status, f"exit {rc}", "ok" if rc == 0 else "fail")
+                self._show_output(out, rc, sink)
                 return False
             GLib.idle_add(show)
 
@@ -2629,26 +2989,24 @@ class ChuckWindow(Adw.ApplicationWindow):
             body = add_noconfirm(fixed)
         tier = classify_command(body)
 
-        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        card.add_css_class("cmd-card")
-        head = Gtk.Label(label=f"\u25B8 {lang}", xalign=0); head.add_css_class("dim")
-        card.append(head)
+        card, chead, cbody, foot = self._card_shell(lang.upper(), lambda: body)
         ct = Gtk.Label(label=body, xalign=0, wrap=True, selectable=True)
-        ct.add_css_class("cmd-text"); card.append(ct)
-        status = Gtk.Label(label="", xalign=0); status.add_css_class("dim")
+        ct.add_css_class("cmd-text"); cbody.append(ct)
+        status = self._pill("queued", "wait")
 
         if tier == "critical":
             run = Gtk.Button(label="Run"); run.add_css_class("gold")
-            self._risk_gate(card, run, body, "code")
+            self._risk_gate(foot, run, body, "code")
 
             def go(_b):
                 if not run.get_sensitive():
                     return
                 run.set_sensitive(False)
-                self._run_code_now(lang, body, status)
+                self._run_code_now(lang, body, status, sink=foot)
+            self._set_status(status, "needs approval", "wait")
             run.connect("clicked", go)
             rw = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-            rw.append(run); rw.append(status); card.append(rw)
+            rw.append(run); rw.append(status); foot.append(rw)
             self._log_pin(card)
             self._tool_feedback.append(
                 f"[that {lang} block is CRITICAL and is waiting for the user to confirm it. "
@@ -2657,17 +3015,19 @@ class ChuckWindow(Adw.ApplicationWindow):
 
         if tier == "danger":
             wl = Gtk.Label(label="\u26a0 destructive \u2014 running it now", xalign=0)
-            wl.add_css_class("danger"); card.append(wl)
-        card.append(status)
+            wl.add_css_class("danger"); foot.append(wl)
+        srow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
+                       halign=Gtk.Align.START)
+        srow.append(status); foot.append(srow)
         self._log_pin(card)
-        self._run_code_now(lang, body, status)
+        self._run_code_now(lang, body, status, sink=foot)
 
-    def _run_code_now(self, lang, body, status):
+    def _run_code_now(self, lang, body, status, sink=None):
         # Same reason as _run_now: a CRITICAL code card can be approved after its
         # turn has ended, and running it resumes the model — so re-arm the run
         # lifecycle (Stop + watchdog). No-op when a turn is already active.
         self._start_run()
-        status.set_label("running\u2026")
+        self._set_status(status, "running", "run")
         self._busy(True)
         self._arm_run_budget(body)
 
@@ -2680,15 +3040,11 @@ class ChuckWindow(Adw.ApplicationWindow):
             auth_failed = (rc == _SUDO_AUTH_FAILED)
 
             def show():
-                status.remove_css_class("dim")
-                status.add_css_class("ok" if rc == 0 else "danger")
-                status.set_label("\u2713 exit 0" if rc == 0
-                                 else ("\u2717 sudo auth failed" if auth_failed
-                                       else f"\u2717 exit {rc}"))
-                if out.strip():
-                    o = Gtk.Label(label=out[:4000], xalign=0, wrap=True, selectable=True)
-                    o.add_css_class("mono")
-                    self._log_pin(o)
+                if auth_failed:
+                    self._set_status(status, "sudo auth failed", "fail")
+                else:
+                    self._set_status(status, f"exit {rc}", "ok" if rc == 0 else "fail")
+                self._show_output(out, rc, sink)
                 return False
             GLib.idle_add(show)
 
@@ -2805,15 +3161,17 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._tool_thread(work, f"video search '{query}'")
 
     def _video_card(self, title, url):
-        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6); card.add_css_class("cmd-card")
-        t = Gtk.Label(label="\U0001F3AC " + (title or url), xalign=0, wrap=True, selectable=True)
-        t.add_css_class("cmd-text"); card.append(t)
+        card, _h, body, foot = self._card_shell("VIDEO", lambda: url)
+        t = Gtk.Label(label=title or url, xalign=0, wrap=True, selectable=True)
+        t.add_css_class("cmd-text"); body.append(t)
+        u = Gtk.Label(label=url, xalign=0, wrap=True, selectable=True)
+        u.add_css_class("dim"); body.append(u)
         rw = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         openb = Gtk.Button(label="Open in Brave"); openb.add_css_class("quick")
         openb.connect("clicked", lambda *_: open_in_brave(url))
         dlb = Gtk.Button(label="Download"); dlb.add_css_class("gold")
         dlb.connect("clicked", lambda *_: self._do_video(url))
-        rw.append(openb); rw.append(dlb); card.append(rw)
+        rw.append(openb); rw.append(dlb); foot.append(rw)
         self._log_pin(card)
 
     def _do_video(self, url):
@@ -3106,18 +3464,17 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._sys_note("\u2717 " + msg, "danger")
             self._tool_feedback.append(f"[packaging failed: {msg}]")
             return
-        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        card.add_css_class("cmd-card")
-        t = Gtk.Label(label=f"\U0001F4E6 {Path(zpath).name}", xalign=0, wrap=True, selectable=True)
-        t.add_css_class("cmd-text"); card.append(t)
+        card, _h, body, foot = self._card_shell("PACKAGE", lambda: str(zpath))
+        t = Gtk.Label(label=Path(zpath).name, xalign=0, wrap=True, selectable=True)
+        t.add_css_class("cmd-text"); body.append(t)
         sub = Gtk.Label(label=msg + f"\n{zpath}", xalign=0, wrap=True, selectable=True)
-        sub.add_css_class("dim"); card.append(sub)
+        sub.add_css_class("dim"); body.append(sub)
         rw = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         b1 = Gtk.Button(label="Open folder"); b1.add_css_class("gold")
         b1.connect("clicked", lambda *_: _open_path(str(Path(zpath).parent)))
         b2 = Gtk.Button(label="Open project"); b2.add_css_class("quick")
         b2.connect("clicked", lambda *_: _open_path(str(p)))
-        rw.append(b1); rw.append(b2); card.append(rw)
+        rw.append(b1); rw.append(b2); foot.append(rw)
         self._log_pin(card)
         self._tool_feedback.append(f"[{msg}. The user has it at {zpath}.]")
 
@@ -3315,6 +3672,8 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._last_paint = 0.0
         self._note_progress()
         send_msgs = self._augment(messages) if not vision else messages
+        self._meter(sent_chars=sum(len(m.get("content") or "") for m in send_msgs
+                                   if isinstance(m.get("content"), str)))
 
         def on_delta(chunk):
             if self._cancelled:
@@ -3358,6 +3717,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             daemon=True).start()
 
     def _finalise(self):
+        self._meter(recv_chars=len(self._bot_text or ""))
         if self._cancelled:
             return False
         self._note_progress()
