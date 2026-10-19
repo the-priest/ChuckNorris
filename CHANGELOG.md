@@ -44,6 +44,29 @@ Covered by `tests/test_completion.py` and `tests/test_audit.py` (both new).
   toolchain, project survey, git overview, TODOs, big files, Python env, test
   runner discovery, who-holds-this-port.
 
+### From a real run (asked for an HTML Tetris)
+
+- **Every command failed with `fork: Resource temporarily unavailable`.**
+  Commands ran with `RLIMIT_NPROC=512`, but that limit counts every task the
+  user owns, the whole desktop included, and a normal Plasma session is already
+  past 512. The cap is now what's running plus 4,096. The 4 GiB address-space
+  cap is gone too: Chromium, Node and the JVM reserve far more than they use,
+  and it stopped them from starting at all.
+- **"couldn't tell where tetris.html ends"** was a false alarm. The check for
+  stray fences after a doc write counted the closing fence of the *next* tool
+  block (the ```bash screenshot command). It now tracks depth there as well.
+- **An absolute path inside the working folder was refused** ("give a path
+  inside the project"). It's now accepted. Paths outside the folder are still
+  refused.
+- **`look` ran before the command that made the image.** A screenshot or look
+  in the same reply as an action is now held back, and the model is told to
+  look again once the action has run.
+- **Shell style warnings blocked commands.** An unused loop variable was enough.
+  Shellcheck now blocks on errors only.
+- **Icons drew as blank squares** under themes that lack Adwaita's symbolic
+  icons (Breeze, for one). Chuck uses the Adwaita icon set for its own window
+  when it's installed, and the installer now installs it.
+
 ### Audit fixes
 
 - A stream from a stopped turn, or one from before *New chat*, could finish late

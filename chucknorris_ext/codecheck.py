@@ -404,7 +404,10 @@ def _lint_shell(body):
         src = ("#!/bin/bash\n" + body) if not body.startswith("#!") else body
         f.write(src); p = f.name
     try:
-        rc, out = _run([tool, "-f", "gcc", p])
+        # errors only: a style warning (an unused loop variable, an unquoted
+        # $var) blocked perfectly good commands and cost a whole round trip.
+        # A command reports its real exit code anyway.
+        rc, out = _run([tool, "-S", "error", "-f", "gcc", p])
         return _clean_lint_output(rc, out, p, "script.sh")
     finally:
         os.unlink(p)

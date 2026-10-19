@@ -75,7 +75,16 @@ def _safe(root, rel):
     rel = (rel or "").strip()
     if not rel:
         raise ValueError("no filename given")
-    if rel.startswith(("/", "~")) or (len(rel) > 1 and rel[1] == ":"):
+    if rel.startswith(("/", "~")):
+        # The model often names the file by its full path, and it is usually
+        # INSIDE the working folder ("/home/me/proj/app.html"). Refusing that
+        # cost a whole round trip. Inside: use it. Anywhere else: refuse.
+        base = Path(root).resolve()
+        absp = Path(os.path.expanduser(rel)).resolve()
+        if absp == base or base not in absp.parents:
+            raise ValueError(f"give a path inside the project ({base}), not {rel!r}")
+        rel = absp.relative_to(base).as_posix()
+    if len(rel) > 1 and rel[1] == ":":
         raise ValueError(f"give a path inside the project, not {rel!r}")
     if "\\" in rel:
         raise ValueError("use forward slashes")

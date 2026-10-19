@@ -318,6 +318,41 @@ check(w.workspace is not None and (w.workspace / "hello.txt").exists(),
       "the file goes to a scratch folder, which the chip then shows")
 
 # ═══════════════════════════════════════════════════════════════════════════
+print("\n--- the tetris run: write a page, screenshot it, look at it ---")
+ws = folder("tetris")
+page = "<!doctype html>\n<html><body><canvas id=c></canvas><script>let x = 1;</script></body></html>\n"
+reply = (f"Building it.\n```write {ws}/tetris.html\n{page}```\n"
+         f"```bash\necho shot > {ws}/shot.txt\n```\n```look {ws}/shot.png```")
+w = agent([reply, "Now looking.", "Looks right."], ws)
+type_and_send(w, "make a html tetris game")
+h = hist_text(w)
+check("couldn't tell where" not in h and "NOTHING was written" not in h,
+      "a page written beside a command and a look is not flagged as ambiguous")
+check((ws / "tetris.html").read_text() == page,
+      "an absolute path inside the working folder is accepted, file written whole")
+check((ws / "shot.txt").exists(), "the command in the same reply ran")
+check("held back" in h, "the look that would have raced the command is held, and the model told")
+check_finished(w, "tetris run")
+
+w = agent([f"```write {tmp}/outside.txt\nno\n```", "Refused."], folder("abs_out"))
+type_and_send(w, "write outside")
+check(not (tmp / "outside.txt").exists() and "give a path inside the project" in hist_text(w),
+      "an absolute path OUTSIDE the working folder is still refused")
+
+print("\n--- commands can fork on a busy desktop ---")
+check(cn._user_tasks() > 0, "the user's running tasks are counted")
+rc, out = cn.run_command("ulimit -v; ulimit -u; python3 -c 'import threading;"
+                         "[threading.Thread(target=lambda:None).start() for _ in range(600)];"
+                         "print(\"spawned\")'")
+lines = out.split()
+check(rc == 0 and "spawned" in out, "a command may start 600 threads (the old cap was 512 total)",
+      out[-200:])
+check(lines and lines[0] == "unlimited", "no address-space cap that would kill Chromium or Node",
+      lines[:1])
+check(len(lines) > 1 and lines[1].isdigit() and int(lines[1]) >= cn._NPROC_HEADROOM,
+      "a process cap still exists, with real headroom", lines[1:2])
+
+# ═══════════════════════════════════════════════════════════════════════════
 print(f"\nTOTAL AUDIT FAILURES: {fails + len(FAILS)}")
 assert fails == 0 and not FAILS, "audit regressions present"
 print("ALL AUDIT TESTS PASSED")

@@ -408,7 +408,10 @@ _sp.run(["pkill", "-f", _MARK], capture_output=True)
 check(_rc == 124, "timeout reported", f"rc={_rc}")
 check(_left == 0, "no orphaned children left behind", f"{_left} still running")
 _rc, _out = cn.run_command("bash -c 'ulimit -u'", timeout=10)
-check(_out.strip().isdigit() and int(_out.strip()) <= 512,
+# Finite, but relative to what the user already runs: RLIMIT_NPROC counts the
+# whole desktop's tasks, and a flat 512 made every fork fail on Plasma.
+check(_out.strip().isdigit()
+      and int(_out.strip()) <= cn._user_tasks() + cn._NPROC_HEADROOM + 256,
       "child gets a process limit", f"ulimit -u = {_out.strip()}")
 
 

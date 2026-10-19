@@ -612,6 +612,24 @@ def _sweep_scratch(max_age_hours=6):
                 continue
 
 
+def _use_adwaita_icons():
+    """Draw this window with the Adwaita icon set when it is installed.
+
+    The UI is designed around Adwaita's symbolic icons. Other desktop themes
+    (Breeze on Plasma, for one) lack some of them or ship them in a form GTK 4
+    can't recolour, and the copy buttons, the sidebar toggle and the lane
+    markers came out as blank squares. This changes only Chuck's own process.
+    """
+    try:
+        dirs = [Path(d) for d in os.environ.get("XDG_DATA_DIRS",
+                                                "/usr/local/share:/usr/share").split(":") if d]
+        dirs.insert(0, Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share"))
+        if any((d / "icons" / "Adwaita" / "index.theme").is_file() for d in dirs):
+            Gtk.Settings.get_default().set_property("gtk-icon-theme-name", "Adwaita")
+    except Exception:
+        pass
+
+
 def _pick_icon(*names):
     """First icon name that actually exists in the user's theme.
 
@@ -1456,10 +1474,11 @@ def _run_guarded(argv, timeout, env, timeout_note):
     after Chuck had already given up on them and moved on — invisible processes
     still eating the box.
     """
+    nproc = _user_tasks() + _NPROC_HEADROOM     # counted here: preexec runs post-fork
     proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, cwd=_cwd(),
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             text=True, errors="replace", env=env,
-                            preexec_fn=_sandbox_preexec)
+                            preexec_fn=lambda: _sandbox_preexec(nproc))
     try:
         out, err = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -1472,7 +1491,30 @@ def _run_guarded(argv, timeout, env, timeout_note):
     return proc.returncode, _shell_out_parts(out, err)
 
 
-def _sandbox_preexec():
+_NPROC_HEADROOM = 4096
+
+
+def _user_tasks():
+    """How many processes + threads this user already runs, desktop included."""
+    uid, n = str(os.getuid()), 0
+    try:
+        pids = [d for d in os.listdir("/proc") if d.isdigit()]
+    except OSError:
+        return 0
+    for pid in pids:
+        try:
+            with open(f"/proc/{pid}/status") as fh:
+                st = fh.read()
+        except OSError:
+            continue
+        m = re.search(r"^Uid:\s+(\d+)", st, re.MULTILINE)
+        if m and m.group(1) == uid:
+            t = re.search(r"^Threads:\s+(\d+)", st, re.MULTILINE)
+            n += int(t.group(1)) if t else 1
+    return n
+
+
+def _sandbox_preexec(nproc=None):
     """Applied in the child, after fork, before exec.
 
     Chuck's own note said skills "run raw in-process" and needed restricted
@@ -1497,9 +1539,15 @@ def _sandbox_preexec():
     try:
         import resource
         # generous ceilings: high enough that ordinary work never notices,
-        # low enough that a runaway cannot take the machine with it
-        _limit(resource, "RLIMIT_NPROC", 512)          # no fork bombs
-        _limit(resource, "RLIMIT_AS", 4 * 1024 ** 3)   # 4 GiB address space
+        # low enough that a runaway cannot take the machine with it.
+        # RLIMIT_NPROC counts EVERY task the user owns, the whole desktop
+        # included: a flat 512 was already exceeded on a normal Plasma session,
+        # so every fork failed ("fork: Resource temporarily unavailable").
+        # The cap is what's running now plus headroom. No address-space cap:
+        # Chromium, Node and the JVM reserve tens of GB they never touch, and
+        # RLIMIT_AS made all of them fail to start.
+        if nproc:
+            _limit(resource, "RLIMIT_NPROC", nproc)   # no fork bombs
         _limit(resource, "RLIMIT_FSIZE", 2 * 1024 ** 3)  # 2 GiB single file
         _limit(resource, "RLIMIT_CORE", 0)             # no core dumps
     except Exception:
@@ -2172,14 +2220,26 @@ def file_blocks(text):
         # the file or open a block inside it. For a DOCUMENT (where inner
         # fences are expected) a later bare fence means we may have closed
         # too early: flag it rather than write half a file and run the rest.
+        # Blocks that legitimately follow (```bash to open it in a browser,
+        # ```look at the screenshot) are balanced: their closing fence is not
+        # evidence. Only a bare fence that closes NOTHING is — counting every
+        # bare fence flagged any doc written alongside another tool.
         ambiguous = False
         if len(fence) == 3 and tag == "write" and _DOC_EXT.search(head):
+            depth_after = 0
             for ln in lines[end_line + 1:]:
                 if _FILE_FENCE.match(ln):
                     break
-                if ln.strip() == "```":
+                st = ln.strip()
+                if st == "```":
+                    if depth_after:
+                        depth_after -= 1
+                        continue
                     ambiguous = True
                     break
+                if st.startswith("```") and not st.startswith("````"):
+                    if not (len(st) > 6 and st.endswith("```")):   # not ```look x```
+                        depth_after += 1
         out.append({"tag": tag, "path": head, "body": body, "ambiguous": ambiguous,
                     "start": offs[i], "end": min(end, len(text))})
         i = end_line + 1
@@ -7083,6 +7143,14 @@ class ChuckWindow(Adw.ApplicationWindow):
         skill_blocks = [v for k, v in keep if k == "skill"]
         runskills = [v for k, v in keep if k == "runskill"]
 
+        # A screenshot or ```look``` beside a command or a write would see the
+        # world BEFORE that action ran: dispatch is one pass, and the command
+        # finishes later. It read a stale /tmp/s.png, or none at all.
+        held_see = []
+        if (shots or looks) and (codes or skill_blocks or runskills or writes or edits
+                                 or bgs or runtests or packages):
+            held_see = (["screenshot"] if shots else []) + [f"look {p.strip()}" for p in looks]
+            shots, looks = False, []        # never dispatched, so never counted
         disp = self._display_text(text, partial=True)
         if self._forced_answer:
             # he was told to answer from what he has — ignore any further research
@@ -7248,6 +7316,10 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._do_map()
         if briefs and _agents:
             self._do_tasks(briefs)
+        if held_see:
+            self._tool_feedback.append(
+                "[" + ", ".join(held_see) + " held back: it was in the same reply as an action "
+                "that had not run yet, so it would have seen the old state. Look again now.]")
         if shots:
             self._do_screenshot()
         for pth in looks:
@@ -8003,6 +8075,7 @@ class ChuckApp(Adw.Application):
             Adw.StyleManager.get_default().set_color_scheme(Adw.ColorScheme.FORCE_DARK)
         except Exception:
             pass
+        _use_adwaita_icons()
         sheets = [CSS_TMPL]
         try:
             if (Adw.get_major_version(), Adw.get_minor_version()) >= (1, 6):
