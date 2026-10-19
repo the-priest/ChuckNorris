@@ -1,5 +1,89 @@
 # Changelog
 
+## 14.1.0 — it finishes the job
+
+The headline bug: asked to write a game, Chuck said *"I'll write the game now"*
+and stopped. This release makes the agent work the way a careful engineer does:
+it keeps going until every part of the task is done, checks that what it built
+actually runs, and stops early only to ask you something it can't decide alone.
+Covered by `tests/test_completion.py` and `tests/test_audit.py` (both new).
+
+### Finishing what it starts
+
+- **Announce-then-stop is caught.** A reply that promises an action ("I'll
+  write…", "Next, let me…") but carries no tool block is sent back to actually
+  do it. Code *printed* in a reply instead of written to a file is caught the
+  same way. Bounded: at most two such nudges per task.
+- **Open plan steps are carried through.** If the agent tries to finish while
+  its ```plan``` still has unchecked steps, it's sent back to do the next one
+  (up to three times per task).
+- **Changed code is run before "done".** Code files written or edited since the
+  last command, test run or screenshot get one "verify it now" round before
+  the final report. Docs-only changes don't.
+- **```ask```** — a QUESTION card with one-click answers, for decisions that
+  really are yours (an unclear requirement, a risky trade-off). The task pauses
+  until you answer, by clicking an option or typing your own. A reply that ends
+  in a question is never nudged either.
+- None of this fires in Chat mode, after you press Stop, or past the step
+  budget, now 60 by default (4–200 in Settings).
+
+### More tools
+
+- **Checkpoints.** Every ```write```, ```edit``` and ```rmfile``` is a card with
+  its diff and a **Revert** button. ```undo``` reverts the last change and
+  ```undo all``` reverts every change in the current task. When you revert
+  something, the agent is told.
+- **Background jobs.** ```bg <name>``` starts a dev server or watcher detached
+  in the working folder. ```logs <name>``` reads its output and ```kill
+  <name>``` stops it. A live card shows uptime and has a Stop button.
+  CRITICAL commands and password-needing sudo are refused as jobs, and closing
+  the window stops them.
+- ```open <path|url>``` hands you a result in your browser or default app.
+- **Playbooks** for debugging, TDD, review, git, UI, performance, security and
+  dependencies, ranked by how well they match the task. **Dev skills**:
+  toolchain, project survey, git overview, TODOs, big files, Python env, test
+  runner discovery, who-holds-this-port.
+
+### Audit fixes
+
+- A stream from a stopped turn, or one from before *New chat*, could finish late
+  and land in the next turn. Every turn now carries a generation number, and
+  stale output is dropped.
+- A README with its own ```bash example inside a ```write block was cut short,
+  and the example ran. Writes now track nested fences. A doc block whose end is
+  genuinely ambiguous writes nothing and runs nothing, and the model is told to
+  resend it in four backticks.
+- With the folder chip on *No folder*, files went into the project from a
+  *previous* session. They now go to a fresh scratch folder, which the chip
+  then shows.
+- Trimming context could start the conversation with an assistant turn, which
+  some APIs reject. Fixed.
+- Tab flipped Agent/Chat while you were inside Settings or the chat search.
+  It now only does so from the main window.
+- A connection that dropped while the model was still only *reasoning* (no
+  visible text yet) was treated as a finished reply and never retried. It now
+  retries like any other transient failure.
+- Long turns may run up to an hour, and sub-agent progress keeps the watchdog
+  fed.
+- Diff and output panels were collapsing to one line. They show at full height
+  again.
+
+### Look
+
+- The glyph net is now **invisible until you click**: a ripple lights it up in
+  waves, then it fades back to black. Glyphs are smaller and there are about
+  twice as many, at a typical frame cost of ~3 ms.
+- The QUESTION card gets a quiet accent edge, since it's the one card that's
+  waiting on you.
+
+### Install
+
+- **Fixed: `ImportError: cannot import name 'pricing'`** right after an update.
+  Fetching files one at a time from a CDN could mix versions. The installer
+  now downloads one archive of the branch, checks that every module the app
+  imports is present, and compiles them. Optional modules are imported one by
+  one, so a missing one disables only its own feature.
+
 ## 14.0.0 — the harness
 
 A rebuild of the window and a much larger toolset, aimed at real coding work.

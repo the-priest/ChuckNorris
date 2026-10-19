@@ -5,10 +5,10 @@
 **A desktop coding and system agent for Linux, on SiliconFlow models.**
 Runs commands, edits real code, reads whole repos, sees screenshots, runs sub-agents in parallel, and tells you what it all cost.
 
-![version](https://img.shields.io/badge/version-14.0.0-8b5cf6?style=flat-square&labelColor=0c0c10)
+![version](https://img.shields.io/badge/version-14.1.0-8b5cf6?style=flat-square&labelColor=0c0c10)
 ![gtk](https://img.shields.io/badge/GTK4-libadwaita-8b5cf6?style=flat-square&labelColor=0c0c10)
 ![python](https://img.shields.io/badge/Python-3.11_·_3.12_·_3.13-8b5cf6?style=flat-square&labelColor=0c0c10)
-![suites](https://img.shields.io/badge/test_suites-17-2ea043?style=flat-square&labelColor=0c0c10)
+![suites](https://img.shields.io/badge/test_suites-19-2ea043?style=flat-square&labelColor=0c0c10)
 ![deps](https://img.shields.io/badge/runtime_deps-stdlib_+_GTK-2ea043?style=flat-square&labelColor=0c0c10)
 ![licence](https://img.shields.io/badge/licence-MIT-8b5cf6?style=flat-square&labelColor=0c0c10)
 
@@ -54,6 +54,10 @@ Click the folder chip (or **Ctrl+O**) to point the session at a project. Command
 | `write` | New files of any length. A reply that hits the output limit is **continued automatically** and stitched (repeated overlap trimmed) before the file is written. |
 | `bash` · `python` · `node` | One step at a time, auto-verified (syntax, lint, security scan) before it runs, real exit code back. |
 | `plan` | A live checklist card that ticks itself off as the work proceeds. |
+| `undo` | Every write and edit is a checkpoint with its diff and a **Revert** button. `undo` reverts the last one; `undo all` reverts the whole task. |
+| `bg` · `logs` · `kill` | Dev servers and watchers run in the background with a live card. Chuck reads their logs and stops them, and they stop when the window closes. |
+| `ask` | A question with one-click answers, for decisions that are really yours. The task waits for your answer. |
+| `open` | Hands you the result in your browser or default app. |
 | `runtests` · `package` · `tree` | Run the project's own tests, zip the result, show what was built. |
 | `screenshot` · `look` | Chuck **sees**: the screen, or any image (a page rendered with headless Chromium, a plot, a mockup). Build a UI, look at it, fix it. |
 | `task` | **Parallel sub-agents.** Each `task` block is a read-only sub-agent with its own model loop. Several run at once and report back; only their summaries enter the main context. |
@@ -63,6 +67,16 @@ Click the folder chip (or **Ctrl+O**) to point the session at a project. Command
 <img src="assets/screenshots/agent-subagents.png" alt="Three sub-agents running in parallel, each with a done badge and a folded report" width="100%">
 
 **Sub-agents are read-only by design.** Parallel writers would trample each other's edits and race each other's sudo prompts. Parallel readers can't. They survey, research and report; the main agent acts, one verified step at a time.
+
+## It finishes the job
+
+Ask for a game and you get a game, not *"I'll write the game now"* and silence. Before Chuck ends a task he checks three things:
+
+- **Did I promise something I didn't do?** A reply that announces an action without one is sent back to act.
+- **Is the plan finished?** Unchecked steps on his plan card mean he isn't done.
+- **Did I run what I changed?** Code written since the last run gets run, tested or screenshotted before the final report.
+
+He stops early only to ask you something he shouldn't decide alone. That arrives as a question card with one-click answers. All of it is bounded by the step budget (60 by default) and none of it happens in Chat mode.
 
 ## Attach anything
 
@@ -96,8 +110,8 @@ List prices as of October 2026. Switch models from the composer's model menu. **
 
 Every hop of an agent loop re-sends the system prompt, so its size is paid per tool call, not per chat.
 
-- **Prompts:** agent 3.5k characters (v13 was 5.7k, while documenting six fewer tools); chat 0.7k.
-- **Playbooks** (Arch, fixing, building, data, web…) are injected only when the task triggers them, at most two at a time, and never in Chat mode.
+- **Prompts:** agent 3.9k characters (v13 was 5.7k while documenting a dozen fewer tools); chat 0.7k.
+- **Playbooks** (debugging, TDD, review, git, UI, performance, security, Arch, building…) are injected only when the task triggers them, at most two at a time, and never in Chat mode.
 - **Cache-friendly:** the volatile part (date, memory, folder) is appended *last*, so the long prefix stays cacheable on the API side.
 - **Context control:** older tool output is compressed extractively (head, tail and every error line kept) and the context budget is a setting.
 - **Batching:** read-only tools batch into one round trip, and four of them cost one model call, not four.
@@ -152,7 +166,7 @@ Arch / CachyOS first-class; apt and dnf supported. The installer handles GTK4 + 
 ./run_tests.sh
 ```
 
-Seventeen suites run headless against a stubbed toolkit and drive the real window end to end. They cover whole conversations, both modes, edits in a real folder, paged reads of a 12,000-line file, a file written across two cut-off replies, parallel sub-agents, images reaching the model as images, cache-hit pricing, memory updates and scopes, the critical gate, sudo storms, orphaned processes, and the ledger chain. The UI itself was checked by rendering every screen on real GTK 4.14 / libadwaita 1.5. The screenshots above are those renders.
+Nineteen suites run headless against a stubbed toolkit and drive the real window end to end. They cover whole conversations, both modes, edits in a real folder, paged reads of a 12,000-line file, a file written across two cut-off replies, parallel sub-agents, images reaching the model as images, cache-hit pricing, memory updates and scopes, an agent that stops early or never stops, late streams from a stopped turn, undo and background jobs, a README whose example must not run, the critical gate, sudo storms, orphaned processes, and the ledger chain. The UI itself was checked by rendering every screen on real GTK 4.14 / libadwaita 1.5. The screenshots above are those renders.
 
 ## Being straight with you
 
