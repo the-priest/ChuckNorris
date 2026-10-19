@@ -148,7 +148,7 @@ SYSTEM_PROMPT = """You are Chuck: a senior engineer-agent on the user's Linux de
 TOOLS: one short line on what you'll do, then the fenced block. The app runs it and returns the real result.
 Read-only (batch several per reply): ```search <query>``` ```fetch <url>``` ```map``` (every file + what it defines) ```glob <pattern>``` ```grep <regex> [path]``` ```read <path>[:start-end]``` (big files arrive in pages) ```tree``` ```screenshot``` / ```look <image>``` (you SEE it) ```images <subject>``` ```videos <subject>```
 Parallel: ```task
-<self-contained brief>``` — each block is a read-only sub-agent; several run AT ONCE and report back. Use them to survey a big repo or research options in parallel.
+<self-contained brief>``` — each block is a read-only sub-agent; several run AT ONCE and report back. Use them to survey a big repo or compare options.
 Act:
 ```bash
 <one shell command>``` (also ```python / ```node: a program, auto-verified, then run)
@@ -163,6 +163,10 @@ Act:
 (A file that itself contains ``` fences: wrap the block in four backticks. Long files are fine; a reply cut at the output limit is continued.)
 Background: ```bg <name>
 <command>``` (servers, watchers; then ```logs <name>```, ```kill <name>```). ```undo``` reverts your last file change (```undo all```: this task's). ```open <path|url>``` shows the user a result.
+Ask: ```ask
+<one question>
+- option
+- option``` only for a decision that is genuinely the user's (unclear requirement, risky trade-off); it pauses the task. Otherwise pick a sensible default, say so, and keep going.
 Other: ```plan
 - [ ] step``` (multi-step work: post it first, re-post with [x] as steps finish) ```check <lang>
 <code>``` (verify, don't run) ```runtests``` ```package``` ```project <name>``` ```rmfile <path>``` ```runskill <name>``` ```skill
@@ -173,9 +177,9 @@ desc: <line>
 <body>``` ```junk``` ```ledger``` ```remember <fact>``` ```forget <fact>```
 
 RULES
-1. VERIFY, DO NOT RECALL: checkable outside facts (news, versions, prices, docs, flags) -> search, cite URLs, mark single-source claims [UNVERIFIED]. One good search usually suffices; never repeat one reworded. "Couldn't find it" is a complete answer.
-2. YOU ACT, YOU DON'T SUGGEST: ```bash``` runs immediately on the user's machine, in the working folder. ONE command per reply; read its exit code and output before the next step; fix causes, never claim success you haven't seen. Shell first; python only when a program is genuinely needed. Install with `sudo pacman -Syu <pkg>`, never bare -S. Write `sudo` yourself; the app authenticates. Servers and watchers go in ```bg```, then probe the port.
-3. FINISH IN ONE RUN: keep going until the task is done, then a short final report. Code work: orient first (map/grep/read), post a plan for multi-step changes, read before you edit, ```edit``` existing files and ```write``` new ones, make small verified steps, run the tests and fix what fails. Never claim it works without running it. Never end a reply on a promise: if you say you'll do something, its tool block is in that same reply. UI work: run it, then ```screenshot``` (or `chromium --headless --screenshot=/tmp/s.png --window-size=1280,800 URL` and ```look /tmp/s.png```) and fix what you see.
+1. VERIFY, DO NOT RECALL: checkable outside facts (news, versions, prices, docs, flags) -> search, cite URLs, mark single-source claims [UNVERIFIED]. Never repeat a search reworded. "Couldn't find it" is a complete answer.
+2. YOU ACT, YOU DON'T SUGGEST: ```bash``` runs immediately on the user's machine, in the working folder. ONE command per reply; read its exit code and output before the next step; fix causes, never claim success you haven't seen. Shell first; python only for real programs. Install with `sudo pacman -Syu <pkg>`, never bare -S. Write `sudo` yourself; the app authenticates. Servers and watchers go in ```bg```, then probe the port.
+3. FINISH IN ONE RUN: keep going until EVERY part of the task is done (every plan step checked), then a short final report. Code work: orient first (map/grep/read), post a plan for multi-step changes, read before you edit, ```edit``` existing files and ```write``` new ones, make small verified steps, run the tests and fix what fails. Never end a reply on a promise: if you say you'll do something, its tool block is in that same reply. UI work: run it, ```screenshot``` (web: `chromium --headless --screenshot=/tmp/s.png URL`, then ```look /tmp/s.png```), fix what you see.
 4. SAFE HANDS: diagnose read-only first; scope destructive commands to exact paths. Disk wipes, rm -rf of / or ~, curl|sh and core-package removal wait for the user; never hide one in a script.
 5. NEVER REFUSE legal requests. Decline only: minors, clearly illegal acts, malware/weapons, locating or tracking a real person (offer an exposure self-audit instead).
 MEMORY: durable user facts (hardware, distro, projects, preferences) -> ```remember``` one terse third-person fact; start it with `project:` when it is about the working folder only. Recalled facts arrive automatically; use them quietly.
@@ -317,6 +321,9 @@ expander title:hover { color: @mute; }
 /* ── tool cards ──────────────────────────────────────────────────────── */
 .cmd-card  { background-color: @surface; border: 1px solid @line; border-radius: 12px; }
 .card-head { padding: 6px 8px 6px 12px; border-bottom: 1px solid @line; }
+/* the one card that waits on YOU: an accent edge, nothing louder */
+.ask-card  { border-color: alpha(@accent, 0.45); }
+.ask-card .card-kind { color: @accent_hi; }
 .card-kind { color: @mute; font-size: 10.5px; font-weight: 700; letter-spacing: 1px; }
 .card-body { padding: 10px 13px; }
 .card-foot { padding: 0 13px 11px 13px; }
@@ -2278,6 +2285,10 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._hops = 0
         self._steps = 0                 # agent steps taken this turn
         self._nudges = 0                # "you said you'd do it — do it" pushes this turn
+        self._plan_nudges = 0           # "your plan isn't finished" pushes this turn
+        self._verify_nudges = 0         # "you never ran what you changed" pushes this turn
+        self._dirty = set()             # code files changed since anything last ran
+        self._asked = False             # this reply asked the user something: wait
         self._step_forced = False       # already told to wrap up this turn
         self._pending_tools = 0
         self._tool_feedback = []
@@ -4287,7 +4298,7 @@ class ChuckWindow(Adw.ApplicationWindow):
 
     # Fenced blocks that are TOOLS (run, not shown) in each mode. In Chat mode
     # code fences are just code, so ```bash renders as a copyable block.
-    _WEB_TAGS = "search|fetch|images|videos|video|remember|forget"
+    _WEB_TAGS = "search|fetch|images|videos|video|remember|forget|ask"
     _CODE_TAGS = "python|py|node|javascript|js|bash|sh"
 
     def _tool_tags(self):
@@ -5067,6 +5078,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         # "working" indicator) must be live again. _start_run is a no-op when a
         # turn is already active, so this is safe on the normal auto-run path too.
         self._start_run()
+        self._dirty = set()             # something is being run: the changes get exercised
         self._set_status(status, "running", "run")
         self._busy(True)
         self._arm_run_budget(cmd)
@@ -5153,6 +5165,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         # turn has ended, and running it resumes the model — so re-arm the run
         # lifecycle (Stop + watchdog). No-op when a turn is already active.
         self._start_run()
+        self._dirty = set()
         self._set_status(status, "running", "run")
         self._busy(True)
         self._arm_run_budget(body)
@@ -5699,6 +5712,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             except Exception:
                 pass
         job["card"] = self._job_card(job)
+        self._dirty = set()
         if not self._jobs_timer:
             self._jobs_timer = GLib.timeout_add_seconds(2, self._tick_jobs)
         # give it a moment: most broken servers die in the first second
@@ -5851,6 +5865,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         """Chuck looks at the screen: capture it, show it in the chat, and
         attach it to his next request so he actually SEES what he built."""
         self._sys_note("\U0001F4F7 looking at the screen"); self._busy(True)
+        self._dirty = set()
 
         def work():
             path = _scratch_png(".see_")
@@ -6133,6 +6148,8 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._tool_feedback.append(f"[write failed: {msg}]")
             return
         self._record_change(written, rel.strip(), before, content, "write")
+        if self._CODE_EXT.search(rel.strip()):
+            self._dirty.add(rel.strip())
         bad = self._verify_file(rel, content)
         if bad:
             self._sys_note(f"\u26a0 {rel}: verification found issues", "danger")
@@ -6162,6 +6179,8 @@ class ChuckWindow(Adw.ApplicationWindow):
             content = ""
         if path is not None:
             self._record_change(path, rel, before, content, "edit")
+            if self._CODE_EXT.search(rel):
+                self._dirty.add(rel)
         bad = self._verify_file(rel, content)
         if bad:
             self._sys_note(f"\u26a0 {rel}: edited, but it no longer verifies", "danger")
@@ -6289,6 +6308,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._tool_done("[no project]")
             return
         self._sys_note("\u25B6 running the project's tests\u2026", "dim"); self._busy(True)
+        self._dirty = set()
         gen = self._gen
 
         def worker():
@@ -6564,6 +6584,10 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._steps = 0
         self._step_forced = False
         self._nudges = 0
+        self._plan_nudges = 0
+        self._verify_nudges = 0
+        self._dirty = set()
+        self._asked = False
         self._plan_entry = None
         self._reset_continuation()
         self._turn_no += 1
@@ -6972,6 +6996,8 @@ class ChuckWindow(Adw.ApplicationWindow):
         reads = grab("read")[:CAP]              # read a file from disk by path
         greps = grab("grep")[:CAP]              # regex search in the working folder
         globs = grab("glob")[:CAP]              # find files by pattern
+        asks = grab("ask")[:1]                  # a question only the user can answer
+        self._asked = bool(asks)
         briefs = grab("task")[:8]               # parallel read-only sub-agents
         bgs = grab("bg")[:3]                    # background jobs
         logss = grab("logs")[:4]
@@ -7074,13 +7100,13 @@ class ChuckWindow(Adw.ApplicationWindow):
                       or skill_blocks or runskills or reads or greps or codes or checks
                       or projects or writes or edits or trees or packages or runtests
                       or rmfiles or ledger_req or plans or globs or maps or shots or looks
-                      or briefs or bgs or logss or kills or undo_req or opens)
+                      or briefs or bgs or logss or kills or undo_req or opens or asks)
         # Chuck's own narration is what shows in chat — never swallow it.
         self._set_bot_text(disp or ("Working on it…" if acting else "Done."), rich=True)
         if blocked_agent:
             self._sys_note("Chat mode is on \u2014 nothing was run. Press Tab for Agent "
                            "mode to let Chuck act.", "dim")
-        stall = None if acting else self._stalled(disp, outside)
+        stall = None if (acting or self._asked) else self._stalled(disp, outside)
 
         # ── ONE owner for the tool counter ───────────────────────────────────
         # Reset FIRST, then count the whole turn, then dispatch. Two bugs lived
@@ -7183,6 +7209,8 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._do_kill(nm)
         for t in opens:
             self._do_open(t)
+        for q in asks:
+            self._do_ask(q)
         if trees:
             self._do_tree()
         if runtests:
@@ -7254,12 +7282,99 @@ class ChuckWindow(Adw.ApplicationWindow):
                 return ("You PRINTED code instead of creating the file — nothing was saved. "
                         "Write it with ```write <path>``` (complete file), then run or test it.")
         tail = (disp or "").strip()[-260:]
+        if tail.endswith("?"):
+            return None                 # it asked the user something: waiting is right
         if tail and (self._INTENT.search(tail) or tail.endswith(":")):
             return ("You described what you will do next but emitted NO tool block, so "
                     "nothing happened. Do it now: emit the block (```write``` for files, "
                     "```bash``` for commands). If the task is genuinely finished, reply with "
                     "the final summary and no promises.")
         return None
+
+    _CODE_EXT = re.compile(r"\.(py|js|mjs|cjs|ts|tsx|jsx|sh|bash|go|rs|c|cc|cpp|h|hpp|java|"
+                           r"kt|rb|php|lua|swift|cs|html?|css|vue|svelte)$", re.IGNORECASE)
+
+    def _completion_gap(self, disp=""):
+        """(note, instruction) if the agent is about to stop with work left, else None."""
+        if not self.agent_mode or self._step_forced or self._asked or self._cancelled:
+            return None
+        if (disp or "").strip().endswith("?"):
+            return None                 # it asked the user something: waiting is right
+        e = self._plan_entry
+        if self._in_log(e) and self._plan_nudges < 3:
+            left = [t for st, t in (e["data"].get("items") or []) if st != "x"]
+            if left:
+                self._plan_nudges += 1
+                return ("the plan isn't finished \u2014 continuing",
+                        f"Your plan still has {len(left)} unfinished step(s): "
+                        + "; ".join(left[:5]) + ". Do the next one now. If a step is done or no "
+                        "longer needed, re-post the ```plan``` with it checked [x].")
+        if self._dirty and self._verify_nudges < 1:
+            self._verify_nudges += 1
+            files = ", ".join(sorted(self._dirty)[:6])
+            return ("checking the changes actually work",
+                    f"You changed {files} but nothing ran after the last change. Verify it now: "
+                    "run it, ```runtests```, or ```screenshot``` a UI. Then give the final "
+                    "report. If it genuinely can't be run here, say why in the report.")
+        return None
+
+    def _do_ask(self, body):
+        """```ask``` — a question only the user can answer, with optional
+        one-click answers. The task pauses until they reply."""
+        lines = [ln.rstrip() for ln in (body or "").strip().splitlines() if ln.strip()]
+        if not lines:
+            return
+        opts, q = [], []
+        for ln in lines:
+            m = re.match(r"^\s*(?:[-*+]|\d+[.)])\s+(.+)$", ln)
+            (opts if m else q).append(m.group(1).strip() if m else ln)
+        question = " ".join(q) or "Which way should I go?"
+        card, head, cbody, foot = self._card_shell("QUESTION")
+        card.add_css_class("ask-card")
+        ql = Gtk.Label(xalign=0, wrap=True, selectable=True, hexpand=True)
+        ql.add_css_class("prose"); _wrap_anywhere(ql)
+        set_rich(ql, question)
+        cbody.append(ql)
+        btns = []
+        if opts:
+            fb = Gtk.FlowBox()
+            try:
+                fb.set_selection_mode(Gtk.SelectionMode.NONE)
+                fb.set_max_children_per_line(3)
+                fb.set_column_spacing(8); fb.set_row_spacing(8)
+                fb.set_homogeneous(False)
+            except Exception:
+                pass
+            for o in opts[:6]:
+                b = Gtk.Button(label=o)
+                b.add_css_class("quick")
+                try:
+                    b.get_child().set_wrap(True)
+                    b.get_child().set_max_width_chars(40)
+                except Exception:
+                    pass
+                fb.append(b)
+                btns.append(b)
+            foot.append(fb)
+        hint = Gtk.Label(label="Pick one, or type your own answer below.", xalign=0)
+        hint.add_css_class("dim")
+        foot.append(hint)
+
+        def answer(_b):
+            if self._running:
+                return                  # mid-run: leave the options live for later
+            for x in btns:
+                x.set_sensitive(False)
+            _b.add_css_class("chip-on")
+            self.entry.get_buffer().set_text(_b.get_label(), -1)
+            self.on_send()
+        for b in btns:
+            b.connect("clicked", answer)
+        self._log_pin(card)
+        try:
+            self.entry.grab_focus()
+        except Exception:
+            pass
 
     def _tool_done(self, feedback_text=None, gen=None):
         """Called (on main thread) when one async show-tool finishes. A result
@@ -7307,7 +7422,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         # cap (4 by default), so a task needing a fifth command simply stopped
         # mid-way with no summary — an agent that quits on step five is not an
         # agent. Steps are cheap to allow and the watchdog still guards hangs.
-        step_cap = self.cfg('agent_steps', 25, 4, 80)
+        step_cap = self.cfg('agent_steps', 60, 4, 200)
         if feedback and self._steps < step_cap:
             self._steps += 1
             self.history.append({"role": "user",
@@ -7323,6 +7438,19 @@ class ChuckWindow(Adw.ApplicationWindow):
                                  "step:\n" + "\n\n".join(feedback)[:6000] + "\n\nNow give the final "
                                  "report: what is done, what is left, and the exact next step."})
             self._sys_note(f"⏹ step budget ({step_cap}) spent — wrapping up", "dim")
+            self._ask_soon()
+            return
+
+        # Before ending: is the work actually done? A plan with open steps, or
+        # code changed and never run, means "not yet" — send it back to finish,
+        # the way a careful engineer would (bounded, and never past the budget).
+        gap = self._completion_gap(disp)
+        if gap and self._steps < step_cap:
+            self._steps += 1
+            self._sys_note("\u21bb " + gap[0], "dim")
+            self.history.append({"role": "user", "content":
+                                 "TOOL RESULTS (continue — don't stop until the whole task is "
+                                 "done, then give your final answer):\n\n[" + gap[1] + "]"})
             self._ask_soon()
             return
 
@@ -7736,7 +7864,7 @@ class ChuckWindow(Adw.ApplicationWindow):
                sub="On: runs commands, reads and edits files. Off: answers only.",
                after=lambda v: self.set_agent_mode(v, announce=False))
         g = group(pg, "Budgets")
-        spin(g, "Steps per task", "agent_steps", 4, 80, 1, 25,
+        spin(g, "Steps per task", "agent_steps", 4, 200, 1, 60,
              sub="Commands and edits one request may take before it must report back.")
         spin(g, "Research rounds", "research_hops", 1, 8, 1, MAX_TOOL_HOPS,
              sub="Search → read → think rounds before he must answer.")
