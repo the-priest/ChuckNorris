@@ -75,7 +75,6 @@ from chucknorris_ext.web import (               # noqa: E402
     _is_image_path,
 )
 from chucknorris_ext.chats import chat_expires_in  # noqa: E402
-from chucknorris_ext import pricing as _pricing    # noqa: E402
 
 
 def chat_files():
@@ -86,27 +85,43 @@ def chat_files():
 def purge_old_chats(ttl_hours=None):
     return _chats.purge_old_chats(ttl_hours or CHAT_TTL_HOURS, CHATS_DIR)
 
-try:
-    from chucknorris_ext import skills as _skills
-    from chucknorris_ext import ledger as _ledger
-    from chucknorris_ext import compress as _compress
-    from chucknorris_ext import specs as _specs
-    from chucknorris_ext import memory as _memory
-    from chucknorris_ext import codecheck as _codecheck
-    from chucknorris_ext import skill_library as _skill_library
-    from chucknorris_ext import builder as _builder
-    from chucknorris_ext import agents as _agents
-except Exception:
-    _agents = None
-    _skills = None
-    _ledger = None
-    _compress = None
-    _specs = None
-    _memory = None
-    _codecheck = None
-    _skill_library = None
-    _builder = None
-    _agents = None
+def _optional(name):
+    """Import one optional module, or None. ONE at a time: these used to sit
+    in a single try block, so a single missing file (an interrupted install,
+    a stale download) silently switched off skills, memory, the ledger and
+    the builder all together."""
+    import importlib
+    try:
+        return importlib.import_module("chucknorris_ext." + name)
+    except Exception:
+        return None
+
+
+_skills = _optional("skills")
+_ledger = _optional("ledger")
+_compress = _optional("compress")
+_specs = _optional("specs")
+_memory = _optional("memory")
+_codecheck = _optional("codecheck")
+_skill_library = _optional("skill_library")
+_builder = _optional("builder")
+_agents = _optional("agents")
+_pricing = _optional("pricing")
+if _pricing is None:
+    class _pricing:                     # noqa: N801  — the meter, minus prices
+        """Stand-in so a partial install still launches: tokens are counted,
+        nothing is priced, nothing is fetched."""
+        PRICES, FREE, VISION = {}, [], set()
+        SUGGESTED = ["zai-org/GLM-5.3-Flash"]
+        usage_from_chunk = staticmethod(lambda d: None)
+        price_for = staticmethod(lambda model, settings=None: None)
+        cost = staticmethod(lambda usage, price: None)
+        sees_images = staticmethod(lambda model: True)
+        is_free = staticmethod(lambda model: False)
+        fmt_usd = staticmethod(lambda x: "" if x is None else f"${x:.4f}")
+        fmt_tokens = staticmethod(lambda n: str(int(n or 0)))
+        fetch_balance = staticmethod(lambda *a, **k: (False, "pricing module missing"))
+        fetch_models = staticmethod(lambda *a, **k: (False, "pricing module missing"))
 
 # Paths, tunables and settings all live in one place now.
 HERE = Path(__file__).resolve().parent

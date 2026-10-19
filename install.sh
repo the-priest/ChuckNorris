@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-#  Chuck Norris installer  —  Arch / CachyOS grandmaster assistant (a tribute)
+#  Chuck installer  —  desktop coding & system agent (Arch / CachyOS first)
 #
 #  One line:
 #    curl -fsSL https://raw.githubusercontent.com/the-priest/ChuckNorris/main/install.sh | bash
@@ -83,15 +83,32 @@ if [ ! -f "$VOICE" ]; then
   fi
 fi
 
-step "installing Chuck Norris + art"
-if [ -f chucknorris.py ]; then
-  cp chucknorris.py "${APP_DIR}/chucknorris.py"
-  cp -r assets/* "${ASSET_DIR}/" 2>/dev/null || true
-  # ship the sidecar package (skills, on-demand specs, memory, code verifier,
-  # and the ready-made skill library)
+step "installing Chuck"
+# Copy a whole source tree into place: the app, its package, its art.
+install_tree() {
+  cp "$1/chucknorris.py" "${APP_DIR}/chucknorris.py"
   rm -rf "${APP_DIR}/chucknorris_ext"
-  cp -r chucknorris_ext "${APP_DIR}/chucknorris_ext" 2>/dev/null || true
+  cp -r "$1/chucknorris_ext" "${APP_DIR}/chucknorris_ext"
+  rm -rf "${APP_DIR}/chucknorris_ext/__pycache__"
+  cp -r "$1"/assets/* "${ASSET_DIR}/" 2>/dev/null || true
+}
+SRC_TMP="$(mktemp -d)"
+trap 'rm -rf "$SRC_TMP"' EXIT
+if [ -f chucknorris.py ] && [ -d chucknorris_ext ]; then
+  install_tree "."                                   # running from a clone
+elif curl -fsSL "https://codeload.github.com/${REPO}/tar.gz/refs/heads/${BRANCH}" \
+        -o "${SRC_TMP}/src.tar.gz" \
+     && tar -xzf "${SRC_TMP}/src.tar.gz" -C "$SRC_TMP" \
+     && SRC_DIR="$(find "$SRC_TMP" -mindepth 1 -maxdepth 1 -type d | head -n 1)" \
+     && [ -f "${SRC_DIR}/chucknorris.py" ] && [ -d "${SRC_DIR}/chucknorris_ext" ]; then
+  # ONE archive of the branch, so every file comes from the same commit.
+  # Fetching files one by one from raw.githubusercontent.com could mix
+  # versions: its CDN caches each file separately for minutes, so right after
+  # a release you could get the new app with an old module list — and an app
+  # that would not start.
+  install_tree "$SRC_DIR"
 else
+  info "archive download failed — falling back to fetching files one by one"
   curl -fsSL "https://raw.githubusercontent.com/${REPO}/${BRANCH}/chucknorris.py" \
     -o "${APP_DIR}/chucknorris.py" || die "could not fetch chucknorris.py"
   mkdir -p "${APP_DIR}/chucknorris_ext"
@@ -121,7 +138,17 @@ else
       -o "${ASSET_DIR}/${a}.png" 2>/dev/null || true
   done
 fi
-ok "app + ext + art installed"
+# Every module the app imports must be here. A partial install is caught NOW,
+# with a clear message, instead of as a traceback the first time you launch.
+missing=""
+for m in $(grep -oE '(from chucknorris_ext import [a-z_]+|_optional\("[a-z_]+"\))' \
+             "${APP_DIR}/chucknorris.py" | grep -oE '[a-z_]+("?\))?$' | tr -d '")' | sort -u); do
+  [ -f "${APP_DIR}/chucknorris_ext/${m}.py" ] || missing="${missing} ${m}"
+done
+[ -z "$missing" ] || die "install incomplete — missing modules:${missing}. Re-run the installer."
+python3 -m py_compile "${APP_DIR}/chucknorris.py" "${APP_DIR}"/chucknorris_ext/*.py \
+  || die "a downloaded file is corrupt (did not compile). Re-run the installer."
+ok "app installed"
 
 cat > "$LAUNCH" <<EOF
 #!/usr/bin/env bash
@@ -160,5 +187,5 @@ fi
 case ":$PATH:" in *":${HOME}/.local/bin:"*) : ;; *)
   info "add to PATH:  export PATH=\"\$HOME/.local/bin:\$PATH\"" ;; esac
 
-printf '\n%s\U0001F94B Chuck Norris installed.%s  Launch:  %schucknorris%s\n' "$c1" "$c0" "$c2" "$c0"
-info "add a SiliconFlow key in Settings (or it reuses Basilisk's), then put him to work."
+printf '\n%sChuck installed.%s  Launch:  %schucknorris%s\n' "$c1" "$c0" "$c2" "$c0"
+info "add a SiliconFlow key in Settings (or it reuses Basilisk's). Tab switches Agent / Chat."
