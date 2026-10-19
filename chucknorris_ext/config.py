@@ -12,7 +12,7 @@ from pathlib import Path
 from . import net as _net
 
 APP_ID = "org.thepriest.chucknorris"
-VERSION = "13.0.0"
+VERSION = "14.0.0"
 
 # Backend model. GLM-5.3-Flash (Z.ai) replaced DeepSeek-V4-Flash in v13: it
 # tops SiliconFlow's intelligence board, is the strongest coder / long-horizon
@@ -43,11 +43,11 @@ for _d in (CONFIG_DIR, CHATS_DIR, DL_DIR, VOICE_DIR):
 MAX_TOOL_HOPS = 4          # research: search→read→think rounds
 RESEARCH_MAX_SOURCES = 3   # distinct pages read before answering
 RESEARCH_QUERIES = 2       # distinct queries fanned out per hop
-SEND_CHAR_BUDGET = 60_000  # conversation carried per turn (~15k tokens)
-TOOL_BLOBS_KEPT = 2        # most recent tool-result blobs sent in full
+SEND_CHAR_BUDGET = 160_000  # conversation carried per request (~40k tokens); Settings
+TOOL_BLOBS_KEPT = 6        # most recent tool-result blobs carried at all
 CHAT_TTL_HOURS = 24        # saved chats self-delete this long after last use
-RENDER_KEEP = 10           # message bubbles kept alive at the bottom
-RENDER_PAGE = 20           # more revealed per scroll-up
+RENDER_KEEP = 40           # transcript entries kept rendered at the bottom
+RENDER_PAGE = 30           # more revealed per scroll-up
 FONT_SIZE = 14             # chat text size in px
 
 UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "

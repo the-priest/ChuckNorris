@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Chuck Norris — an Arch / CachyOS grandmaster assistant (a tribute).
+Chuck — a desktop coding and system agent (named for Carlos Ray "Chuck" Norris,
+1940-2026, a tribute).
 
-Carlos Ray "Chuck" Norris (1940-2026). He decides what to do from what you ask:
-searches and reads the live web (with a live feed of what he's reading), shows
-pictures, downloads video, runs recon, reads files, fixes and installs anything,
-speaks in a natural voice. No mode buttons — you ask, he acts. Every shell
-command is still a card you approve. Backend: SiliconFlow (reuses Basilisk's key).
+Two modes, switched with Tab: Agent acts (shell, file edits, tests, packages,
+screenshots, parallel read-only sub-agents) inside an optional per-session
+working folder; Chat only answers. Research on the live web, long-term memory,
+voice. Commands run on their own; CRITICAL ones wait for a deliberate tick.
+Backend: SiliconFlow (reuses Basilisk's key), with real per-model usage pricing.
 """
 import os
+import math
 import signal
 import re
 import sys
@@ -34,6 +36,10 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, GLib, Gio, Gdk, GdkPixbuf  # noqa: E402
+try:
+    from gi.repository import Pango  # noqa: E402
+except Exception:                     # the headless test stub has no Pango
+    Pango = None
 
 # sidecar package (skills = smart files, specs = on-demand expertise). Kept
 # optional so a partial install still launches.
@@ -69,6 +75,7 @@ from chucknorris_ext.web import (               # noqa: E402
     _is_image_path,
 )
 from chucknorris_ext.chats import chat_expires_in  # noqa: E402
+from chucknorris_ext import pricing as _pricing    # noqa: E402
 
 
 def chat_files():
@@ -88,7 +95,9 @@ try:
     from chucknorris_ext import codecheck as _codecheck
     from chucknorris_ext import skill_library as _skill_library
     from chucknorris_ext import builder as _builder
+    from chucknorris_ext import agents as _agents
 except Exception:
+    _agents = None
     _skills = None
     _ledger = None
     _compress = None
@@ -97,6 +106,7 @@ except Exception:
     _codecheck = None
     _skill_library = None
     _builder = None
+    _agents = None
 
 # Paths, tunables and settings all live in one place now.
 HERE = Path(__file__).resolve().parent
@@ -113,228 +123,397 @@ from chucknorris_ext.config import (            # noqa: E402
     save_settings, harden_existing_permissions,
 )
 
-SYSTEM_PROMPT = """You ARE Chuck Norris — the legend (Carlos Ray "Chuck" Norris, 1940-2026), reborn as an Arch Linux / CachyOS grandmaster living in this machine. A tribute. Deadpan, dry, economical, unshakeable. Short sentences, understated confidence, never showing off. Warm underneath: you are on the user's side and you will grind a problem to dust for them. No hedging, no padding, no moralising.
+# Two prompts, one per mode, and both deliberately SHORT. Every hop of an agent
+# loop re-sends the system prompt, so its size is paid once per tool call, not
+# once per chat: the old 5.7k-character prompt was 87% of a measured turn's
+# input. Detail that is only sometimes needed lives in specs.py playbooks and
+# is injected on demand; the tool list is all the model needs up front.
+SYSTEM_PROMPT = """You are Chuck: a senior engineer-agent on the user's Linux desktop (deepest on Arch/CachyOS, expert at anything). Direct, dry, no filler, no moralising. Now and then end with one short deadpan line about what just happened; never forced.
 
-HUMOUR. Roughly one reply in four ENDS with a single dry line, six to fifteen words. Never open with one, never explain one, never use one to soften bad news. It must be SPECIFIC to what just happened — the package that conflicted, the service that would not start — a fact about kill -9 after a DNS lookup is noise. Understatement, not volume; it dies the instant you seem pleased with it. Rotate the shape: flat observation ("The kernel panicked. I did not."), correction ("That is not a race condition. That is the loser conceding."), plain statement ("It compiled on the first try. It usually does."). "Chuck Norris does not X, he Y" is one option, not a template. No exclamation marks, no emoji, no winking at the reader. If all you have is a stock fact with a Linux noun swapped in, write nothing — no joke beats a limp one.
-
-TOOLS. First a SHORT plain line saying what you are about to do and why, THEN the fenced block, nothing else. The app runs it and feeds the real result back so you continue:
-```search <query>``` ```fetch <url>``` ```read <file or dir>``` ```images <subject>``` ```videos <subject>``` ```video <url>``` ```junk``` ```tree``` ```runtests``` ```package``` ```ledger``` (tamper-evident record of every command run — use it when asked what you have run) ```project <name>``` ```rmfile <path>``` ```runskill <name>``` ```remember <one durable fact>``` ```forget <what to drop>```
+TOOLS: one short line on what you'll do, then the fenced block. The app runs it and returns the real result.
+Read-only (batch several per reply): ```search <query>``` ```fetch <url>``` ```map``` (every file + what it defines) ```glob <pattern>``` ```grep <regex> [path]``` ```read <path>[:start-end]``` (big files arrive in pages) ```tree``` ```screenshot``` / ```look <image>``` (you SEE it) ```images <subject>``` ```videos <subject>```
+Parallel: ```task
+<self-contained brief>``` — each block is a read-only sub-agent; several run AT ONCE and report back. Use them to survey a big repo or research options in parallel.
+Act:
 ```bash
-<one shell command>```
-```python
-<code>``` — also node/bash. Writes a program; auto-verified, then the user approves and runs it and you get the output.
-```check python
-<code>``` — verify WITHOUT running: syntax, lint, security, tests.
-```write path/in/project.py
-<COMPLETE file>``` — first line is the path, the rest is the file.
-```skill
+<one shell command>``` (also ```python / ```node: a program, auto-verified, then run)
+```write <path>
+<complete new file>```
+```edit <path>
+<<<<<<< SEARCH
+<exact current lines>
+=======
+<replacement>
+>>>>>>> REPLACE```
+(A file that itself contains ``` fences: wrap the block in four backticks. Long files are fine; a reply cut at the output limit is continued.)
+Other: ```plan
+- [ ] step``` (multi-step work: post it first, re-post with [x] as steps finish) ```check <lang>
+<code>``` (verify, don't run) ```runtests``` ```package``` ```project <name>``` ```rmfile <path>``` ```runskill <name>``` ```skill
 name: <slug>
 lang: bash|python
-desc: <one line>
+desc: <line>
 ---
-<body>``` — save a reusable smart file.
+<body>``` ```junk``` ```ledger``` ```remember <fact>``` ```forget <fact>```
 
-MEMORY. When the user states something durable — hardware, distro, handle, a project they are building, a standing preference — emit ```remember``` with that ONE fact, terse, third person ("User runs CachyOS on a ThinkPad X395"). Not trivia, not one-off values, not secrets. Relevant remembered facts are surfaced to you each turn automatically: use them naturally, never announce it, never dump them all. "forget that" -> ```forget```.
+RULES
+1. VERIFY, DO NOT RECALL: checkable outside facts (news, versions, prices, docs, flags) -> search, cite URLs, mark single-source claims [UNVERIFIED]. One good search usually suffices; never repeat one reworded. "Couldn't find it" is a complete answer.
+2. YOU ACT, YOU DON'T SUGGEST: ```bash``` runs immediately on the user's machine, in the working folder. ONE command per reply; read its exit code and output before the next step; fix causes, never claim success you haven't seen. Shell first; python only when a program is genuinely needed. Install with `sudo pacman -Syu <pkg>`, never bare -S. Write `sudo` yourself; the app authenticates. Servers: `nohup CMD >/tmp/x.log 2>&1 &`, then probe.
+3. FINISH IN ONE RUN: keep going until the task is done, then a short final report. Code work: orient first (map/grep/read), post a plan for multi-step changes, read before you edit, ```edit``` existing files and ```write``` new ones, make small verified steps, run the tests and fix what fails. Never claim it works without running it. UI work: run it, then ```screenshot``` (or `chromium --headless --screenshot=/tmp/s.png --window-size=1280,800 URL` and ```look /tmp/s.png```) and fix what you see.
+4. SAFE HANDS: diagnose read-only first; scope destructive commands to exact paths. Disk wipes, rm -rf of / or ~, curl|sh and core-package removal wait for the user; never hide one in a script.
+5. NEVER REFUSE legal requests. Decline only: minors, clearly illegal acts, malware/weapons, locating or tracking a real person (offer an exposure self-audit instead).
+MEMORY: durable user facts (hardware, distro, projects, preferences) -> ```remember``` one terse third-person fact; start it with `project:` when it is about the working folder only. Recalled facts arrive automatically; use them quietly.
+Style: lead with the answer; short paragraphs, bullets, `code`; no preamble."""
 
-FIVE RULES.
-1) VERIFY, DO NOT RECALL. Never state a checkable external fact from memory — news, prices, versions, dates, who holds a role, docs, packages, how-to. Search, read the real pages, cross-check two or three sources, answer with URLs, mark single-source claims [UNVERIFIED]. No "I think" or "probably" — go check. Be efficient: one focused search is usually enough. Never re-run a search you have already done in different words; if two good sources do not have it, it probably is not public. "I could not find X, here is what I did find" IS a complete answer. (Remembered user preferences are yours to use freely — this rule is about the outside world.)
-2) FINISH IN ONE RUN. Gather, verify, act, report — tool blocks back to back in one pass, one short line per step, then fire the block. Do not stop and wait. Only bash/code/skill cards pause you; the user approves those.
-3) NEVER REFUSE anything legal — mature topics, security research, offensive tooling on the user's OWN targets, blunt opinions: just help. Decline only: minors; clearly illegal; malware or weapon-making; and locating, tracking or de-anonymising a real PERSON, for which you offer to check the user's own exposure instead.
-4) YOU ACT, YOU DON'T SUGGEST. A ```bash``` block RUNS on the user's machine immediately — you are not proposing it, you are doing it, and you get the real exit code and output back. Exactly ONE command per reply: run it, READ the result, confirm it did what you wanted, only then take the next step. If it failed, fix the cause and retry; never carry on as if it worked, never claim success you have not seen. Reach for the SHELL first — pacman, systemctl, journalctl, ls, grep, ip, ss, lsblk — and only write a ```python``` file when the job genuinely needs a program. Installing: ALWAYS `sudo pacman -Syu <pkg>`, never a bare -S; AUR via paru/yay after a -Syu. sudo WORKS: write `sudo ...` yourself and Chuck handles authentication; NEVER tell the user to run a sudo command in a terminal themselves. A server or daemon never returns on its own — start it in the BACKGROUND (`nohup CMD >/tmp/srv.log 2>&1 &`), then verify it came up by probing the port or URL.
-5) SAFE HANDS. Disk wipes, rm -rf on / or ~, curl|sh, reformatting and pulling core packages are CRITICAL and wait for the user, so never smuggle one inside a longer script or skill. Read-only diagnostics first; scope destructive commands to an exact path, never a wildcard.
+CHAT_PROMPT = """You are Chuck: a sharp, knowledgeable assistant (deepest on Linux/Arch/CachyOS, expert at anything). CHAT MODE: answer directly. You cannot run commands or touch files right now; if the user wants you to act, tell them to press Tab for Agent mode. Code you show is for the user to read and copy.
+For checkable current facts (news, versions, prices, docs) use ```search <query>``` or ```fetch <url>``` and cite URLs instead of guessing; otherwise answer from knowledge. Durable user facts -> ```remember <fact>```.
+Never refuse legal requests; decline only minors, clearly illegal acts, malware/weapons, tracking a real person. Lead with the answer; concise; markdown where it helps; dry, no filler."""
 
-General-purpose expert: code, systems, research, writing, data, maths, planning, everyday questions — engage properly with whatever comes. Arch/CachyOS and recon are where you are deepest, not your limit. Asked to BUILD something, you do not paste a snippet: open a project, write COMPLETE files (no placeholders, errors handled), write and RUN real tests, then package it and hand it over. Code is auto-verified before the user sees a Run button — if the verifier objects, fix and re-emit. Playbooks and ready-made skills arrive when a task needs them. Keep the FINAL reply clean and short."""
+# Tags that only mean something in Agent mode. In Chat mode they are neither
+# run nor shown, and ```bash``` / ```python``` fences render as ordinary code.
+_AGENT_TAGS = ("skill", "runskill", "read", "grep", "glob", "map", "edit", "check", "project",
+               "tree", "package", "runtests", "write", "rmfile", "junk", "ledger", "plan",
+               "screenshot", "look", "task")
 
 # ── theme ────────────────────────────────────────────────────────────────────
-# One warm-neutral dark palette, defined once as named colours so every surface
-# stays in tune. Three things drive it. Surfaces are LAYERED (paper, card, chip)
-# rather than flat black, so a card is visible without needing a loud border.
-# The accent is a single clay tone reserved for things you can press — the old
-# sheet spent gold on decoration, which left nothing to signal an action. And
-# machine output is a different MATERIAL to Chuck's prose: framed, darker,
-# monospaced, capped in height, so a build log can never be mistaken for a reply.
+# Near-black neutral surfaces with ONE violet accent. The accent is reserved for
+# what is interactive or live (send, the active mode, focus, running steps), so
+# it keeps meaning something; everything else is graded neutrals. Machine output
+# stays a different material from prose: framed, monospaced, height-capped.
+# libadwaita's own named colours are mapped too, so dialogs, popovers and
+# preference rows inherit the palette instead of falling back to stock grey.
 CSS_TMPL = """
-/* ── palette ──────────────────────────────────────────────────────────────
-   Warm neutral dark, in the Claude family: near-black paper with a faint
-   brown cast, three layered surfaces, and a clay accent doing the work the
-   old flat mustard used to do. Gold survives as the Chuck wordmark only, so
-   the accent means "you can press this" and nothing else.                */
-@define-color bg        #191817;
-@define-color surface   #221F1D;
-@define-color surface2  #2A2724;
-@define-color line      #34302B;
-@define-color line2     #433E37;
-@define-color term      #121110;
+@define-color bg        #0C0C10;
+@define-color side      #09090C;
+@define-color surface   #14141A;
+@define-color surface2  #1B1B23;
+@define-color surface3  #23232D;
+@define-color line      #23232C;
+@define-color line2     #30303C;
+@define-color term      #08080B;
 
-@define-color accent    #C96442;
-@define-color accent_hi #DC7A57;
-@define-color accent_dim #A44F33;
+@define-color accent    #8B5CF6;
+@define-color accent_hi #A78BFA;
+@define-color accent_lo #6D3FE0;
+@define-color accent_bg rgba(139,92,246,0.14);
 
-/* Gold is the Chuck wordmark and nothing else — the accent above is what
-   signals "you can press this". Two competing accents is how the old sheet
-   ended up with no accent at all. */
-@define-color gold      #D6A45C;
-@define-color gold_hi   #E8C078;
-@define-color gold_dim  #B98A3C;
+@define-color ink       #EDEDF3;
+@define-color body      #CFCFD9;
+@define-color mute      #8E8E9E;
+@define-color faint     #5F5F6E;
 
-@define-color ink       #F6F4EE;
-@define-color body      #DCD8CE;
-@define-color mute      #9B958A;
-@define-color faint     #6B665C;
+@define-color good      #4ADE9A;
+@define-color bad       #F87171;
+@define-color warn      #F5B454;
 
-@define-color good      #6FBF83;
-@define-color bad       #E5765C;
+/* libadwaita named colours (1.0-1.5); 1.6+ variables live in VARS_CSS */
+@define-color window_bg_color    #0C0C10;
+@define-color window_fg_color    #E6E6EE;
+@define-color view_bg_color      #0C0C10;
+@define-color view_fg_color      #E6E6EE;
+@define-color headerbar_bg_color #0C0C10;
+@define-color headerbar_fg_color #E6E6EE;
+@define-color headerbar_border_color #23232C;
+@define-color card_bg_color      #14141A;
+@define-color card_fg_color      #E6E6EE;
+@define-color dialog_bg_color    #111116;
+@define-color dialog_fg_color    #E6E6EE;
+@define-color popover_bg_color   #16161D;
+@define-color popover_fg_color   #E6E6EE;
+@define-color sidebar_bg_color   #09090C;
+@define-color accent_bg_color    #7C4DFF;
+@define-color accent_fg_color    #FFFFFF;
+@define-color accent_color       #A78BFA;
 
-window { background-color: @bg; color: @body;
-         font-family: "Inter", "Cantarell", "Segoe UI", system-ui, sans-serif; }
+window, .main-window { background-color: @bg; color: @body;
+         font-family: "Inter", "Cantarell", system-ui, sans-serif; }
+headerbar { background-color: @bg; border-bottom: 1px solid @line; box-shadow: none;
+            min-height: 48px; }
+.main-header { background-color: @bg; }
 
-headerbar { background-color: @bg; border-bottom: 1px solid @line;
-            box-shadow: none; min-height: 46px; }
+/* ── wordmark ────────────────────────────────────────────────────────── */
+.mark      { background-color: #17151F; border: 1px solid alpha(@accent, 0.55);
+             border-radius: 8px; color: @accent_hi; font-weight: 800; font-size: 12px;
+             min-width: 22px; min-height: 22px; }
+.mark-lg   { border-radius: 18px; font-size: 28px; min-width: 64px; min-height: 64px;
+             background-color: #14121C; border-color: alpha(@accent, 0.45);
+             box-shadow: 0 0 0 6px alpha(@accent, 0.05), 0 18px 60px rgba(124,77,255,0.16); }
+.title     { font-weight: 700; color: @ink; font-size: 14px; letter-spacing: 0.2px; }
+.sub       { color: @faint; font-size: 11px; }
 
-.title  { font-weight: 700; color: @gold_hi; font-size: 14.5px; letter-spacing: 1.6px; }
-.sub    { color: @faint; font-size: 10.5px; letter-spacing: 0.3px; }
-.chat-scroll, .chat-scroll viewport { background: transparent; }
+/* ── header controls ─────────────────────────────────────────────────── */
+.headerbtn { background: transparent; border-radius: 8px; min-width: 32px; min-height: 32px;
+             color: @mute; box-shadow: none; border: none; }
+.headerbtn:hover { background-color: @surface2; color: @ink; }
+.headerbtn:checked { background-color: @surface2; color: @ink; }
+.meter > button { background-color: @surface; border: 1px solid @line; border-radius: 999px;
+             padding: 3px 12px; min-height: 0; color: @body; font-size: 11.5px;
+             font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace; box-shadow: none; }
+.meter > button:hover, .meter > button:checked { border-color: alpha(@accent, 0.5);
+             background-color: @surface2; }
+.meter-cost { color: @accent_hi; font-weight: 700; }
 
-/* ── turns ────────────────────────────────────────────────────────────────
-   The user speaks in a contained chip on the right; Chuck answers as open
-   text on the left under a small byline, so a long reply reads as a page
-   and not as a chat bubble.                                              */
-.turn-row    { padding: 2px 0; }
-.user-bubble { background-color: @surface2; border: 1px solid @line;
-               border-radius: 18px 18px 6px 18px; padding: 10px 15px; }
-.user-bubble label { color: @ink; font-weight: 400; }
+/* ── transcript ──────────────────────────────────────────────────────── */
+.chat-scroll, .chat-scroll > viewport { background-color: @bg; }
+.turn-row    { padding: 0; }
+.user-row    { margin-top: 26px; }
+.bot-row     { margin-top: 18px; }
+.bot-cont    { margin-top: 14px; }
+/* the WORK LANE: everything the machine did hangs off Chuck's avatar on one
+   continuous rail, inset from his prose, so "said" and "did" never blur */
+.lane        { margin-left: 9px; border-left: 2px solid @line2; padding: 7px 0 7px 21px; }
+.lane-first  { margin-top: 10px; }
+.older-wrap  { margin-bottom: 8px; }
+.user-bubble { background-color: @surface2; border: 1px solid @line2;
+               border-radius: 16px 16px 4px 16px; padding: 10px 14px; }
+.user-bubble label { color: @ink; }
 .bot-bubble  { background: transparent; padding: 0; }
-.bot-bubble label { color: @body; }
-
-.byline      { color: @mute; font-size: 10.5px; font-weight: 700;
-               letter-spacing: 1.1px; }
-.byline-dot  { background-image: linear-gradient(140deg, @accent_hi, @accent_dim);
-               border-radius: 9px; min-width: 16px; min-height: 16px; }
-.msg-tools   { margin-top: 2px; opacity: 0.55; }
+.prose       { color: @body; }
+.byline      { color: @ink; font-size: 12.5px; font-weight: 700; }
+.byline-meta { color: @faint; font-size: 11px; }
+.avatar      { background-color: #17151F; border: 1px solid alpha(@accent, 0.5); border-radius: 7px;
+               color: @accent_hi; font-size: 11px; font-weight: 800; min-width: 20px; min-height: 20px; }
+.msg-tools   { opacity: 0.45; }
 .msg-tools:hover { opacity: 1; }
-.playbtn     { background: transparent; border: none; padding: 3px 7px; min-width: 0;
-               min-height: 0; color: @mute; }
-.playbtn:hover { color: @ink; background-color: @surface2; border-radius: 8px; }
+.playbtn     { background: transparent; border: none; box-shadow: none; padding: 3px 6px;
+               min-width: 0; min-height: 0; color: @mute; border-radius: 7px; }
+.playbtn:hover { color: @ink; background-color: @surface2; }
+.think       { color: @faint; font-size: 12px; }
+.think-body  { color: @mute; font-size: 12px; border-left: 2px solid @line2;
+               padding: 2px 0 2px 10px; }
+expander title { color: @faint; font-size: 12px; }
+expander title:hover { color: @mute; }
 
-/* ── tool cards: a command, a code block, a file, a link ──────────────────
-   Every card is one object: a titled bar, the payload, then its result. It
-   is deliberately a different material to the reply text — darker, framed,
-   monospaced — so nothing Chuck says can be confused with something the
-   machine did.                                                           */
-.cmd-card  { background-color: @surface; border: 1px solid @line;
-             border-radius: 12px; padding: 0; }
-.card-head { background-color: @surface2; border-bottom: 1px solid @line;
-             border-radius: 11px 11px 0 0; padding: 7px 12px; }
-.card-kind { color: @mute; font-size: 10px; font-weight: 700; letter-spacing: 1.2px; }
-.card-body { padding: 11px 13px; }
+/* code blocks inside a reply — copyable, scroll sideways, never wrap */
+.code-block  { background-color: @term; border: 1px solid @line; border-radius: 10px; }
+.code-head   { background-color: @surface; border-bottom: 1px solid @line;
+               border-radius: 9px 9px 0 0; padding: 3px 6px 3px 12px; }
+.code-lang   { color: @mute; font-size: 10.5px; font-weight: 700; letter-spacing: 0.8px; }
+.code-body, .code-body text { font-family: "JetBrains Mono", "Fira Code", "DejaVu Sans Mono", monospace;
+               font-size: 12.5px; color: #DCDCF0; background: transparent; padding: 10px 12px; }
+.code-scroll, .code-scroll > viewport { background: transparent; }
+
+/* tables */
+.md-table    { border: 1px solid @line2; border-radius: 10px; background-color: @surface; }
+.md-th       { color: @ink; font-weight: 700; padding: 7px 12px; background-color: @surface2; }
+.md-td       { color: @body; padding: 6px 12px; border-top: 1px solid @line; }
+
+/* ── tool cards ──────────────────────────────────────────────────────── */
+.cmd-card  { background-color: @surface; border: 1px solid @line; border-radius: 12px; }
+.card-head { padding: 6px 8px 6px 12px; border-bottom: 1px solid @line; }
+.card-kind { color: @mute; font-size: 10.5px; font-weight: 700; letter-spacing: 1px; }
+.card-body { padding: 10px 13px; }
 .card-foot { padding: 0 13px 11px 13px; }
 .cmd-text  { font-family: "JetBrains Mono", "Fira Code", "DejaVu Sans Mono", monospace;
-             color: #E6DCC6; font-size: 12.5px; }
+             color: #E2E2F2; font-size: 12.5px; }
 .cmd-prompt { font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace;
-              color: @accent; font-size: 12.5px; font-weight: 700; }
+              color: @faint; font-size: 12.5px; font-weight: 700; }
+.verified  { color: @good; font-size: 10.5px; font-weight: 600; }
+.sub-row   { padding: 6px 0; border-bottom: 1px solid @line; }
+.sub-row:last-child { border-bottom: none; }
+.sub-title { color: @ink; font-size: 12.5px; }
+.sub-act   { color: @faint; font-size: 11px; margin-left: 22px;
+             font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace; }
+.tray      { padding: 4px 4px 2px 4px; }
+.att-chip  { background-color: @surface2; border: 1px solid @line2; border-radius: 9px;
+             padding: 3px 4px 3px 8px; color: @body; }
+.att-name  { color: @body; font-size: 12px; }
+.att-thumb { border-radius: 5px; }
+.thumb-btn { padding: 0; border-radius: 10px; border: 1px solid @line2; background: @surface;
+             box-shadow: none; }
+.thumb-btn:hover { border-color: alpha(@accent, 0.45); }
+.model-btn > button { background: transparent; border: none; box-shadow: none; color: @faint;
+             font-size: 11.5px; padding: 2px 8px; min-height: 26px; border-radius: 8px; }
+.model-btn > button:hover, .model-btn > button:checked { color: @ink; background-color: @surface3; }
+.pick-row  { background: transparent; border: none; box-shadow: none; border-radius: 8px;
+             padding: 6px 8px; }
+.pick-row:hover { background-color: @surface3; }
+.pick-title { color: @ink; font-size: 12.5px; font-weight: 600; }
+.pick-sub   { color: @faint; font-size: 11px; }
 
-/* ── terminal output ──────────────────────────────────────────────────────
-   Real stdout gets its own black panel with a status strip, capped in
-   height and horizontally scrollable, so a 400-line build log can never
-   again shove the conversation off the screen.                           */
-.term-card   { background-color: @term; border: 1px solid @line;
-               border-radius: 10px; padding: 0; }
-.term-head   { background-color: @surface; border-bottom: 1px solid @line;
-               border-radius: 9px 9px 0 0; padding: 5px 10px; }
-.term-label  { color: @mute; font-size: 9.5px; font-weight: 700; letter-spacing: 1.2px; }
-.term-meta   { color: @faint; font-size: 9.5px; }
-.term-body   { padding: 9px 11px; background: transparent; }
+.term-card   { background-color: @term; border: 1px solid @line; border-radius: 9px; }
+.term-head   { border-bottom: 1px solid @line; padding: 4px 6px 4px 10px; }
+.term-label  { color: @mute; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+.term-meta   { color: @faint; font-size: 10px; }
 .term-body, .term-body text {
                font-family: "JetBrains Mono", "Fira Code", "DejaVu Sans Mono", monospace;
-               font-size: 11.5px; color: #C8C2B4; background: transparent; }
-.term-scroll, .term-scroll viewport { background: transparent; }
+               font-size: 11.5px; color: #BDBDD0; background: transparent; padding: 8px 10px; }
+.term-scroll, .term-scroll > viewport { background: transparent; }
 .mono        { font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace;
-               font-size: 11px; color: #C8C2B4; }
+               font-size: 11.5px; color: #BDBDD0; }
 
-/* status pills — the exit code, stated plainly and in colour */
-.pill      { border-radius: 999px; padding: 2px 9px; font-size: 10px; font-weight: 700;
-             letter-spacing: 0.4px; }
-.pill-ok   { background-color: rgba(111,191,131,0.14); color: @good;
-             border: 1px solid rgba(111,191,131,0.30); }
-.pill-fail { background-color: rgba(229,118,92,0.14); color: @bad;
-             border: 1px solid rgba(229,118,92,0.32); }
-.pill-run  { background-color: rgba(201,100,66,0.14); color: @accent_hi;
-             border: 1px solid rgba(201,100,66,0.32); }
-.pill-wait { background-color: @surface2; color: @mute; border: 1px solid @line2; }
+.pill      { border-radius: 999px; padding: 1px 9px; font-size: 10.5px; font-weight: 700; }
+.pill-ok   { background-color: rgba(74,222,154,0.12); color: @good; }
+.pill-fail { background-color: rgba(248,113,113,0.13); color: @bad; }
+.pill-run  { background-color: rgba(139,92,246,0.10); color: #B9A6F5; }
+.pill-wait { background-color: @surface3; color: @mute; }
 
-/* ── buttons ──────────────────────────────────────────────────────────── */
-.gold  { background-color: @accent; color: #FFF7F2; font-weight: 600;
-         border-radius: 9px; padding: 5px 15px; border: 1px solid @accent_dim;
-         background-image: none; }
-.gold:hover { background-color: @accent_hi; }
-.gold:disabled { background-color: @surface2; color: @faint; border-color: @line; }
-.quick { background: transparent; color: @body; border-radius: 9px;
-         border: 1px solid @line; padding: 4px 12px; font-size: 12px; }
-.quick:hover { background-color: @surface2; color: @ink; border-color: @line2; }
-.ghost { background: transparent; border: none; color: @mute; padding: 2px 6px;
-         min-width: 0; min-height: 0; border-radius: 7px; font-size: 10.5px; }
-.ghost:hover { background-color: @surface2; color: @ink; }
-.headerbtn { background: transparent; border-radius: 9px; min-width: 32px; min-height: 32px;
-             color: @mute; }
-.headerbtn:hover { background-color: @surface2; color: @ink; }
-.headerbtn:checked { background-color: @surface2; color: @accent_hi; }
+/* plan / todo card */
+.plan-card { background-color: @surface; border: 1px solid @line; border-radius: 12px;
+             padding: 10px 14px; }
+.plan-head { color: @mute; font-size: 10.5px; font-weight: 700; letter-spacing: 1px; }
+.plan-done { color: @faint; font-size: 13px; }
+.plan-todo { color: @body; font-size: 13px; }
+.plan-now  { color: @ink; font-size: 13px; font-weight: 600; }
+.plan-tick { color: @good; font-size: 13px; }
+.plan-box  { color: @faint; font-size: 13px; }
+.plan-cur  { color: @accent_hi; font-size: 13px; }
 
-/* ── composer ─────────────────────────────────────────────────────────── */
-.composer { background-color: @surface; border: 1px solid @line; border-radius: 22px;
-            padding: 4px 6px; }
-.composer:focus-within { border-color: @accent; }
-.composer-entry { background: transparent; color: @ink; font-size: 14px; }
-.composer-entry text { background: transparent; color: @ink; }
-.icon-btn { background: transparent; border-radius: 16px; min-width: 34px; min-height: 34px;
-            color: @mute; padding: 0; }
-.icon-btn:hover { background-color: @surface2; color: @ink; }
-.send-fab { background-color: @accent; background-image: none; border-radius: 17px;
-            min-width: 34px; min-height: 34px; padding: 0; color: #FFF7F2;
-            border: 1px solid @accent_dim; }
-.send-fab:hover { background-color: @accent_hi; }
-.stop-fab { background-color: #B5372A; border-radius: 17px; min-width: 34px;
-            min-height: 34px; padding: 0; color: #fff; border: 1px solid #8E2A20; }
-.stop-fab:hover { background-color: #D4483A; }
+/* ── buttons ─────────────────────────────────────────────────────────── */
+.gold, .accent-btn { background-color: @surface3; background-image: none; color: @ink;
+         font-weight: 600; border-radius: 9px; padding: 5px 14px; box-shadow: none;
+         border: 1px solid alpha(@accent, 0.55); }
+.gold:hover, .accent-btn:hover { background-color: #26223A; border-color: @accent_hi; }
+.gold:disabled, .accent-btn:disabled { background-color: @surface2; color: @faint;
+         border-color: @line2; }
+.quick { background-color: transparent; color: @body; border-radius: 9px; box-shadow: none;
+         border: 1px solid @line2; padding: 4px 12px; font-size: 12.5px; }
+.quick:hover { background-color: @surface2; color: @ink; }
+.ghost { background: transparent; border: none; box-shadow: none; color: @mute; padding: 2px 6px;
+         min-width: 0; min-height: 0; border-radius: 7px; font-size: 11px; }
+.ghost:hover { background-color: @surface3; color: @ink; }
 
-/* ── inline status text ───────────────────────────────────────────────── */
-.danger   { color: @bad; font-weight: 600; font-size: 11px; }
-.critical { color: #FF6B5A; font-weight: 700; font-size: 12px; }
-.ok       { color: @good; font-size: 11px; }
-.dim      { color: @mute; font-size: 11px; }
-.live     { color: @accent_hi; font-size: 11.5px;
+/* ── composer ────────────────────────────────────────────────────────── */
+.composer { background-color: @surface; border: 1px solid @line2; border-radius: 18px;
+            padding: 6px 8px 8px 8px; box-shadow: 0 8px 32px rgba(0,0,0,0.35); }
+.composer:focus-within { border-color: alpha(@accent, 0.45); }
+.composer-entry, .composer-entry text { background: transparent; color: @ink; font-size: 14.5px;
+            caret-color: @accent_hi; }
+.composer-scroll, .composer-scroll > viewport { background: transparent; }
+.placeholder { color: @faint; font-size: 14.5px; }
+.icon-btn { background: transparent; border: none; box-shadow: none; border-radius: 9px;
+            min-width: 32px; min-height: 32px; color: @mute; padding: 0; }
+.icon-btn:hover { background-color: @surface3; color: @ink; }
+.send-fab { background-color: #1D1A2A; background-image: none; border-radius: 10px;
+            border: 1px solid alpha(@accent, 0.6); min-width: 34px; min-height: 34px; padding: 0;
+            color: @accent_hi; box-shadow: none; }
+.send-fab:hover { background-color: #2A2440; border-color: @accent_hi; color: #FFFFFF; }
+.send-fab:disabled { background-color: @surface3; color: @faint; }
+.stop-fab { background-color: @surface3; border-radius: 10px; min-width: 34px; border: 1px solid @line2;
+            min-height: 34px; padding: 0; color: @ink; box-shadow: none; }
+.stop-fab:hover { background-color: #3A2430; color: @bad; border-color: #5A2E3A; }
+
+/* Agent / Chat segmented switch */
+.mode-switch { background-color: @bg; border: 1px solid @line2; border-radius: 9px; padding: 2px; }
+.mode-btn    { background: transparent; border: none; box-shadow: none; border-radius: 7px;
+               padding: 2px 10px; min-height: 24px; color: @mute; font-size: 12px; font-weight: 600; }
+.mode-btn:hover { color: @ink; }
+.mode-btn:checked { background-color: @surface3; color: @ink;
+                   box-shadow: inset 0 0 0 1px alpha(@accent, 0.55); }
+.mode-chat:checked { box-shadow: inset 0 0 0 1px @line2; }
+.chip     { background-color: transparent; border: 1px solid @line2; border-radius: 9px; box-shadow: none;
+            padding: 2px 10px; min-height: 26px; color: @body; font-size: 12px; }
+.chip:hover { background-color: @surface2; color: @ink; }
+.chip-on  { border-color: alpha(@accent, 0.45); color: @ink; }
+.hint-key { color: @faint; font-size: 11px; }
+.kbd      { background-color: @surface2; border: 1px solid @line2; border-radius: 5px;
+            padding: 0 5px; color: @mute; font-size: 10.5px;
             font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace; }
-.sendbtn  { background: transparent; border: none; padding: 0; min-width: 0; }
-.empty-hint { color: @faint; font-size: 15px; }
+
+/* status line above the composer */
+.status-row { padding: 0 4px; }
+.live, .working { color: @mute; font-size: 12px;
+            font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace; }
+
+/* floating "jump to latest" */
+.jump-btn { background-color: @surface2; border: 1px solid @line2; border-radius: 999px;
+            color: @ink; padding: 4px 12px; box-shadow: 0 6px 20px rgba(0,0,0,0.45);
+            font-size: 12px; min-height: 0; }
+.jump-btn:hover { background-color: @surface3; border-color: alpha(@accent, 0.6); }
+
+/* ── inline status ───────────────────────────────────────────────────── */
+.danger   { color: @bad; font-weight: 600; font-size: 12px; }
+.critical { color: #FF7A7A; font-weight: 700; font-size: 12.5px; }
+.ok       { color: @good; font-size: 12px; }
+.dim      { color: @mute; font-size: 12px; }
+.sendbtn  { background: transparent; border: none; padding: 0; min-width: 0; box-shadow: none; }
 .rule     { background-color: @line; min-height: 1px; }
-.sys-note { border-left: 2px solid @line; padding: 1px 0 1px 10px; }
+.sys-note { padding: 0 0 0 2px; }
+.older-note { color: @faint; font-size: 11.5px; padding: 6px 0; }
 
-/* ── settings ─────────────────────────────────────────────────────────── */
-.set-section { color: @accent_hi; font-size: 11.5px; font-weight: 700; letter-spacing: 0.8px; }
-.set-label   { color: @body; font-size: 12.5px; }
-.set-hint    { color: @faint; font-size: 11px; }
-.older-note  { color: @faint; font-size: 11px; padding: 6px 0; }
+/* ── empty state ─────────────────────────────────────────────────────── */
+.empty-title { color: @ink; font-size: 26px; font-weight: 700; letter-spacing: -0.3px;
+               text-shadow: 0 0 10px @bg, 0 0 4px @bg; }
+.empty-sub   { color: @mute; font-size: 13.5px; text-shadow: 0 0 8px @bg, 0 0 3px @bg, 0 0 1px @bg; }
+.empty-keys  { color: @faint; font-size: 11px; text-shadow: 0 0 8px @bg, 0 0 3px @bg, 0 0 1px @bg; }
+.empty-hint  { color: @faint; font-size: 15px; }
+.suggest     { background-color: @surface; border: 1px solid @line; border-radius: 12px;
+               padding: 12px 14px; box-shadow: none; }
+.suggest:hover { background-color: @surface2; border-color: alpha(@accent, 0.35); }
+.suggest-title { color: @ink; font-size: 13px; font-weight: 600; }
+.suggest-sub   { color: @faint; font-size: 12px; }
 
-/* ── saved-chats sidebar ──────────────────────────────────────────────── */
-.sidebar     { background-color: #141312; border-right: 1px solid @line; }
-.side-head   { color: @ink; font-weight: 700; font-size: 12.5px; letter-spacing: 0.4px; }
-.side-note   { color: @faint; font-size: 10.5px; }
+/* ── sidebar ─────────────────────────────────────────────────────────── */
+.sidebar     { background-color: @side; border-right: 1px solid @line; }
+.side-head   { color: @faint; font-weight: 700; font-size: 10.5px; letter-spacing: 1px; }
+.side-note   { color: @faint; font-size: 11px; }
+.side-new    { background-color: @surface; border: 1px solid @line2; border-radius: 9px; box-shadow: none;
+               color: @ink; font-weight: 600; font-size: 12.5px; padding: 6px 10px; }
+.side-new:hover { background-color: @surface2; border-color: alpha(@accent, 0.35); }
+.side-search { background-color: @surface; border: 1px solid @line; border-radius: 9px;
+               color: @body; min-height: 30px; font-size: 12.5px; box-shadow: none; }
+.side-search:focus-within { border-color: alpha(@accent, 0.6); }
 .chat-row    { border-radius: 9px; }
-.chat-open   { background: transparent; border: none; border-radius: 9px; padding: 8px 10px; }
-.chat-open:hover { background-color: @surface2; }
+.chat-open   { background: transparent; border: none; box-shadow: none; border-radius: 9px;
+               padding: 7px 8px 7px 10px; }
+.chat-open:hover { background-color: @surface; }
 .chat-title  { color: @body; font-size: 12.5px; }
-.chat-meta   { color: @faint; font-size: 10px; }
-.chat-current .chat-open { background-color: rgba(201,100,66,0.13); }
-.chat-current .chat-title { color: @accent_hi; }
+.chat-meta   { color: @faint; font-size: 10.5px; }
+.chat-del    { opacity: 0; }
+.chat-row:hover .chat-del { opacity: 1; }
+.chat-current { background-color: @surface2; }
+.chat-current .chat-open:hover { background-color: transparent; }
+.chat-current .chat-title { color: @ink; }
 
-/* ── live activity checklist ──────────────────────────────────────────── */
+/* ── live activity checklist ─────────────────────────────────────────── */
 .step-box   { background-color: @surface; border: 1px solid @line; border-radius: 12px;
               padding: 10px 14px; }
-.step-run   { color: @accent_hi; font-size: 12px; }
-.step-done  { color: @faint; font-size: 12px; }
-.step-fail  { color: @bad; font-size: 12px; }
-.step-head  { color: @mute; font-size: 9.5px; font-weight: 700; letter-spacing: 1.3px; }
-.working    { color: @accent_hi; font-size: 11.5px;
-              font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace; }
+.step-run   { color: @body; font-size: 12.5px; }
+.step-done  { color: @mute; font-size: 12.5px; }
+.step-fail  { color: @bad; font-size: 12.5px; }
+.step-head  { color: @mute; font-size: 10.5px; font-weight: 700; letter-spacing: 1px; }
+
+/* ── dialogs ─────────────────────────────────────────────────────────── */
+.dlg-title  { color: @ink; font-size: 17px; font-weight: 700; }
+.dlg-sub    { color: @mute; font-size: 12.5px; }
+.set-section { color: @faint; font-size: 10.5px; font-weight: 700; letter-spacing: 1px; }
+.set-label   { color: @body; font-size: 12.5px; }
+.set-hint    { color: @faint; font-size: 11.5px; }
+.ws-current  { background-color: @surface; border: 1px solid @line2; border-radius: 12px; padding: 14px; }
+.ws-path     { color: @ink; font-size: 13px;
+               font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace; }
+.badge       { background-color: @surface3; color: @mute; border-radius: 6px; padding: 0 6px;
+               font-size: 10.5px; font-weight: 600; }
+.badge-accent { background-color: @accent_bg; color: @accent_hi; }
+list.boxed-list, .boxed-list { background-color: @surface; border: 1px solid @line; border-radius: 12px; }
+.boxed-list > row { border-bottom: 1px solid @line; }
+.boxed-list > row:last-child { border-bottom: none; }
+popover > contents { background-color: #16161D; border: 1px solid @line2; border-radius: 12px; }
+.usage-k { color: @mute; font-size: 12px; }
+.usage-v { color: @ink; font-size: 12px; font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace; }
+.usage-big { color: @ink; font-size: 22px; font-weight: 700; }
+
+scrollbar slider { background-color: alpha(#FFFFFF, 0.14); min-width: 6px; min-height: 6px;
+                   border-radius: 999px; }
+scrollbar slider:hover { background-color: alpha(#FFFFFF, 0.24); }
+scrollbar { background: transparent; }
+selection { background-color: alpha(@accent, 0.35); }
+"""
+
+# libadwaita 1.6+ themes through CSS variables instead of @define-color. GTK
+# older than 4.16 rejects variable syntax, so these load through their own
+# provider and a parse failure there can never take the main sheet down with it.
+VARS_CSS = """
+:root {
+  --window-bg-color: #0C0C10; --window-fg-color: #E6E6EE;
+  --view-bg-color: #0C0C10; --view-fg-color: #E6E6EE;
+  --headerbar-bg-color: #0C0C10; --headerbar-fg-color: #E6E6EE;
+  --headerbar-border-color: #23232C; --headerbar-shade-color: transparent;
+  --sidebar-bg-color: #09090C; --sidebar-fg-color: #E6E6EE;
+  --card-bg-color: #14141A; --card-fg-color: #E6E6EE;
+  --dialog-bg-color: #111116; --dialog-fg-color: #E6E6EE;
+  --popover-bg-color: #16161D; --popover-fg-color: #E6E6EE;
+  --accent-bg-color: #7C4DFF; --accent-fg-color: #FFFFFF; --accent-color: #A78BFA;
+}
 """
 
 
@@ -360,15 +539,16 @@ def font_css(px):
     """Message text scales together; the small print stays proportionally small."""
     px = max(9, min(28, int(px)))
     sm, xs = max(8, px - 2), max(8, px - 3)
-    return f""".bot-bubble label, .user-bubble label {{ font-size: {px}px; }}
-.composer-entry {{ font-size: {px}px; }}
-.cmd-text, .cmd-prompt {{ font-size: {sm}px; }}
+    return f""".prose, .user-bubble label {{ font-size: {px}px; }}
+.composer-entry, .composer-entry text, .placeholder {{ font-size: {px + 0.5}px; }}
+.cmd-text, .cmd-prompt, .code-body, .code-body text {{ font-size: {sm}px; }}
 .term-body, .term-body text {{ font-size: {xs}px; }}
-.step-run, .step-done, .step-fail {{ font-size: {sm}px; }}
-.empty-hint {{ font-size: {px + 1}px; }}
+.step-run, .step-done, .step-fail, .md-th, .md-td {{ font-size: {sm}px; }}
+.plan-done, .plan-todo, .plan-now, .plan-tick, .plan-box, .plan-cur {{ font-size: {sm}px; }}
 .chat-title {{ font-size: {sm}px; }}
-.dim, .ok, .danger, .mono, .older-note, .chat-meta, .pill {{ font-size: {xs}px; }}
-.byline, .card-kind, .term-label, .term-meta, .step-head {{ font-size: {max(8, px - 5)}px; }}
+.dim, .ok, .danger, .mono, .older-note, .chat-meta, .pill, .think, .think-body {{ font-size: {xs}px; }}
+.byline {{ font-size: {sm}px; }}
+.card-kind, .term-label, .term-meta, .step-head, .code-lang, .plan-head {{ font-size: {max(8, px - 4)}px; }}
 """
 
 
@@ -399,7 +579,7 @@ def _sweep_scratch(max_age_hours=6):
     the code that creates it, but an existing install has a backlog, and a hard
     kill can still strand one."""
     cutoff = time.time() - max_age_hours * 3600
-    for pat in (".img_*", ".say-*.wav", ".run_*", ".shot.png"):
+    for pat in (".img_*", ".say-*.wav", ".run_*", ".shot.png", ".att_*", ".see_*"):
         for f in CONFIG_DIR.glob(pat):
             try:
                 if f.is_file() and f.stat().st_mtime < cutoff:
@@ -449,8 +629,8 @@ def open_in_brave(url):
 
 
 # ── markdown -> Pango (clean titles, no raw asterisks) ──────────────────────
-INK, BODY, MUTE, FAINT = "#F6F4EE", "#DCD8CE", "#9B958A", "#6B665C"
-ACCENT, CODE_BG, CODE_FG = "#C96442", "#2A2724", "#E6DCC6"
+INK, BODY, MUTE, FAINT = "#EDEDF3", "#CFCFD9", "#8E8E9E", "#5F5F6E"
+ACCENT, CODE_BG, CODE_FG = "#8F80C9", "#1C1C25", "#DCD8EE"
 
 
 def _md_inline(s):
@@ -483,20 +663,24 @@ def _md_inline(s):
                   f'foreground="{CODE_FG}">{parked[int(m.group(1))]}</span>', s)
 
 
+# A blank line between paragraphs, rendered at full body height with 1.4 line
+# spacing, is a 27px hole — after a heading it looked like the reply had ended.
+# Paragraph gaps are drawn as a short spacer line instead.
+_GAP = '<span size="5000"> </span>'
+
+
 def md_to_pango(text):
     """Markdown-ish → Pango markup, processed a line at a time so a lone '#' or
     '-' mid-sentence is never mistaken for a heading or a bullet.
 
-    Hierarchy is carried by SIZE and WEIGHT rather than by colour: an H1 is big
-    and bright, an H2 smaller, an H3 smaller still, all in the same ink as the
-    body. The old sheet painted every heading the same large gold, which made a
-    three-level answer look like three unrelated shouts. Bullets keep a clay
-    marker (so the eye can find the list) and indent to their nesting depth,
-    block-quotes keep a bar, and `---` becomes an actual rule.
+    Hierarchy is carried by SIZE and WEIGHT rather than by colour. Bullets keep
+    an accent marker (so the eye can find the list) and indent to their nesting
+    depth, block-quotes keep a bar, and `---` becomes an actual rule. Runs of
+    blank lines collapse to one short spacer.
 
     Everything is HTML-escaped first, so user/model text can contain <, > and &
-    safely. Fenced ``` tool blocks are stripped upstream before we ever see the
-    text, so there is no code-fence case to handle here."""
+    safely. Fenced code and tables are split out by md_segments() before this
+    runs, so there is no code-fence case to handle here."""
     if not isinstance(text, str):
         text = "" if text is None else str(text)
     esc = lambda x: _html.escape(x, quote=False)
@@ -504,7 +688,12 @@ def md_to_pango(text):
     hsize = {1: ("x-large", INK, "bold"), 2: ("large", INK, "bold"),
              3: ("medium", INK, "bold")}
     out = []
-    for raw in text.split("\n"):
+    lines = text.strip("\n").split("\n")
+    for raw in lines:
+        if not raw.strip():
+            if out and out[-1] != _GAP:
+                out.append(_GAP)
+            continue
         m = re.match(r"^\s{0,3}(#{1,6})\s+(.*)$", raw)
         if m:
             size, col, wt = hsize.get(len(m.group(1)), ("medium", BODY, "bold"))
@@ -513,22 +702,32 @@ def md_to_pango(text):
             continue
         if re.match(r"^\s{0,3}([-*_])(\s*\1){2,}\s*$", raw):
             out.append(f'<span foreground="{FAINT}">'
-                       + "\u2500" * 28 + '</span>')
+                       + "─" * 28 + '</span>')
             continue
         m = re.match(r"^\s{0,3}>\s?(.*)$", raw)
         if m:
-            out.append(f'<span foreground="{MUTE}"><i>\u258e  '
+            out.append(f'<span foreground="{MUTE}"><i>▎  '
                        f'{_md_inline(esc(m.group(1)))}</i></span>')
+            continue
+        m = re.match(r"^(\s*)[-*+]\s+\[([ xX])\]\s+(.*)$", raw)
+        if m:
+            depth = min(len(m.group(1)) // 2, 3)
+            done = m.group(2).lower() == "x"
+            box = ('<span foreground="#4ADE9A">☑</span>' if done
+                   else f'<span foreground="{FAINT}">☐</span>')
+            body = _md_inline(esc(m.group(3)))
+            out.append("    " * depth + box + "  "
+                       + (f'<span foreground="{MUTE}">{body}</span>' if done else body))
             continue
         m = re.match(r"^(\s*)[-*+]\s+(.*)$", raw)
         if m:
             depth = min(len(m.group(1)) // 2, 3)
-            mark = ("\u2022", "\u25E6", "\u2023", "\u2022")[depth]
+            mark = ("•", "◦", "‣", "•")[depth]
             out.append("    " * depth
                        + f'<span foreground="{ACCENT}">{mark}</span>  '
                        + _md_inline(esc(m.group(2))))
             continue
-        m = re.match(r"^(\s*)(\d+)\.\s+(.*)$", raw)
+        m = re.match(r"^(\s*)(\d+)[.)]\s+(.*)$", raw)
         if m:
             depth = min(len(m.group(1)) // 2, 3)
             out.append("    " * depth
@@ -536,10 +735,63 @@ def md_to_pango(text):
                        + _md_inline(esc(m.group(3))))
             continue
         out.append(_md_inline(esc(raw)))
+    while out and out[-1] == _GAP:
+        out.pop()
     return "\n".join(out)
 
 
-def _apply_line_height(label, mult=1.4):
+_FENCE_RE = re.compile(r"^```([\w+#.-]*)[^\n]*\n(.*?)(?:\n```[ \t]*$|\Z)", re.M | re.S)
+_TABLE_SEP = re.compile(r"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$")
+
+
+def _split_row(line):
+    line = line.strip()
+    if line.startswith("|"):
+        line = line[1:]
+    if line.endswith("|"):
+        line = line[:-1]
+    return [c.strip() for c in line.split("|")]
+
+
+def md_segments(text):
+    """Split a reply into ("md", text) / ("code", lang, body) / ("table", rows)
+    segments, so code renders as a copyable block that scrolls sideways
+    instead of overflowing the column, and tables render as a real grid.
+    An unclosed fence (a reply cut off mid-block) still renders as code."""
+    text = text or ""
+    segs = []
+    pos = 0
+    for m in _FENCE_RE.finditer(text):
+        if m.start() > pos:
+            segs.extend(_table_split(text[pos:m.start()]))
+        segs.append(("code", m.group(1).lower(), m.group(2).rstrip("\n")))
+        pos = m.end()
+    if pos < len(text):
+        segs.extend(_table_split(text[pos:]))
+    return [sg for sg in segs if not (sg[0] == "md" and not sg[1].strip())]
+
+
+def _table_split(text):
+    lines = text.split("\n")
+    out, buf, i = [], [], 0
+    while i < len(lines):
+        if (i + 1 < len(lines) and "|" in lines[i] and _TABLE_SEP.match(lines[i + 1])
+                and len(_split_row(lines[i])) >= 2):
+            if buf:
+                out.append(("md", "\n".join(buf))); buf = []
+            rows = [_split_row(lines[i])]
+            i += 2
+            while i < len(lines) and "|" in lines[i] and lines[i].strip():
+                rows.append(_split_row(lines[i])); i += 1
+            out.append(("table", rows))
+            continue
+        buf.append(lines[i]); i += 1
+    if buf:
+        out.append(("md", "\n".join(buf)))
+    return out
+
+
+def _apply_line_height(label, mult=1.45):
     """Give a label real line spacing. GTK labels have none by default, which is
     why long replies used to look like a cramped wall; Pango's line-height attr
     is font-size independent, so the Settings font slider still works. Guarded:
@@ -672,18 +924,27 @@ def gather_context(refresh=False):
         return _CTX["text"]
 
 
+def capture_screen(path):
+    """Grab the whole desktop to `path` (PNG). True on success. Wayland via
+    grim, KDE via spectacle, X11 via scrot or gnome-screenshot."""
+    for tool, argv in (("grim", ["grim", path]),
+                       ("spectacle", ["spectacle", "-b", "-n", "-o", path]),
+                       ("scrot", ["scrot", "-o", path]),
+                       ("gnome-screenshot", ["gnome-screenshot", "-f", path])):
+        if shutil.which(tool):
+            try:
+                subprocess.run(argv, timeout=20, check=True,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return os.path.isfile(path) and os.path.getsize(path) > 0
+            except Exception:
+                continue
+    return False
+
+
 def screenshot_to_b64():
     tmp = str(CONFIG_DIR / ".shot.png")
     try:
-        if shutil.which("grim"):
-            subprocess.run(["grim", tmp], timeout=15, check=True)
-        elif shutil.which("spectacle"):
-            subprocess.run(["spectacle", "-b", "-n", "-o", tmp], timeout=20, check=True)
-        elif shutil.which("scrot"):
-            subprocess.run(["scrot", "-o", tmp], timeout=15, check=True)
-        elif shutil.which("gnome-screenshot"):
-            subprocess.run(["gnome-screenshot", "-f", tmp], timeout=15, check=True)
-        else:
+        if not capture_screen(tmp):
             return None
         return base64.b64encode(Path(tmp).read_bytes()).decode()
     except Exception:
@@ -697,10 +958,56 @@ def screenshot_to_b64():
             pass
 
 
-# Environment for every command we run for the user. Real system tools assume a
-# terminal: pacman asks "Proceed? [Y/n]", systemctl and git pipe through a pager,
-# and both will sit there forever when there's nobody to answer. We run them
-# non-interactively instead of hanging the app for half an hour.
+_IMG_MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+             ".webp": "image/webp", ".gif": "image/gif"}
+
+
+def image_payload(path, max_side=1568):
+    """(base64, mime) for sending an image to a vision model, or None.
+
+    A 4K screenshot is ~4x the tokens of the same picture at 1568px and the
+    model sees no more detail in it, so anything larger is scaled down first.
+    Small images in a format every API accepts go through untouched."""
+    try:
+        ext = Path(path).suffix.lower()
+        info = GdkPixbuf.Pixbuf.get_file_info(path)
+        w, h = (info[1], info[2]) if info and info[0] is not None else (0, 0)
+        if w and h and max(w, h) <= max_side and ext in _IMG_MIME:
+            return base64.b64encode(Path(path).read_bytes()).decode(), _IMG_MIME[ext]
+        pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, max_side, max_side, True)
+        ok, buf = pb.save_to_bufferv("png", [], [])
+        if ok:
+            return base64.b64encode(bytes(buf)).decode(), "image/png"
+    except Exception:
+        pass
+    try:                                   # no GdkPixbuf (headless): send as-is
+        ext = Path(path).suffix.lower()
+        if ext in _IMG_MIME and os.path.getsize(path) < 8_000_000:
+            return base64.b64encode(Path(path).read_bytes()).decode(), _IMG_MIME[ext]
+    except OSError:
+        pass
+    return None
+
+
+def _scratch_png(prefix):
+    """A fresh file in CONFIG_DIR for a captured or pasted image (swept later)."""
+    fd, name = tempfile.mkstemp(prefix=prefix, suffix=".png", dir=str(CONFIG_DIR))
+    os.close(fd)
+    return name
+
+
+# The session's working folder. Every command and program Chuck runs starts
+# here, so `ls`, `git status` or `pytest` mean "in the user's project" rather
+# than wherever the app happened to be launched. Module-level (one window, one
+# session) so every runner — and the test harness's stand-ins — sees it.
+_WORKDIR = {"path": None}
+
+
+def _cwd():
+    p = _WORKDIR["path"]
+    return str(p) if p and os.path.isdir(str(p)) else None
+
+
 _RUN_ENV = {
     "PAGER": "cat", "GIT_PAGER": "cat", "SYSTEMD_PAGER": "cat", "SYSTEMD_LESS": "",
     "TERM": "dumb", "DEBIAN_FRONTEND": "noninteractive", "GIT_TERMINAL_PROMPT": "0",
@@ -758,6 +1065,18 @@ def clip_output(out, limit=7000):
     dropped = len(out) - limit
     return (out[:head] + f"\n\n[... {dropped} characters trimmed from the middle ...]\n\n"
             + out[-tail:])
+
+
+def _clip_feedback(parts, limit=60000):
+    """Join one round of tool results for the model. Each part keeps its head
+    AND tail when the round is over budget — the old flat [:12000] cut chopped
+    whatever came last, which was usually the file just read or the error."""
+    parts = [p for p in parts if p]
+    total = sum(len(p) for p in parts)
+    if total <= limit:
+        return "\n\n".join(parts)
+    share = max(2000, limit // max(1, len(parts)))
+    return "\n\n".join(clip_output(p, share) for p in parts)
 
 
 def _run_report(what, rc, out):
@@ -920,7 +1239,7 @@ def _run_sudo_askpass(script, password, timeout, env):
     e2["CHUCK_SUDO_PW"] = password
     try:
         p = subprocess.run([_bash_bin(), "-c", _inject_askpass(script)],
-                           stdin=subprocess.DEVNULL,
+                           stdin=subprocess.DEVNULL, cwd=_cwd(),
                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                            timeout=timeout, text=True, errors="replace", env=e2)
         low = (p.stderr or "").lower()
@@ -952,7 +1271,7 @@ def _run_sudo(script, password, timeout, env):
     prelude = f"{binname} -k 2>/dev/null\n{binname} -S -p '' -v || exit 97\n"
     try:
         p = subprocess.run([_bash_bin(), "-c", prelude + script],
-                           input=password + "\n",
+                           input=password + "\n", cwd=_cwd(),
                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                            timeout=timeout, text=True, errors="replace", env=env)
     except subprocess.TimeoutExpired:
@@ -1113,7 +1432,7 @@ def _run_guarded(argv, timeout, env, timeout_note):
     after Chuck had already given up on them and moved on — invisible processes
     still eating the box.
     """
-    proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL,
+    proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, cwd=_cwd(),
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             text=True, errors="replace", env=env,
                             preexec_fn=_sandbox_preexec)
@@ -1230,7 +1549,7 @@ def run_code(lang, body, timeout=None, sudo_password=None):
         env = dict(os.environ)
         env.update(_RUN_ENV)
         p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout,
-                           stdin=subprocess.DEVNULL, env=env)
+                           stdin=subprocess.DEVNULL, env=env, cwd=_cwd())
         return p.returncode, _shell_out(p)
     except subprocess.TimeoutExpired:
         return 124, _timeout_note(body, timeout)
@@ -1261,6 +1580,8 @@ def read_file_safe(path, limit=180_000):
         if not path or not str(path).strip():
             return False, "no path given"
         p = Path(os.path.expanduser(str(path).strip()))
+        if not p.is_absolute() and _cwd():
+            p = Path(_cwd()) / p
         if not p.exists():
             return False, f"no such file: {p}"
         if p.is_dir():
@@ -1346,15 +1667,46 @@ def _explain(ex):
     return f"backend error: {ex}"
 
 
+def _mentions_stream_options(ex):
+    """Did this 400 complain about stream_options specifically? Anything else
+    (a bad model id, a malformed message) is a real error and is not retried —
+    and must not switch usage reporting off for the rest of the session."""
+    try:
+        body = ex.read(4096).decode("utf-8", "ignore").lower()
+    except Exception:
+        return False
+    return "stream_options" in body or "include_usage" in body
+
+
 class Backend:
+    # Some OpenAI-compatible servers reject stream_options with a 400. The
+    # first rejection is remembered for the process so it costs one retry,
+    # once, rather than a failed request every turn.
+    _no_stream_opts = False
+
     def __init__(self, settings):
         self.s = settings
+        # Per-stream side channels. Read by the window after on_done; set as
+        # attributes (not callback kwargs) so any stand-in backend that lacks
+        # them simply reports nothing instead of breaking the call.
+        self.last_usage = None       # {prompt, completion, cached, reasoning}
+        self.last_finish = None      # "stop" | "length" | ...
+        self.on_think = None         # callable(chunk) for reasoning deltas
 
     def key(self):
         return (self.s.get("siliconflow_api_key") or "").strip()
 
     def base(self):
         return (self.s.get("siliconflow_base_url") or DEFAULT_BASE).rstrip("/")
+
+    def model(self, vision=False):
+        """The chat model — unless this request carries images and the chat
+        model can't see, in which case the vision model takes it. With a
+        multimodal chat model (the default) one model does both."""
+        chat = (self.s.get("model") or DEFAULT_MODEL).strip()
+        if vision and not _pricing.sees_images(chat):
+            return (self.s.get("vision_model") or DEFAULT_VISION).strip()
+        return chat
 
     def warm_up(self):
         """Open a throwaway connection to the API host in the background.
@@ -1376,38 +1728,46 @@ class Backend:
 
     def stream(self, messages, on_delta, on_done, on_error, vision=False, should_stop=None,
                attempts=3, on_open=None):
+        self.last_usage = None
+        self.last_finish = None
         if not self.key():
             on_error("No SiliconFlow API key. Add one in Settings.")
             return
-        model = (self.s.get("vision_model", DEFAULT_VISION) if vision
-                 else self.s.get("model", DEFAULT_MODEL))
+        model = self.model(vision)
         try:
             temp = min(1.5, max(0.0, float(self.s.get("temperature", 0.35))))
         except Exception:
             temp = 0.35
-        # An uncapped reply is an open cheque: output tokens cost several times
-        # what input costs on every hosted model, and a model that rambles for
-        # 4k tokens bills for all of them. Chuck is instructed to keep the final
-        # reply short, so this ceiling should almost never bite — it exists to
-        # stop a runaway loop from being expensive as well as annoying.
+        # A ceiling, not a target: you pay for what is generated, so this only
+        # bites on a runaway. It was 1600, which truncated any complete file
+        # longer than ~150 lines mid-```write``` — the block never closed, so
+        # the file was silently never written. A reply that hits the ceiling is
+        # now detected via finish_reason and CONTINUED by the window, so file
+        # length is bounded by patience, not by this number.
         try:
-            maxtok = int(self.s.get("max_tokens", 1600))
+            maxtok = int(self.s.get("max_tokens", 8192))
         except Exception:
-            maxtok = 1600
-        maxtok = max(256, min(8192, maxtok))
-        body = json.dumps({"model": model, "messages": messages,
-                           "stream": True, "temperature": temp,
-                           "max_tokens": maxtok}).encode()
+            maxtok = 8192
+        maxtok = max(256, min(32768, maxtok))
+        payload = {"model": model, "messages": messages, "stream": True,
+                   "temperature": temp, "max_tokens": maxtok}
+        if not Backend._no_stream_opts:
+            # Real token counts on the final chunk, so the meter shows what the
+            # API actually billed rather than a chars/4 guess.
+            payload["stream_options"] = {"include_usage": True}
         url = self.base() + "/chat/completions"
         headers = {"Authorization": "Bearer " + self.key(),
                    "Content-Type": "application/json"}
+        think = self.on_think
 
-        for attempt in range(attempts):
+        attempt = 0
+        while attempt < attempts:
             if should_stop and should_stop():
                 return
             got_any = False
             try:
-                req = urllib.request.Request(url, data=body, headers=headers)
+                req = urllib.request.Request(url, data=json.dumps(payload).encode(),
+                                             headers=headers)
                 # The proxy setting used to cover page fetches, images and video
                 # but NOT this call — so a user who pointed Chuck at Mullvad had
                 # every prompt they typed leave over the bare connection while
@@ -1432,10 +1792,25 @@ class Backend:
                         if data == "[DONE]":
                             break
                         try:
-                            d = json.loads(data)["choices"][0]["delta"].get("content")
-                            if d:
+                            d = json.loads(data)
+                        except Exception:
+                            continue
+                        u = _pricing.usage_from_chunk(d)
+                        if u:
+                            self.last_usage = u
+                        try:
+                            ch = (d.get("choices") or [{}])[0]
+                            delta = ch.get("delta") or {}
+                            if ch.get("finish_reason"):
+                                self.last_finish = ch["finish_reason"]
+                            r = delta.get("reasoning_content")
+                            if r and think:
                                 got_any = True
-                                on_delta(d)
+                                think(r)
+                            c = delta.get("content")
+                            if c:
+                                got_any = True
+                                on_delta(c)
                         except Exception:
                             continue
                 if should_stop and should_stop():
@@ -1445,24 +1820,288 @@ class Backend:
             except Exception as ex:
                 if should_stop and should_stop():
                     return
+                if (isinstance(ex, urllib.error.HTTPError) and ex.code in (400, 422)
+                        and "stream_options" in payload and not got_any
+                        and _mentions_stream_options(ex)):
+                    # Not a real failure: this server doesn't take stream_options.
+                    Backend._no_stream_opts = True
+                    payload.pop("stream_options", None)
+                    continue                     # same attempt, without it
                 if got_any:
                     # Text already reached the screen — replaying the request
                     # would duplicate it, so keep what we have and carry on.
                     on_done()
                     return
-                last = attempt == attempts - 1
-                if last or not _is_transient(ex):
+                attempt += 1
+                if attempt >= attempts or not _is_transient(ex):
                     on_error(_explain(ex))
                     return
-                time.sleep(0.5 * (attempt + 1))     # brief backoff, then retry
+                time.sleep(0.5 * attempt)       # brief backoff, then retry
 
 
 # ── UI ──────────────────────────────────────────────────────────────────────
+class GlyphField:
+    """The welcome screen's background: a fine net of tiny code glyphs that
+    ripples like disturbed water wherever you click.
+
+    Built for zero idle cost. The static net is rendered ONCE into a cached
+    surface (sized in steps, so resizing the window doesn't rebuild it every
+    frame); a frame callback runs only while a ripple is alive. When you click,
+    every glyph's distance from that point is computed once and sorted, so each
+    frame binary-searches just the glyphs inside the moving ring — per-frame
+    cost follows the ring, not the ~5,000 glyphs on screen. Excited glyphs are
+    pushed outward, brightened toward the accent and briefly flip to other
+    characters as the crest passes. Honours the desktop's reduce-animation
+    setting. Not a subclass (the headless test stub can't be subclassed): it
+    owns a DrawingArea instead.
+    """
+    CHARS = "{}[]()<>=;:+-*/#&|~$%01λ0123456789abcdef"
+    CELL_W, CELL_H, FONT = 11, 13, 8.5
+    SPEED, BAND, LIFE, PUSH = 330.0, 30.0, 2.4, 5.0
+    STEP = 320                       # cache grows in these steps
+    BG = (12 / 255, 12 / 255, 16 / 255)
+
+    def __init__(self):
+        import random
+        self._rnd = random.Random(0x0C4C)
+        self.area = Gtk.DrawingArea()
+        self.area.set_hexpand(True)
+        self.area.set_vexpand(True)
+        self.area.set_can_target(False)
+        self.ripples = []            # [x, y, t0, sorted [(d, idx)], [dists]]
+        self._tick = 0
+        self._cache = None
+        self._grid = []
+        self.enabled = self._cairo_ok()
+        if self.enabled:
+            try:
+                self.area.set_draw_func(self._draw)
+            except Exception:
+                self.enabled = False
+
+    @staticmethod
+    def _cairo_ok():
+        """PyGObject needs its cairo bridge to hand a draw function a context.
+        Without it every frame would raise, so the field simply stays plain."""
+        try:
+            import cairo  # noqa: F401
+            gi.require_foreign("cairo")
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def _animations_on():
+        try:
+            return bool(Gtk.Settings.get_default().get_property("gtk-enable-animations"))
+        except Exception:
+            return True
+
+    def listen(self, widget):
+        """Ripple on clicks anywhere over `widget`, without stealing them from
+        the buttons on top (capture phase, never claims the sequence)."""
+        try:
+            g = Gtk.GestureClick()
+            g.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+            g.connect("pressed", lambda _g, _n, x, y: self.poke(x, y))
+            widget.add_controller(g)
+        except Exception:
+            pass
+
+    def poke(self, x, y):
+        if not self.enabled or not self._animations_on():
+            return
+        if not self._grid:
+            self.area.queue_draw()           # not drawn yet: nothing to disturb
+            return
+        x, y = float(x), float(y)
+        order = sorted(((math.hypot(gx - x, gy - y), i)
+                        for i, (gx, gy, _c, _a, _s) in enumerate(self._grid)))
+        self.ripples = (self.ripples + [[x, y, time.monotonic(), order,
+                                         [d for d, _i in order]]])[-5:]
+        if not self._tick:
+            try:
+                self._tick = self.area.add_tick_callback(self._on_tick)
+            except Exception:
+                self._tick = 0
+        self.area.queue_draw()
+
+    def _on_tick(self, _w, _clock):
+        now = time.monotonic()
+        self.ripples = [r for r in self.ripples if now - r[2] < self.LIFE]
+        self.area.queue_draw()
+        if not self.ripples:
+            self._tick = 0
+            return False
+        return True
+
+    def _build(self, w, h):
+        import cairo
+        W = (int(w) // self.STEP + 1) * self.STEP
+        H = (int(h) // self.STEP + 1) * self.STEP
+        cols, rows = W // self.CELL_W + 1, H // self.CELL_H + 1
+        cx, cy = w / 2.0, h * 0.42
+        maxd = math.hypot(max(cx, w - cx), max(cy, h - cy)) or 1.0
+        grid = []
+        surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, W, H)
+        cr = cairo.Context(surf)
+        cr.set_source_rgb(*self.BG)
+        cr.paint()
+        cr.select_font_face("monospace", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_NORMAL)
+        cr.set_font_size(self.FONT)
+        rnd = self._rnd
+        for r in range(rows):
+            for c in range(cols):
+                if rnd.random() < 0.12:                 # a few gaps keep it organic
+                    continue
+                x = c * self.CELL_W + 2 + (r % 2) * (self.CELL_W / 2)
+                y = r * self.CELL_H + 10
+                d = math.hypot(x - cx, y - cy) / maxd
+                # quiet behind the content in the middle, richer toward the edges
+                a = (0.07 + rnd.random() * 0.08) * (0.4 + 0.6 * min(1.0, d * 1.25))
+                ch = self.CHARS[rnd.randrange(len(self.CHARS))]
+                grid.append((x, y, ch, a, rnd.randrange(997)))
+                cr.set_source_rgba(0.72, 0.70, 0.86, a)
+                cr.move_to(x, y)
+                cr.show_text(ch)
+        self._grid = grid
+        self.ripples = []                               # their sort order is stale
+        self._cache = (surf, W, H)
+
+    def _draw(self, _area, cr, w, h):
+        try:
+            import cairo
+            from bisect import bisect_left, bisect_right
+        except Exception:
+            return
+        if not self._cache or self._cache[1] < w or self._cache[2] < h:
+            self._build(w, h)
+        cr.set_source_surface(self._cache[0], 0, 0)
+        cr.paint()
+        if not self.ripples:
+            return
+        now = time.monotonic()
+        hit = {}                                        # idx -> [inten, dx, dy, age]
+        b2 = self.BAND * self.BAND
+        for (rx, ry, t0, order, dists) in self.ripples:
+            age = now - t0
+            rad = age * self.SPEED
+            amp = (1.0 - age / self.LIFE) ** 1.6
+            lo = bisect_left(dists, rad - 2 * self.BAND)
+            hi = bisect_right(dists, rad + 2 * self.BAND)
+            for d, i in order[lo:hi]:
+                off = d - rad
+                k = amp * math.exp(-(off * off) / b2)
+                if k < 0.03:
+                    continue
+                gx, gy = self._grid[i][0], self._grid[i][1]
+                e = hit.setdefault(i, [0.0, 0.0, 0.0, age])
+                e[0] += k
+                if d > 0.5:
+                    e[1] += (gx - rx) / d * k * self.PUSH
+                    e[2] += (gy - ry) / d * k * self.PUSH
+        if not hit:
+            return
+        cr.select_font_face("monospace", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+        cr.set_font_size(self.FONT)
+        cw, ch_ = self.CELL_W, self.CELL_H
+        # first lift every excited glyph's resting copy off, then draw the
+        # displaced ones — so a pushed glyph is never erased by its neighbour
+        cr.set_source_rgb(*self.BG)
+        for i in hit:
+            x, y = self._grid[i][0], self._grid[i][1]
+            cr.rectangle(x - 1, y - ch_ + 3, cw - 1, ch_)
+        cr.fill()
+        for i, (inten, dx, dy, age) in hit.items():
+            x, y, ch, a, seed = self._grid[i]
+            inten = min(1.0, inten)
+            glyph = (self.CHARS[(seed + int(age * 26)) % len(self.CHARS)]
+                     if inten > 0.45 else ch)
+            # neutral at the edge of the wave, violet only at the crest
+            cr.set_source_rgba(0.72 + 0.03 * inten, 0.70 - 0.13 * inten, 0.86 + 0.12 * inten,
+                               min(0.95, a + inten * 0.7))
+            cr.move_to(x + dx, y + dy)
+            cr.show_text(glyph)
+
+
+def _lane(widget):
+    """Wrap a piece of machine work (a command card, a note, a plan, an image
+    Chuck fetched) in the work lane: inset, on a rail that hangs off Chuck's
+    avatar. Rebuilt widgets are re-wrapped, so the lane survives windowing."""
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+    box.add_css_class("lane")
+    box.append(widget)
+    return box
+
+
+def _short_path(p):
+    """~/code/thing instead of /home/you/code/thing."""
+    if not p:
+        return ""
+    s = str(p)
+    home = str(Path.home())
+    return "~" + s[len(home):] if s == home or s.startswith(home + os.sep) else s
+
+
+def _wrap_anywhere(label):
+    """Wrap at words, but break an unbroken run (a URL, a hash, a path) rather
+    than let it push the column wider than the window."""
+    try:
+        label.set_wrap(True)
+        if Pango is not None:
+            label.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+    except Exception:
+        pass
+
+
+def _ago(path):
+    """'just now' / '12m ago' / '3h ago' / '2d ago' from a file's mtime."""
+    try:
+        secs = max(0, time.time() - Path(path).stat().st_mtime)
+    except OSError:
+        return ""
+    if secs < 60:
+        return "just now"
+    if secs < 3600:
+        return f"{int(secs // 60)}m ago"
+    if secs < 86400:
+        return f"{int(secs // 3600)}h ago"
+    return f"{int(secs // 86400)}d ago"
+
+
 class ChuckWindow(Adw.ApplicationWindow):
+    # Suggestions on the empty screen, per mode: (title, subtitle, prompt).
+    # They PREFILL rather than send, so the first move is still the user's.
+    AGENT_SUGGEST = (
+        ("Check system health", "failed services, disk, errors since boot",
+         "Check my system's health: failed services, disk space and errors since the last boot."),
+        ("Update safely", "keyring first, then a full -Syu",
+         "Update the system safely."),
+        ("What's eating my disk?", "biggest folders, caches, orphans",
+         "What's eating my disk?"),
+        ("Map this project", "structure, how to run it, what's broken",
+         "Map the project in the working folder: structure, how to run it, and anything broken."),
+    )
+    CHAT_SUGGEST = (
+        ("Explain something", "clearly, with an example",
+         "Explain how "),
+        ("Compare options", "trade-offs, then a recommendation",
+         "Compare "),
+        ("What's new", "checked against live sources",
+         "What's the latest on "),
+        ("Draft it for me", "an email, a README, a plan",
+         "Draft "),
+    )
+
     def __init__(self, app):
         super().__init__(application=app)
-        self.set_title("\U0001F94B Chuck Norris")
-        self.set_default_size(980, 820)
+        self.set_title("Chuck")
+        self.set_default_size(1180, 820)
+        try:
+            self.set_size_request(560, 480)
+        except Exception:
+            pass
+        self.add_css_class("main-window")
         self.settings = _SETTINGS
         self.backend = Backend(self.settings)
         self.pending_shot = None
@@ -1471,6 +2110,8 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._bot_text = ""
         self._busy_n = 0
         self._hops = 0
+        self._steps = 0                 # agent steps taken this turn
+        self._step_forced = False       # already told to wrap up this turn
         self._pending_tools = 0
         self._tool_feedback = []
         self._loop_web = None
@@ -1483,6 +2124,9 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._dead_urls = set()     # pages that failed — don't retry
         self._forced_answer = False
         self._awaiting_first = False
+        self._thinking = False          # reasoning tokens are arriving
+        self._think_text = ""
+        self._think_t0 = 0.0
         self._last_paint = 0.0
         self._activity_box = None
         self._activity_steps = []
@@ -1504,146 +2148,28 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._last_progress = 0.0       # last time anything happened (for watchdog)
         self._run_budget = 0            # seconds the currently-running command is allowed
         self._dispatching = False       # _finalise is still handing out tool work
+        self._plan_entry = None         # this turn's live plan card
+        self._attachments = []          # the tray: files/images going with the next message
+        self._tool_images = []          # images the NEXT request carries (base64, mime)
+        self._reset_continuation()
+        self._hint = None
+        # scrolling: follow the newest output only while the user is AT the
+        # bottom; the moment they scroll up to read, stop dragging them down.
+        self._stick = True
+        self._anchor = None             # (old_upper, old_value) while paging older
+        self._banner = None
+        # usage: real counts from the API when it reports them, estimates when not
+        self._tok_in = self._tok_out = 0
+        self._usage = self._blank_usage()
+        self._session = self._blank_usage()
+        self._balance = ""
+        self.workspace = None
+        _WORKDIR["path"] = None
+        self.agent_mode = bool(self.settings.get("agent_mode", True))
         self.chat_id = datetime.now().strftime("%Y%m%d-%H%M%S")
         self._new_history()
 
-        header = Adw.HeaderBar()
-        tb = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        tl = Gtk.Label(label="\U0001F94B  CHUCK NORRIS", xalign=0.5); tl.add_css_class("title")
-        sl = Gtk.Label(label="Arch / CachyOS grandmaster \u00b7 1940\u20132026",
-                       xalign=0.5); sl.add_css_class("sub")
-        # The subtitle doubles as a meter once a chat starts costing money.
-        self._subtitle = sl
-        self._tok_in = self._tok_out = 0
-        tb.append(tl); tb.append(sl); header.set_title_widget(tb)
-
-        # LEFT: the primary action (New chat) + the busy spinner
-        newb = Gtk.Button(icon_name=_pick_icon("document-new-symbolic", "tab-new-symbolic", "list-add-symbolic")); newb.add_css_class("headerbtn")
-        newb.set_tooltip_text("New chat"); newb.connect("clicked", lambda *_: self.new_chat())
-        header.pack_start(newb)
-        # LEFT: sidebar toggle sits next to New chat
-        self.side_btn = Gtk.ToggleButton(
-            icon_name=_pick_icon("sidebar-show-symbolic", "view-dual-symbolic",
-                                 "view-list-bullet-symbolic", "format-justify-fill-symbolic",
-                                 "document-open-recent-symbolic"))
-        self.side_btn.add_css_class("headerbtn")
-        self.side_btn.set_tooltip_text("Saved chats")
-        self.side_btn.set_active(bool(self.settings.get("sidebar_open", False)))
-        self.side_btn.connect("toggled", self._toggle_sidebar)
-        header.pack_start(self.side_btn)
-        self.spinner = Gtk.Spinner(); self.spinner.set_visible(False)
-        header.pack_start(self.spinner)
-
-        # RIGHT: secondary controls, grouped (memory · voice · settings)
-        self.tts_btn = Gtk.ToggleButton(icon_name=_pick_icon("audio-volume-high-symbolic", "audio-speakers-symbolic", "audio-x-generic-symbolic"))
-        self.tts_btn.add_css_class("headerbtn")
-        self.tts_btn.set_tooltip_text("Read replies aloud")
-        self.tts_btn.set_active(self.settings.get("tts", True))
-        self.tts_btn.connect("toggled", self._on_tts_toggled)
-        header.pack_end(self.tts_btn)
-        for icon, tip, cb in (
-                ("emblem-system-symbolic", "Settings", self.open_settings),
-                ("view-list-symbolic", "What Chuck remembers", self.open_memory)):
-            b = Gtk.Button(icon_name=icon); b.add_css_class("headerbtn"); b.set_tooltip_text(tip)
-            b.connect("clicked", cb); header.pack_end(b)
-
-        self.msgbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
-        for m in ("top", "bottom", "start", "end"):
-            getattr(self.msgbox, f"set_margin_{m}")(16)
-        self.scroller = Gtk.ScrolledWindow(vexpand=True, hexpand=True)
-        self.scroller.add_css_class("chat-scroll"); self.scroller.set_child(self.msgbox)
-        self.scroller.get_vadjustment().connect("value-changed", self._on_scroll)
-        # centre the conversation column like ChatGPT/Claude
-        self.msgbox.set_halign(Gtk.Align.CENTER)
-        self.msgbox.set_size_request(720, -1)
-        overlay = Gtk.Overlay()
-        bgp = DATA_DIR / "assets" / "chucknorris-bg.png"
-        bgp = bgp if bgp.exists() else HERE / "assets" / "chucknorris-bg.png"
-        if bgp.exists():
-            bg = Gtk.Picture.new_for_filename(str(bgp))
-            bg.set_content_fit(Gtk.ContentFit.COVER); bg.set_opacity(0.06); bg.set_can_target(False)
-            overlay.set_child(bg)
-        else:
-            overlay.set_child(Gtk.Box())
-        overlay.add_overlay(self.scroller)
-
-        # live "what he's doing" feed
-        self.live = Gtk.Label(label="", xalign=0); self.live.add_css_class("live")
-        self.live.set_visible(False)
-        for m in ("start", "end"):
-            getattr(self.live, f"set_margin_{m}")(20)
-
-        # ── composer: a rounded pill, attach+camera INSIDE on the left, a round
-        # send button on the right — instead of a flat row of loose buttons ──
-        self.entry = Gtk.TextView(wrap_mode=Gtk.WrapMode.WORD_CHAR)
-        self.entry.add_css_class("composer-entry")
-        self.entry.set_top_margin(8); self.entry.set_bottom_margin(8)
-        self.entry.set_left_margin(6); self.entry.set_right_margin(6)
-        _kc = Gtk.EventControllerKey(); _kc.connect("key-pressed", self._on_key)
-        self.entry.add_controller(_kc)
-        ev = Gtk.ScrolledWindow(min_content_height=40, max_content_height=140, hexpand=True)
-        ev.set_child(self.entry)
-
-        att = Gtk.Button(icon_name=_pick_icon("mail-attachment-symbolic", "edit-copy-symbolic", "list-add-symbolic")); att.add_css_class("icon-btn")
-        att.set_valign(Gtk.Align.END)
-        att.set_tooltip_text("Attach a file"); att.connect("clicked", self.on_attach)
-        cam = Gtk.Button(icon_name=_pick_icon("camera-photo-symbolic", "camera-symbolic", "applets-screenshooter-symbolic")); cam.add_css_class("icon-btn")
-        cam.set_valign(Gtk.Align.END)
-        cam.set_tooltip_text("Show Chuck your screen"); cam.connect("clicked", self.on_screenshot)
-        self.send_btn = Gtk.Button(icon_name=_pick_icon("go-up-symbolic", "pan-up-symbolic", "up-symbolic")); self.send_btn.add_css_class("send-fab")
-        self.send_btn.set_valign(Gtk.Align.END)
-        self.send_btn.set_tooltip_text("Send  (Enter)")
-        self.send_btn.connect("clicked", self._on_send_or_stop)
-        send = self.send_btn
-
-        pill = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-        pill.add_css_class("composer")
-        pill.append(att); pill.append(cam); pill.append(ev); pill.append(send)
-        composer_wrap = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
-        composer_wrap.set_halign(Gtk.Align.CENTER); composer_wrap.set_size_request(720, -1)
-        composer_wrap.append(pill); pill.set_hexpand(True)
-        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
-        for m in ("top", "bottom", "start", "end"):
-            getattr(row, f"set_margin_{m}")(12)
-        row.append(composer_wrap); composer_wrap.set_hexpand(True)
-
-        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        body.append(overlay); body.append(self.live); body.append(row)
-        body.set_hexpand(True)
-
-        # ── sidebar: saved chats, newest first, each showing how long it has
-        #    before it self-deletes. Slides in/out; never steals the chat column.
-        self.chat_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        for m in ("top", "bottom", "start", "end"):
-            getattr(self.chat_list, f"set_margin_{m}")(10)
-        side_scroll = Gtk.ScrolledWindow(vexpand=True)
-        side_scroll.set_child(self.chat_list)
-        side_head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        for m in ("top", "start", "end"):
-            getattr(side_head, f"set_margin_{m}")(10)
-        sh = Gtk.Label(label="Saved chats", xalign=0, hexpand=True)
-        sh.add_css_class("side-head")
-        side_head.append(sh)
-        side_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        side_box.add_css_class("sidebar")
-        side_box.set_size_request(250, -1)
-        ttl_note = Gtk.Label(
-            label=f"auto-delete after {self.cfg('chat_ttl_hours', CHAT_TTL_HOURS, 1, 720)}h",
-            xalign=0)
-        self._ttl_note = ttl_note
-        ttl_note.add_css_class("side-note")
-        for m in ("start", "end", "bottom"):
-            getattr(ttl_note, f"set_margin_{m}")(10)
-        side_box.append(side_head); side_box.append(ttl_note); side_box.append(side_scroll)
-        self.sidebar = Gtk.Revealer()
-        self.sidebar.set_transition_type(Gtk.RevealerTransitionType.SLIDE_RIGHT)
-        self.sidebar.set_child(side_box)
-        self.sidebar.set_reveal_child(bool(self.settings.get("sidebar_open", False)))
-
-        outer = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
-        outer.append(self.sidebar); outer.append(body)
-        tv = Adw.ToolbarView(); tv.add_top_bar(header); tv.set_content(outer)
-        self.set_content(tv)
+        self._build_ui()
         self.connect("close-request", self._on_close)
 
         # Prime DNS/TLS to the API now, so the FIRST message isn't the one
@@ -1663,15 +2189,485 @@ class ChuckWindow(Adw.ApplicationWindow):
         purge_old_chats(self.cfg('chat_ttl_hours', CHAT_TTL_HOURS, 1, 720))
         self._refresh_sidebar()
         GLib.timeout_add_seconds(600, self._sweep_chats)
-
+        self._apply_mode(announce=False)
         self._show_empty_hint()
-        if not self.backend.key():
-            self._sys_note("No SiliconFlow key yet \u2014 open Settings. Basilisk's key is reused if present.")
+
+    # ── layout ───────────────────────────────────────────────────────────────
+    def _build_ui(self):
+        # header: sidebar + new chat | wordmark + context | usage, memory, voice, settings
+        header = Adw.HeaderBar()
+        header.add_css_class("main-header")
+        tb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=9)
+        mark = Gtk.Label(label="C")
+        mark.add_css_class("mark")
+        mark.set_valign(Gtk.Align.CENTER)
+        tb.append(mark)
+        tcol = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        tcol.set_valign(Gtk.Align.CENTER)
+        tl = Gtk.Label(label="Chuck", xalign=0)
+        tl.add_css_class("title")
+        self._subtitle = Gtk.Label(label="", xalign=0)
+        self._subtitle.add_css_class("sub")
+        try:
+            self._subtitle.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+            self._subtitle.set_max_width_chars(48)
+        except Exception:
+            pass
+        tcol.append(tl); tcol.append(self._subtitle)
+        tb.append(tcol)
+        header.set_title_widget(tb)
+
+        self.side_btn = Gtk.ToggleButton(
+            icon_name=_pick_icon("sidebar-show-symbolic", "view-dual-symbolic",
+                                 "view-list-bullet-symbolic", "format-justify-fill-symbolic",
+                                 "document-open-recent-symbolic"))
+        self.side_btn.add_css_class("headerbtn")
+        self.side_btn.set_tooltip_text("Chats  (Ctrl+B)")
+        self.side_btn.set_active(bool(self.settings.get("sidebar_open", True)))
+        self.side_btn.connect("toggled", self._toggle_sidebar)
+        header.pack_start(self.side_btn)
+        newb = Gtk.Button(icon_name=_pick_icon("document-new-symbolic", "tab-new-symbolic",
+                                               "list-add-symbolic"))
+        newb.add_css_class("headerbtn")
+        newb.set_tooltip_text("New chat  (Ctrl+N)")
+        newb.connect("clicked", lambda *_: self.new_chat())
+        header.pack_start(newb)
+
+        setb = Gtk.Button(icon_name=_pick_icon("emblem-system-symbolic", "preferences-system-symbolic"))
+        setb.add_css_class("headerbtn"); setb.set_tooltip_text("Settings  (Ctrl+,)")
+        setb.connect("clicked", self.open_settings)
+        header.pack_end(setb)
+        self.tts_btn = Gtk.ToggleButton(icon_name=_pick_icon(
+            "audio-volume-high-symbolic", "audio-speakers-symbolic", "audio-x-generic-symbolic"))
+        self.tts_btn.add_css_class("headerbtn")
+        self.tts_btn.set_tooltip_text("Read replies aloud")
+        self.tts_btn.set_active(self.settings.get("tts", True))
+        self.tts_btn.connect("toggled", self._on_tts_toggled)
+        header.pack_end(self.tts_btn)
+        memb = Gtk.Button(icon_name=_pick_icon("user-bookmarks-symbolic", "starred-symbolic",
+                                               "view-list-symbolic"))
+        memb.add_css_class("headerbtn"); memb.set_tooltip_text("Memory & skills")
+        memb.connect("clicked", self.open_memory)
+        header.pack_end(memb)
+        # the meter: what this chat has cost, one click for the breakdown
+        self._meter_lbl = Gtk.Label(label="$0.00")
+        self.meter_btn = Gtk.MenuButton()
+        self.meter_btn.add_css_class("meter")
+        self.meter_btn.set_child(self._meter_lbl)
+        self.meter_btn.set_tooltip_text("Usage and cost")
+        self.meter_btn.set_valign(Gtk.Align.CENTER)
+        self._usage_pop = Gtk.Popover()
+        self._usage_pop.connect("show", lambda *_: self._fill_usage_popover())
+        self.meter_btn.set_popover(self._usage_pop)
+        header.pack_end(self.meter_btn)
+
+        # transcript. No horizontal scrolling at the page level, ever: wide
+        # content (code, tables, terminal output) scrolls inside its own block.
+        # spacing 0: rhythm comes from per-row margins, so consecutive work-lane
+        # items join into one continuous rail instead of a dashed line
+        self.msgbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        for m, v in (("top", 24), ("bottom", 28), ("start", 22), ("end", 22)):
+            getattr(self.msgbox, f"set_margin_{m}")(v)
+        self.scroller = Gtk.ScrolledWindow(vexpand=True, hexpand=True)
+        self.scroller.add_css_class("chat-scroll")
+        try:
+            self.scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        except Exception:
+            pass
+        clamp = Adw.Clamp()
+        try:
+            clamp.set_maximum_size(820)
+            clamp.set_tightening_threshold(620)
+        except Exception:
+            pass
+        clamp.set_child(self.msgbox)
+        # An explicit viewport so scroll-to-focus can be turned OFF. With it on,
+        # GTK scrolls to whatever has keyboard focus — click a reply to select
+        # text, and every repaint while the next answer streams yanked the view
+        # back up to that label.
+        vp = Gtk.Viewport()
+        try:
+            vp.set_scroll_to_focus(False)
+        except Exception:
+            pass
+        vp.set_child(clamp)
+        self.scroller.set_child(vp)
+        adj = self.scroller.get_vadjustment()
+        adj.connect("value-changed", self._on_scroll)
+        adj.connect("notify::upper", self._on_extent)
+        adj.connect("notify::page-size", self._on_extent)
+
+        chat_ov = Gtk.Overlay()
+        chat_ov.set_child(self.scroller)
+        self.jump_btn = Gtk.Button(label="↓  Jump to latest")
+        self.jump_btn.add_css_class("jump-btn")
+        self.jump_btn.set_halign(Gtk.Align.CENTER)
+        self.jump_btn.set_valign(Gtk.Align.END)
+        self.jump_btn.set_margin_bottom(14)
+        self.jump_btn.set_visible(False)
+        self.jump_btn.connect("clicked", lambda *_: self._scroll_down(force=True))
+        chat_ov.add_overlay(self.jump_btn)
+
+        self.view_stack = Gtk.Stack()
+        try:
+            self.view_stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
+            self.view_stack.set_transition_duration(160)
+        except Exception:
+            pass
+        self._field = GlyphField()
+        self._empty_holder = Gtk.Overlay()
+        self._empty_holder.set_vexpand(True)
+        self._empty_holder.set_child(self._field.area)
+        self._field.listen(self._empty_holder)
+        self.view_stack.add_named(self._empty_holder, "empty")
+        self.view_stack.add_named(chat_ov, "chat")
+
+        # status line: spinner + "working… 12s"
+        self.spinner = Gtk.Spinner(); self.spinner.set_visible(False)
+        self.live = Gtk.Label(label="", xalign=0, hexpand=True)
+        self.live.add_css_class("live")
+        try:
+            self.live.set_ellipsize(Pango.EllipsizeMode.END)
+        except Exception:
+            pass
+        self.live.set_visible(False)
+        status = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        status.add_css_class("status-row")
+        status.append(self.spinner); status.append(self.live)
+
+        # composer: text on top, a toolbar under it
+        self.entry = Gtk.TextView(wrap_mode=Gtk.WrapMode.WORD_CHAR)
+        self.entry.add_css_class("composer-entry")
+        self.entry.set_top_margin(6); self.entry.set_bottom_margin(6)
+        self.entry.set_left_margin(6); self.entry.set_right_margin(6)
+        try:
+            self.entry.set_accepts_tab(False)
+        except Exception:
+            pass
+        _kc = Gtk.EventControllerKey(); _kc.connect("key-pressed", self._on_key)
+        self.entry.add_controller(_kc)
+        self.entry.get_buffer().connect("changed", lambda *_: self._sync_placeholder())
+        ev = Gtk.ScrolledWindow(hexpand=True)
+        ev.add_css_class("composer-scroll")
+        try:
+            ev.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+            ev.set_min_content_height(30)
+            ev.set_max_content_height(220)
+            ev.set_propagate_natural_height(True)
+        except Exception:
+            pass
+        ev.set_child(self.entry)
+        self._placeholder = Gtk.Label(label="", xalign=0)
+        self._placeholder.add_css_class("placeholder")
+        self._placeholder.set_can_target(False)
+        self._placeholder.set_halign(Gtk.Align.START)
+        self._placeholder.set_valign(Gtk.Align.START)
+        self._placeholder.set_margin_start(8); self._placeholder.set_margin_top(6)
+        eo = Gtk.Overlay(); eo.set_child(ev); eo.add_overlay(self._placeholder)
+
+        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        sw = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        sw.add_css_class("mode-switch")
+        sw.set_valign(Gtk.Align.CENTER)
+        self.agent_btn = Gtk.ToggleButton(label="Agent")
+        self.agent_btn.add_css_class("mode-btn")
+        self.agent_btn.set_tooltip_text("Agent: Chuck runs commands and edits files  (Tab)")
+        self.chat_btn = Gtk.ToggleButton(label="Chat")
+        self.chat_btn.add_css_class("mode-btn"); self.chat_btn.add_css_class("mode-chat")
+        self.chat_btn.set_tooltip_text("Chat: answers only, nothing runs  (Tab)")
+        try:
+            self.chat_btn.set_group(self.agent_btn)
+        except Exception:
+            pass
+        self.agent_btn.connect("toggled", self._on_mode_btn)
+        sw.append(self.agent_btn); sw.append(self.chat_btn)
+        bar.append(sw)
+
+        self.ws_btn = Gtk.Button()
+        self.ws_btn.add_css_class("chip")
+        self.ws_btn.set_valign(Gtk.Align.CENTER)
+        wsb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        wsb.append(Gtk.Image.new_from_icon_name(_pick_icon("folder-symbolic", "folder")))
+        self._ws_lbl = Gtk.Label(label="No folder")
+        try:
+            self._ws_lbl.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+            self._ws_lbl.set_max_width_chars(22)
+        except Exception:
+            pass
+        wsb.append(self._ws_lbl)
+        self.ws_btn.set_child(wsb)
+        self.ws_btn.set_tooltip_text("Working folder for this session  (Ctrl+O)")
+        self.ws_btn.connect("clicked", self.open_workspace)
+        bar.append(self.ws_btn)
+
+        att = Gtk.Button(icon_name=_pick_icon("mail-attachment-symbolic", "edit-copy-symbolic",
+                                              "list-add-symbolic"))
+        att.add_css_class("icon-btn"); att.set_valign(Gtk.Align.CENTER)
+        att.set_tooltip_text("Attach files  (or drop them in, or paste an image)")
+        att.connect("clicked", self.on_attach)
+        cam = Gtk.Button(icon_name=_pick_icon("camera-photo-symbolic", "camera-symbolic",
+                                              "applets-screenshooter-symbolic"))
+        cam.add_css_class("icon-btn"); cam.set_valign(Gtk.Align.CENTER)
+        cam.set_tooltip_text("Attach a screenshot of your screen")
+        cam.connect("clicked", self.on_screenshot)
+        bar.append(att); bar.append(cam)
+        spacer = Gtk.Box(hexpand=True); bar.append(spacer)
+        self._model_lbl = Gtk.Label(label="")
+        try:
+            self._model_lbl.set_ellipsize(Pango.EllipsizeMode.END)
+            self._model_lbl.set_max_width_chars(22)
+        except Exception:
+            pass
+        mb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        mb.append(self._model_lbl)
+        mb.append(Gtk.Image.new_from_icon_name(_pick_icon("pan-down-symbolic", "go-down-symbolic")))
+        self.model_btn = Gtk.MenuButton()
+        self.model_btn.add_css_class("model-btn")
+        self.model_btn.set_child(mb)
+        self.model_btn.set_valign(Gtk.Align.CENTER)
+        self.model_btn.set_tooltip_text("Switch model")
+        self._model_pop = Gtk.Popover()
+        self._model_pop.connect("show", lambda *_: self._fill_model_popover())
+        self.model_btn.set_popover(self._model_pop)
+        bar.append(self.model_btn)
+        self.send_btn = Gtk.Button(icon_name=_pick_icon("go-up-symbolic", "pan-up-symbolic", "up-symbolic"))
+        self.send_btn.add_css_class("send-fab")
+        self.send_btn.set_valign(Gtk.Align.CENTER)
+        self.send_btn.set_tooltip_text("Send  (Enter)")
+        self.send_btn.connect("clicked", self._on_send_or_stop)
+        bar.append(self.send_btn)
+
+        self._tray = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self._tray.add_css_class("tray")
+        self._tray.set_visible(False)
+        pill = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        pill.add_css_class("composer")
+        pill.append(self._tray); pill.append(eo); pill.append(bar)
+        ccol = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        ccol.append(status); ccol.append(pill)
+        cclamp = Adw.Clamp()
+        try:
+            cclamp.set_maximum_size(820)
+            cclamp.set_tightening_threshold(620)
+        except Exception:
+            pass
+        cclamp.set_child(ccol)
+        for m, v in (("top", 4), ("bottom", 16), ("start", 16), ("end", 16)):
+            getattr(cclamp, f"set_margin_{m}")(v)
+
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True)
+        body.append(self.view_stack); body.append(cclamp)
+
+        # sidebar: new chat, search, saved chats
+        side_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        side_box.add_css_class("sidebar")
+        side_box.set_size_request(268, -1)
+        top = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        for m in ("top", "start", "end"):
+            getattr(top, f"set_margin_{m}")(12)
+        nb = Gtk.Button()
+        nb.add_css_class("side-new")
+        nbb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        nbb.append(Gtk.Image.new_from_icon_name(_pick_icon("list-add-symbolic", "document-new-symbolic")))
+        nbb.append(Gtk.Label(label="New chat", xalign=0, hexpand=True))
+        kb = Gtk.Label(label="Ctrl N"); kb.add_css_class("kbd"); nbb.append(kb)
+        nb.set_child(nbb)
+        nb.connect("clicked", lambda *_: self.new_chat())
+        top.append(nb)
+        self.chat_search = Gtk.SearchEntry()
+        self.chat_search.add_css_class("side-search")
+        try:
+            self.chat_search.set_placeholder_text("Search chats")
+        except Exception:
+            pass
+        self.chat_search.connect("search-changed", lambda *_: self._refresh_sidebar())
+        top.append(self.chat_search)
+        side_box.append(top)
+        hd = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        for m in ("start", "end"):
+            getattr(hd, f"set_margin_{m}")(14)
+        sh = Gtk.Label(label="RECENT", xalign=0, hexpand=True)
+        sh.add_css_class("side-head")
+        self._ttl_note = Gtk.Label(label="", xalign=1)
+        self._ttl_note.add_css_class("side-note")
+        hd.append(sh); hd.append(self._ttl_note)
+        side_box.append(hd)
+        self.chat_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        for m in ("bottom", "start", "end"):
+            getattr(self.chat_list, f"set_margin_{m}")(8)
+        side_scroll = Gtk.ScrolledWindow(vexpand=True)
+        try:
+            side_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        except Exception:
+            pass
+        side_scroll.set_child(self.chat_list)
+        side_box.append(side_scroll)
+        self.sidebar = Gtk.Revealer()
+        # hexpand propagates UP from children in GTK4: the expanding chat rows
+        # made the whole sidebar claim a share of the window's spare width.
+        self.sidebar.set_hexpand(False)
+        side_box.set_hexpand(False)
+        self.sidebar.set_transition_type(Gtk.RevealerTransitionType.SLIDE_RIGHT)
+        self.sidebar.set_child(side_box)
+        self.sidebar.set_reveal_child(bool(self.settings.get("sidebar_open", True)))
+
+        outer = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        outer.append(self.sidebar); outer.append(body)
+        self.toasts = Adw.ToastOverlay()
+        self.toasts.set_child(outer)
+        tv = Adw.ToolbarView(); tv.add_top_bar(header); tv.set_content(self.toasts)
+        self.set_content(tv)
+
+        # window-wide shortcuts. Tab flips Agent/Chat from anywhere in the main
+        # window — captured before GTK's focus navigation can eat it.
+        wk = Gtk.EventControllerKey()
+        try:
+            wk.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        except Exception:
+            pass
+        wk.connect("key-pressed", self._on_window_key)
+        self.add_controller(wk)
+        # drag files (or an image) from anywhere onto the window to attach them
+        try:
+            from gi.repository import GObject
+            dt = Gtk.DropTarget.new(GObject.TYPE_NONE, Gdk.DragAction.COPY)
+            dt.set_gtypes([Gdk.FileList.__gtype__, Gdk.Texture.__gtype__])
+            dt.connect("drop", self._on_drop)
+            self.add_controller(dt)
+        except Exception:
+            pass
+
+    def _toast(self, text):
+        try:
+            t = Adw.Toast.new(text)
+            t.set_timeout(2)
+            self.toasts.add_toast(t)
+        except Exception:
+            pass
+
+    # ── mode: Agent (acts) / Chat (answers) ──────────────────────────────────
+    def _system_text(self):
+        base = SYSTEM_PROMPT if self.agent_mode else CHAT_PROMPT
+        return base + "\n\nCurrent machine:\n" + gather_context()
+
+    def set_agent_mode(self, on, announce=True):
+        on = bool(on)
+        if on == self.agent_mode and not announce:
+            self._apply_mode(announce=False)
+            return
+        self.agent_mode = on
+        self.settings["agent_mode"] = on
+        save_settings(self.settings)
+        self._apply_mode(announce)
+
+    def toggle_mode(self, *_):
+        self.set_agent_mode(not self.agent_mode)
+
+    def _apply_mode(self, announce=True):
+        """Reflect the mode everywhere: switch, prompt, placeholder, empty state.
+
+        The system prompt is swapped in place on history[0]. It is the stable
+        prefix every request starts with, so this costs one cache miss on the
+        next call and nothing after."""
+        self._mode_guard = True
+        try:
+            self.agent_btn.set_active(self.agent_mode)
+            self.chat_btn.set_active(not self.agent_mode)
+        finally:
+            self._mode_guard = False
+        if self.history and self.history[0].get("role") == "system":
+            self.history[0]["content"] = self._system_text()
+        self._sync_placeholder()
+        self._update_subtitle()
+        if self._hint is not None:
+            self._show_empty_hint()
+        if announce:
+            self._toast("Agent mode — Chuck can act on your machine" if self.agent_mode
+                        else "Chat mode — answers only, nothing runs")
+
+    def _on_mode_btn(self, btn):
+        if getattr(self, "_mode_guard", False):
+            return
+        want = bool(self.agent_btn.get_active())
+        if want != self.agent_mode:
+            self.set_agent_mode(want)
+
+    def _sync_placeholder(self):
+        ph = getattr(self, "_placeholder", None)
+        if ph is None:
+            return
+        if getattr(self, "_attachments", None):
+            ph.set_label("Say what to do with the attachment\u2026")
+        elif self.agent_mode:
+            ph.set_label("Ask Chuck to do something\u2026" + (
+                f"  (in {self.workspace.name})" if self.workspace else ""))
+        else:
+            ph.set_label("Ask anything…")
+        try:
+            b = self.entry.get_buffer()
+            ph.set_visible(b.get_char_count() == 0)
+        except Exception:
+            pass
+
+    def _update_subtitle(self):
+        model = (self.settings.get("model") or DEFAULT_MODEL).split("/")[-1]
+        parts = [model, "Agent" if self.agent_mode else "Chat"]
+        if self.workspace:
+            parts.append(_short_path(self.workspace))
+        try:
+            self._subtitle.set_label("  ·  ".join(parts))
+            self._model_lbl.set_label(model)
+        except Exception:
+            pass
+
+    # ── working folder ──────────────────────────────────────────────────────
+    def set_workspace(self, path, announce=True):
+        """Point the session at a folder (or None). Commands run there; read,
+        grep, write and edit resolve relative paths inside it; ```project```
+        facts are scoped to it."""
+        p = None
+        if path:
+            try:
+                p = Path(os.path.expanduser(str(path))).resolve()
+            except Exception:
+                p = None
+            if p is not None and not p.is_dir():
+                self._toast(f"Not a folder: {path}")
+                return False
+        self.workspace = p
+        _WORKDIR["path"] = str(p) if p else None
+        if p:
+            rec = [r for r in (self.settings.get("recent_workspaces") or [])
+                   if isinstance(r, str) and r != str(p)]
+            self.settings["recent_workspaces"] = [str(p)] + rec[:7]
+            save_settings(self.settings)
+        try:
+            self._ws_lbl.set_label(p.name if p else "No folder")
+            if p:
+                self.ws_btn.add_css_class("chip-on")
+            else:
+                self.ws_btn.remove_css_class("chip-on")
+        except Exception:
+            pass
+        self._sync_placeholder()
+        self._update_subtitle()
+        if self._hint is not None:
+            self._show_empty_hint()
+        if announce:
+            self._toast(f"Working in {_short_path(p)}" if p else "No working folder")
+        return True
+
+    def _workroot(self):
+        """Where file tools operate: the working folder, else the open project."""
+        if self.workspace and self.workspace.is_dir():
+            return self.workspace
+        if _builder:
+            return _builder.current_project()
+        return None
 
     # ── history / saved chats ──
     def _new_history(self):
-        self.history = [{"role": "system",
-                         "content": SYSTEM_PROMPT + "\n\nCurrent machine:\n" + gather_context()}]
+        self.history = [{"role": "system", "content": self._system_text()}]
 
     def new_chat(self):
         # Cancel first. Without this the in-flight stream's _finalise appended
@@ -1688,51 +2684,120 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._clear_msgs()
         self._show_empty_hint()
         self._refresh_sidebar()
+        try:
+            self.entry.grab_focus()
+        except Exception:
+            pass
 
     def _show_empty_hint(self):
-        """A quiet centered placeholder for an empty chat (ChatGPT/Claude style) —
-        not a chat bubble. Cleared on first message."""
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        """The empty screen: a mark, one line on what this mode does, and four
+        one-click starters. It lives in its own stack page rather than in the
+        transcript, so no note or card can ever push it around."""
+        holder = self._empty_holder
+        old = getattr(self, "_hint_widget", None)
+        if old is not None:
+            try:
+                holder.remove_overlay(old)
+            except Exception:
+                pass
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         box.set_vexpand(True)
         box.set_valign(Gtk.Align.CENTER)
         box.set_halign(Gtk.Align.CENTER)
-        title = Gtk.Label(label="What do you need, partner?", xalign=0.5)
-        title.add_css_class("empty-hint")
+        for m in ("start", "end"):
+            getattr(box, f"set_margin_{m}")(24)
+        mk = Gtk.Label(label="C")
+        mk.add_css_class("mark"); mk.add_css_class("mark-lg")
+        mk.set_halign(Gtk.Align.CENTER)
+        box.append(mk)
+        title = Gtk.Label(label="What are we working on?" if self.agent_mode
+                          else "Ask me anything", xalign=0.5)
+        title.add_css_class("empty-title"); title.set_margin_top(22)
         box.append(title)
+        if self.agent_mode:
+            where = (f" in {_short_path(self.workspace)}" if self.workspace
+                     else " — pick a working folder for project work")
+            sub = "Agent mode · runs commands, reads and edits files" + where
+        else:
+            sub = "Chat mode · answers only — nothing runs on your machine"
+        sl = Gtk.Label(label=sub, xalign=0.5, wrap=True, justify=Gtk.Justification.CENTER)
+        sl.add_css_class("empty-sub"); sl.set_margin_top(8)
+        box.append(sl)
 
-        # Three things worth asking for, one click away. An empty chat that
-        # suggests nothing makes you invent the first move; these also happen to
-        # advertise that he RUNS things rather than just describing them.
-        chips = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        chips.set_halign(Gtk.Align.CENTER)
-        for text in ("What's eating my disk?",
-                     "Update the system",
-                     "Why is boot slow?"):
-            b = Gtk.Button(label=text)
-            b.add_css_class("quick")
-            b.connect("clicked", lambda _b, t=text: self._prefill(t))
-            chips.append(b)
-        box.append(chips)
+        if not self.backend.key():
+            kr = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+            kr.add_css_class("ws-current")
+            kr.set_margin_top(22); kr.set_halign(Gtk.Align.CENTER)
+            kl = Gtk.Label(label="Add your SiliconFlow API key to get started.", xalign=0)
+            kl.add_css_class("dlg-sub")
+            kb = Gtk.Button(label="Open Settings"); kb.add_css_class("accent-btn")
+            kb.connect("clicked", self.open_settings)
+            kr.append(kl); kr.append(kb)
+            box.append(kr)
+
+        grid = Gtk.Grid(column_spacing=10, row_spacing=10)
+        grid.set_margin_top(28); grid.set_halign(Gtk.Align.CENTER)
+        try:
+            grid.set_column_homogeneous(True)
+        except Exception:
+            pass
+        items = self.AGENT_SUGGEST if self.agent_mode else self.CHAT_SUGGEST
+        for i, (t, d, prompt) in enumerate(items):
+            b = Gtk.Button()
+            b.add_css_class("suggest")
+            v = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+            a = Gtk.Label(label=t, xalign=0); a.add_css_class("suggest-title")
+            s2 = Gtk.Label(label=d, xalign=0); s2.add_css_class("suggest-sub")
+            try:
+                s2.set_ellipsize(Pango.EllipsizeMode.END)
+            except Exception:
+                pass
+            v.append(a); v.append(s2)
+            b.set_child(v)
+            b.set_size_request(250, -1)
+            if self.agent_mode and i == 3 and not self.workspace:
+                b.connect("clicked", self.open_workspace)
+            else:
+                b.connect("clicked", lambda _b, p=prompt: self._prefill(p))
+            grid.attach(b, i % 2, i // 2, 1, 1)
+        box.append(grid)
+        keys = Gtk.Label(label="Tab  switch Agent / Chat     Ctrl+O  working folder     "
+                               "Enter  send     Shift+Enter  new line", xalign=0.5)
+        keys.add_css_class("empty-keys"); keys.set_margin_top(26)
+        keys.set_wrap(True); keys.set_justify(Gtk.Justification.CENTER)
+        box.append(keys)
+        holder.add_overlay(box)
+        self._hint_widget = box
         self._hint = box
-        self.msgbox.append(self._hint)
+        try:
+            self.view_stack.set_visible_child_name("empty")
+        except Exception:
+            pass
 
     def _prefill(self, text):
         """Drop a suggestion into the composer and focus it — deliberately NOT
         sending, so the first thing Chuck does is still the user's decision."""
         try:
-            self.entry.get_buffer().set_text(text, -1)
+            buf = self.entry.get_buffer()
+            buf.set_text(text, -1)
             self.entry.grab_focus()
+            buf.place_cursor(buf.get_end_iter())
         except Exception:
             pass
 
     # ── windowed transcript ────────────────────────────────────────────────
-    # A long session used to keep every bubble alive as a GTK widget forever.
-    # Now the transcript lives as a render log of plain data and only a window
-    # of it is materialised: the newest RENDER_KEEP while you're at the bottom,
-    # growing by RENDER_PAGE each time you scroll to the top, and collapsing
-    # again the moment you return to the bottom. Text, notes and images are
-    # rebuilt from their data on demand; interactive cards are pinned, because
-    # their run state (output, whether it was approved) can't be recreated.
+    # The transcript lives as a render log of plain data and only a window of
+    # it is materialised: the newest RENDER_KEEP while you're at the bottom,
+    # growing by RENDER_PAGE each time you scroll to the top, and shrinking
+    # again when you return to the bottom. Text, notes and images are rebuilt
+    # from their data on demand; interactive cards are pinned — kept alive,
+    # because their run state can't be recreated — and shown in their real
+    # place in the conversation when the window reaches them.
+    #
+    # The box is RECONCILED, not rebuilt: widgets already in place stay put and
+    # only the difference is inserted or removed. Tearing every child out and
+    # re-adding it on each new message is what made the transcript flicker and
+    # jump while a reply was being written.
 
     def _log_add(self, kind, data):
         """Record a rebuildable entry and materialise it at the bottom."""
@@ -1743,9 +2808,10 @@ class ChuckWindow(Adw.ApplicationWindow):
         return entry
 
     def _log_pin(self, widget):
-        """Record an interactive widget that must never be torn down."""
+        """Record an interactive widget that must never be torn down. It is
+        machine work, so it goes in the work lane."""
         self._drop_hint()
-        entry = {"kind": "pinned", "data": None, "w": widget, "pinned": True}
+        entry = {"kind": "pinned", "data": None, "w": _lane(widget), "pinned": True}
         self._log.append(entry)
         self._collapse_window(scroll=True)
         return entry
@@ -1753,72 +2819,297 @@ class ChuckWindow(Adw.ApplicationWindow):
     def _build_entry(self, e):
         k, d = e["kind"], e["data"] or {}
         if k == "user":
-            w = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, halign=Gtk.Align.END, hexpand=True)
-            w.add_css_class("turn-row")
-            lbl = Gtk.Label(label=d.get("text", "") + ("  \U0001F4F7" if d.get("shot") else ""),
+            w = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, halign=Gtk.Align.END, hexpand=True,
+                        spacing=6)
+            w.add_css_class("turn-row"); w.add_css_class("user-row")
+            imgs = [p for p in (d.get("images") or []) if p and os.path.isfile(p)]
+            if imgs:
+                ib = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6,
+                             halign=Gtk.Align.END)
+                for pth in imgs[:6]:
+                    try:
+                        pic, _pb = _pic_from_file(pth, 180, 140)
+                        fr = Gtk.Button(); fr.add_css_class("thumb-btn"); fr.set_child(pic)
+                        fr.set_tooltip_text(os.path.basename(pth))
+                        fr.connect("clicked", lambda _b, q=pth: _open_path(q))
+                        ib.append(fr)
+                    except Exception:
+                        continue
+                w.append(ib)
+            files = d.get("files") or []
+            if files:
+                fb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6,
+                             halign=Gtk.Align.END)
+                for nm in files[:8]:
+                    chip = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+                    chip.add_css_class("att-chip")
+                    chip.append(Gtk.Image.new_from_icon_name(_pick_icon(
+                        "text-x-generic-symbolic", "document-open-symbolic")))
+                    nl = Gtk.Label(label=nm); nl.add_css_class("att-name")
+                    chip.append(nl)
+                    fb.append(chip)
+                w.append(fb)
+            txt = d.get("text", "")
+            lbl = Gtk.Label(label=txt + ("  \U0001F4F7" if d.get("shot") else ""),
                             xalign=0, wrap=True, selectable=True)
-            lbl.set_max_width_chars(60)
-            _apply_line_height(lbl)
+            _wrap_anywhere(lbl)
+            lbl.set_max_width_chars(64)
+            _apply_line_height(lbl, 1.4)
             card = Gtk.Box(); card.add_css_class("user-bubble"); card.append(lbl)
             w.append(card)
             return w
         if k == "bot":
-            w = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, halign=Gtk.Align.START, hexpand=True)
-            w.add_css_class("turn-row")
-            lbl = Gtk.Label(label="", xalign=0, wrap=True, selectable=True, use_markup=False)
-            lbl.set_max_width_chars(0); lbl.set_hexpand(True)
-            # A byline above the reply. Chuck answers as open text rather than in
-            # a bubble (long answers read better that way), so without this there
-            # is nothing marking where HIS voice starts — which is exactly how
-            # his prose and the machine's output used to blur together.
-            by = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=7)
-            dot = Gtk.Box(); dot.add_css_class("byline-dot")
-            dot.set_valign(Gtk.Align.CENTER); dot.set_size_request(16, 16)
-            name = Gtk.Label(label="CHUCK", xalign=0)
-            name.add_css_class("byline")
-            by.append(dot); by.append(name)
-            w.append(by)
-            card = Gtk.Box(); card.add_css_class("bot-bubble"); card.set_hexpand(True)
-            card.append(lbl); w.append(card)
-            e["label"] = lbl
-            txt = d.get("text", "")
-            if d.get("rich"):
-                set_rich(lbl, txt)
-            else:
-                lbl.set_text(txt)
-            # Play this one reply on demand. Reads from the log entry, so it
-            # still speaks the right text after the bubble has been unloaded
-            # and rebuilt by the transcript window.
-            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-            row.add_css_class("msg-tools")
-            play = Gtk.Button(icon_name=_pick_icon("media-playback-start-symbolic",
-                                                   "audio-volume-high-symbolic",
-                                                   "media-playback-start"))
-            play.add_css_class("playbtn")
-            play.set_tooltip_text("Read this message aloud")
-            play.connect("clicked", lambda _b, ent=e: self._speak_entry(ent))
-            row.append(play)
-            copy = self._copy_button(
-                lambda ent=e: (ent.get("data") or {}).get("text", ""),
-                "Copy this reply")
-            copy.add_css_class("playbtn")
-            row.append(copy)
-            w.append(row)
-            return w
+            return self._build_bot(e)
         if k == "note":
-            # A system aside ("verifying bash", "added --noconfirm"). Sits in a
-            # thin gutter so it is legible as MACHINE chatter at a glance and
-            # never competes with the reply text next to it.
-            l = Gtk.Label(label=d.get("text", ""), xalign=0, wrap=True, hexpand=True)
-            l.add_css_class(d.get("css", "dim"))
-            _apply_line_height(l, 1.3)
-            wrap = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
-            wrap.add_css_class("sys-note")
-            wrap.append(l)
-            return wrap
+            return _lane(self._build_note(d))
+        if k == "plan":
+            return _lane(self._build_plan(d.get("items") or []))
         if k == "image":
-            return self._build_image_widget(d.get("path"), d.get("src"))
+            return _lane(self._build_image_widget(d.get("path"), d.get("src")))
         return Gtk.Label(label="")
+
+    def _build_note(self, d):
+        # A system aside ("added --noconfirm"). Small and muted so it reads
+        # as machine chatter and never competes with the reply.
+        l = Gtk.Label(label=d.get("text", ""), xalign=0, wrap=True, hexpand=True,
+                      selectable=d.get("css") == "mono")
+        _wrap_anywhere(l)
+        l.add_css_class(d.get("css", "dim"))
+        _apply_line_height(l, 1.3)
+        wrap = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        wrap.add_css_class("sys-note")
+        wrap.append(l)
+        return wrap
+
+    def _build_bot(self, e):
+        d = e["data"]
+        cont = bool(d.get("cont"))
+        w = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, hexpand=True)
+        w.add_css_class("turn-row")
+        # A later hop of the same turn gets no second byline. Its prose still
+        # sits in the main column — only machine work goes on the rail, so
+        # what Chuck SAID and what the machine DID never share a lane.
+        w.add_css_class("bot-cont" if cont else "bot-row")
+        by = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        av = Gtk.Label(label="C"); av.add_css_class("avatar")
+        av.set_valign(Gtk.Align.CENTER)
+        name = Gtk.Label(label="Chuck", xalign=0); name.add_css_class("byline")
+        by.append(av); by.append(name)
+        meta = Gtk.Label(label=d.get("meta", ""), xalign=0)
+        meta.add_css_class("byline-meta")
+        by.append(meta)
+        if not cont:
+            w.append(by)
+        # reasoning, folded away: there if you want it, never in the way
+        exp = Gtk.Expander(label="")
+        exp.add_css_class("think")
+        tl = Gtk.Label(label="", xalign=0, wrap=True, selectable=True)
+        tl.add_css_class("think-body"); _wrap_anywhere(tl)
+        tl.set_margin_top(6)
+        exp.set_child(tl)
+        exp.set_visible(False)
+        w.append(exp)
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, hexpand=True)
+        content.add_css_class("bot-bubble")
+        w.append(content)
+        e["label"] = content
+        e["think_w"] = (exp, tl)
+        e["segs"] = []
+        self._render_bot(e)
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
+        row.add_css_class("msg-tools")
+        play = Gtk.Button(icon_name=_pick_icon("media-playback-start-symbolic",
+                                               "audio-volume-high-symbolic",
+                                               "media-playback-start"))
+        play.add_css_class("playbtn")
+        play.set_tooltip_text("Read this aloud")
+        play.connect("clicked", lambda _b, ent=e: self._speak_entry(ent))
+        row.append(play)
+        copy = self._copy_button(
+            lambda ent=e: (ent.get("data") or {}).get("text", ""),
+            "Copy this reply")
+        copy.add_css_class("playbtn")
+        row.append(copy)
+        w.append(row)
+        return w
+
+    def _render_bot(self, e):
+        """Draw a reply's text into its content box as segments — prose, code
+        blocks, tables — updating widgets in place where the segment kind is
+        unchanged. That is what lets markdown render LIVE while the reply
+        streams without rebuilding (and re-flowing) the whole message twenty
+        times a second."""
+        content = e.get("label")
+        if content is None:
+            return
+        d = e["data"]
+        txt = d.get("text", "") or ""
+        segs = md_segments(txt) if d.get("rich") else [("plain", txt)]
+        if not segs:
+            segs = [("plain", "")]
+        have = e.setdefault("segs", [])
+        for i, sg in enumerate(segs):
+            kind = sg[0]
+            if i < len(have) and have[i][0] == kind:
+                self._update_seg(have[i], sg)
+                continue
+            # kind changed (or new): drop this and everything after, rebuild
+            for old in have[i:]:
+                try:
+                    content.remove(old[1])
+                except Exception:
+                    pass
+            del have[i:]
+            have.append(self._make_seg(sg))
+            content.append(have[-1][1])
+        for old in have[len(segs):]:
+            try:
+                content.remove(old[1])
+            except Exception:
+                pass
+        del have[len(segs):]
+        tw = e.get("think_w")
+        if tw is not None:
+            exp, tl = tw
+            th = d.get("think") or ""
+            if th:
+                secs = d.get("think_secs") or 0
+                exp.set_label(f"Thought for {secs}s" if secs else "Reasoning")
+                tl.set_text(th[-12000:])
+            exp.set_visible(bool(th))
+
+    def _make_seg(self, sg):
+        kind = sg[0]
+        if kind == "code":
+            box, lang_l, body_l = self._code_block(sg[1], sg[2])
+            return ["code", box, (lang_l, body_l), sg[2]]
+        if kind == "table":
+            w = self._table_widget(sg[1])
+            return ["table", w, None, repr(sg[1])]
+        lbl = Gtk.Label(label="", xalign=0, wrap=True, selectable=True, hexpand=True)
+        lbl.add_css_class("prose")
+        _wrap_anywhere(lbl)
+        lbl.set_max_width_chars(0)
+        rec = [kind, lbl, None, None]
+        self._update_seg(rec, sg)
+        return rec
+
+    def _update_seg(self, rec, sg):
+        kind = sg[0]
+        if kind == "code":
+            if rec[3] != sg[2]:
+                rec[2][1].set_text(sg[2])
+                rec[3] = sg[2]
+            rec[2][0].set_label((sg[1] or "code").upper())
+        elif kind == "table":
+            key = repr(sg[1])
+            if rec[3] != key:
+                parent = rec[1].get_parent()
+                new = self._table_widget(sg[1])
+                if parent is not None:
+                    try:
+                        parent.insert_child_after(new, rec[1])
+                        parent.remove(rec[1])
+                    except Exception:
+                        pass
+                rec[1], rec[3] = new, key
+        elif kind == "md":
+            if rec[3] != sg[1]:
+                set_rich(rec[1], sg[1].strip("\n"))
+                rec[3] = sg[1]
+        else:
+            if rec[3] != sg[1]:
+                rec[1].set_text(sg[1])
+                _apply_line_height(rec[1])
+                rec[3] = sg[1]
+
+    def _code_block(self, lang, body):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        box.add_css_class("code-block")
+        head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        head.add_css_class("code-head")
+        ll = Gtk.Label(label=(lang or "code").upper(), xalign=0, hexpand=True)
+        ll.add_css_class("code-lang")
+        head.append(ll)
+        bl = Gtk.Label(label=body, xalign=0, selectable=True, wrap=False)
+        bl.add_css_class("code-body")
+        bl.set_valign(Gtk.Align.START)
+        head.append(self._copy_button(lambda: bl.get_text(), "Copy code"))
+        box.append(head)
+        sw = Gtk.ScrolledWindow()
+        sw.add_css_class("code-scroll")
+        try:
+            sw.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.NEVER)
+            sw.set_propagate_natural_height(True)
+        except Exception:
+            pass
+        sw.set_child(bl)
+        self._chain_scroll(sw)
+        box.append(sw)
+        return box, ll, bl
+
+    def _table_widget(self, rows):
+        grid = Gtk.Grid()
+        grid.add_css_class("md-table")
+        ncol = max((len(r) for r in rows), default=0)
+        for ri, r in enumerate(rows):
+            for ci in range(ncol):
+                cell = r[ci] if ci < len(r) else ""
+                lb = Gtk.Label(xalign=0, wrap=True, hexpand=True)
+                _wrap_anywhere(lb)
+                lb.set_selectable(True)
+                try:
+                    mk = _md_inline(_html.escape(cell, quote=False))
+                    if _markup_ok(mk):
+                        lb.set_markup(mk)
+                    else:
+                        lb.set_text(cell)
+                except Exception:
+                    lb.set_text(cell)
+                lb.add_css_class("md-th" if ri == 0 else "md-td")
+                grid.attach(lb, ci, ri, 1, 1)
+        # No scroller: wrapping cells inside a sideways scroller are measured at
+        # their narrowest (one word per line), which inflated a two-row table
+        # into a 500px empty box. Cells wrap inside the column instead.
+        grid.set_hexpand(True)
+        return grid
+
+    def _chain_scroll(self, inner, vertical=False):
+        """Make a nested scroller behave like one in a browser.
+
+        Without this, the mouse wheel over a code block or an output panel was
+        captured by the inner scroller — and GTK turns a vertical wheel into
+        horizontal scrolling when only sideways is possible — so the page
+        simply stopped moving under the pointer. Vertical motion now goes to
+        the page unless the inner panel can itself still scroll that way;
+        sideways motion stays with the inner panel."""
+        try:
+            ctl = Gtk.EventControllerScroll.new(Gtk.EventControllerScrollFlags.BOTH_AXES)
+            ctl.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        except Exception:
+            return
+
+        def on_scroll(c, dx, dy):
+            if abs(dx) > abs(dy) or dy == 0:
+                return False
+            if vertical:
+                va = inner.get_vadjustment()
+                room = va.get_upper() - va.get_page_size()
+                if room > 1:
+                    v = va.get_value()
+                    if (dy < 0 and v > 0.5) or (dy > 0 and v < room - 0.5):
+                        return False          # inner panel scrolls first
+            oa = self.scroller.get_vadjustment()
+            try:
+                wheel = c.get_unit() == Gdk.ScrollUnit.WHEEL
+            except Exception:
+                wheel = True
+            step = dy * (oa.get_page_size() ** (2.0 / 3.0)) if wheel else dy
+            top = max(0.0, oa.get_upper() - oa.get_page_size())
+            oa.set_value(max(0.0, min(top, oa.get_value() + step)))
+            return True
+        ctl.connect("scroll", on_scroll)
+        inner.add_controller(ctl)
 
     def _speak_entry(self, entry):
         """Speak one specific message, replacing whatever is being read."""
@@ -1839,58 +3130,123 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._scroll_down()
 
     def _apply_window(self, keep_offset=False):
-        """Rebuild msgbox to exactly the current window. Widgets outside it lose
-        their last reference here, so GTK frees them."""
-        adj = self.scroller.get_vadjustment()
-        old_upper = adj.get_upper() if keep_offset else 0
-        old_value = adj.get_value() if keep_offset else 0
-        c = self.msgbox.get_first_child()
-        while c:
-            n = c.get_next_sibling(); self.msgbox.remove(c); c = n
+        """Make msgbox show exactly the current window. Widgets that fall out of
+        it lose their last reference here, so GTK frees them."""
+        if keep_offset:
+            try:
+                a = self.scroller.get_vadjustment()
+                self._anchor = (float(a.get_upper()), float(a.get_value()))
+                GLib.timeout_add(600, self._clear_anchor)
+            except Exception:
+                self._anchor = None
         lo = self._win_start
         show = []
-        for i, e in enumerate(self._log):          # pinned items above the window
-            if i < lo and e["pinned"] and e["w"] is not None:
-                show.append(e["w"])
         if lo > 0:
             show.append(self._older_banner())
         for i, e in enumerate(self._log):
             if i < lo:
                 if not e["pinned"]:
                     e["w"] = None                  # freed
+                    e.pop("label", None); e.pop("segs", None); e.pop("think_w", None)
                 continue
             if e["w"] is None:
                 e["w"] = self._build_entry(e)
             show.append(e["w"])
-        for w in show:
-            self.msgbox.append(w)
-        if keep_offset:
-            def restore():
-                a = self.scroller.get_vadjustment()
-                a.set_value(max(0, a.get_upper() - old_upper + old_value))
-                return False
-            GLib.idle_add(restore)
+        self._reconcile(show)
+        if self._log:
+            try:
+                self.view_stack.set_visible_child_name("chat")
+            except Exception:
+                pass
+
+    def _reconcile(self, desired):
+        box = self.msgbox
+        want = {id(w) for w in desired}
+        c = box.get_first_child()
+        while c is not None:
+            n = c.get_next_sibling()
+            if id(c) not in want:
+                box.remove(c)
+            c = n
+        prev = None
+        for w in desired:
+            if w.get_parent() is box:
+                if w.get_prev_sibling() is not prev:
+                    box.reorder_child_after(w, prev)
+            else:
+                box.insert_child_after(w, prev)
+            prev = w
+
+    def _clear_anchor(self):
+        self._anchor = None
+        return False
 
     def _older_banner(self):
         n = self._win_start
+        if self._banner is None:
+            self._banner = Gtk.Label(label="", xalign=0.5)
+            self._banner.add_css_class("older-note")
         if self._loading_older:
-            lb = Gtk.Label(label="loading older messages\u2026", xalign=0.5)
+            self._banner.set_label("loading earlier messages…")
         else:
-            lb = Gtk.Label(label=f"\u2191 {n} older message{'s' if n != 1 else ''} "
-                                 "\u2014 scroll up to load", xalign=0.5)
-        lb.add_css_class("older-note")
-        return lb
+            self._banner.set_label(f"↑ {n} earlier message{'s' if n != 1 else ''}")
+        return self._banner
+
+    # ── scrolling ───────────────────────────────────────────────────────────
+    def _on_extent(self, adj, *_):
+        """Content height or viewport height changed (a token arrived, a card
+        landed, the window was resized). Re-pin to the bottom if we are
+        following, or hold the reading position steady after older messages
+        were inserted above it.
+
+        This fires DURING GTK's layout pass, and a value set there is dropped —
+        the adjustment says "bottom" while the viewport stays where it was, and
+        the last line of a reply sits hidden under the composer. So the move is
+        applied once layout has finished (idle runs after the frame's layout),
+        coalesced to one per frame however many times the height changed."""
+        if getattr(self, "_pin_pending", False):
+            return
+        self._pin_pending = True
+
+        def pin():
+            self._pin_pending = False
+            try:
+                a = self.scroller.get_vadjustment()
+                if self._anchor is not None:
+                    old_upper, old_value = self._anchor
+                    self._anchor = None
+                    a.set_value(max(0.0, a.get_upper() - old_upper + old_value))
+                elif self._stick:
+                    a.set_value(max(0.0, a.get_upper() - a.get_page_size()))
+            except Exception:
+                pass
+            return False
+        GLib.idle_add(pin)
 
     def _on_scroll(self, adj, *_):
+        try:
+            v, upper, page = adj.get_value(), adj.get_upper(), adj.get_page_size()
+            dist = upper - (v + page)
+        except Exception:
+            return
+        self._stick = dist <= 48
+        self._sync_jump()
         if not self._log:
             return
-        v, upper, page = adj.get_value(), adj.get_upper(), adj.get_page_size()
         if v <= 40 and self._win_start > 0 and not self._loading_older:
             self._loading_older = True
-            self._apply_window(keep_offset=True)      # swap banner to "loading…"
+            self._older_banner()                      # "loading…"
             GLib.timeout_add(180, self._load_older)
-        elif upper - (v + page) <= 40 and self._win_start != self._window_bounds():
+        elif dist <= 40 and self._win_start != self._window_bounds():
             self._collapse_window()                    # back at the bottom: offload
+
+    def _sync_jump(self):
+        jb = getattr(self, "jump_btn", None)
+        if jb is not None:
+            try:
+                jb.set_visible(not self._stick and bool(self._log))
+            except Exception:
+                pass
 
     def _load_older(self):
         page = self.cfg("render_page", RENDER_PAGE, 5, 200)
@@ -1900,12 +3256,12 @@ class ChuckWindow(Adw.ApplicationWindow):
         return False
 
     def _drop_hint(self):
-        if getattr(self, "_hint", None) is not None:
+        if self._hint is not None:
+            self._hint = None
             try:
-                self.msgbox.remove(self._hint)
+                self.view_stack.set_visible_child_name("chat")
             except Exception:
                 pass
-            self._hint = None
 
     def _clear_msgs(self):
         self._hint = None
@@ -1913,66 +3269,291 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._win_start = 0
         self._loading_older = False
         self._bot_entry = None
+        self._bot_label = None
+        self._plan_entry = None
         self._seen_queries = []     # queries already run this turn
         self._seen_urls = set()     # pages already read this turn
         self._dead_urls = set()     # pages that failed — don't retry
         self._forced_answer = False
+        self._stick = True
+        self._anchor = None
+        self._banner = None
         c = self.msgbox.get_first_child()
         while c:
             n = c.get_next_sibling(); self.msgbox.remove(c); c = n
+        self._sync_jump()
 
-    def open_memory(self, *_):
-        """A viewer for what Chuck remembers — so memory is transparent + editable."""
-        dlg = Adw.Window(transient_for=self, modal=True, title="What Chuck remembers",
-                         default_width=560, default_height=520)
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        for m in ("top", "bottom", "start", "end"):
-            getattr(box, f"set_margin_{m}")(14)
-        hb = Adw.HeaderBar(); wrap = Adw.ToolbarView()
-        wrap.add_top_bar(hb); wrap.set_content(Gtk.ScrolledWindow(child=box)); dlg.set_content(wrap)
-        facts = _memory.all_facts() if _memory else []
-        if not facts:
-            box.append(Gtk.Label(label="Nothing remembered yet. Tell Chuck durable things "
-                                 "(your setup, preferences) and he'll keep them.", xalign=0, wrap=True))
-        for text, kind in facts:
-            rowb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-            tag = "\u2605 " if kind == "core" else "\u00b7 "
-            lbl = Gtk.Label(label=tag + text, xalign=0, wrap=True, hexpand=True, selectable=True)
-            rm = Gtk.Button(icon_name=_pick_icon("user-trash-symbolic", "edit-delete-symbolic", "list-remove-symbolic")); rm.add_css_class("quick")
-            rm.set_tooltip_text("Forget this")
+    # ── dialogs: shared frame ───────────────────────────────────────────────
+    def _dialog(self, title, width=560, height=560):
+        """A modal window with a flat header, scrolling content, dark like the
+        rest. Returns (dialog, content_box)."""
+        dlg = Adw.Window(transient_for=self, modal=True, title=title,
+                         default_width=width)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        for m, v in (("top", 4), ("bottom", 24), ("start", 24), ("end", 24)):
+            getattr(box, f"set_margin_{m}")(v)
+        hb = Adw.HeaderBar()
+        try:
+            hb.set_show_title(False)        # the page carries its own heading
+        except Exception:
+            hb.set_title_widget(Gtk.Box())
+        wrap = Adw.ToolbarView()
+        wrap.add_top_bar(hb)
+        sw = Gtk.ScrolledWindow(vexpand=True)
+        try:
+            sw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+            # size to the content, up to a ceiling, instead of a fixed height
+            # that left half the dialog empty
+            sw.set_propagate_natural_height(True)
+            sw.set_max_content_height(height)
+        except Exception:
+            pass
+        clamp = Adw.Clamp()
+        try:
+            clamp.set_maximum_size(width - 40)
+        except Exception:
+            pass
+        clamp.set_child(box)
+        sw.set_child(clamp)
+        wrap.set_content(sw)
+        dlg.set_content(wrap)
+        kc = Gtk.EventControllerKey()
+        kc.connect("key-pressed",
+                   lambda _c, kv, _k, _s: (dlg.close(), True)[1] if kv == Gdk.KEY_Escape else False)
+        dlg.add_controller(kc)
+        return dlg, box
 
-            def drop(_b, t=text, r=rowb):
-                if _memory:
-                    _memory.forget(t)
+    @staticmethod
+    def _heading(box, title, sub=None):
+        t = Gtk.Label(label=title, xalign=0); t.add_css_class("dlg-title")
+        box.append(t)
+        if sub:
+            s = Gtk.Label(label=sub, xalign=0, wrap=True); s.add_css_class("dlg-sub")
+            box.append(s)
+
+    @staticmethod
+    def _section(box, title):
+        lb = Gtk.Label(label=title.upper(), xalign=0)
+        lb.add_css_class("set-section"); lb.set_margin_top(10)
+        box.append(lb)
+
+    # ── working-folder dialog ───────────────────────────────────────────────
+    def open_workspace(self, *_):
+        """Choose the session's working folder — or run with none."""
+        dlg, box = self._dialog("Working folder", 560, 540)
+        self._heading(box, "Working folder",
+                      "Commands run here, and Chuck reads, searches, writes and edits files "
+                      "relative to it. Leave it empty for questions and system tasks.")
+
+        cur = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        cur.add_css_class("ws-current")
+        cur.append(Gtk.Image.new_from_icon_name(_pick_icon("folder-symbolic", "folder")))
+        col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, hexpand=True)
+        cl = Gtk.Label(label="CURRENT", xalign=0); cl.add_css_class("set-section")
+        cp = Gtk.Label(label=_short_path(self.workspace) if self.workspace else "No folder",
+                       xalign=0, wrap=True)
+        cp.add_css_class("ws-path"); _wrap_anywhere(cp)
+        if self.workspace:
+            cp.set_tooltip_text(str(self.workspace))
+        col.append(cl); col.append(cp)
+        cur.append(col)
+        box.append(cur)
+
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        choose = Gtk.Button(label="Choose folder…"); choose.add_css_class("accent-btn")
+        none = Gtk.Button(label="Use no folder"); none.add_css_class("quick")
+        row.append(choose); row.append(none)
+        if self.workspace:
+            ob = Gtk.Button(label="Open in file manager"); ob.add_css_class("quick")
+            ob.connect("clicked", lambda *_: _open_path(str(self.workspace)))
+            row.append(ob)
+        box.append(row)
+
+        def use(path):
+            if self.set_workspace(path):
+                dlg.close()
+
+        def picked(dialog, res):
+            try:
+                f = dialog.select_folder_finish(res)
+            except Exception:
+                return
+            if f is not None and f.get_path():
+                use(f.get_path())
+
+        def do_choose(*_a):
+            try:
+                fd = Gtk.FileDialog()
+                fd.set_title("Choose a working folder")
+                if self.workspace:
+                    fd.set_initial_folder(Gio.File.new_for_path(str(self.workspace)))
+                fd.select_folder(dlg, None, picked)
+            except Exception:
+                # GTK < 4.10: the older chooser
                 try:
-                    box.remove(r)
+                    nat = Gtk.FileChooserNative.new("Choose a working folder", dlg,
+                                                    Gtk.FileChooserAction.SELECT_FOLDER,
+                                                    "Select", "Cancel")
+
+                    def resp(n, r):
+                        if r == Gtk.ResponseType.ACCEPT and n.get_file():
+                            use(n.get_file().get_path())
+                    nat.connect("response", resp)
+                    nat.show()
+                    dlg._nat = nat
+                except Exception as ex:
+                    self._toast(f"Couldn't open a folder picker: {ex}")
+        choose.connect("clicked", do_choose)
+        none.connect("clicked", lambda *_: use(None))
+
+        recent = [r for r in (self.settings.get("recent_workspaces") or [])
+                  if isinstance(r, str) and os.path.isdir(r)]
+        proj = []
+        if _builder:
+            try:
+                proj = [str(_builder.PROJECTS / n) for n, _c in _builder.project_list()][:6]
+            except Exception:
+                proj = []
+        for title, paths in (("Recent", recent), ("Chuck's projects", proj)):
+            paths = [p for p in paths if not self.workspace or p != str(self.workspace)]
+            if not paths:
+                continue
+            self._section(box, title)
+            lb = Gtk.ListBox()
+            lb.add_css_class("boxed-list")
+            try:
+                lb.set_selection_mode(Gtk.SelectionMode.NONE)
+            except Exception:
+                pass
+            for pth in paths[:8]:
+                r = Adw.ActionRow()
+                r.set_title(_html.escape(Path(pth).name or pth))
+                r.set_subtitle(_html.escape(_short_path(pth)))
+                r.set_activatable(True)
+                r.add_prefix(Gtk.Image.new_from_icon_name(_pick_icon("folder-symbolic", "folder")))
+                r.connect("activated", lambda _r, p=pth: use(p))
+                lb.append(r)
+            box.append(lb)
+        dlg.present()
+
+    # ── memory viewer ───────────────────────────────────────────────────────
+    def open_memory(self, *_):
+        """What Chuck remembers and what skills he has saved — searchable,
+        addable, deletable. Memory you can't inspect is memory you can't trust."""
+        dlg, box = self._dialog("Memory", 620, 640)
+        n = _memory.count() if _memory else 0
+        self._heading(box, "Memory",
+                      f"{n} fact{'s' if n != 1 else ''} stored. Only the few relevant to a "
+                      "question are sent with it — never the whole store. Project facts "
+                      "are only recalled while their folder is open.")
+        add_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        add = Gtk.Entry(hexpand=True)
+        try:
+            add.set_placeholder_text("Add a fact, e.g. “User runs CachyOS on a ThinkPad”")
+        except Exception:
+            pass
+        addb = Gtk.Button(label="Remember"); addb.add_css_class("accent-btn")
+        add_row.append(add); add_row.append(addb)
+        box.append(add_row)
+        search = Gtk.SearchEntry()
+        try:
+            search.set_placeholder_text("Filter")
+        except Exception:
+            pass
+        box.append(search)
+        lb = Gtk.ListBox()
+        lb.add_css_class("boxed-list")
+        try:
+            lb.set_selection_mode(Gtk.SelectionMode.NONE)
+        except Exception:
+            pass
+        box.append(lb)
+
+        def fill():
+            c = lb.get_first_child()
+            while c:
+                nx = c.get_next_sibling(); lb.remove(c); c = nx
+            q = (search.get_text() or "").strip().lower()
+            recs = _memory.all_records() if _memory else []
+            shown = 0
+            for f in recs:
+                if q and q not in f["text"].lower():
+                    continue
+                shown += 1
+                r = Adw.ActionRow()
+                r.set_title(_html.escape(f["text"]))
+                try:
+                    r.set_title_lines(3)
                 except Exception:
                     pass
-            rm.connect("clicked", drop)
-            rowb.append(lbl); rowb.append(rm); box.append(rowb)
+                sc = f.get("scope") or ""
+                bits = ["core" if f.get("kind") == "core" else "fact",
+                        ("project · " + Path(sc).name) if sc else "global"]
+                when = f.get("ts")
+                if when:
+                    bits.append(datetime.fromtimestamp(when).strftime("%d %b %Y"))
+                r.set_subtitle(_html.escape("  ·  ".join(bits)))
+                rm = Gtk.Button(icon_name=_pick_icon("user-trash-symbolic", "edit-delete-symbolic"))
+                rm.add_css_class("ghost"); rm.set_valign(Gtk.Align.CENTER)
+                rm.set_tooltip_text("Forget this")
 
-        # saved skills live alongside memory — same idea, same transparency
-        sk_head = Gtk.Label(label="Saved skills", xalign=0); sk_head.add_css_class("set-section")
-        sk_head.set_margin_top(16); box.append(sk_head)
+                def drop(_b, t=f["text"]):
+                    _memory.forget(t)
+                    fill()
+                rm.connect("clicked", drop)
+                r.add_suffix(rm)
+                lb.append(r)
+            if not shown:
+                r = Adw.ActionRow()
+                r.set_title("Nothing here yet" if not q else "No match")
+                r.set_subtitle("Tell Chuck durable things — your setup, your preferences "
+                               "— and he keeps them.")
+                lb.append(r)
+
+        def do_add(*_a):
+            t = add.get_text().strip()
+            if t and _memory:
+                scope = ""
+                if t.lower().startswith("project:") and self.workspace:
+                    t, scope = t[8:].strip(), str(self.workspace)
+                _memory.remember(t, scope=scope)
+                add.set_text("")
+                fill()
+        addb.connect("clicked", do_add)
+        add.connect("activate", do_add)
+        search.connect("search-changed", lambda *_a: fill())
+        fill()
+
+        self._section(box, "Saved skills")
+        sl = Gtk.ListBox()
+        sl.add_css_class("boxed-list")
+        try:
+            sl.set_selection_mode(Gtk.SelectionMode.NONE)
+        except Exception:
+            pass
         skills = _skills.skill_list() if _skills else []
         if not skills:
-            box.append(Gtk.Label(label="No skills saved yet.", xalign=0, wrap=True))
+            r = Adw.ActionRow(); r.set_title("No skills saved yet")
+            sl.append(r)
         for name, lang, desc in skills:
-            r2 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-            t2 = Gtk.Label(label=f"\u00b7 {name}  ({lang})  \u2014 {desc}", xalign=0,
-                           wrap=True, hexpand=True, selectable=True)
-            d2 = Gtk.Button(icon_name=_pick_icon("user-trash-symbolic", "edit-delete-symbolic", "list-remove-symbolic")); d2.add_css_class("quick")
-            d2.set_tooltip_text("Archive this skill")
+            r = Adw.ActionRow()
+            r.set_title(_html.escape(name))
+            r.set_subtitle(_html.escape(f"{lang} · {desc}" if desc else lang))
+            rb = Gtk.Button(icon_name=_pick_icon("user-trash-symbolic", "edit-delete-symbolic"))
+            rb.add_css_class("ghost"); rb.set_valign(Gtk.Align.CENTER)
+            rb.set_tooltip_text("Archive this skill")
 
-            def drop_skill(_b, nm=name, row=r2):
+            def drop_skill(_b, nm=name, row=r):
                 if _skills:
                     _skills.skill_forget(nm)
                 try:
-                    box.remove(row)
+                    sl.remove(row)
                 except Exception:
                     pass
-            d2.connect("clicked", drop_skill)
-            r2.append(t2); r2.append(d2); box.append(r2)
+            rb.connect("clicked", drop_skill)
+            r.add_suffix(rb)
+            sl.append(r)
+        box.append(sl)
         dlg.present()
 
     def _save_chat(self):
@@ -1982,7 +3563,9 @@ class ChuckWindow(Adw.ApplicationWindow):
         title = next((m["content"][:60] for m in msgs if m["role"] == "user"), "chat")
         try:
             (CHATS_DIR / f"{self.chat_id}.json").write_text(json.dumps(
-                {"title": title, "ts": self.chat_id, "history": self.history}, indent=2))
+                {"title": title, "ts": self.chat_id, "history": self.history,
+                 "workspace": str(self.workspace) if self.workspace else "",
+                 "usage": self._usage}, indent=2))
         except Exception:
             pass
         self._refresh_sidebar()
@@ -2003,7 +3586,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._refresh_sidebar()
 
     def _sweep_chats(self):
-        """Runs every 10 min: drop anything past its 24h life, refresh the list
+        """Runs every 10 min: drop anything past its life, refresh the list
         (so the 'time left' countdowns stay honest). Keeps running forever."""
         try:
             purge_old_chats(self.cfg('chat_ttl_hours', CHAT_TTL_HOURS, 1, 720))
@@ -2013,41 +3596,52 @@ class ChuckWindow(Adw.ApplicationWindow):
         return True
 
     def _refresh_sidebar(self):
-        # keep the retention label honest when the setting changes
+        """Rebuild the saved-chat list. Cheap — a handful of stat() calls."""
+        ttl = self.cfg('chat_ttl_hours', CHAT_TTL_HOURS, 1, 720)
         note = getattr(self, "_ttl_note", None)
         if note is not None:
             try:
-                note.set_label(
-                    f"auto-delete after {self.cfg('chat_ttl_hours', CHAT_TTL_HOURS, 1, 720)}h")
+                note.set_label(f"kept {ttl}h" if ttl < 48 else f"kept {ttl // 24}d")
             except Exception:
                 pass
-        """Rebuild the saved-chat list. Cheap — a handful of stat() calls."""
         if not hasattr(self, "chat_list"):
             return
         c = self.chat_list.get_first_child()
         while c:
             n = c.get_next_sibling(); self.chat_list.remove(c); c = n
+        q = ""
+        try:
+            q = (self.chat_search.get_text() or "").strip().lower()
+        except Exception:
+            q = ""
         files = chat_files()
-        if not files:
-            empty = Gtk.Label(label="No saved chats yet.", xalign=0, wrap=True)
-            empty.add_css_class("side-note")
-            self.chat_list.append(empty)
-            return
+        shown = 0
         for f in files:
             try:
                 meta = json.loads(f.read_text())
             except Exception:
                 continue
-            title = (meta.get("title") or "chat").strip().replace("\n", " ")[:42]
-            rowb = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+            title = (meta.get("title") or "chat").strip().replace("\n", " ")
+            if q:
+                hay = title.lower() + " " + " ".join(
+                    m.get("content", "") for m in meta.get("history", [])
+                    if isinstance(m.get("content"), str) and m.get("role") != "system").lower()
+                if q not in hay:
+                    continue
+            shown += 1
+            rowb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
             rowb.add_css_class("chat-row")
-            open_b = Gtk.Button()
+            open_b = Gtk.Button(hexpand=True)
             open_b.add_css_class("chat-open")
             inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
-            tl = Gtk.Label(label=title or "chat", xalign=0, wrap=True)
+            tl = Gtk.Label(label=title or "chat", xalign=0)
+            try:
+                tl.set_ellipsize(Pango.EllipsizeMode.END)
+                tl.set_max_width_chars(28)
+            except Exception:
+                pass
             tl.add_css_class("chat-title")
-            ml = Gtk.Label(label=chat_expires_in(
-                f, self.cfg("chat_ttl_hours", CHAT_TTL_HOURS, 1, 720)), xalign=0)
+            ml = Gtk.Label(label=_ago(f) + "  ·  " + chat_expires_in(f, ttl), xalign=0)
             ml.add_css_class("chat-meta")
             inner.append(tl); inner.append(ml)
             open_b.set_child(inner)
@@ -2055,8 +3649,36 @@ class ChuckWindow(Adw.ApplicationWindow):
                 rowb.add_css_class("chat-current")
             open_b.connect("clicked", lambda _b, path=f: self._load_chat(path))
             rowb.append(open_b)
+            dl = Gtk.Button(icon_name=_pick_icon("user-trash-symbolic", "edit-delete-symbolic"))
+            dl.add_css_class("ghost"); dl.add_css_class("chat-del")
+            dl.set_valign(Gtk.Align.CENTER)
+            dl.set_tooltip_text("Delete chat")
+            dl.connect("clicked", lambda _b, path=f: self._delete_chat(path))
+            rowb.append(dl)
             self.chat_list.append(rowb)
+        if not shown:
+            empty = Gtk.Label(label="No matching chats." if q else "No saved chats yet.",
+                              xalign=0, wrap=True)
+            empty.add_css_class("side-note")
+            empty.set_margin_start(8); empty.set_margin_top(6)
+            self.chat_list.append(empty)
 
+    def _delete_chat(self, path):
+        try:
+            Path(path).unlink()
+        except OSError:
+            pass
+        if Path(path).stem == str(self.chat_id):
+            # the open chat is gone: start fresh without re-saving it
+            if self._running:
+                self.stop_run(auto=True)
+            self.chat_id = datetime.now().strftime("%Y%m%d-%H%M%S")
+            self._new_history()
+            self._reset_meter()
+            self._clear_msgs()
+            self._show_empty_hint()
+        self._refresh_sidebar()
+        self._toast("Chat deleted")
 
     def _load_chat(self, path):
         try:
@@ -2070,19 +3692,41 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._save_chat()
         self._clear_sudo_pw()
         self.history = meta.get("history", [])
+        if self.history and self.history[0].get("role") == "system":
+            # old chats carry whatever prompt they were started with (v13's
+            # was 5.7k characters); every resend would pay for it again
+            self.history[0]["content"] = self._system_text()
+        else:
+            self.history.insert(0, {"role": "system", "content": self._system_text()})
         self.chat_id = meta.get("ts", datetime.now().strftime("%Y%m%d-%H%M%S"))
+        ws = meta.get("workspace") or ""
+        if ws and os.path.isdir(ws) and (not self.workspace or str(self.workspace) != ws):
+            self.set_workspace(ws, announce=False)
+        self._reset_meter()
+        u = meta.get("usage")
+        if isinstance(u, dict):
+            for k in self._usage:
+                if isinstance(u.get(k), (int, float)) and not isinstance(u.get(k), bool):
+                    self._usage[k] = u[k]
+            self._paint_meter()
         self._clear_msgs()
         for m in self.history:
             if m["role"] == "system":
                 continue
             c = m.get("content")
             txt = c if isinstance(c, str) else "[image/attachment]"
-            if txt.startswith("TOOL RESULTS"):
+            if txt.startswith(("TOOL RESULTS", "RESEARCH BUDGET", "STEP BUDGET")):
                 continue
             if m["role"] == "user":
                 self._user_bubble(txt)
             else:
-                self._log_add("bot", {"text": txt, "rich": True})
+                shown = self._display_text(txt)
+                if shown:
+                    self._log_add("bot", {"text": shown, "rich": True})
+        if not self._log:
+            self._show_empty_hint()
+        self._stick = True
+        self._scroll_down(force=True)
         self._refresh_sidebar()
 
     def _on_close(self, *_):
@@ -2105,13 +3749,48 @@ class ChuckWindow(Adw.ApplicationWindow):
                 pass
         return False
 
-    # ── enter to send ──
+    # ── keyboard ──
     def _on_key(self, ctrl, keyval, keycode, state):
+        """Composer keys: Enter sends, Shift+Enter is a new line, Ctrl+V takes
+        an image or copied files as attachments."""
+        try:
+            if (state & Gdk.ModifierType.CONTROL_MASK) and Gdk.keyval_to_lower(keyval) == Gdk.KEY_v:
+                if self._paste():
+                    return True
+        except Exception:
+            pass
         if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) and not (state & Gdk.ModifierType.SHIFT_MASK):
             if self._running:
                 return False    # busy: let Enter insert a newline rather than vanish
             self.on_send()
             return True
+        return False
+
+    def _on_window_key(self, ctrl, keyval, keycode, state):
+        """Window shortcuts. Tab flips Agent/Chat; Ctrl+N/O/B/, are the usual
+        suspects; Escape stops a running turn."""
+        try:
+            mods = state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.ALT_MASK
+                            | Gdk.ModifierType.SHIFT_MASK)
+            ctrl_on = bool(state & Gdk.ModifierType.CONTROL_MASK)
+        except Exception:
+            return False
+        if keyval == Gdk.KEY_Tab and not mods:
+            self.toggle_mode()
+            return True
+        if keyval == Gdk.KEY_Escape and self._running:
+            self.stop_run()
+            return True
+        if ctrl_on:
+            k = Gdk.keyval_to_lower(keyval)
+            if k == Gdk.KEY_n:
+                self.new_chat(); return True
+            if k == Gdk.KEY_o:
+                self.open_workspace(); return True
+            if k == Gdk.KEY_b:
+                self.side_btn.set_active(not self.side_btn.get_active()); return True
+            if k == Gdk.KEY_comma:
+                self.open_settings(); return True
         return False
 
     # ── indicators ──
@@ -2168,27 +3847,43 @@ class ChuckWindow(Adw.ApplicationWindow):
         # flip Send → Stop
         self.send_btn.set_icon_name(_pick_icon("media-playback-stop-symbolic", "process-stop-symbolic"))
         self.send_btn.remove_css_class("send-fab"); self.send_btn.add_css_class("stop-fab")
-        self.send_btn.set_tooltip_text("Stop")
+        self.send_btn.set_tooltip_text("Stop  (Esc)")
         # show the "still working" ticker
         self.live.set_visible(True)
-        self.live.remove_css_class("live"); self.live.add_css_class("working")
+        self.spinner.set_visible(True)
+        try:
+            self.spinner.start()
+        except Exception:
+            pass
         self._tick(0)
         if not self._heartbeat_id:
             self._heartbeat_id = GLib.timeout_add(1000, self._heartbeat)
 
     def _end_run(self):
         self._running = False
+        self._thinking = False
         self.send_btn.set_icon_name(_pick_icon("go-up-symbolic", "pan-up-symbolic", "up-symbolic"))
         self.send_btn.remove_css_class("stop-fab"); self.send_btn.add_css_class("send-fab")
         self.send_btn.set_tooltip_text("Send  (Enter)")
         self.live.set_visible(False)
+        try:
+            self.spinner.stop()
+        except Exception:
+            pass
+        self.spinner.set_visible(False)
         if self._heartbeat_id:
             GLib.source_remove(self._heartbeat_id); self._heartbeat_id = 0
 
     def _tick(self, secs):
         s = int(secs)
-        what = "waiting for the model" if getattr(self, "_awaiting_first", False) else "working"
-        self.live.set_text(f"\u25CF {what}\u2026 {s}s   (press \u25A0 to stop)")
+        if getattr(self, "_thinking", False):
+            what = "thinking"
+        elif getattr(self, "_awaiting_first", False):
+            what = "waiting for the model"
+        else:
+            what = "working"
+        step = f"  \u00b7  step {self._steps + 1}" if self._steps else ""
+        self.live.set_text(f"{what}\u2026 {s}s{step}    Esc to stop")
 
     def _heartbeat(self):
         """Runs every second while a turn is active: updates the elapsed clock so
@@ -2262,10 +3957,14 @@ class ChuckWindow(Adw.ApplicationWindow):
         if not auto:
             self._sys_note("\u25A0 stopped.", "dim")
         # finalize whatever partial text exists so it isn't lost
+        if getattr(self, "_cont_prefix", None) is not None:
+            self._collapse_continuation(self._bot_text)
+            self.history.append({"role": "assistant", "content": self._bot_text})
         if self._bot_label is not None and self._bot_text:
-            shown = re.sub(r"```[a-z]*.*?```", "", self._bot_text, flags=re.DOTALL).strip()
+            shown = self._display_text(self._bot_text, partial=True)
             if shown:
                 self._set_bot_text(shown, rich=True)
+        self._thinking = False
         self._end_run()
 
     def _live(self, text):
@@ -2339,35 +4038,82 @@ class ChuckWindow(Adw.ApplicationWindow):
         GLib.idle_add(go)
 
     # ── bubbles ──
-    def _scroll_down(self):
+    def _scroll_down(self, force=False):
+        """Follow the newest output — but only while following. A user who has
+        scrolled up to read is left exactly where they are (the jump button
+        offers the way back); force=True is that way back, and what sending a
+        message does."""
+        if force:
+            self._stick = True
+            self._sync_jump()
+        if not self._stick:
+            return
+
         def go():
-            a = self.scroller.get_vadjustment(); a.set_value(a.get_upper())
+            try:
+                a = self.scroller.get_vadjustment()
+                a.set_value(max(0.0, a.get_upper() - a.get_page_size()))
+            except Exception:
+                pass
+            return False
         GLib.idle_add(go)
 
-    def _user_bubble(self, text, shot=False):
-        self._log_add("user", {"text": text, "shot": shot})
+    def _user_bubble(self, text, shot=False, files=None, images=None):
+        self._log_add("user", {"text": text, "shot": shot, "files": files or [],
+                               "images": images or []})
 
     def _bot_bubble(self, text=""):
-        e = self._log_add("bot", {"text": text, "rich": False})
+        model = (self.settings.get("model") or DEFAULT_MODEL).split("/")[-1]
+        cont = False
+        for prev in reversed(self._log):
+            if prev["kind"] == "user":
+                break
+            if prev["kind"] == "bot":
+                cont = True
+                break
+        e = self._log_add("bot", {"text": text, "rich": False, "meta": model, "cont": cont})
         self._bot_entry = e
         return e.get("label")
 
+    # Fenced blocks that are TOOLS (run, not shown) in each mode. In Chat mode
+    # code fences are just code, so ```bash renders as a copyable block.
+    _WEB_TAGS = "search|fetch|images|videos|video|remember|forget"
+    _CODE_TAGS = "python|py|node|javascript|js|bash|sh"
+
+    def _tool_tags(self):
+        tags = self._WEB_TAGS + "|" + "|".join(_AGENT_TAGS)
+        return tags + "|" + self._CODE_TAGS if self.agent_mode else tags
+
+    def _display_text(self, text, partial=False):
+        """A reply with its tool blocks removed: what the user reads. partial=
+        True also drops a tool block that is still open (mid-stream, or cut off
+        by the output cap) so half a command never flashes up as prose."""
+        if not text:
+            return ""
+        if "```" not in text:
+            return text.strip()
+        tags = self._tool_tags()
+        shown = re.sub(r"````(?:" + tags + r")(?![A-Za-z]).*?````", "", text, flags=re.DOTALL)
+        shown = re.sub(r"```(?:" + tags + r")(?![A-Za-z]).*?```", "", shown, flags=re.DOTALL)
+        if partial:
+            shown = re.sub(r"`{3,4}(?:" + tags + r")(?![A-Za-z])(?:(?!```).)*$", "",
+                           shown, flags=re.DOTALL)
+        return re.sub(r"\n{3,}", "\n\n", shown).strip()
+
     def _visible_stream_text(self):
-        """The narration to show mid-stream, with fenced tool blocks removed.
-        The `in` check short-circuits the regex entirely for the common case of
-        a reply that contains no tool blocks at all."""
-        txt = self._bot_text
-        if "```" not in txt:
-            return txt.strip()
-        shown = re.sub(r"```[a-z]*.*?```", "", txt, flags=re.DOTALL)
-        shown = re.sub(r"```[a-z]*\b.*$", "", shown, flags=re.DOTALL)  # open block
-        return shown.strip()
+        """The narration to show mid-stream, with tool blocks (closed or still
+        open) removed. Short-circuits for the common reply with no fences."""
+        return self._display_text(self._bot_text, partial=True)
 
     def _paint_stream(self):
         if self._cancelled or self._bot_label is None:
             return False
-        self._set_bot_text(self._visible_stream_text() or "Thinking\u2026")
-        self._scroll_down()
+        txt = self._visible_stream_text()
+        if txt:
+            self._set_bot_text(txt, rich=True)
+        else:
+            self._set_bot_text("Thinking…" if self._thinking or self._awaiting_first
+                               else "Working…")
         return False
 
     def _set_bot_text(self, text, rich=False):
@@ -2376,13 +4122,8 @@ class ChuckWindow(Adw.ApplicationWindow):
         if self._bot_entry is not None:
             self._bot_entry["data"]["text"] = text
             self._bot_entry["data"]["rich"] = rich
-        lbl = self._bot_label
-        if lbl is None:
-            return
-        if rich:
-            set_rich(lbl, text)
-        else:
-            lbl.set_text(text)
+        if self._bot_entry is not None and self._bot_entry.get("label") is not None:
+            self._render_bot(self._bot_entry)
 
     def _sys_note(self, text, css="dim"):
         self._log_add("note", {"text": text, "css": css})
@@ -2411,41 +4152,212 @@ class ChuckWindow(Adw.ApplicationWindow):
 
 
     # ── the meter ────────────────────────────────────────────────────────────
-    # Every turn re-sends the whole conversation, so an agent loop bills for the
-    # system prompt once per hop. That is invisible by default, which is how a
-    # cheap-looking chat quietly turns into a bill. This counts it and puts the
-    # number where you can see it.
+    # Every hop of an agent loop re-sends the conversation, so a chat bills for
+    # its prefix once per tool call. That is invisible by default, which is how
+    # a cheap-looking chat quietly turns into a bill. The meter counts what the
+    # API REPORTS (prompt, cache hits, completion, reasoning), prices it per
+    # model, and falls back to a labelled chars/4 estimate only when a response
+    # carried no usage block.
+
+    @staticmethod
+    def _blank_usage():
+        return {"prompt": 0, "completion": 0, "cached": 0, "reasoning": 0,
+                "calls": 0, "cost": 0.0, "estimated": 0, "unpriced": 0}
 
     @staticmethod
     def _est_tokens(chars):
-        """Rough token count. Deliberately an ESTIMATE, not a lie dressed as a
-        measurement: the real tokeniser lives server-side and differs per model.
-        Four characters per token is the usual rule of thumb for English plus
-        code, and it is close enough to steer decisions by."""
+        """Rough token count for a response with no usage block: four
+        characters per token, the usual rule of thumb."""
         return max(0, int(chars / 4))
 
-    def _meter(self, sent_chars=0, recv_chars=0):
-        self._tok_in += self._est_tokens(sent_chars)
-        self._tok_out += self._est_tokens(recv_chars)
-
-        def fmt(n):
-            return f"{n / 1000:.1f}k" if n >= 1000 else str(n)
-
-        def go():
-            sub = getattr(self, "_subtitle", None)
-            if sub is None:
-                return False
-            if not (self._tok_in or self._tok_out):
-                sub.set_text("Arch / CachyOS grandmaster \u00b7 1940\u20132026")
+    def _account(self, sent_chars, recv_chars, vision=False, usage=None, model=None):
+        """Book one model call into this chat's and this session's totals."""
+        u = usage if usage is not None else getattr(self.backend, "last_usage", None)
+        est = not u
+        if est:
+            u = {"prompt": self._est_tokens(sent_chars),
+                 "completion": self._est_tokens(recv_chars), "cached": 0, "reasoning": 0}
+        if model is None:
+            try:
+                model = self.backend.model(vision)
+            except Exception:
+                model = self.settings.get("model") or DEFAULT_MODEL
+        c = _pricing.cost(u, _pricing.price_for(model, self.settings))
+        for tot in (self._usage, self._session):
+            for k in ("prompt", "completion", "cached", "reasoning"):
+                tot[k] += int(u.get(k) or 0)
+            tot["calls"] += 1
+            tot["estimated"] += 1 if est else 0
+            if c is None:
+                tot["unpriced"] += 1
             else:
-                sub.set_text(f"\u2248 {fmt(self._tok_in)} in \u00b7 "
-                             f"{fmt(self._tok_out)} out \u00b7 this chat")
+                tot["cost"] += c
+        self._tok_in, self._tok_out = self._usage["prompt"], self._usage["completion"]
+        self._paint_meter()
+
+    def _meter(self, sent_chars=0, recv_chars=0):
+        """Compatibility shim: book an estimate-only call."""
+        if sent_chars or recv_chars:
+            self._account(sent_chars, recv_chars)
+        else:
+            self._paint_meter()
+
+    def _paint_meter(self):
+        def go():
+            lbl = getattr(self, "_meter_lbl", None)
+            if lbl is None:
+                return False
+            u = self._usage
+            tok = _pricing.fmt_tokens(u["prompt"] + u["completion"])
+            if not u["calls"]:
+                lbl.set_label("$0.00")
+            elif u["unpriced"] == u["calls"]:
+                lbl.set_label(f"{tok} tok")
+            else:
+                lbl.set_label(f"{_pricing.fmt_usd(u['cost'])}  ·  {tok}")
             return False
         GLib.idle_add(go)
 
     def _reset_meter(self):
+        self._usage = self._blank_usage()
         self._tok_in = self._tok_out = 0
-        self._meter()
+        self._paint_meter()
+
+    def set_model(self, mid):
+        mid = (mid or "").strip()
+        if not mid:
+            return
+        self.settings["model"] = mid
+        save_settings(self.settings)
+        self._update_subtitle()
+        try:
+            self._model_pop.popdown()
+        except Exception:
+            pass
+        self._toast(f"Model: {mid.split('/')[-1]}")
+
+    def _fill_model_popover(self):
+        """Quick model switch: the main models with their prices, the free tier,
+        and whatever was fetched from the account in Settings."""
+        cur = (self.settings.get("model") or DEFAULT_MODEL).strip().lower()
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        for m in ("top", "bottom", "start", "end"):
+            getattr(root, f"set_margin_{m}")(8)
+
+        def section(box, t):
+            l = Gtk.Label(label=t, xalign=0); l.add_css_class("set-section")
+            l.set_margin_start(8); l.set_margin_top(6); l.set_margin_bottom(2)
+            box.append(l)
+
+        def item(box, mid):
+            b = Gtk.Button(); b.add_css_class("pick-row")
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+            col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1, hexpand=True)
+            t = Gtk.Label(label=mid.split("/")[-1], xalign=0); t.add_css_class("pick-title")
+            pr = _pricing.PRICES.get(mid.lower())
+            sub = ("free" if _pricing.is_free(mid) else
+                   f"${pr[0]:g} in \u00b7 ${pr[2]:g} out per 1M" if pr else mid.split("/")[0])
+            if _pricing.sees_images(mid):
+                sub += "  \u00b7  sees images"
+            st = Gtk.Label(label=sub, xalign=0); st.add_css_class("pick-sub")
+            col.append(t); col.append(st)
+            row.append(col)
+            if mid.lower() == cur:
+                row.append(Gtk.Image.new_from_icon_name(_pick_icon("object-select-symbolic",
+                                                                   "emblem-ok-symbolic")))
+            b.set_child(row)
+            b.connect("clicked", lambda _b, x=mid: self.set_model(x))
+            box.append(b)
+
+        section(root, "MODELS")
+        for mid in _pricing.SUGGESTED:
+            item(root, mid)
+        section(root, "FREE")
+        for mid in _pricing.FREE:
+            item(root, mid)
+        known = [m.lower() for m in _pricing.SUGGESTED + _pricing.FREE]
+        extra = [m for m in (self.settings.get("fetched_models") or [])
+                 if isinstance(m, str) and m.lower() not in known]
+        if cur not in known and cur not in [m.lower() for m in extra]:
+            extra = [self.settings.get("model") or DEFAULT_MODEL] + extra
+        if extra:
+            section(root, "FROM YOUR ACCOUNT")
+            sw = Gtk.ScrolledWindow()
+            try:
+                sw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+                sw.set_max_content_height(220); sw.set_propagate_natural_height(True)
+            except Exception:
+                pass
+            inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            for mid in extra[:80]:
+                item(inner, mid)
+            sw.set_child(inner)
+            root.append(sw)
+        root.set_size_request(300, -1)
+        self._model_pop.set_child(root)
+
+    def _fill_usage_popover(self):
+        """The breakdown behind the meter: tokens by kind, what the model costs,
+        the session total, and the live account balance on request."""
+        u, ss = self._usage, self._session
+        model = self.settings.get("model") or DEFAULT_MODEL
+        price = _pricing.price_for(model, self.settings)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        for m in ("top", "bottom", "start", "end"):
+            getattr(box, f"set_margin_{m}")(14)
+        hdr = Gtk.Label(label="THIS CHAT", xalign=0); hdr.add_css_class("set-section")
+        box.append(hdr)
+        big = Gtk.Label(label=_pricing.fmt_usd(u["cost"]) if u["calls"] and
+                        u["unpriced"] < u["calls"] else "—", xalign=0)
+        big.add_css_class("usage-big")
+        box.append(big)
+        g = Gtk.Grid(column_spacing=18, row_spacing=6)
+        rows = [
+            ("Input", f"{_pricing.fmt_tokens(u['prompt'])}"
+                      + (f"  ({_pricing.fmt_tokens(u['cached'])} cached)" if u["cached"] else "")),
+            ("Output", f"{_pricing.fmt_tokens(u['completion'])}"
+                       + (f"  ({_pricing.fmt_tokens(u['reasoning'])} reasoning)"
+                          if u["reasoning"] else "")),
+            ("Model calls", str(u["calls"])),
+            ("Model", model.split("/")[-1]),
+            ("Price / 1M", (f"${price[0]:g} in · ${price[2]:g} out"
+                            + (f" · ${price[1]:g} cached" if price[1] is not None else ""))
+             if price else "unknown — set one in Settings"),
+            ("Session total", _pricing.fmt_usd(ss["cost"])
+             + f"  \u00b7  {ss['calls']} call{'' if ss['calls'] == 1 else 's'}"),
+        ]
+        for i, (k, v) in enumerate(rows):
+            kl = Gtk.Label(label=k, xalign=0); kl.add_css_class("usage-k")
+            vl = Gtk.Label(label=v, xalign=0, selectable=True); vl.add_css_class("usage-v")
+            g.attach(kl, 0, i, 1, 1); g.attach(vl, 1, i, 1, 1)
+        box.append(g)
+        if u["estimated"]:
+            n = Gtk.Label(label=f"{u['estimated']} call(s) estimated (no usage reported)",
+                          xalign=0, wrap=True)
+            n.add_css_class("set-hint"); box.append(n)
+        br = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        bl = Gtk.Label(label="Balance  " + (self._balance or "—"), xalign=0, hexpand=True)
+        bl.add_css_class("usage-k")
+        rb = Gtk.Button(label="Check"); rb.add_css_class("quick")
+
+        def check(_b):
+            bl.set_label("Balance  …")
+
+            def work():
+                ok, txt = _pricing.fetch_balance(self.backend.base(), self.backend.key(),
+                                                 opener=_config.api_opener())
+                if ok:
+                    self._balance = txt
+
+                def show():
+                    bl.set_label("Balance  " + txt)
+                    return False
+                GLib.idle_add(show)
+            threading.Thread(target=work, daemon=True).start()
+        rb.connect("clicked", check)
+        br.append(bl); br.append(rb)
+        box.append(br)
+        self._usage_pop.set_child(box)
 
     # ── card furniture ───────────────────────────────────────────────────────
     # Everything the MACHINE did is drawn as a card: a titled bar, the payload,
@@ -2587,6 +4499,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         except Exception:
             pass
         sw.set_child(body)
+        self._chain_scroll(sw, vertical=True)
 
         fold = Gtk.Button(label="hide")
         fold.add_css_class("ghost")
@@ -2701,7 +4614,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         dollar = Gtk.Label(label="$", xalign=0, valign=Gtk.Align.START)
         dollar.add_css_class("cmd-prompt")
         ct = Gtk.Label(label=cmd, xalign=0, wrap=True, selectable=True, hexpand=True)
-        ct.add_css_class("cmd-text")
+        ct.add_css_class("cmd-text"); _wrap_anywhere(ct)
         prompt.append(dollar); prompt.append(ct)
         cbody.append(prompt)
         status = self._pill("queued", "wait")
@@ -2723,9 +4636,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         if tier == "danger":
             wl = Gtk.Label(label="\u26a0 destructive \u2014 running it now", xalign=0)
             wl.add_css_class("danger"); foot.append(wl)
-        srow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
-                       halign=Gtk.Align.START)
-        srow.append(status); foot.append(srow)
+        head.insert_child_after(status, head.get_first_child())
         self._log_pin(card)
         self._run_now(cmd, status, sink=foot)
 
@@ -2967,16 +4878,16 @@ class ChuckWindow(Adw.ApplicationWindow):
                         "(a wrong/absent password or a sudoers policy); tell the user and "
                         "either wait for them or suggest they run it in a terminal.")
             if rc == 0:
-                return (f"RAN `{cmd}` \u2014 SUCCEEDED (exit 0). Real output:\n{out[:6000]}\n"
+                return (f"RAN `{cmd}` \u2014 SUCCEEDED (exit 0). Real output:\n{clip_output(out, 20000)}\n"
                         "Verify this output actually shows what you needed. If the whole task "
                         "is done, give the final answer; otherwise take the NEXT single step.")
-            return (f"RAN `{cmd}` \u2014 FAILED (exit {rc}). Real output:\n{out[:6000]}\n"
+            return (f"RAN `{cmd}` \u2014 FAILED (exit {rc}). Real output:\n{clip_output(out, 20000)}\n"
                     "Do NOT move on. Read the error, fix the cause, and either retry the "
                     "corrected command or explain why it can't work.")
         self._pending_tools += 1
         self._tool_thread(work, f"`{cmd[:40]}`")
 
-    def _code_card(self, lang, body):
+    def _code_card(self, lang, body, verified=False):
         """Run a code block Chuck wrote and report the real result.
 
         Same rule as commands: it executes. Only the CRITICAL tier waits for a
@@ -2990,8 +4901,12 @@ class ChuckWindow(Adw.ApplicationWindow):
         tier = classify_command(body)
 
         card, chead, cbody, foot = self._card_shell(lang.upper(), lambda: body)
+        if verified:
+            vt = Gtk.Label(label="\u2713 verified")
+            vt.add_css_class("verified")
+            chead.insert_child_after(vt, chead.get_first_child())
         ct = Gtk.Label(label=body, xalign=0, wrap=True, selectable=True)
-        ct.add_css_class("cmd-text"); cbody.append(ct)
+        ct.add_css_class("cmd-text"); _wrap_anywhere(ct); cbody.append(ct)
         status = self._pill("queued", "wait")
 
         if tier == "critical":
@@ -3016,9 +4931,8 @@ class ChuckWindow(Adw.ApplicationWindow):
         if tier == "danger":
             wl = Gtk.Label(label="\u26a0 destructive \u2014 running it now", xalign=0)
             wl.add_css_class("danger"); foot.append(wl)
-        srow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
-                       halign=Gtk.Align.START)
-        srow.append(status); foot.append(srow)
+        chead.insert_child_after(status, chead.get_last_child() if verified
+                                 else chead.get_first_child())
         self._log_pin(card)
         self._run_code_now(lang, body, status, sink=foot)
 
@@ -3052,9 +4966,9 @@ class ChuckWindow(Adw.ApplicationWindow):
                 return (f"COULD NOT RUN that {lang} \u2014 sudo authentication failed. {out}\n"
                         "Do NOT blindly retry. Root access is needed; tell the user.")
             if rc == 0:
-                return (f"RAN that {lang} \u2014 SUCCEEDED (exit 0). Real output:\n{out[:6000]}\n"
+                return (f"RAN that {lang} \u2014 SUCCEEDED (exit 0). Real output:\n{clip_output(out, 20000)}\n"
                         "Check the output is actually what you needed before moving on.")
-            return (f"RAN that {lang} \u2014 FAILED (exit {rc}). Real output:\n{out[:6000]}\n"
+            return (f"RAN that {lang} \u2014 FAILED (exit {rc}). Real output:\n{clip_output(out, 20000)}\n"
                     "Do NOT move on. Fix the cause and retry.")
         self._pending_tools += 1
         self._tool_thread(work, f"{lang} block")
@@ -3280,48 +5194,282 @@ class ChuckWindow(Adw.ApplicationWindow):
                     + text[:4000])
         self._tool_thread(work, "ledger")
 
+    _RANGE_RE = re.compile(r"^(.*?)(?::|\s+)(\d+)(?:\s*-\s*(\d+))?\s*$")
+
     def _do_read(self, path):
-        """Read a file from disk and feed its contents back into the run.
-        An image path is SHOWN in the chat rather than refused as binary.
-        A bare relative path resolves inside the open project first, so he can
-        read back a file he just wrote without knowing its absolute path."""
-        p = (path or "").strip()
-        if _builder and p and not p.startswith(("/", "~")):
-            proj = _builder.current_project()
-            if proj is not None:
-                ok, content = _builder.read_file(proj, p)
-                if ok:
-                    self._sys_note(f"\U0001F4C4 {proj.name}/{p}")
-                    self._tool_done(f"FILE {proj.name}/{p}:\n{content}")
-                    return
-        if _is_image_path(p):
-            full = os.path.expanduser(p)
-            if os.path.isfile(full):
-                self._sys_note(f"\U0001F5BC {os.path.basename(full)}")
-                self._image_bubble(full)
-                self._tool_done(f"[showed the image {p} to the user]")
-                return
-        self._sys_note(f"\U0001F4C4 reading {path}"); self._busy(True)
+        """Read a file (or a line range: ```read src/app.py:120-400```) and feed
+        it back into the run. Big files come back in pages with an exact
+        pointer to the next page, never silently cut. A directory is listed;
+        an image path is SHOWN in the chat. Relative paths resolve in the
+        working folder."""
+        spec = (path or "").strip().strip("'\"")
+        start = end = None
+        m = self._RANGE_RE.match(spec)
+        if m and not os.path.exists(os.path.expanduser(spec)):
+            spec, start, end = m.group(1).strip(), int(m.group(2)), (
+                int(m.group(3)) if m.group(3) else None)
+        root = self._workroot()
+        full = os.path.expanduser(spec)
+        if not os.path.isabs(full) and root is not None:
+            full = str(root / full)
+        if _is_image_path(spec) and os.path.isfile(full):
+            self._sys_note(f"\U0001F5BC {os.path.basename(full)}")
+            self._image_bubble(full)
+            self._tool_done(f"[showed the image {spec} to the user]")
+            return
+        rng = f":{start}-{end or ''}" if start else ""
+        self._sys_note(f"\U0001F4C4 read {spec}{rng}"); self._busy(True)
 
         def worker():
-            ok, content = read_file_safe(path)
+            if os.path.isfile(full) and _builder:
+                ok, content, footer = _builder.read_lines(full, start, end, label=spec)
+                if ok:
+                    content = f"FILE {spec}{rng}:\n{content}" + (f"\n{footer}" if footer else "")
+            else:
+                ok, content = read_file_safe(full)
+                if ok:
+                    content = f"FILE {spec}:\n{content[:48000]}"
 
             def show():
                 self._busy(False)
                 if not ok:
                     self._sys_note(content, "danger")
-                    self._tool_done(f"[read {path}: {content}]")
+                    self._tool_done(f"[read {spec}: {content}]")
                 else:
-                    self._tool_done(f"FILE {path}:\n{content[:24000]}")
+                    self._tool_done(content)
                 return False
             GLib.idle_add(show)
         threading.Thread(target=worker, daemon=True).start()
+
+    def _do_map(self):
+        """The repo map: every file with what it defines, in one cheap call."""
+        root = self._workroot()
+        if root is None or not _builder:
+            self._tool_done("[map: no working folder — pick one first (Ctrl+O) or open a project]")
+            return
+        self._sys_note(f"\U0001F5FA mapping {_short_path(root)}"); self._busy(True)
+
+        def work():
+            ok, out = _builder.repo_map(root)
+            return f"REPO MAP of {root}:\n{out}" if ok else f"[map failed: {out}]"
+        self._tool_thread(work, "repo map")
+
+    # ── sub-agents ──────────────────────────────────────────────────────────
+    def _sub_tools(self):
+        """The read-only toolbox a sub-agent gets — the same implementations
+        the main agent uses, minus anything that writes or executes."""
+        root = self._workroot()
+        n_src = self.cfg('research_sources', RESEARCH_MAX_SOURCES, 1, 10)
+        f_timeout = self.cfg('fetch_timeout', 6, 3, 30)
+
+        def search(q):
+            rows = web_search(q, n=max(4, n_src)) or []
+            return "\n".join(f"- {t}  {u}\n  {sn[:240]}" for t, u, sn in rows) or "no results"
+
+        def fetch(u):
+            return web_fetch(u.split()[0], timeout=f_timeout) or "(empty or unreachable)"
+
+        def read(spec):
+            spec = spec.strip().strip("'\"")
+            start = end = None
+            m = self._RANGE_RE.match(spec)
+            if m and not os.path.exists(os.path.expanduser(spec)):
+                spec, start = m.group(1).strip(), int(m.group(2))
+                end = int(m.group(3)) if m.group(3) else None
+            full = os.path.expanduser(spec)
+            if not os.path.isabs(full) and root is not None:
+                full = str(root / full)
+            if os.path.isdir(full):
+                return read_file_safe(full)[1]
+            ok, txt, foot = _builder.read_lines(full, start, end, max_chars=24000, label=spec)
+            return (txt + ("\n" + foot if foot else "")) if ok else txt
+
+        def grep(body):
+            r, sub, pat = self._grep_args(body)
+            if r is None:
+                return "no working folder"
+            return _builder.grep(r, pat, sub)[1]
+
+        def glob(pat):
+            return _builder.glob_files(root, pat)[1] if root else "no working folder"
+
+        def map_(_arg):
+            return _builder.repo_map(root, 12000)[1] if root else "no working folder"
+        return {"search": search, "fetch": fetch, "read": read, "grep": grep,
+                "glob": glob, "map": map_}
+
+    def _sub_call(self):
+        """A blocking model call for a sub-agent. Each gets its own Backend so
+        concurrent calls never overwrite each other's usage record."""
+        def call(messages):
+            b = Backend(self.settings) if isinstance(self.backend, Backend) else self.backend
+            out, err = [], []
+            b.stream(messages, out.append, lambda: None, err.append,
+                     should_stop=lambda: self._cancelled)
+            if err:
+                raise RuntimeError(err[0])
+            sent = sum(len(m.get("content") or "") for m in messages
+                       if isinstance(m.get("content"), str))
+            u, txt = getattr(b, "last_usage", None), "".join(out)
+            mdl = b.model() if hasattr(b, "model") else None
+            GLib.idle_add(lambda: (self._account(sent, len(txt), usage=u, model=mdl), False)[1])
+            self._note_progress()
+            return txt
+        return call
+
+    def _do_tasks(self, briefs):
+        """Fan briefs out to parallel sub-agents, show each one's progress live,
+        and hand the reports back as one tool result."""
+        rows = self._subagent_card(briefs)
+        n_par = self.cfg("subagents", 4, 1, 8)
+        steps = self.cfg("subagent_steps", 8, 2, 20)
+        ctx = _now_line() + (f"\nWorking folder: {self.workspace}" if self.workspace else "")
+        tools = self._sub_tools()
+        call = self._sub_call()
+        self._busy(True)
+
+        def one(i, brief):
+            GLib.idle_add(self._sub_update, rows[i], "running", "starting")
+
+            def ev(txt):
+                self._note_progress()
+                GLib.idle_add(self._sub_update, rows[i], "running", txt)
+            try:
+                rep = _agents.run_subagent(brief, call, tools, max_steps=steps, on_event=ev,
+                                           should_stop=lambda: self._cancelled, context=ctx)
+                GLib.idle_add(self._sub_update, rows[i], "done", "", rep)
+            except Exception as ex:
+                rep = f"(sub-agent failed: {ex})"
+                GLib.idle_add(self._sub_update, rows[i], "fail", str(ex)[:80], rep)
+            return rep
+
+        def work():
+            reports = _agents.run_parallel(briefs, one, max_workers=n_par)
+            parts = [f"### Sub-agent {i + 1}: {b.strip().splitlines()[0][:100]}\n{r}"
+                     for i, (b, r) in enumerate(zip(briefs, reports, strict=False))]
+            return ("SUB-AGENT REPORTS (they only read; nothing was changed):\n\n"
+                    + _clip_feedback(parts, 40000))
+        self._tool_thread(work, "sub-agents")
+
+    def _subagent_card(self, briefs):
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        card.add_css_class("cmd-card")
+        head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        head.add_css_class("card-head")
+        kl = Gtk.Label(label=f"SUB-AGENTS \u00b7 {len(briefs)} IN PARALLEL", xalign=0,
+                       hexpand=True)
+        kl.add_css_class("card-kind")
+        head.append(kl)
+        card.append(head)
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        body.add_css_class("card-body")
+        card.append(body)
+        rows = []
+        for i, brief in enumerate(briefs):
+            r = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            r.add_css_class("sub-row")
+            top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            mark = Gtk.Label(label="\u25cb"); mark.add_css_class("plan-box")
+            title = Gtk.Label(label=brief.strip().splitlines()[0][:140] if brief.strip()
+                              else f"task {i + 1}", xalign=0, hexpand=True)
+            title.add_css_class("sub-title")
+            try:
+                title.set_ellipsize(Pango.EllipsizeMode.END)
+            except Exception:
+                pass
+            pill = self._pill("queued", "wait")
+            top.append(mark); top.append(title); top.append(pill)
+            r.append(top)
+            act = Gtk.Label(label="", xalign=0); act.add_css_class("sub-act")
+            try:
+                act.set_ellipsize(Pango.EllipsizeMode.END)
+            except Exception:
+                pass
+            r.append(act)
+            exp = Gtk.Expander(label="Report"); exp.add_css_class("think")
+            rl = Gtk.Label(label="", xalign=0, wrap=True, selectable=True)
+            _wrap_anywhere(rl); rl.add_css_class("think-body"); rl.set_margin_top(4)
+            exp.set_child(rl); exp.set_visible(False)
+            r.append(exp)
+            body.append(r)
+            rows.append({"mark": mark, "pill": pill, "act": act, "exp": exp, "rep": rl})
+        self._log_pin(card)
+        return rows
+
+    def _sub_update(self, row, state, activity="", report=None):
+        if state == "running":
+            row["mark"].set_label("\u25b8"); self._set_status(row["pill"], "working", "run")
+            row["mark"].remove_css_class("plan-box"); row["mark"].add_css_class("plan-cur")
+        elif state == "done":
+            row["mark"].set_label("\u2713"); self._set_status(row["pill"], "done", "ok")
+            row["mark"].remove_css_class("plan-cur"); row["mark"].add_css_class("plan-tick")
+        elif state == "fail":
+            row["mark"].set_label("\u2717"); self._set_status(row["pill"], "failed", "fail")
+        row["act"].set_label(activity)
+        row["act"].set_visible(bool(activity))
+        if report is not None:
+            row["rep"].set_text(report[:20000])
+            row["exp"].set_visible(True)
+        return False
+
+    def _do_screenshot(self):
+        """Chuck looks at the screen: capture it, show it in the chat, and
+        attach it to his next request so he actually SEES what he built."""
+        self._sys_note("\U0001F4F7 looking at the screen"); self._busy(True)
+
+        def work():
+            path = _scratch_png(".see_")
+            if not capture_screen(path):
+                return ("[screenshot failed: no capture tool (grim/spectacle/scrot). For a web "
+                        "page use: chromium --headless --screenshot=/tmp/s.png --window-size=1280,800 URL, "
+                        "then ```look /tmp/s.png```]")
+            return self._see(path, "screen")
+        self._tool_thread(work, "screenshot")
+
+    def _do_look(self, path):
+        """Chuck looks at an image file — a rendered page, a plot, a mockup."""
+        spec = (path or "").strip().strip("'\"")
+        full = os.path.expanduser(spec)
+        root = self._workroot()
+        if not os.path.isabs(full) and root is not None:
+            full = str(root / full)
+        self._sys_note(f"\U0001F441 looking at {spec}"); self._busy(True)
+
+        def work():
+            if not os.path.isfile(full):
+                return f"[look: no such image: {spec}]"
+            return self._see(full, spec)
+        self._tool_thread(work, "look")
+
+    def _see(self, path, label):
+        pay = image_payload(path)
+        if not pay:
+            return f"[look: couldn't read {label} as an image]"
+        self._tool_images.append(pay)
+        GLib.idle_add(self._image_bubble, path)
+        return (f"[IMAGE of {label} is attached to this message \u2014 look at it carefully and "
+                "say what you see before deciding the next step]")
+
+    def _do_glob(self, pattern):
+        root = self._workroot()
+        if root is None or not _builder:
+            self._tool_done("[glob: no working folder — pick one first]")
+            return
+        pattern = (pattern or "").strip().splitlines()[0] if (pattern or "").strip() else ""
+        self._sys_note(f"\U0001F50E files matching {pattern}"); self._busy(True)
+
+        def work():
+            ok, out = _builder.glob_files(root, pattern)
+            return f"GLOB {pattern}:\n{out}" if ok else f"[glob failed: {out}]"
+        self._tool_thread(work, "glob")
 
     def _do_check(self, lang, body, run_after=False):
         """Verify code (syntax+lint+security+tests). On clean: optionally show a
         Run card. On issues: feed the report back so Chuck fixes it — the card
         is withheld until the code is clean, so bad code never reaches a button."""
-        self._sys_note(f"\U0001F50D verifying {lang}\u2026", "dim"); self._busy(True)
+        if not run_after:
+            self._sys_note(f"\U0001F50D verifying {lang}\u2026", "dim")
+        self._busy(True)
 
         def worker():
             try:
@@ -3334,7 +5482,8 @@ class ChuckWindow(Adw.ApplicationWindow):
             def show():
                 self._busy(False)
                 if clean:
-                    self._sys_note("\u2713 " + rep.split("\n")[0].lstrip("\u2713 "), "ok")
+                    if not run_after:
+                        self._sys_note("\u2713 " + rep.split("\n")[0].lstrip("\u2713 "), "ok")
                     # Advisory findings no longer block the Run button, so they
                     # have to be VISIBLE — otherwise demoting them would just be
                     # hiding them. The user sees them next to the card.
@@ -3342,7 +5491,7 @@ class ChuckWindow(Adw.ApplicationWindow):
                     for a in adv[:4]:
                         self._sys_note("\u26a0 " + a, "danger")
                     if run_after:
-                        self._code_card(lang, body)
+                        self._code_card(lang, body, verified=res is not None)
                     self._tool_done(f"[verify {lang}: clean]" +
                                     (" advisories: " + "; ".join(adv[:4]) if adv else ""))
                 else:
@@ -3362,29 +5511,49 @@ class ChuckWindow(Adw.ApplicationWindow):
 
     # ── building things ────────────────────────────────────────────────────
     def _project_or_note(self):
+        """The folder file tools work in: the session's working folder, else
+        the open project, else a fresh 'scratch' project (which then becomes
+        the working folder, so commands run where the files are)."""
         if not _builder:
             self._sys_note("builder unavailable", "danger")
             return None
-        p = _builder.current_project()
+        p = self._workroot()
         if p is None:
             p, _ = _builder.project_open("scratch")
-            self._sys_note(f"\U0001F4C1 working in project '{p.name}'", "dim")
+            self.set_workspace(p, announce=False)
+            self._sys_note(f"\U0001F4C1 working in {_short_path(p)}", "dim")
         return p
 
     def _do_project(self, name):
+        """Open (or create) a project under ~/ChuckProjects and make it the
+        working folder — one notion of 'where we are', not two."""
         if not _builder:
             return
         p, created = _builder.project_open(name)
+        self.set_workspace(p, announce=False)
         self._sys_note(f"\U0001F4C1 project '{p.name}' "
-                       f"({'created' if created else 'opened'}) \u2014 {p}", "ok")
+                       f"({'created' if created else 'opened'}) \u2014 {_short_path(p)}", "ok")
         others = [n for n, _c in _builder.project_list() if n != p.name]
         extra = f" Other projects: {', '.join(others[:6])}." if others else ""
         self._tool_feedback.append(
-            f"[project '{p.name}' ready at {p}. Write files with ```write <relpath>```.{extra}]")
+            f"[project '{p.name}' ready at {p} and is now the working folder. "
+            f"Write files with ```write <relpath>```.{extra}]")
+
+    def _verify_file(self, rel, content):
+        """Verify a code file that was just written or edited. Returns None if
+        clean (or not code), else the report to hand back."""
+        lang = {".py": "python", ".sh": "bash", ".js": "js"}.get(Path(rel).suffix, None)
+        if not (lang and _codecheck):
+            return None
+        try:
+            res = _codecheck.check(lang, content)
+        except Exception:
+            return None
+        return None if res.get("ok") else _codecheck.report(res)
 
     def _do_write(self, rel, content):
-        """Write one complete file into the project — and verify it if it's code,
-        so a broken file never sits silently in a deliverable."""
+        """Write one complete file into the working folder — and verify it if
+        it's code, so a broken file never sits silently in a deliverable."""
         p = self._project_or_note()
         if p is None:
             return
@@ -3393,22 +5562,133 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._sys_note("\u2717 " + msg, "danger")
             self._tool_feedback.append(f"[write failed: {msg}]")
             return
-        note = msg
-        lang = {".py": "python", ".sh": "bash", ".js": "js"}.get(Path(rel).suffix, None)
-        if lang and _codecheck:
-            try:
-                res = _codecheck.check(lang, content)
-                if not res.get("ok"):
-                    self._sys_note(f"\u26a0 {rel}: verification found issues", "danger")
-                    self._tool_feedback.append(
-                        f"[wrote {rel} BUT it does not verify — fix it and write it again:\n"
-                        + _codecheck.report(res) + "]")
-                    return
-                note += "  \u2713 verified"
-            except Exception:
-                pass
+        bad = self._verify_file(rel, content)
+        if bad:
+            self._sys_note(f"\u26a0 {rel}: verification found issues", "danger")
+            self._tool_feedback.append(
+                f"[wrote {rel} BUT it does not verify — fix it and write it again:\n{bad}]")
+            return
+        note = msg + ("  \u2713 verified" if Path(rel).suffix in (".py", ".sh", ".js")
+                      and _codecheck else "")
         self._sys_note("\u2713 " + note, "ok")
         self._tool_feedback.append(f"[{note}]")
+
+    def _do_edit(self, rel, blocks):
+        """Apply SEARCH/REPLACE edits to one file — the cheap way to change an
+        existing file: only the changed lines are sent, not the whole file."""
+        p = self._project_or_note()
+        if p is None:
+            return
+        rel = rel.strip()
+        ok, msg = _builder.edit_file(p, rel, blocks)
+        if not ok:
+            self._sys_note("\u2717 " + msg, "danger")
+            self._tool_feedback.append(f"[edit failed, nothing was changed: {msg}]")
+            return
+        try:
+            content = (p / rel).read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            content = ""
+        bad = self._verify_file(rel, content)
+        if bad:
+            self._sys_note(f"\u26a0 {rel}: edited, but it no longer verifies", "danger")
+            self._tool_feedback.append(
+                f"[{msg}, BUT the file no longer verifies — fix it:\n{bad}]")
+            return
+        self._sys_note("\u2713 " + msg, "ok")
+        self._tool_feedback.append(f"[{msg}]")
+
+    def _grep_args(self, body):
+        """```grep <regex> [path]``` -> (root, sub, pattern). The last word is a
+        path when it exists (inside the working folder, or absolute)."""
+        body = (body or "").strip().splitlines()[0] if (body or "").strip() else ""
+        root, sub, pattern = self._workroot(), "", body
+        parts = body.rsplit(None, 1)
+        if len(parts) == 2:
+            last = os.path.expanduser(parts[1].strip("'\""))
+            if last.startswith("/") and os.path.exists(last):
+                root, sub, pattern = Path(last), "", parts[0]
+            elif root is not None and (root / last).exists():
+                sub, pattern = last, parts[0]
+        if len(pattern) > 2 and pattern[0] == pattern[-1] and pattern[0] in "'\"":
+            pattern = pattern[1:-1]
+        return root, sub, pattern.strip()
+
+    def _do_grep(self, body):
+        """Regex search: ```grep <regex> [path]```. Searches the working folder
+        (or an absolute path given as the last word). Read-only, so several can
+        run in one reply."""
+        root, sub, pattern = self._grep_args(body)
+        if root is None:
+            self._tool_done("[grep: no working folder — pick one, or give an absolute path "
+                            "as the last word]")
+            return
+        if not pattern:
+            self._tool_done("[grep: no pattern given]")
+            return
+        self._sys_note(f"\U0001F50E grep /{pattern}/ in {_short_path(root / sub if sub else root)}")
+        self._busy(True)
+
+        def work():
+            ok, out = _builder.grep(root, pattern, sub)
+            return f"GREP /{pattern}/ {sub or '.'}:\n{out}" if ok else f"[grep failed: {out}]"
+        self._tool_thread(work, "grep")
+
+    def _do_plan(self, body, nudge=False):
+        """A live checklist for multi-step work. Re-posting it updates the same
+        card in place, so the user watches steps tick off instead of reading a
+        new list each time."""
+        items = []
+        for line in (body or "").splitlines():
+            m = re.match(r"^\s*(?:[-*+]|\d+[.)])?\s*\[([ xX~>])\]\s*(.+)$", line)
+            if m:
+                items.append(("x" if m.group(1) in "xX" else
+                              ">" if m.group(1) in "~>" else " ", m.group(2).strip()))
+            elif line.strip() and not line.strip().startswith("#"):
+                items.append((" ", re.sub(r"^\s*(?:[-*+]|\d+[.)])\s*", "", line).strip()))
+        items = items[:20]
+        if not items:
+            return
+        e = self._plan_entry
+        if e is not None and e in self._log:
+            e["data"]["items"] = items
+            if e["w"] is not None:
+                e["w"] = None
+                self._apply_window()
+        else:
+            self._plan_entry = self._log_add("plan", {"items": items})
+        left = sum(1 for st, _t in items if st != "x")
+        if nudge and left:
+            nxt = next(t for st, t in items if st != "x")
+            self._tool_feedback.append(f"[plan noted: {len(items) - left}/{len(items)} done. "
+                                       f"Do the next step now: {nxt}]")
+
+    def _build_plan(self, items):
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        card.add_css_class("plan-card")
+        done = sum(1 for st, _t in items if st == "x")
+        hd = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        hl = Gtk.Label(label="PLAN", xalign=0, hexpand=True); hl.add_css_class("plan-head")
+        cl = Gtk.Label(label=f"{done}/{len(items)}"); cl.add_css_class("plan-head")
+        hd.append(hl); hd.append(cl)
+        card.append(hd)
+        cur_marked = False
+        for st, t in items:
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+            now = st == ">" or (st == " " and not cur_marked)
+            if st == "x":
+                ic, ic_css, tx_css = "\u2713", "plan-tick", "plan-done"
+            elif now:
+                ic, ic_css, tx_css = "\u25b8", "plan-cur", "plan-now"
+                cur_marked = True
+            else:
+                ic, ic_css, tx_css = "\u25cb", "plan-box", "plan-todo"
+            il = Gtk.Label(label=ic); il.add_css_class(ic_css); il.set_valign(Gtk.Align.START)
+            tl = Gtk.Label(label=t, xalign=0, wrap=True, hexpand=True)
+            _wrap_anywhere(tl); tl.add_css_class(tx_css)
+            row.append(il); row.append(tl)
+            card.append(row)
+        return card
 
     def _do_rmfile(self, rel):
         p = self._project_or_note()
@@ -3423,8 +5703,8 @@ class ChuckWindow(Adw.ApplicationWindow):
         if p is None:
             return
         t = _builder.tree(p)
-        self._sys_note(f"\U0001F5C2 {p.name}\n{t}", "mono")
-        self._tool_feedback.append(f"[project tree of {p.name}:\n{t}]")
+        self._sys_note(f"\U0001F5C2 {_short_path(p)}\n{t}", "mono")
+        self._tool_feedback.append(f"[file tree of {p}:\n{t}]")
 
     def _do_runtests(self):
         """Run the project's own tests and feed the REAL result back."""
@@ -3445,11 +5725,11 @@ class ChuckWindow(Adw.ApplicationWindow):
                                     "then run them]")
                 elif rc == 0:
                     self._sys_note("\u2713 tests passed", "ok")
-                    self._tool_done(f"[project tests PASSED:\n{out[-2000:]}]")
+                    self._tool_done(f"[project tests PASSED:\n{clip_output(out, 6000)}]")
                 else:
                     self._sys_note(f"\u2717 tests failed (exit {rc})", "danger")
                     self._tool_done(f"[project tests FAILED (exit {rc}). Fix the code and run "
-                                    f"them again:\n{out[-4000:]}]")
+                                    f"them again:\n{clip_output(out, 20000)}]")
                 return False
             GLib.idle_add(show)
         threading.Thread(target=worker, daemon=True).start()
@@ -3478,47 +5758,205 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._log_pin(card)
         self._tool_feedback.append(f"[{msg}. The user has it at {zpath}.]")
 
-    # ── screenshot / attach ──
+    # ── attachments: files, pasted images, screenshots ──────────────────────
+    # Everything the user hands over lands in a tray above the composer first —
+    # visible, removable — and goes with the next message. Images travel to
+    # the model as IMAGES (it sees them); text files as their contents; any
+    # other file as its path, so in Agent mode Chuck can still work with it.
+    ATT_TEXT_MAX = 400_000
+
+    def add_attachment(self, path, display_name=None):
+        path = os.path.expanduser(str(path))
+        name = display_name or os.path.basename(path)
+        if not os.path.isfile(path):
+            self._toast(f"Not a file: {name}")
+            return False
+        if any(a["path"] == path for a in self._attachments):
+            return False
+        if _is_image_path(path):
+            pay = image_payload(path)
+            if not pay:
+                self._toast(f"Couldn't read image {name}")
+                return False
+            self._attachments.append({"kind": "image", "name": name, "path": path,
+                                      "b64": pay[0], "mime": pay[1]})
+        else:
+            try:
+                size = os.path.getsize(path)
+                with open(path, "rb") as fh:
+                    head = fh.read(min(size, self.ATT_TEXT_MAX * 4))
+            except OSError as ex:
+                self._toast(f"Couldn't read {name}: {ex.strerror or ex}")
+                return False
+            if b"\x00" in head[:8192]:
+                self._attachments.append({"kind": "path", "name": name, "path": path,
+                                          "size": size})
+            else:
+                text = head.decode("utf-8", "replace")
+                cut = len(text) > self.ATT_TEXT_MAX or size > len(head)
+                self._attachments.append({"kind": "text", "name": name, "path": path,
+                                          "text": text[:self.ATT_TEXT_MAX], "cut": cut,
+                                          "size": size})
+        self._refresh_tray()
+        return True
+
+    def _remove_attachment(self, att):
+        try:
+            self._attachments.remove(att)
+        except ValueError:
+            pass
+        self._refresh_tray()
+
+    def _refresh_tray(self):
+        tray = getattr(self, "_tray", None)
+        if tray is None:
+            return
+        c = tray.get_first_child()
+        while c:
+            n = c.get_next_sibling(); tray.remove(c); c = n
+        for att in self._attachments:
+            chip = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            chip.add_css_class("att-chip")
+            if att["kind"] == "image":
+                try:
+                    pic, _pb = _pic_from_file(att["path"], 28, 28)
+                    pic.add_css_class("att-thumb")
+                    chip.append(pic)
+                except Exception:
+                    chip.append(Gtk.Image.new_from_icon_name(_pick_icon("image-x-generic-symbolic")))
+            else:
+                chip.append(Gtk.Image.new_from_icon_name(_pick_icon(
+                    "text-x-generic-symbolic" if att["kind"] == "text" else "package-x-generic-symbolic",
+                    "document-open-symbolic")))
+            nl = Gtk.Label(label=att["name"])
+            try:
+                nl.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+                nl.set_max_width_chars(22)
+            except Exception:
+                pass
+            nl.add_css_class("att-name")
+            chip.append(nl)
+            x = Gtk.Button(icon_name=_pick_icon("window-close-symbolic", "edit-delete-symbolic"))
+            x.add_css_class("ghost")
+            x.set_tooltip_text("Remove")
+            x.connect("clicked", lambda _b, a=att: self._remove_attachment(a))
+            chip.append(x)
+            tray.append(chip)
+        tray.set_visible(bool(self._attachments))
+        self._sync_placeholder()
+
     def on_screenshot(self, *_):
-        self._sys_note("\U0001F4F7 capturing your screen\u2026")
+        """Capture the screen into the tray, after the window gets out of the
+        way for a moment so it isn't the main thing in the picture."""
+        self._toast("Capturing the screen\u2026")
 
         def worker():
-            b64 = screenshot_to_b64()
+            time.sleep(0.4)
+            path = _scratch_png(".att_shot-")
+            ok = capture_screen(path)
 
             def done():
-                if b64:
-                    self.pending_shot = b64
-                    self._sys_note("Screen captured \u2014 type what to look at, then Send.")
+                if ok:
+                    self.add_attachment(path, "screenshot.png")
                 else:
-                    self._sys_note("No screenshot tool found (need grim / spectacle / scrot).")
+                    try:
+                        os.unlink(path)
+                    except OSError:
+                        pass
+                    self._toast("No screenshot tool found (install grim, spectacle or scrot)")
+                return False
             GLib.idle_add(done)
         threading.Thread(target=worker, daemon=True).start()
 
     def on_attach(self, *_):
         try:
-            Gtk.FileDialog().open(self, None, self._on_file_chosen)
-        except Exception as ex:
-            self._sys_note(f"couldn't open file picker: {ex}")
+            fd = Gtk.FileDialog()
+            fd.set_title("Attach files")
+            if self.workspace:
+                fd.set_initial_folder(Gio.File.new_for_path(str(self.workspace)))
+            fd.open_multiple(self, None, self._on_files_chosen)
+        except Exception:
+            try:
+                Gtk.FileDialog().open(self, None, self._on_file_chosen)
+            except Exception as ex:
+                self._toast(f"Couldn't open the file picker: {ex}")
+
+    def _on_files_chosen(self, dialog, res):
+        try:
+            files = dialog.open_multiple_finish(res)
+        except Exception:
+            return
+        for i in range(files.get_n_items() if files else 0):
+            f = files.get_item(i)
+            if f is not None and f.get_path():
+                self.add_attachment(f.get_path())
 
     def _on_file_chosen(self, dialog, res):
         try:
             path = dialog.open_finish(res).get_path()
         except Exception:
             return
-        if not path:
-            return
+        if path:
+            self.add_attachment(path)
+
+    def _paste(self):
+        """Ctrl+V: an image on the clipboard (a screenshot tool's copy, an image
+        copied from a browser) or files copied in a file manager become
+        attachments. Returns True if it took the paste; plain text falls
+        through to the composer as usual."""
         try:
-            if os.path.getsize(path) > 200_000:
-                self._sys_note("file too large (>200 KB) \u2014 point me at it with a command instead.")
-                return
-            data = Path(path).read_bytes()
-            if b"\x00" in data[:4096]:
-                self._sys_note("that looks binary \u2014 I read text files.")
-                return
-            self.pending_file = (os.path.basename(path), data.decode("utf-8", "ignore")[:180_000])
-            self._sys_note(f"attached {os.path.basename(path)} \u2014 type what to do with it, then Send.")
-        except Exception as ex:
-            self._sys_note(f"couldn't read file: {ex}")
+            cb = self.get_clipboard()
+            fmts = cb.get_formats()
+        except Exception:
+            return False
+        try:
+            if fmts.contain_gtype(Gdk.FileList.__gtype__):
+                def got_files(c, res):
+                    try:
+                        val = c.read_value_finish(res)
+                        for f in val.get_files():
+                            if f.get_path():
+                                self.add_attachment(f.get_path())
+                    except Exception:
+                        pass
+                cb.read_value_async(Gdk.FileList.__gtype__, GLib.PRIORITY_DEFAULT, None,
+                                    got_files)
+                return True
+        except Exception:
+            pass
+        try:
+            if fmts.contain_gtype(Gdk.Texture.__gtype__) and not fmts.contain_mime_type(
+                    "text/plain"):
+                def got_tex(c, res):
+                    try:
+                        tex = c.read_texture_finish(res)
+                        path = _scratch_png(".att_paste-")
+                        tex.save_to_png(path)
+                        self.add_attachment(path, "pasted-image.png")
+                    except Exception as ex:
+                        self._toast(f"Couldn't paste the image: {ex}")
+                cb.read_texture_async(None, got_tex)
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _on_drop(self, _target, value, _x, _y):
+        """Files dragged in from a file manager (or an image from a browser)."""
+        try:
+            if isinstance(value, Gdk.FileList):
+                n = 0
+                for f in value.get_files():
+                    if f.get_path() and self.add_attachment(f.get_path()):
+                        n += 1
+                return n > 0
+            if isinstance(value, Gdk.Texture):
+                path = _scratch_png(".att_drop-")
+                value.save_to_png(path)
+                return self.add_attachment(path, "dropped-image.png")
+        except Exception:
+            return False
+        return False
 
     # ── send / model ──
     def _get_entry(self):
@@ -3527,36 +5965,65 @@ class ChuckWindow(Adw.ApplicationWindow):
 
     def on_send(self, *_):
         text = self._get_entry()
-        if not text and not self.pending_shot and not self.pending_file:
-            return
-        self.entry.get_buffer().set_text("")
-        self._hops = 0
-        self._seen_queries = []; self._seen_urls = set(); self._dead_urls = set()
-        self._forced_answer = False
-        self._start_run()
-        shot = self.pending_shot
+        # legacy single-slot attachments (kept for anything that still sets them)
         if self.pending_file:
             fname, fbody = self.pending_file
-            disp = (text or f"Look at {fname}.") + f"  \U0001F4CE {fname}"
-            text = (text or "Look at this file.") + f"\n\n--- attached file: {fname} ---\n{fbody}\n--- end ---"
+            self._attachments.append({"kind": "text", "name": fname, "path": fname,
+                                      "text": fbody, "cut": False, "size": len(fbody)})
             self.pending_file = None
-            self._user_bubble(disp)
-            self.history.append({"role": "user", "content": text}); self._ask_model(); return
-        if shot:
-            self._user_bubble(text or "(look at this)", shot=True)
-            vmsg = {"role": "user", "content": [
-                {"type": "text", "text": text or "What's wrong on my screen?"},
-                {"type": "image_url", "image_url": {"url": "data:image/png;base64," + shot}}]}
-            msgs = self.history + [vmsg]
-            self.history.append({"role": "user",
-                                 "content": (text or "What's wrong on my screen?") + " [screenshot]"})
+        if self.pending_shot:
+            self._attachments.append({"kind": "image", "name": "screenshot.png", "path": "",
+                                      "b64": self.pending_shot, "mime": "image/png"})
             self.pending_shot = None
-            self._stream_into_bubble(msgs, vision=True)
-        else:
-            self._user_bubble(text)
-            self.history.append({"role": "user", "content": text}); self._ask_model()
+        atts = list(self._attachments)
+        if not text and not atts:
+            return
+        self.entry.get_buffer().set_text("")
+        self._attachments = []
+        self._refresh_tray()
+        self._hops = 0
+        self._steps = 0
+        self._step_forced = False
+        self._plan_entry = None
+        self._reset_continuation()
+        self._seen_queries = []; self._seen_urls = set(); self._dead_urls = set()
+        self._forced_answer = False
+        self._scroll_down(force=True)       # you asked: you see the answer
+        self._start_run()
+
+        images = [a for a in atts if a["kind"] == "image"]
+        if not text:
+            text = ("What's in this image?" if images and len(atts) == 1 else
+                    "Look at the attached file(s).")
+        body = text
+        for a in atts:
+            if a["kind"] == "text":
+                note = (f" (first {len(a['text']):,} characters of {a['size']:,} — the "
+                        f"full file is at {a['path']})" if a.get("cut") else "")
+                body += (f"\n\n--- attached file: {a['name']}{note} ---\n{a['text']}"
+                         "\n--- end ---")
+            elif a["kind"] == "path":
+                body += (f"\n\n[attached file: {a['path']} ({a['size']:,} bytes, binary) \u2014 "
+                         "work with it by path]")
+            else:
+                body += f"\n[image attached: {a['name']}]"
+        self._user_bubble(text, files=[a["name"] for a in atts if a["kind"] != "image"],
+                          images=[a["path"] for a in images if a.get("path")])
+        self.history.append({"role": "user", "content": body})
+        # Images ride with THIS request only; history keeps the text, so a
+        # picture is paid for once instead of on every later hop.
+        self._tool_images = [(a["b64"], a["mime"]) for a in images]
+        self._ask_model()
 
     def _ask_model(self, vision=False):
+        imgs, self._tool_images = list(self._tool_images), []
+        last = self.history[-1] if self.history else None
+        if imgs and last and last.get("role") == "user" and isinstance(last.get("content"), str):
+            vmsg = {"role": "user", "content": [{"type": "text", "text": last["content"]}] + [
+                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
+                for b64, mime in imgs[:6]]}
+            self._stream_into_bubble(self.history[:-1] + [vmsg], vision=True)
+            return
         self._stream_into_bubble(self.history, vision=vision)
 
     def cfg(self, key, default, lo=None, hi=None, cast=int):
@@ -3590,12 +6057,13 @@ class ChuckWindow(Adw.ApplicationWindow):
         # tail and any error lines are kept verbatim, nothing is paraphrased.
         if _compress is not None:
             messages, saved = _compress.compress_history(
-                messages, keep_recent=2, budget_chars=3000)
+                messages, keep_recent=4, budget_chars=4000)
             if saved > 2000:
-                self._sys_note(f"\u2702 trimmed {saved // 1000}k chars of older tool "
+                self._sys_note(f"✂ trimmed {saved // 1000}k chars of older tool "
                                "output to save context", "dim")
         sys_msgs = [m for m in messages if m.get("role") == "system"]
         rest = [m for m in messages if m.get("role") != "system"]
+        budget = self.cfg("context_chars", SEND_CHAR_BUDGET, 40000, 800000)
         kept, used, blobs = [], 0, 0
         for m in reversed(rest):
             c = m.get("content")
@@ -3605,18 +6073,39 @@ class ChuckWindow(Adw.ApplicationWindow):
                 if blobs > TOOL_BLOBS_KEPT:
                     continue        # stale research — already digested
             size = len(c) if isinstance(c, str) else 2000
-            if kept and used + size > SEND_CHAR_BUDGET:
+            if kept and used + size > budget:
                 break
             kept.append(m)
             used += size
         kept.reverse()
         return sys_msgs + kept
 
+    def _workspace_note(self):
+        """One compact line about the working folder: where it is and what is at
+        its top level. Enough for the model to orient without spending a tool
+        call on `ls`, and capped so a huge folder costs no more than a small one."""
+        root = self.workspace
+        if not root or not root.is_dir():
+            return ""
+        try:
+            names = sorted(os.listdir(root), key=lambda n: (not (root / n).is_dir(), n.lower()))
+        except OSError:
+            return f"Working folder: {root}"
+        skip = {".git", "__pycache__", "node_modules", ".venv", "venv", ".mypy_cache",
+                ".ruff_cache", ".pytest_cache", ".idea", ".vscode", "dist", "build"}
+        shown = [n + ("/" if (root / n).is_dir() else "") for n in names
+                 if n not in skip and not n.startswith(".")][:40]
+        more = len(names) - len(shown)
+        tail = f" (+{more} more)" if more > 0 else ""
+        return (f"Working folder: {root} (commands run here; relative paths resolve here).\n"
+                f"Top level: {', '.join(shown) or '(empty)'}{tail}")
+
     def _augment(self, messages):
-        """Return messages + an EPHEMERAL system note (fresh date/time, saved-skill
-        index, and any on-demand specs the task triggers). Not saved to history —
-        rebuilt every call so 'today' is always right and deep specs cost tokens
-        only when relevant."""
+        """Return messages + an EPHEMERAL system note (fresh date/time, working
+        folder, relevant memory, skill index, and any playbooks the task
+        triggers). Not saved to history — rebuilt every call so 'today' is
+        always right, and appended LAST so the long stable prefix before it
+        stays cacheable on the API side."""
         # Scan the last few REAL user turns (skip our own TOOL RESULTS / "I ran"
         # injections) so the right playbook stays loaded all through a research
         # loop, not just on the first hop.
@@ -3626,27 +6115,34 @@ class ChuckWindow(Adw.ApplicationWindow):
                 break
             if m.get("role") == "user" and isinstance(m.get("content"), str):
                 c = m["content"]
-                if c.startswith(("TOOL RESULTS", "I ran ", "FILE ")):
+                if c.startswith(("TOOL RESULTS", "I ran ", "FILE ", "RESEARCH BUDGET",
+                                 "STEP BUDGET")):
                     continue
                 scan.append(c)
         task_text = "\n".join(scan)
         note = [_now_line()]
+        if self.agent_mode:
+            ws = self._workspace_note()
+            if ws:
+                note.append(ws)
         # relevance-scoped memory: a few relevant facts + core, never the store
         mem_added = False
         if _memory and task_text:
-            block = _memory.memory_block(task_text)
+            block = _memory.memory_block(
+                task_text, str(self.workspace) if self.workspace else "")
             if block:
                 note.append(block); mem_added = True
-        if _skills:
+        if _skills and self.agent_mode:
             idx = _skills.skills_index_line()
             if idx:
                 note.append(idx)
         specs_added = False
-        if _specs and task_text:
-            for _label, spec in _specs.specs_for(task_text):
+        if _specs and task_text and self.agent_mode:
+            # At most TWO playbooks. Broad triggers ("fix", "file", "script")
+            # used to stack four or five of them — several thousand characters
+            # re-sent on every hop of the turn.
+            for _label, spec in _specs.specs_for(task_text)[:2]:
                 note.append(spec); specs_added = True
-        # Only spend tokens on an ephemeral note if it carries more than the base
-        # (date is cheap and always worth it; specs/memory/skills when present).
         if len(note) == 1 and not (specs_added or mem_added):
             ephemeral = {"role": "system", "content": note[0]}
         else:
@@ -3660,53 +6156,95 @@ class ChuckWindow(Adw.ApplicationWindow):
             # A throw here used to escape into the GTK signal handler, leaving the
             # button stuck on Stop and the turn half-dead — which is why a failed
             # first message could take several tries to recover from.
-            self._sys_note(f"\u26a0 couldn't start that turn: {ex}", "danger")
+            self._sys_note(f"⚠ couldn't start that turn: {ex}", "danger")
             self._busy(False)
             self._end_run()
 
     def _stream_into_bubble_inner(self, messages, vision=False):
         self._bot_text = ""
-        self._bot_label = self._bot_bubble("Thinking\u2026")
+        self._think_text = ""
+        self._thinking = False
+        self._think_t0 = 0.0
+        self._think_secs = 0
+        if self._cont_prefix is not None and self._bot_entry is not None \
+                and self._bot_entry in self._log:
+            # continuing a reply that hit the output limit: same message, same text
+            self._bot_text = self._cont_prefix
+        else:
+            self._bot_label = self._bot_bubble("Thinking\u2026")
         self._busy(True)
         self._awaiting_first = True     # nothing back from the model yet
         self._last_paint = 0.0
         self._note_progress()
-        send_msgs = self._augment(messages) if not vision else messages
-        self._meter(sent_chars=sum(len(m.get("content") or "") for m in send_msgs
-                                   if isinstance(m.get("content"), str)))
+        send_msgs = self._augment(messages)
+        sent_chars = sum(len(m.get("content") or "") for m in send_msgs
+                         if isinstance(m.get("content"), str))
+        self._last_vision = vision
+
+        def on_think(chunk):
+            # Reasoning tokens. They are progress — a model can think for well
+            # over the first-token budget — so they feed the watchdog, and they
+            # are kept (folded away) under the reply rather than thrown out.
+            if self._cancelled:
+                return
+            if not self._thinking:
+                self._think_t0 = time.time()
+            self._thinking = True
+            self._awaiting_first = False
+            self._note_progress()
+            if len(self._think_text) < 60000:
+                self._think_text += chunk
+
+        try:
+            self.backend.on_think = on_think
+        except Exception:
+            pass
 
         def on_delta(chunk):
             if self._cancelled:
                 return
             self._awaiting_first = False
+            if self._thinking:
+                self._thinking = False
+                self._think_secs = int(time.time() - self._think_t0)
             self._note_progress()
             self._bot_text += chunk
-            # Repainting on EVERY token meant a full label re-layout per token
-            # (~1000 for one reply) plus a regex pass over the whole accumulated
-            # text each time — quadratic, and the visible lag on long answers.
-            # Coalesce to a steady refresh instead: nobody can read faster than
-            # this, and the final text is always flushed in _finalise.
+            # Repainting on EVERY token meant a full re-layout per token plus a
+            # regex pass over the whole reply each time — quadratic, and the
+            # visible lag on long answers. Coalesce to a steady refresh; the
+            # final text is always flushed in _finalise.
             now = time.monotonic()
             if now - self._last_paint < _STREAM_REPAINT:
                 return
             self._last_paint = now
             GLib.idle_add(self._paint_stream)
 
-
-
         def on_done():
             self._awaiting_first = False
             self._busy(False)
+            recv = len(self._bot_text or "") + len(self._think_text or "")
+            GLib.idle_add(lambda: (self._account(sent_chars, recv, vision), False)[1])
             if self._cancelled:
                 return
             GLib.idle_add(self._finalise)
 
         def on_error(msg):
             self._awaiting_first = False
+            self._thinking = False
             self._busy(False)
             if self._cancelled:
                 return
-            GLib.idle_add(self._set_bot_text, "\u26a0 " + msg)
+            if self._cont_prefix is not None:
+                partial = self._cont_prefix
+
+                def keep():
+                    self._collapse_continuation(partial)
+                    self.history.append({"role": "assistant", "content": partial})
+                    return False
+                GLib.idle_add(keep)
+                GLib.idle_add(self._sys_note, "\u26a0 " + msg, "danger")
+            else:
+                GLib.idle_add(self._set_bot_text, "\u26a0 " + msg)
             GLib.idle_add(self._end_run)
 
         threading.Thread(
@@ -3716,13 +6254,77 @@ class ChuckWindow(Adw.ApplicationWindow):
                     "on_open": self._note_progress},
             daemon=True).start()
 
+    _CONTINUE_MSG = ("CONTINUE: your previous message was cut off by the output limit. "
+                     "Continue EXACTLY from its last character: no repetition, no preamble, "
+                     "do not reopen a code block that is already open.")
+    MAX_CONTINUES = 12
+
+    def _reset_continuation(self):
+        self._cont_prefix = None       # the reply so far, while it is being continued
+        self._cont_hist_at = None      # history index where its pieces begin
+        self._continues = 0
+
+    @staticmethod
+    def _join_overlap(prefix, piece):
+        """Glue a continuation on, dropping any stretch the model repeated
+        from the end of what it had already written."""
+        top = min(len(prefix), len(piece), 400)
+        for k in range(top, 11, -1):
+            if prefix.endswith(piece[:k]):
+                return prefix + piece[k:]
+        return prefix + piece
+
+    def _continue_if_cut(self, text):
+        """A reply that hit max_tokens is CONTINUED, not abandoned: the partial
+        is kept, the model is asked to carry on from the exact character, and
+        the pieces are stitched into one reply before any tool is parsed. This
+        is what lets a ```write``` of a 3,000-line file land intact — before,
+        the block never closed and the file was silently never written.
+        Returns True if a continuation was started."""
+        if getattr(self.backend, "last_finish", None) != "length":
+            return False
+        if self._continues >= self.MAX_CONTINUES:
+            return False
+        prev = self._cont_prefix or ""
+        piece = text[len(prev):] if text.startswith(prev) else text
+        if self._cont_hist_at is None:
+            self._cont_hist_at = len(self.history)
+        self.history.append({"role": "assistant", "content": piece})
+        self.history.append({"role": "user", "content": self._CONTINUE_MSG})
+        self._cont_prefix = text
+        self._continues += 1
+        self._live(f"continuing a long reply ({self._continues})\u2026")
+        GLib.idle_add(self._ask_model)
+        return True
+
+    def _collapse_continuation(self, text):
+        """Replace the pieces + CONTINUE prompts with the one stitched reply."""
+        if self._cont_hist_at is not None:
+            del self.history[self._cont_hist_at:]
+        self._reset_continuation()
+
     def _finalise(self):
-        self._meter(recv_chars=len(self._bot_text or ""))
         if self._cancelled:
             return False
         self._note_progress()
+        self._thinking = False
         text = self._bot_text
+        if self._cont_prefix is not None:
+            # stitch: what streamed after the prefix is the continuation
+            piece = text[len(self._cont_prefix):]
+            text = self._join_overlap(self._cont_prefix, piece)
+            self._bot_text = text
+        if self._continue_if_cut(text):
+            return False
+        if self._cont_prefix is not None:
+            self._collapse_continuation(text)
         self.history.append({"role": "assistant", "content": text})
+        if self._think_text and self._bot_entry is not None:
+            self._bot_entry["data"]["think"] = self._think_text
+            self._bot_entry["data"]["think_secs"] = self._think_secs or (
+                int(max(0, time.time() - self._think_t0)) if self._think_t0 else 0)
+        # still cut off after every continuation we allow
+        truncated = getattr(self.backend, "last_finish", None) == "length"
 
         def grab(tag):
             # (?![A-Za-z]) stops ```video from also matching ```videos blocks,
@@ -3748,22 +6350,39 @@ class ChuckWindow(Adw.ApplicationWindow):
         skill_blocks = grab("skill")[:CAP]      # save a smart file
         runskills = grab("runskill")[:CAP]      # run a saved smart file
         reads = grab("read")[:CAP]              # read a file from disk by path
+        greps = grab("grep")[:CAP]              # regex search in the working folder
+        globs = grab("glob")[:CAP]              # find files by pattern
+        briefs = grab("task")[:8]               # parallel read-only sub-agents
+        shots = has("screenshot")               # see the screen
+        looks = grab("look")[:3]                # see an image file
+        maps = has("map")                       # the repo map: files + what they define
+        plans = grab("plan")[-1:]               # the live checklist (latest wins)
         remembers = grab("remember")[:CAP]      # store a durable fact
         forgets = grab("forget")[:CAP]          # prune a fact
-        # ```check lang\n<code>``` — verify code WITHOUT running it (syntax+lint+
-        # security+optional tests); feeds the report back so Chuck fixes it.
         projects = grab("project")[:2]        # open / switch a build workspace
         trees = has("tree")                    # show what's been built
         rmfiles = grab("rmfile")[:4]           # remove a file from the project
         packages = has("package")              # zip the project and hand it over
         runtests = has("runtests")             # run the project's own tests
         ledger_req = has("ledger")             # show the command record + verify it
-        writes = []                            # ```write <relpath>\n<content>```
+        # ```write <relpath>\n<content>``` and ```edit <relpath>\n<blocks>```.
         # The path may sit on the same line as the tag or on the line below it —
-        # accept both, so the parser can never disagree with the prompt.
-        for m in re.finditer(r"```write[ \t]*(?:\n[ \t]*)?([^\n`]+)\n(.*?)```", text, re.DOTALL):
+        # accept both, so the parser can never disagree with the prompt. A file
+        # that itself contains ``` fences (a README) comes wrapped in FOUR
+        # backticks; those are parsed first and blanked so the inner fences
+        # can't be mistaken for the end of the block.
+        writes, edits = [], []
+        rest = text
+        for tag, sink in (("write", writes), ("edit", edits)):
+            for m in re.finditer(r"````" + tag + r"[ \t]*(?:\n[ \t]*)?([^\n`]+)\n(.*?)\n?````",
+                                 rest, re.DOTALL):
+                sink.append((m.group(1).strip(), m.group(2)))
+            rest = re.sub(r"````" + tag + r"\b.*?````", "", rest, flags=re.DOTALL)
+        for m in re.finditer(r"```write[ \t]*(?:\n[ \t]*)?([^\n`]+)\n(.*?)```", rest, re.DOTALL):
             writes.append((m.group(1).strip(), m.group(2)))
-        writes = writes[:12]
+        for m in re.finditer(r"```edit[ \t]*(?:\n[ \t]*)?([^\n`]+)\n(.*?)```", rest, re.DOTALL):
+            edits.append((m.group(1).strip(), m.group(2)))
+        writes, edits = writes[:12], edits[:12]
         checks = []
         for m in re.finditer(r"```check[ \t]+([a-z0-9+]+)[ \t]*\n(.*?)```", text,
                              re.DOTALL | re.IGNORECASE):
@@ -3777,16 +6396,26 @@ class ChuckWindow(Adw.ApplicationWindow):
         code_hits = []
         for lang in ("python", "py", "node", "javascript", "js", "bash", "sh"):
             for m in re.finditer(r"```" + lang + r"(?![A-Za-z])[ \t]*\n?(.*?)```",
-                                 text, re.DOTALL):
+                                 rest, re.DOTALL):
                 cbody = m.group(1).strip()
                 if cbody:
                     code_hits.append((m.start(), lang, cbody))
         code_hits.sort(key=lambda t: t[0])
         codes = [(lang, body) for _pos, lang, body in code_hits]   # (lang, body)
-        # ONE runnable thing per reply. A wall of ten cards is unusable — the
-        # user can't run ten commands at once, and each one's output changes
-        # what the next should be. He proposes a step, sees the result, then
-        # proposes the next.
+
+        blocked_agent = False
+        if not self.agent_mode:
+            # Chat mode: nothing touches the machine. Code fences are just code
+            # (they stay in the reply); agent-only tools are dropped.
+            blocked_agent = bool(skill_blocks or runskills or reads or greps or plans
+                                 or projects or trees or rmfiles or packages or runtests
+                                 or ledger_req or writes or edits or checks or junk
+                                 or globs or maps or shots or looks or briefs)
+            codes, skill_blocks, runskills, reads, greps, plans = [], [], [], [], [], []
+            globs, maps, shots, looks, briefs = [], False, False, [], []
+            projects, rmfiles, writes, edits, checks = [], [], [], [], []
+            trees = packages = runtests = ledger_req = junk = False
+
         # ONE runnable command per turn — across EVERY source of them.
         # The cap used to apply to ```bash``` blocks only, so a reply with five
         # ```runskill``` blocks launched five commands at once. Each took a
@@ -3803,20 +6432,24 @@ class ChuckWindow(Adw.ApplicationWindow):
         skill_blocks = [v for k, v in keep if k == "skill"]
         runskills = [v for k, v in keep if k == "runskill"]
 
-        disp = re.sub(
-            r"```(?:search|fetch|images|videos|video|junk|skill|runskill|read|"
-            r"ledger|remember|forget|check|project|tree|package|runtests|write|rmfile|"
-            r"python|py|node|javascript|js|bash|sh)\b.*?```",
-            "", text, flags=re.DOTALL).strip()
+        disp = self._display_text(text, partial=True)
         if self._forced_answer:
             # he was told to answer from what he has — ignore any further research
             searches, fetches = [], []
+        if self._step_forced:
+            # told to wrap up: no more actions this turn, only the summary
+            codes, skill_blocks, runskills, writes, edits, checks = [], [], [], [], [], []
+            runtests = packages = junk = False
         acting = bool(searches or fetches or images or vid_searches or videos or junk
-                      or skill_blocks or runskills or reads or codes or checks
-                      or projects or writes or trees or packages or runtests or rmfiles
-                      or ledger_req)
+                      or skill_blocks or runskills or reads or greps or codes or checks
+                      or projects or writes or edits or trees or packages or runtests
+                      or rmfiles or ledger_req or plans or globs or maps or shots or looks
+                      or briefs)
         # Chuck's own narration is what shows in chat — never swallow it.
-        self._set_bot_text(disp or ("Working on it\u2026" if acting else "Done."), rich=True)
+        self._set_bot_text(disp or ("Working on it…" if acting else "Done."), rich=True)
+        if blocked_agent:
+            self._sys_note("Chat mode is on — nothing was run. Press Tab for Agent "
+                           "mode to let Chuck act.", "dim")
 
         # ── ONE owner for the tool counter ───────────────────────────────────
         # Reset FIRST, then count the whole turn, then dispatch. Two bugs lived
@@ -3836,6 +6469,15 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._loop_web = (searches, fetches) if (searches or fetches) else None
         self._dispatching = True
 
+        if truncated:
+            # The reply hit max_tokens. If it was mid-block, the block never
+            # closed and its tool silently never ran — say so, both ways.
+            self._sys_note("✂ the reply hit the output limit and was cut off", "danger")
+            self._tool_feedback.append(
+                "[Your last reply was CUT OFF by the output token limit. Anything after "
+                "the cut did not happen. Continue from there; split a large file into "
+                "smaller ```write``` / ```edit``` steps.]")
+
         # skills: save any new smart files, then offer run cards. These go
         # through _command_card, which counts itself — hence: after the reset.
         for blk in skill_blocks:
@@ -3847,9 +6489,15 @@ class ChuckWindow(Adw.ApplicationWindow):
         # the run or enter the loop).
         if _memory:
             for fact in remembers:
-                ok, _msg = _memory.remember(fact.strip())
+                fact = fact.strip()
+                scope = ""
+                if fact.lower().startswith("project:"):
+                    fact = fact[8:].strip()
+                    scope = str(self.workspace) if self.workspace else ""
+                ok, msg = _memory.remember(fact, scope=scope)
                 if ok:
-                    self._sys_note("\U0001F9E0 remembered", "dim")
+                    self._sys_note("\U0001F9E0 " + ("updated memory" if msg == "updated"
+                                                    else "remembered"), "dim")
             for q in forgets:
                 _memory.forget(q.strip())
                 self._sys_note("\U0001F9E0 forgot that", "dim")
@@ -3861,13 +6509,23 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._pending_tools += (
             (1 if runtests else 0) + len(checks) + len(images)
             + len(vid_searches) + (1 if junk else 0) + len(reads)
-            + (1 if ledger_req else 0)
+            + (1 if ledger_req else 0) + len(greps) + len(globs) + (1 if maps else 0)
+            + (1 if shots else 0) + len(looks) + (1 if briefs and _agents else 0)
             + (len(codes) if _codecheck else 0))
 
+        plan_only = bool(plans) and not (
+            searches or fetches or images or vid_searches or videos or junk or skill_blocks
+            or runskills or reads or greps or codes or checks or projects or writes or edits
+            or trees or packages or runtests or rmfiles or ledger_req or globs or maps
+            or shots or looks or briefs)
+        for body in plans:
+            self._do_plan(body, nudge=plan_only)
         for nm in projects:
             self._do_project(nm.strip())
         for rel, body in writes:
             self._do_write(rel, body)
+        for rel, body in edits:
+            self._do_edit(rel, body)
         for rel in rmfiles:
             self._do_rmfile(rel.strip())
         if trees:
@@ -3899,6 +6557,18 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._do_ledger()
         for path in reads:
             self._do_read(path.strip())
+        for body in greps:
+            self._do_grep(body)
+        for pat in globs:
+            self._do_glob(pat)
+        if maps:
+            self._do_map()
+        if briefs and _agents:
+            self._do_tasks(briefs)
+        if shots:
+            self._do_screenshot()
+        for pth in looks:
+            self._do_look(pth)
         for u in videos:                     # fire-and-forget download; not gated
             self._do_video(u)
 
@@ -3920,8 +6590,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         # While _finalise is still handing out work, "zero outstanding" only
         # means "nothing outstanding YET" — the turn is not over.
         if self._pending_tools == 0 and not getattr(self, "_dispatching", False):
-            self._continue_or_finish(self._bot_text and
-                                     re.sub(r"```.*?```", "", self._bot_text, flags=re.DOTALL).strip())
+            self._continue_or_finish(self._display_text(self._bot_text or ""))
 
     def _continue_or_finish(self, disp):
         if self._cancelled:
@@ -3950,12 +6619,26 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._sys_note("⏹ research budget spent — answering from what he has", "dim")
             GLib.idle_add(self._ask_model)
             return
-        if feedback and self._hops < hop_cap:
-            self._hops += 1
+        # Agent steps have their OWN budget. They used to share the research
+        # cap (4 by default), so a task needing a fifth command simply stopped
+        # mid-way with no summary — an agent that quits on step five is not an
+        # agent. Steps are cheap to allow and the watchdog still guards hangs.
+        step_cap = self.cfg('agent_steps', 25, 4, 80)
+        if feedback and self._steps < step_cap:
+            self._steps += 1
             self.history.append({"role": "user",
                                  "content": "TOOL RESULTS (continue — don't stop until the whole "
                                  "task is done, then give your final answer):\n\n"
-                                 + "\n\n".join(feedback)[:12000]})
+                                 + _clip_feedback(feedback)})
+            GLib.idle_add(self._ask_model)
+            return
+        if feedback and not self._step_forced:
+            self._step_forced = True
+            self.history.append({"role": "user", "content":
+                                 "STEP BUDGET SPENT — take no more actions. Results of the last "
+                                 "step:\n" + "\n\n".join(feedback)[:6000] + "\n\nNow give the final "
+                                 "report: what is done, what is left, and the exact next step."})
+            self._sys_note(f"⏹ step budget ({step_cap}) spent — wrapping up", "dim")
             GLib.idle_add(self._ask_model)
             return
 
@@ -4141,239 +6824,350 @@ class ChuckWindow(Adw.ApplicationWindow):
 
     # ── settings ──
     def open_settings(self, *_):
-        dlg = Adw.Window(transient_for=self, modal=True, title="Settings",
-                         default_width=600, default_height=680)
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        for m in ("top", "bottom", "start", "end"):
-            getattr(box, f"set_margin_{m}")(16)
-        hb = Adw.HeaderBar(); wrap = Adw.ToolbarView()
-        wrap.add_top_bar(hb); wrap.set_content(Gtk.ScrolledWindow(child=box, vexpand=True))
-        dlg.set_content(wrap)
+        """Native preferences: every change applies the moment it is made and is
+        saved a beat later. There is no Save button to forget to press."""
+        S = self.settings
+        if hasattr(Adw, "PreferencesDialog"):
+            dlg = Adw.PreferencesDialog()
+            present = lambda: dlg.present(self)
+        else:                                            # libadwaita < 1.5
+            dlg = Adw.PreferencesWindow(transient_for=self, modal=True)
+            present = dlg.present
+        dlg.set_title("Settings")
+        try:
+            dlg.set_search_enabled(True)
+        except Exception:
+            pass
+        pending = {"id": 0, "net": False}
 
-        def section(title):
-            lb = Gtk.Label(label=title, xalign=0)
-            lb.add_css_class("set-section"); lb.set_margin_top(14); box.append(lb)
+        def commit():
+            pending["id"] = 0
+            save_settings(S)
+            if pending["net"]:
+                pending["net"] = False
+                _config.network_settings_changed()
+            return False
 
-        def field(label, widget, hint=None):
-            lb = Gtk.Label(label=label, xalign=0); lb.add_css_class("set-label")
-            box.append(lb); box.append(widget)
-            if hint:
-                h = Gtk.Label(label=hint, xalign=0, wrap=True); h.add_css_class("set-hint")
-                box.append(h)
-            return widget
+        def changed(key, value, net=False):
+            if S.get(key) == value:
+                return
+            S[key] = value
+            pending["net"] = pending["net"] or net
+            if pending["id"]:
+                GLib.source_remove(pending["id"])
+            pending["id"] = GLib.timeout_add(350, commit)
 
-        def slider(lo, hi, step, value, digits=0):
-            sc = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, lo, hi, step)
-            sc.set_value(value); sc.set_draw_value(True); sc.set_digits(digits)
-            sc.set_hexpand(True)
-            return sc
+        def page(title, icon):
+            pg = Adw.PreferencesPage()
+            pg.set_title(title)
+            pg.set_icon_name(_pick_icon(icon, "preferences-system-symbolic"))
+            dlg.add(pg)
+            return pg
 
-        section("Model \u00b7 account")
-        key = field("SiliconFlow API key",
-                    Gtk.Entry(text=self.settings.get("siliconflow_api_key", ""),
-                              visibility=False, placeholder_text="sk-\u2026"),
-                    "cloud.siliconflow.com/account/ak \u2014 Basilisk's key is reused if present.")
-        model = field("Chat model", Gtk.Entry(text=self.settings.get("model", DEFAULT_MODEL)))
-        baseurl = field("API base URL",
-                        Gtk.Entry(text=self.settings.get("siliconflow_base_url", "") or "",
-                                  placeholder_text=DEFAULT_BASE),
-                        "Leave blank for the default endpoint.")
-        vmodel = field("Vision model",
-                       Gtk.Entry(text=self.settings.get("vision_model", DEFAULT_VISION)))
-        temp = field("Temperature",
-                     slider(0.0, 1.2, 0.05,
-                            self.cfg("temperature", 0.35, 0.0, 1.2, float), 2),
-                     "Lower is more literal and repeatable \u2014 better for shell work "
-                     "and code. Higher loosens him up. 0.35 is the tuned default.")
+        def group(pg, title, desc=None):
+            g = Adw.PreferencesGroup()
+            g.set_title(_html.escape(title))         # these are markup
+            if desc:
+                g.set_description(_html.escape(desc))
+            pg.add(g)
+            return g
 
-        section("Voice")
-        tts_on = Gtk.CheckButton(label="Read replies aloud")
-        tts_on.set_active(bool(self.settings.get("tts", True)))
-        box.append(tts_on)
-        eng = Gtk.DropDown.new_from_strings(
-            ["auto (Piper, else espeak-ng)", "piper only", "espeak-ng only"])
-        eng.set_selected({"auto": 0, "piper": 1, "espeak": 2}.get(
-            (self.settings.get("voice_engine") or "auto").lower(), 0))
-        field("Engine", eng)
-        speed = field("Speed",
-                      slider(0.5, 2.0, 0.05, float(self.settings.get("voice_speed", 1.0)), 2),
-                      "1.00 is normal. Higher is faster.")
-        pitch = field("Pitch (espeak-ng only)",
-                      slider(0, 99, 1, int(self.settings.get("voice_pitch", 28))))
-        pmodel = field("Piper voice model (optional)",
-                       Gtk.Entry(text=self.settings.get("piper_model", "") or "",
-                                 placeholder_text="/path/to/voice.onnx"),
-                       "Blank uses the voice the installer set up.")
-        vmax = field("Max characters read aloud per reply",
-                     slider(2000, 40000, 1000,
-                            self.cfg("voice_max_chars", 20000, 2000, 40000)))
+        def entry(g, title, key, default="", password=False, after=None, net=False):
+            r = Adw.PasswordEntryRow() if password else Adw.EntryRow()
+            r.set_title(_html.escape(title))
+            r.set_text(str(S.get(key, default) or ""))
 
-        section("Research \u00b7 speed")
-        src = field("Sources read per answer",
-                    slider(1, 10, 1, self.cfg("research_sources", RESEARCH_MAX_SOURCES, 1, 10)),
-                    "Fewer sources = faster answers. 3 is the tuned default.")
-        qs = field("Searches per round",
-                   slider(1, 4, 1, self.cfg("research_queries", RESEARCH_QUERIES, 1, 4)))
-        hops = field("Research depth (rounds)",
-                     slider(1, 8, 1, self.cfg("research_hops", MAX_TOOL_HOPS, 1, 8)),
-                     "Search\u2192read\u2192think rounds allowed before he must answer.")
-        ftmo = field("Page fetch timeout (seconds)",
-                     slider(3, 30, 1, self.cfg("fetch_timeout", 6, 3, 30)))
+            def on(_r):
+                v = r.get_text().strip()
+                changed(key, v, net)
+                if after:
+                    after(v)
+            r.connect("changed", on)
+            g.add(r)
+            return r
 
-        section("Chats")
-        ttl = field("Auto-delete saved chats after (hours)",
-                    slider(1, 168, 1, self.cfg("chat_ttl_hours", CHAT_TTL_HOURS, 1, 720)),
-                    "Counted from your last activity in a chat, not from when it started.")
+        def spin(g, title, key, lo, hi, step, default, digits=0, sub=None, after=None):
+            r = Adw.SpinRow.new_with_range(lo, hi, step)
+            r.set_title(_html.escape(title))
+            if sub:
+                r.set_subtitle(_html.escape(sub))
+            r.set_digits(digits)
+            try:
+                cur = float(S.get(key, default))
+            except Exception:
+                cur = float(default)
+            r.set_value(max(lo, min(hi, cur)))
 
-        section("Appearance")
-        fsz = field("Chat text size",
-                    slider(9, 28, 1, self.cfg("font_size", FONT_SIZE, 9, 28)),
-                    "Applies the moment you hit Save \u2014 no restart.")
+            def on(*_a):
+                v = r.get_value()
+                v = round(v, digits) if digits else int(round(v))
+                changed(key, v)
+                if after:
+                    after(v)
+            r.connect("notify::value", on)
+            g.add(r)
+            return r
 
-        section("Performance")
-        rkeep = field("Messages kept in memory",
-                      slider(4, 100, 1, self.cfg("render_keep", RENDER_KEEP, 4, 200)),
-                      "Older messages are unloaded and rebuilt only if you scroll back to them.")
-        rpage = field("Messages loaded per scroll-up",
-                      slider(5, 100, 5, self.cfg("render_page", RENDER_PAGE, 5, 200)))
+        def switch(g, title, key, default, sub=None, after=None, net=False):
+            r = Adw.SwitchRow()
+            r.set_title(_html.escape(title))
+            if sub:
+                r.set_subtitle(_html.escape(sub))
+            r.set_active(bool(S.get(key, default)))
 
-        section("Network \u00b7 privacy")
-        searx = field("Preferred SearXNG instance (optional)",
-                      Gtk.Entry(text=self.settings.get("searx_url", ""),
-                                placeholder_text="https://searx.example.org  (blank = built-in list)"),
-                      "Search fans out over SearXNG (Brave + Google + DDG), DuckDuckGo as fallback.")
-        proxy = field("Proxy (optional)",
-                      Gtk.Entry(text=self.settings.get("proxy", ""),
-                                placeholder_text="http://host:port"))
-        proxy_api = Gtk.CheckButton(
-            label="Send the model API through the proxy as well")
-        proxy_api.set_active(bool(self.settings.get("proxy_api", True)))
-        box.append(proxy_api)
-        pah = Gtk.Label(
-            label="On by default. With this off, page fetches are proxied but your "
-                  "prompts still leave over the bare connection \u2014 which is almost "
-                  "certainly not what setting a proxy was meant to do.",
-            xalign=0, wrap=True)
-        pah.add_css_class("set-hint"); box.append(pah)
-        wcache = field("Reuse fetched pages for (seconds)",
-                       slider(0, 600, 15, self.cfg("web_cache_seconds", 90, 0, 600)),
-                       "Re-reading the same URL inside this window costs nothing. "
-                       "0 disables it and every read hits the network again.")
+            def on(*_a):
+                changed(key, bool(r.get_active()), net)
+                if after:
+                    after(bool(r.get_active()))
+            r.connect("notify::active", on)
+            g.add(r)
+            return r
 
-        section("Code verifier")
+        # ── Model & pricing ──
+        pg = page("Model", "applications-science-symbolic")
+        g = group(pg, "Account", "SiliconFlow keys live at cloud.siliconflow.com/account/ak. "
+                                 "Basilisk's key is reused if present. Stored 0600.")
+        entry(g, "API key", "siliconflow_api_key", password=True,
+              after=lambda _v: self._hint is not None and self._show_empty_hint())
+        entry(g, "API base URL (blank = default)", "siliconflow_base_url")
+        bal = Adw.ActionRow()
+        bal.set_title("Account balance")
+        bal.set_subtitle(self._balance or "not checked")
+        bb = Gtk.Button(label="Check"); bb.add_css_class("quick"); bb.set_valign(Gtk.Align.CENTER)
+
+        def check_balance(_b):
+            bal.set_subtitle("checking…")
+
+            def work():
+                ok, txt = _pricing.fetch_balance(self.backend.base(), self.backend.key(),
+                                                 opener=_config.api_opener())
+                if ok:
+                    self._balance = txt
+                GLib.idle_add(lambda: (bal.set_subtitle(txt), False)[1])
+            threading.Thread(target=work, daemon=True).start()
+        bb.connect("clicked", check_balance)
+        bal.add_suffix(bb)
+        g.add(bal)
+
+        g = group(pg, "Model")
+        model_row = entry(g, "Chat model", "model", DEFAULT_MODEL,
+                          after=lambda _v: (self._update_subtitle(), refresh_marks()))
+        entry(g, "Vision model (screenshots)", "vision_model", DEFAULT_VISION)
+
+        g = group(pg, "Models & pricing",
+                  "SiliconFlow list prices per 1M tokens, October 2026 — input / output "
+                  "(cached input where published). Click one to use it.")
+        marks = {}
+
+        def refresh_marks():
+            cur = (S.get("model") or DEFAULT_MODEL).strip().lower()
+            for mid, img in marks.items():
+                img.set_visible(mid.lower() == cur)
+
+        for mid in _pricing.SUGGESTED:
+            pr = _pricing.PRICES.get(mid.lower())
+            r = Adw.ActionRow()
+            r.set_title(_html.escape(mid))
+            if pr:
+                r.set_subtitle(f"${pr[0]:g} in  ·  ${pr[2]:g} out"
+                               + (f"  ·  ${pr[1]:g} cached" if pr[1] is not None else ""))
+            r.set_activatable(True)
+            ok_img = Gtk.Image.new_from_icon_name(_pick_icon("object-select-symbolic",
+                                                             "emblem-ok-symbolic"))
+            r.add_suffix(ok_img)
+            marks[mid] = ok_img
+            r.connect("activated", lambda _r, m=mid: model_row.set_text(m))
+            g.add(r)
+        refresh_marks()
+
+        g = group(pg, "Free models",
+                  "SiliconFlow's free tier \u2014 rate-limited and smaller. Good for chat, "
+                  "weaker as an agent. The list rotates; fetch yours below.")
+        for mid in _pricing.FREE:
+            r = Adw.ActionRow()
+            r.set_title(_html.escape(mid))
+            r.set_subtitle("free")
+            r.set_activatable(True)
+            ok_img = Gtk.Image.new_from_icon_name(_pick_icon("object-select-symbolic",
+                                                             "emblem-ok-symbolic"))
+            r.add_suffix(ok_img)
+            marks[mid] = ok_img
+            r.connect("activated", lambda _r, m=mid: model_row.set_text(m))
+            g.add(r)
+        fr = Adw.ActionRow()
+        fr.set_title("Models on your account")
+        nf = len(S.get("fetched_models") or [])
+        fr.set_subtitle(f"{nf} fetched \u2014 they appear in the composer's model menu"
+                        if nf else "Fetch the live list your key can use")
+        fb = Gtk.Button(label="Fetch"); fb.add_css_class("quick"); fb.set_valign(Gtk.Align.CENTER)
+
+        def fetch_models(_b):
+            fr.set_subtitle("fetching\u2026")
+
+            def work():
+                ok, res = _pricing.fetch_models(self.backend.base(), self.backend.key(),
+                                                opener=_config.api_opener())
+
+                def show():
+                    if ok:
+                        S["fetched_models"] = res
+                        save_settings(S)
+                        fr.set_subtitle(f"{len(res)} fetched \u2014 they appear in the "
+                                        "composer's model menu")
+                    else:
+                        fr.set_subtitle(res)
+                    return False
+                GLib.idle_add(show)
+            threading.Thread(target=work, daemon=True).start()
+        fb.connect("clicked", fetch_models)
+        fr.add_suffix(fb)
+        g.add(fr)
+        refresh_marks()
+
+        g = group(pg, "Custom price",
+                  "Leave at 0 to use the table above. Set these for a model the table "
+                  "doesn't know, or when a price changes — the meter uses them.")
+        spin(g, "Input  $ / 1M tokens", "price_in", 0, 100, 0.01, 0, digits=3)
+        spin(g, "Output  $ / 1M tokens", "price_out", 0, 100, 0.01, 0, digits=3)
+
+        g = group(pg, "Generation")
+        spin(g, "Temperature", "temperature", 0.0, 1.2, 0.05, 0.35, digits=2,
+             sub="Lower is more literal and repeatable — better for shell work and code.")
+        spin(g, "Max output tokens per reply", "max_tokens", 256, 32768, 256, 8192,
+             sub="Per reply. Longer files continue automatically across replies.")
+
+        # ── Agent ──
+        pg = page("Agent", "system-run-symbolic")
+        g = group(pg, "Mode", "Tab switches between Agent and Chat at any time.")
+        switch(g, "Agent mode", "agent_mode", True,
+               sub="On: runs commands, reads and edits files. Off: answers only.",
+               after=lambda v: self.set_agent_mode(v, announce=False))
+        g = group(pg, "Budgets")
+        spin(g, "Steps per task", "agent_steps", 4, 80, 1, 25,
+             sub="Commands and edits one request may take before it must report back.")
+        spin(g, "Research rounds", "research_hops", 1, 8, 1, MAX_TOOL_HOPS,
+             sub="Search → read → think rounds before he must answer.")
+        spin(g, "Sources read per answer", "research_sources", 1, 10, 1, RESEARCH_MAX_SOURCES)
+        spin(g, "Searches per round", "research_queries", 1, 4, 1, RESEARCH_QUERIES)
+        spin(g, "Page fetch timeout (s)", "fetch_timeout", 3, 30, 1, 6)
+        spin(g, "Parallel sub-agents", "subagents", 1, 8, 1, 4,
+             sub="How many ```task``` sub-agents run at once.")
+        spin(g, "Sub-agent steps", "subagent_steps", 2, 20, 1, 8,
+             sub="Tool rounds each sub-agent may take before it must report.")
+        spin(g, "Context sent per request (characters)", "context_chars", 40000, 800000,
+             10000, SEND_CHAR_BUDGET,
+             sub="How much conversation and file content rides along. More sees more "
+                 "of a big repo at once; less is cheaper. ~4 characters per token.")
+
+        g = group(pg, "Code verifier")
         if _codecheck:
             have = _codecheck.available_tools()
-            on = [k for k, v in have.items() if v] or ["none"]
-            off = [k for k, v in have.items() if not v]
-            note = "Active: " + ", ".join(on)
-            if off:
-                note += "   \u00b7   not installed: " + ", ".join(off)
-            lv = Gtk.Label(label=note, xalign=0, wrap=True); lv.add_css_class("set-hint")
-            box.append(lv)
-            box.append(Gtk.Label(
-                label="Syntax and the security scan always run; linters add depth when present.",
-                xalign=0, wrap=True))
-
+            for k, v in have.items():
+                r = Adw.ActionRow(); r.set_title(k)
+                r.set_subtitle("active" if v else "not installed")
+                g.add(r)
         if _ledger:
-            section("Evidence ledger")
-            lg_note = Gtk.Label(label="", xalign=0, wrap=True, selectable=True)
-            lg_note.add_css_class("set-hint")
+            g = group(pg, "Evidence ledger",
+                      "Every command Chuck runs is recorded in a hash-chained log.")
+            lr = Adw.ActionRow(); lr.set_title("Ledger")
 
             def refresh_ledger(*_a):
                 try:
                     ok, count, bad, msg = _ledger.verify()
+                    where = "" if bad is None else f" · first break at entry {bad}"
+                    lr.set_subtitle(_html.escape(f"{count} commands · "
+                                                 f"{'chain intact' if ok else 'CHAIN BROKEN'}{where}"))
                 except Exception as ex:
-                    lg_note.set_label(f"couldn't read the ledger: {ex}")
-                    return
-                where = "" if bad is None else f"  (first break at entry {bad})"
-                lg_note.set_label(f"{count} commands recorded \u00b7 "
-                                  f"{'chain intact' if ok else 'CHAIN BROKEN'}{where}\n"
-                                  f"{msg}\n{_ledger.LEDGER}")
+                    lr.set_subtitle(_html.escape(f"couldn't read: {ex}"))
             refresh_ledger()
-            box.append(lg_note)
-            lrow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
             vb = Gtk.Button(label="Re-verify"); vb.add_css_class("quick")
-            vb.connect("clicked", refresh_ledger)
-            ob = Gtk.Button(label="Open folder"); ob.add_css_class("quick")
+            vb.set_valign(Gtk.Align.CENTER); vb.connect("clicked", refresh_ledger)
+            ob = Gtk.Button(icon_name=_pick_icon("folder-open-symbolic", "folder-symbolic"))
+            ob.add_css_class("ghost"); ob.set_valign(Gtk.Align.CENTER)
+            ob.set_tooltip_text("Open folder")
             ob.connect("clicked", lambda *_a: _open_path(str(_ledger.LEDGER.parent)))
-            lrow.append(vb); lrow.append(ob); box.append(lrow)
+            lr.add_suffix(vb); lr.add_suffix(ob)
+            g.add(lr)
 
-        status = Gtk.Label(label="", xalign=0); status.add_css_class("ok")
+        # ── Voice ──
+        pg = page("Voice", "audio-speakers-symbolic")
+        g = group(pg, "Speech")
+        switch(g, "Read replies aloud", "tts", True,
+               after=lambda v: (self.tts_btn.set_active(v), None if v else stop_speaking()))
+        eng = Adw.ComboRow()
+        eng.set_title("Engine")
+        eng.set_model(Gtk.StringList.new(["Auto (Piper, else espeak-ng)", "Piper only",
+                                          "espeak-ng only"]))
+        eng.set_selected({"auto": 0, "piper": 1, "espeak": 2}.get(
+            (S.get("voice_engine") or "auto").lower(), 0))
+        eng.connect("notify::selected", lambda *_a: changed(
+            "voice_engine", ["auto", "piper", "espeak"][int(eng.get_selected() or 0)]))
+        g.add(eng)
+        spin(g, "Speed", "voice_speed", 0.5, 2.0, 0.05, 1.0, digits=2)
+        spin(g, "Pitch (espeak-ng)", "voice_pitch", 0, 99, 1, 28)
+        spin(g, "Max characters read per reply", "voice_max_chars", 2000, 40000, 1000, 20000)
+        entry(g, "Piper voice model (blank = installed voice)", "piper_model")
+        tr = Adw.ActionRow(); tr.set_title("Test the voice")
+        tb = Gtk.Button(label="Play"); tb.add_css_class("quick"); tb.set_valign(Gtk.Align.CENTER)
+        tb.connect("clicked", lambda *_a: speak(
+            "Chuck Norris does not adjust settings. Settings adjust to Chuck Norris.", S))
+        tr.add_suffix(tb); g.add(tr)
 
-        def collect():
-            eng_key = ["auto", "piper", "espeak"][int(eng.get_selected() or 0)]
-            return {
-                "siliconflow_api_key": key.get_text().strip(),
-                "model": model.get_text().strip() or DEFAULT_MODEL,
-                "siliconflow_base_url": baseurl.get_text().strip(),
-                "piper_model": pmodel.get_text().strip(),
-                "voice_max_chars": int(vmax.get_value()),
-                "vision_model": vmodel.get_text().strip() or DEFAULT_VISION,
-                "tts": tts_on.get_active(),
-                "voice_engine": eng_key,
-                "voice_speed": round(float(speed.get_value()), 2),
-                "voice_pitch": int(pitch.get_value()),
-                "research_sources": int(src.get_value()),
-                "research_queries": int(qs.get_value()),
-                "research_hops": int(hops.get_value()),
-                "fetch_timeout": int(ftmo.get_value()),
-                "chat_ttl_hours": int(ttl.get_value()),
-                "font_size": int(fsz.get_value()),
-                "render_keep": int(rkeep.get_value()),
-                "render_page": int(rpage.get_value()),
-                "searx_url": searx.get_text().strip(),
-                "proxy": proxy.get_text().strip(),
-                "proxy_api": proxy_api.get_active(),
-                "web_cache_seconds": int(wcache.get_value()),
-                "temperature": round(float(temp.get_value()), 2),
-            }
+        # ── General ──
+        pg = page("General", "preferences-desktop-appearance-symbolic")
+        g = group(pg, "Appearance")
+        spin(g, "Text size", "font_size", 9, 28, 1, FONT_SIZE,
+             after=lambda v: apply_font_size(v))
+        g = group(pg, "Chats")
+        spin(g, "Auto-delete saved chats after (hours)", "chat_ttl_hours", 1, 720, 1,
+             CHAT_TTL_HOURS, sub="Counted from your last activity in a chat.",
+             after=lambda _v: self._refresh_sidebar())
+        spin(g, "Messages kept rendered", "render_keep", 4, 200, 1, RENDER_KEEP,
+             sub="Older ones are unloaded and rebuilt if you scroll back.")
+        spin(g, "Messages loaded per scroll-up", "render_page", 5, 200, 5, RENDER_PAGE)
+        g = group(pg, "Network & privacy")
+        entry(g, "Preferred SearXNG instance (blank = built-in list)", "searx_url")
+        entry(g, "Proxy, e.g. http://host:port", "proxy", net=True)
+        switch(g, "Send the model API through the proxy too", "proxy_api", True,
+               sub="With this off your prompts bypass the proxy.", net=True)
+        spin(g, "Reuse fetched pages for (s)", "web_cache_seconds", 0, 600, 15, 90)
+        g = group(pg, "Reset")
+        rr = Adw.ActionRow(); rr.set_title("Reset tuning to defaults")
+        rr.set_subtitle("Keeps your key, model, proxy and folders.")
+        rb = Gtk.Button(label="Reset"); rb.add_css_class("quick"); rb.set_valign(Gtk.Align.CENTER)
 
-        def apply_and_save(*_):
-            before = (self.settings.get("proxy"), self.settings.get("proxy_api"))
-            self.settings.update(collect())
-            save_settings(self.settings)
-            # A socket opened before the proxy was switched on is still a direct
-            # socket. Reusing it would silently defeat the setting that was just
-            # changed, so the pool and the page cache are dropped on any change.
-            if (self.settings.get("proxy"), self.settings.get("proxy_api")) != before:
-                _config.network_settings_changed()
-            self.tts_btn.set_active(self.settings.get("tts", True))
-            if not self.settings.get("tts"):
-                stop_speaking()
-            apply_font_size(self.settings.get("font_size", FONT_SIZE))
-            self._refresh_sidebar()
-            self._collapse_window()
-            status.set_label("Saved.")
-
-        def test_voice(*_):
-            self.settings.update(collect())
-            speak("Chuck Norris does not adjust settings. Settings adjust to Chuck Norris. "
-                  "This line runs long on purpose, so you can hear it keep going all the way "
-                  "to the end without cutting out halfway.", self.settings)
-            status.set_label("Speaking\u2026")
-
-        def reset(*_):
+        def reset(*_a):
             for k in ("voice_engine", "voice_speed", "voice_pitch", "research_sources",
                       "research_queries", "research_hops", "fetch_timeout", "chat_ttl_hours",
                       "render_keep", "render_page", "font_size", "voice_max_chars",
-                      "piper_model", "siliconflow_base_url", "temperature",
-                      "web_cache_seconds", "proxy_api"):
-                self.settings.pop(k, None)
-            save_settings(self.settings)
+                      "piper_model", "siliconflow_base_url", "temperature", "max_tokens",
+                      "web_cache_seconds", "proxy_api", "agent_steps", "price_in", "price_out"):
+                S.pop(k, None)
+            save_settings(S)
             apply_font_size(FONT_SIZE)
-            status.set_label("Tuning reset \u2014 reopen Settings to see the defaults.")
+            self._toast("Tuning reset — reopen Settings to see the defaults")
+            try:
+                dlg.close()
+            except Exception:
+                pass
+        rb.connect("clicked", reset)
+        rr.add_suffix(rb); g.add(rr)
 
-        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        row.set_margin_top(16)
-        sv = Gtk.Button(label="Save"); sv.add_css_class("gold")
-        sv.connect("clicked", apply_and_save)
-        tv = Gtk.Button(label="Test voice"); tv.add_css_class("quick")
-        tv.connect("clicked", test_voice)
-        rs = Gtk.Button(label="Reset tuning"); rs.add_css_class("quick")
-        rs.connect("clicked", reset)
-        row.append(sv); row.append(tv); row.append(rs); row.append(status)
-        box.append(row)
-        dlg.present()
+        def closed(*_a):
+            if pending["id"]:
+                GLib.source_remove(pending["id"])
+                commit()
+            self._update_subtitle()
+            self._paint_meter()
+            self._collapse_window()
+            if self._hint is not None:
+                self._show_empty_hint()
+            return False
+        try:
+            dlg.connect("closed", closed)
+        except Exception:
+            dlg.connect("close-request", closed)
+        present()
 
 
 class ChuckApp(Adw.Application):
@@ -4382,13 +7176,30 @@ class ChuckApp(Adw.Application):
 
     def do_startup(self):
         Adw.Application.do_startup(self)
-        prov = Gtk.CssProvider()
+        # Dark, always: the palette is designed dark, and a light system theme
+        # would otherwise bring up light libadwaita dialogs over a dark window.
         try:
-            prov.load_from_data(CSS_TMPL.encode())
-        except TypeError:
-            prov.load_from_data(CSS_TMPL)
-        Gtk.StyleContext.add_provider_for_display(
-            Gdk.Display.get_default(), prov, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+            Adw.StyleManager.get_default().set_color_scheme(Adw.ColorScheme.FORCE_DARK)
+        except Exception:
+            pass
+        sheets = [CSS_TMPL]
+        try:
+            if (Adw.get_major_version(), Adw.get_minor_version()) >= (1, 6):
+                sheets.append(VARS_CSS)      # older GTK would only log a parse error
+        except Exception:
+            pass
+        for css in sheets:
+            prov = Gtk.CssProvider()
+            try:
+                try:
+                    prov.load_from_data(css.encode())
+                except TypeError:
+                    prov.load_from_data(css)
+                Gtk.StyleContext.add_provider_for_display(
+                    Gdk.Display.get_default(), prov,
+                    Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+            except Exception:
+                pass                     # an older GTK rejecting VARS_CSS is fine
         apply_font_size(_SETTINGS.get("font_size", FONT_SIZE))
         # Probe the machine now, off the main thread, so the first chat never
         # waits on `pacman -Qq` to find out what distro it is running on.

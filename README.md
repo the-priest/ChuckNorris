@@ -1,412 +1,171 @@
 <div align="center">
 
-<img src="assets/banner.svg" alt="Chuck Norris — Arch / CachyOS desktop agent" width="100%">
+# Chuck
 
-<br>
+**A desktop coding and system agent for Linux, on SiliconFlow models.**
+Runs commands, edits real code, reads whole repos, sees screenshots, runs sub-agents in parallel, and tells you what it all cost.
 
-<img src="https://readme-typing-svg.demolab.com?font=DejaVu+Sans+Mono&weight=700&size=22&pause=1200&color=B6892F&center=true&vCenter=true&width=760&lines=You+ask.+He+acts.;No+modes.+No+buttons.+No+excuses.;He+runs+it%2C+reads+the+real+exit+code%2C+then+moves+on.;A+local+agent+driving+a+remote+brain." alt="You ask. He acts.">
+![version](https://img.shields.io/badge/version-14.0.0-8b5cf6?style=flat-square&labelColor=0c0c10)
+![gtk](https://img.shields.io/badge/GTK4-libadwaita-8b5cf6?style=flat-square&labelColor=0c0c10)
+![python](https://img.shields.io/badge/Python-3.11_·_3.12_·_3.13-8b5cf6?style=flat-square&labelColor=0c0c10)
+![suites](https://img.shields.io/badge/test_suites-17-2ea043?style=flat-square&labelColor=0c0c10)
+![deps](https://img.shields.io/badge/runtime_deps-stdlib_+_GTK-2ea043?style=flat-square&labelColor=0c0c10)
+![licence](https://img.shields.io/badge/licence-MIT-8b5cf6?style=flat-square&labelColor=0c0c10)
 
-<br><br>
-
-[![tests](https://github.com/the-priest/ChuckNorris/actions/workflows/tests.yml/badge.svg)](https://github.com/the-priest/ChuckNorris/actions/workflows/tests.yml)
-![version](https://img.shields.io/badge/version-12.1.0-b6892f?style=for-the-badge&labelColor=0b0b0d)
-![tribute](https://img.shields.io/badge/1940--2026-a_tribute-b6892f?style=for-the-badge&labelColor=0b0b0d)
-![distro](https://img.shields.io/badge/Arch_%7C_CachyOS-first--class-b6892f?style=for-the-badge&labelColor=0b0b0d)
-
-![gtk](https://img.shields.io/badge/GTK4-libadwaita-b6892f?style=flat-square&labelColor=0b0b0d)
-![python](https://img.shields.io/badge/Python-3.11_·_3.12_·_3.13-b6892f?style=flat-square&labelColor=0b0b0d)
-![suites](https://img.shields.io/badge/suites-16-2ea043?style=flat-square&labelColor=0b0b0d)
-![skills](https://img.shields.io/badge/skills-14_shipped-b6892f?style=flat-square&labelColor=0b0b0d)
-![deps](https://img.shields.io/badge/runtime_deps-stdlib_+_GTK-2ea043?style=flat-square&labelColor=0b0b0d)
-![licence](https://img.shields.io/badge/licence-MIT-b6892f?style=flat-square&labelColor=0b0b0d)
-
-<br>
-
-> ### *Chuck Norris doesn't `kill -9` a process.*
-> ### *He looks at it, and it exits `0` out of respect.*
+<img src="assets/screenshots/welcome.png" alt="Chuck's welcome screen: a dark window with a field of tiny code glyphs rippling from a click" width="100%">
 
 </div>
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/the-priest/ChuckNorris/main/install.sh | bash && chucknorris
+```
+
+Paste a SiliconFlow key in Settings. Press **Tab** to pick Agent or Chat. Talk to it.
 
 ---
 
-<div align="center">
+## Two modes, one key
 
-## ⚡ THIRTY SECONDS ⚡
+**Agent** runs on your machine: shell commands, file edits, tests, packages. **Chat** answers only, and nothing touches your system. **Tab** flips between them from anywhere in the window, and the switch sits in the composer so you always know which one you're in.
 
-</div>
+<table>
+<tr>
+<td width="50%"><img src="assets/screenshots/agent-commands.png" alt="Agent mode: a reply, then a command card on the work lane"></td>
+<td width="50%"><img src="assets/screenshots/chat-mode.png" alt="Chat mode: a formatted answer with a table and a copyable code block"></td>
+</tr>
+<tr>
+<td><b>Agent.</b> Everything the machine did hangs on the <i>work lane</i>, a rail off Chuck's avatar. What he <i>said</i> and what <i>ran</i> never blur together. Every command shows its real exit code and output.</td>
+<td><b>Chat.</b> Markdown, real tables, and code blocks with a copy button that scroll sideways instead of overflowing. Code in Chat mode is shown, never executed.</td>
+</tr>
+</table>
+
+## A working folder for the session
+
+Click the folder chip (or **Ctrl+O**) to point the session at a project. Commands run there. `read`, `grep`, `glob`, `write` and `edit` resolve relative paths there. Each request carries a one-line map of the folder's top level, so the model starts oriented. Choose **no folder** for questions and system work. Recent folders and Chuck's own `~/ChuckProjects` are one click away.
+
+## Built for real coding work
+
+| tool | what it does |
+|---|---|
+| `map` | Every file in the repo with the classes and functions it defines (real AST for Python, patterns for JS/TS, Go, Rust, C/C++, Java, Ruby, PHP, Lua, shell). Honours `.gitignore`. |
+| `glob` · `grep` | Find files by pattern, search by regex. Uses ripgrep when installed, pure Python when not. Output is capped so a search never floods the context. |
+| `read path:120-400` | Reads any size of file in **pages**. Each page ends with the exact `read` for the next one. Nothing is silently cut. |
+| `edit` | Aider-style `SEARCH/REPLACE` blocks. Only the changed lines are sent, so it's cheap on output tokens. All-or-nothing, whitespace-tolerant, re-verified after the edit. |
+| `write` | New files of any length. A reply that hits the output limit is **continued automatically** and stitched (repeated overlap trimmed) before the file is written. |
+| `bash` · `python` · `node` | One step at a time, auto-verified (syntax, lint, security scan) before it runs, real exit code back. |
+| `plan` | A live checklist card that ticks itself off as the work proceeds. |
+| `runtests` · `package` · `tree` | Run the project's own tests, zip the result, show what was built. |
+| `screenshot` · `look` | Chuck **sees**: the screen, or any image (a page rendered with headless Chromium, a plot, a mockup). Build a UI, look at it, fix it. |
+| `task` | **Parallel sub-agents.** Each `task` block is a read-only sub-agent with its own model loop. Several run at once and report back; only their summaries enter the main context. |
+| `search` · `fetch` | Live web research across SearXNG instances, with sources cited. |
+| `remember` · `forget` | Long-term memory (below). |
+
+<img src="assets/screenshots/agent-subagents.png" alt="Three sub-agents running in parallel, each with a done badge and a folded report" width="100%">
+
+**Sub-agents are read-only by design.** Parallel writers would trample each other's edits and race each other's sudo prompts. Parallel readers can't. They survey, research and report; the main agent acts, one verified step at a time.
+
+## Attach anything
+
+Click the paperclip, **drag files onto the window**, or **paste an image** (Ctrl+V straight from your screenshot tool or a browser). Everything lands in a tray above the composer, where you can review it and remove it before sending.
+
+- **Images** go to the model *as images*. With a text-only chat model (DeepSeek), they're routed to the vision model automatically.
+- **Text files** go as their contents, up to 400k characters. Larger ones say where the rest is.
+- **Other files** go by path, so in Agent mode Chuck can still work with them.
+
+Images are paid for once: they ride with the request that needs them, and history keeps only text.
+
+<img src="assets/screenshots/attachments.png" alt="Composer with an image thumbnail and a file chip in the attachment tray" width="100%">
+
+## Models, pricing, and what you spent
+
+The header meter shows **this chat's cost and tokens**, from the usage the API actually reports: prompt, cache hits, completion and reasoning tokens. A click opens the breakdown, the session total and your live account balance.
+
+| model | input / 1M | output / 1M | sees images |
+|---|---|---|---|
+| `zai-org/GLM-5.3-Flash` *(default)* | $0.15 | $0.50 | yes |
+| `deepseek-ai/DeepSeek-V4.1-Flash` | $0.158 ($0.01 cached) | $0.633 | via vision model |
+| `deepseek-ai/DeepSeek-V4-Flash` | $0.13 | $0.28 | via vision model |
+| `zai-org/GLM-5.3` | $1.40 ($0.26 cached) | $4.40 | yes |
+| **Free:** `Qwen/Qwen3-8B`, `THUDM/GLM-4-9B-0414`, `deepseek-ai/DeepSeek-R1-0528-Qwen3-8B` | $0 | $0 | no |
+
+List prices as of October 2026. Switch models from the composer's model menu. **Settings → Fetch** pulls the live list your key can use; SiliconFlow's free tier rotates. A model the table doesn't know shows tokens without inventing a price, and you can set a custom price in Settings.
+
+<p align="center"><img src="assets/screenshots/usage.png" alt="Usage popover: cost, input with cache hits, output with reasoning, price, session total, balance" width="320"></p>
+
+## Efficient by construction
+
+Every hop of an agent loop re-sends the system prompt, so its size is paid per tool call, not per chat.
+
+- **Prompts:** agent 3.5k characters (v13 was 5.7k, while documenting six fewer tools); chat 0.7k.
+- **Playbooks** (Arch, fixing, building, data, web…) are injected only when the task triggers them, at most two at a time, and never in Chat mode.
+- **Cache-friendly:** the volatile part (date, memory, folder) is appended *last*, so the long prefix stays cacheable on the API side.
+- **Context control:** older tool output is compressed extractively (head, tail and every error line kept) and the context budget is a setting.
+- **Batching:** read-only tools batch into one round trip, and four of them cost one model call, not four.
+
+## Memory you can trust
+
+Durable facts persist across chats and only the few relevant ones are sent with a question, never the store. Two upgrades in the spirit of [supermemory](https://github.com/supermemoryai/supermemory):
+
+- **Updates supersede.** "GPU is an RTX 4090" replaces "GPU is an RTX 3080" instead of sitting beside it. The old fact is archived, not destroyed.
+- **Project scope.** Facts saved as `project:` belong to the working folder and are recalled only there, so one repo's conventions never leak into another's answers.
+
+All of it is visible, searchable, addable and deletable in the Memory panel.
+
+## Safety that doesn't get in your way
+
+Commands run on their own; that's the point of an agent. **CRITICAL** ones (disk wipes, `rm -rf /`, `curl | sh`, removing core packages) arrive disarmed and wait for your tick, and so do saved skills whose *body* is critical. Commands run in their own process group with resource limits, and a timeout kills the whole tree. `pacman -S` is rewritten to `-Syu`. sudo authenticates once per chat, in memory only. Every command lands in a hash-chained ledger you can re-verify in Settings.
+
+## Keyboard
+
+| key | action |
+|---|---|
+| **Tab** | switch Agent / Chat |
+| **Enter** · **Shift+Enter** | send · new line |
+| **Ctrl+V** | paste text, an image, or copied files |
+| **Ctrl+O** | working folder |
+| **Ctrl+N** · **Ctrl+B** · **Ctrl+,** | new chat · chats sidebar · settings |
+| **Esc** | stop the current run |
+
+## The window
+
+Dark neutral surfaces with one violet accent, used only for edges, focus and what's live. On the welcome screen, a fine net of code glyphs ripples like water wherever you click. It costs nothing at rest, animates only while a ripple is alive, and respects your desktop's reduce-animation setting. The transcript follows new output only while you're at the bottom: scroll up to read and it stays put, with a *Jump to latest* button to come back. Wide code and tables scroll inside their own block, and the page never scrolls sideways.
+
+<img src="assets/screenshots/settings.png" alt="Settings: account, model, and the models and pricing list" width="100%">
+
+## Install
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/the-priest/ChuckNorris/main/install.sh | bash
 ```
+
+Or read it first, which you should:
+
 ```bash
-chucknorris
+git clone https://github.com/the-priest/ChuckNorris.git && cd ChuckNorris && ./install.sh
 ```
 
-Paste a SiliconFlow key in Settings. Talk to him. That's the whole onboarding.
+Arch / CachyOS first-class; apt and dnf supported. The installer handles GTK4 + libadwaita (with the PyGObject cairo bridge), a screenshot tool, polkit, voice (Piper, espeak-ng fallback), `yt-dlp`, and the verifier linters. Runtime needs nothing beyond the standard library and GTK; everything optional degrades gracefully.
 
----
-
-## 🥋 What this actually is
-
-A **native GTK4 desktop agent** for Arch and CachyOS. Not a chat window with a search button glued on the side — an assistant that **decides what to do and then does it.** Searches the live web. Reads the actual pages. Runs commands on your real machine. Writes code, tests it, fixes it, hands you the zip.
-
-> *Chuck Norris doesn't use a package manager.*
-> *He tells the software where to live, and it moves in.*
-
-**Now the honest part, up front where it belongs.** The *tooling* is local — your shell, your files, your projects, voice synthesis, code verification, chat history, all on your machine. The *model* is not. Chuck talks to the **SiliconFlow API**, so your prompts and the page text he gathers leave your box on the way to the model, exactly like every other hosted assistant.
-
-He is a **local agent driving a remote brain.** That trade buys real access to your system plus a model far stronger than anything you'd fit on a desktop GPU. If it isn't a trade you want, that's an entirely reasonable position and you should stop reading here.
-
----
-
-## 🔁 The loop
-
-Every turn is the same shape, and the shape is the product. He does not get to claim success — the exit code decides.
-
-```mermaid
-flowchart LR
-    A([you ask]) --> B[decide]
-    B --> C{tool needed?}
-    C -->|no| Z([answer])
-    C -->|yes| D[emit ONE tool block]
-    D --> E{risk tier}
-    E -->|CRITICAL| F[card stays disarmed<br/>you tick the box]
-    E -->|danger / normal| G[runs]
-    F --> G
-    G --> H[real exit code<br/>real output]
-    H --> I{did it work?}
-    I -->|no| J[state the failure<br/>fix the CAUSE]
-    J --> B
-    I -->|yes| K{task done?}
-    K -->|no| B
-    K -->|yes| Z
-
-    style A fill:#0b0b0d,stroke:#b6892f,color:#f0d089
-    style Z fill:#0b0b0d,stroke:#2ea043,color:#8fe39f
-    style F fill:#2a1414,stroke:#ff5f57,color:#ffb4b0
-    style H fill:#16150f,stroke:#b6892f,color:#f0d089
-    style J fill:#2a1f14,stroke:#febc2e,color:#ffe0a3
-```
-
-**One command per reply. Always.** Run, verify, then the next. A wall of commands is unusable, and an agent that fires five and reads none of them is just a very confident random number generator.
-
----
-
-## 🔥 What he can actually do
-
-### 🌐 Research the live web
-
-Searches multiple SearXNG instances — Brave, Google, DuckDuckGo and Bing underneath — with DuckDuckGo as backstop. Instances are probed in parallel, the searches in a round run concurrently, connections are pooled and kept alive, and a page read twice in one turn is read from memory the second time. Reads real pages. Cross-checks outlets. Cites URLs. Marks single-source claims `[UNVERIFIED]` rather than quietly promoting them to fact.
-
-You watch it happen in a **live checklist** — `● searching…` → `✓ read bbc.com — headline` — each line ticking itself off as it lands. No mystery spinner, no wondering whether it died.
-
-> *Chuck Norris doesn't get rate-limited.*
-> *The API waits its turn.*
-
-### ⚙️ He runs things. He does not suggest them.
-
-A shell command **executes on your machine.** Chuck is an agent, not a suggestion box that makes you copy-paste your own homework.
-
-Then he reads the **real exit code and real output**, confirms it did what he intended, and only then takes the next step. If it failed he says so and fixes the *cause*. He never carries on as though it worked.
-
-Installing anything goes through `pacman -Syu`. A bare `-S` is **rewritten before it runs** — including inside saved skills, including for `paru` and `yay`. Partial upgrades are a rule enforced in code, not a polite request in a prompt the model can forget.
-
-### 🛠️ Fix a real machine, carefully
-
-Diagnose read-only first. Hypothesis out loud. **One change at a time.** Verify before moving on.
-
-Before anything risky he says what could break and how to undo it — and for bootloader, initramfs, fstab or kernel work he hands you the **rescue path *before* you run it**, not in the postmortem. He won't rip out core packages, force-overwrite files pacman owns, or disable a check to make an error disappear.
-
-If the output contradicts his theory, he says so and looks again. That sentence is the whole personality.
-
-> *Chuck Norris doesn't chroot into a broken system.*
-> *The system chroots into Chuck Norris and apologises.*
-
-<details>
-<summary><b>💻 Write, verify and run code</b> — every block checked before you see a Run button</summary>
-
-<br>
-
-Python, Node, Bash. Syntax, linting, static security scan. Broken code is withheld and he's told to fix it.
-
-Findings are **split by severity**, which took a bug to learn:
-
-| severity | examples | effect |
-|---|---|---|
-| `BLOCK` | `eval()`, `os.system()`, `shell=True`, `curl \| sh`, hard-coded secrets | Run button withheld, model told to fix |
-| `ADVISE` | `md5`, `verify=False`, `innerHTML=`, `pickle.loads` | reported beside the card, **does not block** |
-
-Treating everything as blocking meant a script that legitimately checksummed a file with `md5` could never reach a Run button — and the model, told to "fix every issue", had nothing to fix and looped until the hop budget ran out. Precision matters more than strictness.
-
-He can also verify code **without running it**, which is useful for reviewing yours.
-
-</details>
-
-<details>
-<summary><b>📦 Build entire projects</b> — written, tested, packaged, handed over</summary>
-
-<br>
-
-Ask for a tool. He opens a real project under `~/ChuckProjects/`, writes complete files (each verified as it lands), writes tests that assert real behaviour, **runs every one of them**, fixes what fails, then zips it and hands you a card with an *Open folder* button.
-
-If the tests fail, **he tells you they failed.** He will not report success because the code looks about right.
-
-</details>
-
-<details>
-<summary><b>🧠 Remember what matters</b> — IDF-ranked recall, not keyword soup</summary>
-
-<br>
-
-Durable facts persist across chats. Recall is IDF-weighted with conservative stemming, recency and hit-count damping.
-
-| you ask | he recalls |
-|---|---|
-| *"my nvidia driver broke after the kernel update"* | the DKMS fact ✅ |
-| *"what subnet is the server on"* | the network fact ✅ |
-| *"searching a big source tree"* | the ripgrep preference ✅ |
-| *"what's the weather like"* | **nothing at all** ✅ |
-
-That last row is the hard one. Coverage gates, IDF ranks — gating on IDF instead collapses in a small store, where every word looks maximally distinctive. Only relevant facts surface each turn; the store is never dumped wholesale into the prompt. All of it visible and deletable in one panel.
-
-</details>
-
-<details>
-<summary><b>🥷 Fourteen skills, shipped</b> — plus he writes new ones as he goes</summary>
-
-<br>
-
-System health checks · keyring-first safe updates · keyring repair · mirror ranking · disk cleanup · boot rescue · GPU inspection · passive domain recon · IP geolocation and ASN · security-header audits · listening-port audits · WiFi scan · authorised port scan.
-
-One tap each. Saved skills are re-classified on their **body**, not their launcher, so nothing gets smuggled past the risk gate inside a script.
-
-</details>
-
-### 🔊 Talk — and it's on from the start
-
-A natural **Piper** voice (espeak-ng fallback) reads replies **in full** by default, chunked and synthesised a step ahead of playback so long answers *finish* instead of dying mid-sentence. Every reply carries a **▶** to hear that one again. Stop silences everything instantly.
-
-### 👁️ Plus
-
-**Read your files** — root-owned ones come back as a `sudo cat` card. **Show your pictures** inline. **Find video** — cards, or `yt-dlp` it down. **Look at your screen** — send a screenshot and he'll tell you what's wrong with it. **Handle the rest** — Arch and recon are where he's deepest, not where he stops.
-
----
-
-## 🛡️ Safety that doesn't get in your way
-
-Commands run on their own. That is the entire point of an agent. What does **not** run on its own is anything catastrophic.
-
-```mermaid
-flowchart TD
-    A[command<br/>+ skill body if any] --> B[classify]
-    B --> C{tier}
-    C -->|🔴 CRITICAL| D[Run button DISARMED<br/>tick box to arm]
-    C -->|🟠 DANGER| E[red warning, then runs]
-    C -->|🟢 NORMAL| F[just runs]
-    D --> G[own process group<br/>+ resource limits]
-    E --> G
-    F --> G
-    G --> H[hash-chained ledger]
-
-    style D fill:#2a1414,stroke:#ff5f57,color:#ffb4b0
-    style E fill:#2a1f14,stroke:#febc2e,color:#ffe0a3
-    style F fill:#0f1a0f,stroke:#2ea043,color:#8fe39f
-    style H fill:#16150f,stroke:#b6892f,color:#f0d089
-```
-
-The tier is judged on **what will actually execute**, including a saved skill's body. The verifier is deliberately **static and never executes what it checks**, so there's no path around the gate through a verification step either.
-
-**Stop means stop.** Send becomes Stop while he works, with a live `● working… 12s` counter. A watchdog stops him if anything truly hangs — sized off the *running command's own budget*, so a real twenty-minute `pacman -Syu` isn't mistaken for a hang and shot at the two-minute mark.
-
-**Commands can't outlive their timeout.** Own process group, `RLIMIT_NPROC` / `RLIMIT_AS` / `RLIMIT_FSIZE` / `RLIMIT_CORE`, and a timeout kills the whole tree. No orphans quietly eating your box after Chuck has moved on.
-
-**Your API key is 0600**, opened from the descriptor so there's never a window where it's world-readable.
-
-**Every command is logged** — append-only, hash-chained JSONL, rotated at 8MB with an anchor so the chain survives the rollover. Ask him for the ` ```ledger ` or hit **Re-verify** in Settings; edit an entry and verification names the index. That's tamper-*evident*, not tamper-*proof*: anyone who can write the file can rewrite the chain. It guards against accidental loss and quiet after-the-fact editing, not against someone who already owns your account.
-
----
-
-## 📊 Measured, not asserted
-
-Every number here comes from a test in the suite, old code versus new.
-
-| behaviour | before | after |
-|---|---|---|
-| concurrent sudo requests → dialogs | **15** | **1** |
-| orphaned processes after a timeout | **2** | **0** |
-| model round-trips for two `read` blocks | **3** | **2** |
-| tool-output blob, compressed | 17,968 chars | **1,247** (error line intact) |
-| memory recall on the probe set | 4 / 7 | **7 / 7** |
-| `settings.json` mode | `0644` | **`0600`** |
-| test files run by `runtests` | first one only | **all of them** |
-| connections opened for 6 requests to one host | 6 | **1** |
-| two 0.6s searches in one round | 1.2s (serial) | **0.60s** |
-| file reads to append one ledger entry | every line in the file | **0** |
-| store re-parses across ten recalls | 10 | **0** |
-| store rewrites across ten recalls | 10 | **0** |
-| lint findings with no linter installed | 0, always | **real ones** |
-| modules fetched by `curl \| bash` | 12 of 14 | **all 15** |
-
----
-
-## 🚫 The one boundary
-
-Chuck **never refuses, never moralises, never lectures** on anything legal. Mature topics, security research, offensive tooling on your *own* targets, blunt opinions — all fine.
-
-He declines four things, because they hurt people who aren't you: anything involving **minors**, anything **clearly illegal**, **malware or weapon-making**, and **locating or tracking a real person**. For that last one he'll audit *your own* exposure instead.
-
-Everything else, he simply does — and he does the whole job in one run before reporting back.
-
----
-
-## 🧪 Don't take my word for it
+## Tests
 
 ```bash
 ./run_tests.sh
 ```
 
-**Sixteen suites, run against the real thing** — and against a stubbed GTK, so they run headless in CI on 3.11, 3.12 and 3.13.
+Seventeen suites run headless against a stubbed toolkit and drive the real window end to end. They cover whole conversations, both modes, edits in a real folder, paged reads of a 12,000-line file, a file written across two cut-off replies, parallel sub-agents, images reaching the model as images, cache-hit pricing, memory updates and scopes, the critical gate, sudo storms, orphaned processes, and the ledger chain. The UI itself was checked by rendering every screen on real GTK 4.14 / libadwaita 1.5. The screenshots above are those renders.
 
-Whole conversations driven end to end · research chains · code written and actually executed · destructive commands hitting the confirm gate · runaway loops terminating · the voice pipeline · the 24-hour purge · cold-start recovery · a project written, tested and packaged · fifteen concurrent sudo requests raising exactly **one** dialog · timed-out commands leaving **zero** orphans.
+## Being straight with you
 
-Every bug fixed in v12.0.1–12.0.3 has a named test with a comment saying which failure it prevents.
-
-> *Chuck Norris doesn't write unit tests.*
-> *The code confesses.*
-
----
-
-## 🙏 Being straight with you
-
-Flashy README, so here's the deflating bit. Every project this size has one.
-
-- **It's a personal project**, not a product with an SLA. One person, one machine, cleaned up enough to share.
-- **The model is remote.** See above. Your prompts leave your box.
-- **He's deepest on Arch and CachyOS.** He'll help on other distros; he just won't know them in his bones.
-- **He is not infallible, and neither is the tiering.** A regex classifier is a good safety net, not a proof. Read the CRITICAL cards. The tick box is there for a reason.
-- **v12 shipped with real bugs, and 12.0.3 shipped four more.** The verifier did nothing without `ruff`, the evidence ledger could not be displayed, the proxy did not cover the API, and the one-line installer had been quietly fetching an incomplete app. All in `CHANGELOG.md`, each with a test.
-- **v12 shipped with real bugs** — a sudo storm that opened fifteen modals at once, a watchdog that shot healthy upgrades at the two-minute mark, a `videos` tool that had never once worked. All in `CHANGELOG.md`, described plainly, each with a test. A project claiming it never had bugs is a project that isn't looking.
-
-> *Chuck Norris has never lost an argument with a compiler.*
-> *He has, once, agreed to a compromise.*
-
----
-
-## 🏗️ How it's built
-
-GTK4 front end over small focused modules. **No runtime dependency beyond the standard library and GTK** — the linters and voice engines are optional and degrade gracefully when absent.
-
-```mermaid
-flowchart TB
-    UI["chucknorris.py<br/><i>GTK4 · tool loop · risk cards</i>"]
-
-    subgraph act [act]
-        SAFE["safety.py<br/><i>tiering · -Syu hygiene</i>"]
-        CHK["codecheck.py<br/><i>syntax · lint · severity</i>"]
-        BLD["builder.py<br/><i>write · test · package</i>"]
-        LED["ledger.py<br/><i>hash-chained record</i>"]
-    end
-
-    subgraph know [know]
-        MEM["memory.py<br/><i>IDF recall</i>"]
-        SPEC["specs.py<br/><i>on-demand playbooks</i>"]
-        SK["skills.py<br/>skill_library.py"]
-    end
-
-    subgraph reach [reach]
-        NET["net.py<br/><i>pooled HTTP · cache</i>"]
-        WEB["web.py<br/><i>search · fetch · media</i>"]
-        CMP["compress.py<br/><i>extractive trim</i>"]
-    end
-
-    VOI["voice.py"]
-    CHT["chats.py"]
-    CFG["config.py<br/><i>one source of truth</i>"]
-
-    UI --> act
-    UI --> know
-    UI --> reach
-    UI --> VOI
-    UI --> CHT
-    act --> CFG
-    know --> CFG
-    reach --> CFG
-
-    style UI fill:#16150f,stroke:#b6892f,color:#f0d089
-    style CFG fill:#16150f,stroke:#b6892f,color:#f0d089
-```
-
-<details>
-<summary><b>module by module</b></summary>
-
-<br>
-
-| module | what it owns |
-|---|---|
-| `config.py` | paths, tunables, settings — one source of truth, written `0600` |
-| `safety.py` | destructive-command classification, `pacman -Syu` hygiene |
-| `net.py` | pooled keep-alive HTTP, page cache, proxy — one network layer |
-| `web.py` | multi-engine search, page fetching, images, video |
-| `voice.py` | speech: cleaning, chunking, synthesis, playback |
-| `chats.py` | saved conversations and retention |
-| `codecheck.py` | static verification: syntax, lint, security severity split |
-| `builder.py` | sandboxed projects: write, test, package |
-| `compress.py` | extractive context compression — cuts bulk, keeps errors |
-| `ledger.py` | hash-chained record of every command run |
-| `skills.py` · `skill_library.py` | saved and shipped recipes |
-| `memory.py` · `specs.py` | durable facts, on-demand playbooks |
-
-</details>
-
----
-
-## 📥 Install
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/the-priest/ChuckNorris/main/install.sh | bash
-```
-
-Or clone it, **read it first** (you should — see the CRITICAL tier above for why), then run it:
-
-```bash
-git clone https://github.com/the-priest/ChuckNorris.git chucknorris
-```
-```bash
-cd chucknorris
-```
-```bash
-./install.sh
-```
-
-The installer handles the lot: GTK4 + libadwaita, screenshot tool, polkit, `pacman-contrib`, `pciutils`, `pkgfile`, `espeak-ng` + **Piper** with a natural voice model, `yt-dlp`, the verifier linters (`shellcheck`, `ruff`), and the recon kit (`whois`, `bind`/`dig`, `traceroute`, `wget`, `netcat`) — plus the app and art.
-
-## ⚙️ Set up
-
-Open **Settings**, paste a **SiliconFlow** key ([get one here](https://cloud.siliconflow.com/account/ak)) — or Chuck reuses **Basilisk's** automatically if you have it.
-
-While you're there: tune the voice, how deep he researches, how long chats live, how much transcript stays in RAM, and point him at your own SearXNG instance or a proxy.
-
-```bash
-chucknorris
-```
-
-Talk to him. That's it.
+- **The model is remote.** Your prompts, attached files and screenshots go to SiliconFlow.
+- **It's a personal project,** cleaned up to share, not a product with an SLA.
+- **Prices drift.** The table is a snapshot; set a custom price if yours differs.
+- **The `DeepSeek-V4.1-Flash` model ID** follows SiliconFlow's naming convention. If your account lists it differently, **Fetch** in Settings shows the exact ID.
+- **A regex risk classifier is a safety net, not a proof.** Read the CRITICAL cards.
 
 ---
 
 <div align="center">
 
-<br>
-
-> ### *Chuck Norris doesn't read man pages.*
-> ### *Man pages read Chuck Norris and take notes.*
-
-<br>
-
-**MIT.** Made by **The Priest** ⛧
-
-*In memory of a legend. 1940–2026.*
-
-# 🥋
+**MIT.** Made by **The Priest** · *In memory of a legend, 1940–2026.*
 
 </div>

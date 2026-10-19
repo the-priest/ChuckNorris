@@ -5,11 +5,11 @@
 #  One line:
 #    curl -fsSL https://raw.githubusercontent.com/the-priest/ChuckNorris/main/install.sh | bash
 #
-#  Installs GTK4 + libadwaita, screenshot tool, polkit, pacman-contrib, pciutils,
-#  pkgfile, espeak-ng (voice) and yt-dlp (video), then the app + art (Chuck+Tux
-#  wallpaper, SEND plaque, karate-gi icon) + launcher + .desktop.
-#  SiliconFlow backend (reuses Basilisk's key). Non-autonomous: you approve
-#  every command.
+#  Installs GTK4 + libadwaita (+ the PyGObject cairo bridge), screenshot tool,
+#  polkit, pacman-contrib, pciutils, pkgfile, espeak-ng (voice) and yt-dlp
+#  (video), then the app, its icon, a launcher and a .desktop entry.
+#  SiliconFlow backend (reuses Basilisk's key). Commands run on their own;
+#  CRITICAL ones (disk wipes, rm -rf /, curl|sh) wait for your tick.
 # ============================================================================
 set -euo pipefail
 
@@ -48,7 +48,7 @@ elif command -v apt-get >/dev/null; then
   # shellcheck disable=SC2086
   sudo apt-get install -y $PKGS || die "apt install failed"
 elif command -v dnf >/dev/null; then
-  PKGS="python3-gobject gtk4 libadwaita polkit pciutils espeak-ng yt-dlp whois bind-utils traceroute wget nmap-ncat"
+  PKGS="python3-gobject python3-cairo gtk4 libadwaita polkit pciutils espeak-ng yt-dlp whois bind-utils traceroute wget nmap-ncat"
   if [ "$SESS" = "wayland" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then PKGS="$PKGS grim"; else PKGS="$PKGS scrot"; fi
   # shellcheck disable=SC2086
   sudo dnf install -y $PKGS || die "dnf install failed"
@@ -103,18 +103,18 @@ else
   # curl-installed copy silently ran with no evidence ledger and no context
   # compression while the git-cloned copy had both. If you add a module, add it
   # HERE as well — the check below exists because that is easy to forget.
-  for f in __init__ config net safety web voice chats \
+  for f in __init__ config net safety web voice chats pricing \
            skills specs memory codecheck skill_library builder \
-           ledger compress; do
+           ledger compress agents; do
     curl -fsSL "https://raw.githubusercontent.com/${REPO}/${BRANCH}/chucknorris_ext/${f}.py" \
       -o "${APP_DIR}/chucknorris_ext/${f}.py" \
       || case "$f" in
-           __init__|config|net|safety|web|voice|chats)
+           __init__|config|net|safety|web|voice|chats|pricing)
              die "could not fetch required module chucknorris_ext/${f}.py" ;;
            *) info "could not fetch chucknorris_ext/${f}.py (that feature will be limited)" ;;
          esac
   done
-  for a in chucknorris-bg chucknorris-icon gi-mark \
+  for a in chucknorris-icon gi-mark \
            chucknorris-icon-256 chucknorris-icon-128 chucknorris-icon-64 \
            chucknorris-icon-48 chucknorris-icon-32; do
     curl -fsSL "https://raw.githubusercontent.com/${REPO}/${BRANCH}/assets/${a}.png" \
@@ -131,9 +131,9 @@ chmod +x "$LAUNCH"
 cat > "$DESKTOP" <<EOF
 [Desktop Entry]
 Type=Application
-Name=🥋 Chuck Norris
-GenericName=Arch/CachyOS Assistant
-Comment=Arch/CachyOS grandmaster: verifies everything on the web first, cross-checks sources, fixes, installs, writes code, shows images, finds video
+Name=Chuck
+GenericName=AI Agent
+Comment=A coding and system agent for your desktop: runs commands, edits code, researches, sees screenshots
 Exec=${LAUNCH}
 Icon=org.thepriest.chucknorris
 Terminal=false

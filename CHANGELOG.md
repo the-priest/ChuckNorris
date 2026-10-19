@@ -1,5 +1,112 @@
 # Changelog
 
+## 14.0.0 — the harness
+
+A rebuild of the window and a much larger toolset, aimed at real coding work.
+Everything below is covered by `tests/test_v14.py` (new) or verified by
+rendering the real window on GTK 4.14 / libadwaita 1.5.
+
+### Modes and the working folder
+
+- **Agent / Chat**, toggled with **Tab** from anywhere in the window, shown as a
+  switch in the composer. Chat mode has its own 0.7k-character prompt and never
+  touches the machine: ```bash``` fences render as copyable code instead of
+  running, and agent-only tools are refused with a note.
+- **Working folder per session** (folder chip or Ctrl+O): commands run there,
+  file tools resolve relative paths there, and each request carries a capped
+  one-line map of its top level. ```project``` now sets the working folder too,
+  so there is one notion of "where we are". Saved chats remember their folder.
+
+### Tools
+
+- ```edit``` — Aider-style SEARCH/REPLACE, all-or-nothing, whitespace-tolerant,
+  re-verified after applying. Changing three lines no longer costs a whole file
+  of output tokens.
+- ```map``` (repo map with definitions; honours .gitignore), ```glob```,
+  ```grep``` (ripgrep when present). Read-only tools batch into one round trip.
+- ```read path:start-end``` — big files arrive in pages with an exact pointer to
+  the next page. **Fixed:** reads were silently cut at 24,000 characters.
+- ```plan``` — a live checklist card updated in place.
+- ```screenshot``` / ```look``` — the agent sees the screen or any image file.
+- ```task``` — **parallel read-only sub-agents** (`chucknorris_ext/agents.py`),
+  each with its own model loop, live progress card and folded report.
+
+### Long work no longer breaks
+
+- **Fixed: files longer than one reply were never written.** A reply cut at
+  `max_tokens` left its ```write``` block unclosed. Replies that hit the limit
+  are now continued automatically and stitched (with repeated overlap trimmed)
+  before any tool is parsed. Default output ceiling 1600 → 8192.
+- **Fixed: an agent stopped at its fifth step.** Agent steps shared the
+  research-round budget (4). They now have their own (25, settable) and a spent
+  budget asks for a final report instead of going silent.
+- Tool results per round 12k → 60k characters, command output 6k → 20k with
+  head+tail clipping (the error at the end of a build log is kept), context
+  budget 60k → 160k characters and settable.
+
+### Vision and attachments
+
+- Attachment tray: multiple files, drag-and-drop onto the window, **Ctrl+V
+  pastes images** and copied files. Images go to the model as images (resized to
+  1568px), text files as contents, anything else by path. History keeps text
+  only, so an image is billed once.
+- Images are routed to the vision model when the chat model can't see.
+
+### Models and money
+
+- **Real usage**: the meter books prompt, cache-hit, completion and reasoning
+  tokens as the API reports them (`stream_options.include_usage`, with a
+  fallback that triggers only on a 400 that actually names it), priced per model
+  in `chucknorris_ext/pricing.py`. Popover breakdown, session total, live
+  account balance (`/user/info`).
+- Model menu in the composer: GLM-5.3-Flash (default, multimodal),
+  DeepSeek-V4.1-Flash, DeepSeek-V4-Flash, GLM-5.3, and the free tier. Settings
+  can fetch the live model list for your key; custom prices supported.
+
+### Memory
+
+- Newer facts about the same subject **supersede** older ones (archived to
+  `superseded.jsonl`, not deleted). Facts saved as `project:` are scoped to the
+  working folder and recalled only there.
+
+### Prompt and efficiency
+
+- Agent prompt 5,708 → ~3,500 characters while documenting more tools; at most
+  two playbooks per request and none in Chat mode; the volatile note stays last
+  so the prefix caches.
+
+### The window
+
+- New dark palette with a single violet accent used as an overtone. The
+  background image is gone.
+- The **work lane**: commands, outputs, notes, plans and sub-agents hang on a
+  rail off Chuck's avatar, inset from his prose. One byline per turn.
+- Live markdown while streaming, with real tables and code blocks that scroll
+  sideways (they used to overflow). Reasoning is folded under the reply.
+- Welcome screen with mode-aware suggestions over an interactive net of code
+  glyphs that ripples where you click (zero idle cost; honours reduce-motion).
+- Native libadwaita Settings (live-apply, no Save button), redesigned memory and
+  working-folder dialogs, chat search and delete in the sidebar, toasts,
+  keyboard shortcuts (Ctrl+N/O/B/, , Esc).
+- **Scrolling fixed properly.** The view follows new output only while you are
+  at the bottom (scroll up and it stays put; *Jump to latest* brings you back).
+  Three real bugs behind the old jumps: the bottom was set before layout so it
+  landed short; GTK's scroll-to-focus yanked the view back to any selected
+  label on every streamed repaint; and every new message tore down and rebuilt
+  the whole transcript. The transcript is now reconciled in place, the pin is
+  applied after layout, scroll-to-focus is off, and wheel events over code and
+  output panels chain to the page.
+- Fixed a CSS specificity bug that forced code headers and table cells to body
+  text size; fixed libadwaita group titles with "&" failing to render.
+
+### Other fixes
+
+- **The JS verifier blocked every clean file on ESLint 9+** (`--no-eslintrc` and
+  the `compact` formatter were removed) and, once that was fixed, linted
+  nothing (ESLint 9 skips files outside its base path). It now detects the
+  version and lints over stdin with a defect-only rule set.
+- The curl installer now fetches `pricing.py` and `agents.py`.
+
 ## 13.1.0 — a face worth looking at (properly this time), and a cheaper mouth
 
 ### The look

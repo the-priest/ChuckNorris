@@ -268,3 +268,333 @@ def manifest(project):
     cmd = test_command_str(root)
     return json.dumps({"project": root.name, "files": sorted(files),
                        "test_command": cmd}, indent=2)
+
+
+# ── surgical edits ───────────────────────────────────────────────────────────
+# Rewriting a whole file to change three lines costs the full file in output
+# tokens — the most expensive tokens there are — and invites the model to drop
+# something on the way through. Aider's SEARCH/REPLACE block is the proven fix:
+# quote the exact lines, give their replacement, nothing else is resent.
+_EDIT_RE = re.compile(
+    r"<{5,9} ?SEARCH[ \t]*\n(.*?)\n?={5,9}[ \t]*\n(.*?)\n?>{5,9} ?REPLACE", re.DOTALL)
+
+
+def parse_edit_blocks(text):
+    """[(search, replace), ...] from one or more SEARCH/REPLACE blocks."""
+    return [(m.group(1), m.group(2)) for m in _EDIT_RE.finditer(text or "")]
+
+
+def _loose_find(hay, needle):
+    """Locate needle ignoring trailing whitespace on each line — the commonest
+    way a model's quote differs from the file. Returns (start, end) or None,
+    and only when the match is unique."""
+    norm = lambda s: "\n".join(l.rstrip() for l in s.split("\n"))
+    hl, nl = hay.split("\n"), norm(needle).split("\n")
+    hits = []
+    for i in range(len(hl) - len(nl) + 1):
+        if [l.rstrip() for l in hl[i:i + len(nl)]] == nl:
+            hits.append(i)
+            if len(hits) > 1:
+                return None
+    if not hits:
+        return None
+    i = hits[0]
+    start = sum(len(l) + 1 for l in hl[:i])
+    end = start + len("\n".join(hl[i:i + len(nl)]))
+    return start, end
+
+
+def edit_file(project, rel, blocks_text):
+    """Apply SEARCH/REPLACE blocks to one file. All-or-nothing: if any block
+    fails to match exactly once, nothing is written. Returns (ok, message).
+
+    An empty SEARCH on a file that does not exist yet creates it, so the same
+    tool covers "new file" without a second syntax.
+    """
+    try:
+        root = Path(project)
+        p = _safe(root, rel)
+        blocks = parse_edit_blocks(blocks_text)
+        if not blocks:
+            return False, ("no SEARCH/REPLACE block found — use <<<<<<< SEARCH / "
+                           "======= / >>>>>>> REPLACE")
+        if not p.exists():
+            if len(blocks) == 1 and not blocks[0][0].strip():
+                return write_file(root, rel, blocks[0][1] + "\n")[:2]
+            return False, f"no such file: {rel} (read it first, or write it)"
+        text = p.read_text(encoding="utf-8")
+        for n, (search, repl) in enumerate(blocks, 1):
+            if not search.strip():
+                return False, f"block {n}: empty SEARCH on an existing file"
+            c = text.count(search)
+            if c == 1:
+                text = text.replace(search, repl, 1)
+                continue
+            if c > 1:
+                return False, (f"block {n}: SEARCH matches {c} places in {rel} — "
+                               "include more surrounding lines so it is unique")
+            span = _loose_find(text, search)
+            if span is None:
+                return False, (f"block {n}: SEARCH text not found in {rel} — read the "
+                               "file and quote the current lines exactly")
+            text = text[:span[0]] + repl + text[span[1]:]
+        p.write_text(text, encoding="utf-8")
+        return True, f"edited {rel} ({len(blocks)} change{'s' if len(blocks) != 1 else ''})"
+    except Exception as ex:
+        return False, f"couldn't edit {rel}: {ex}"
+
+
+# ── search ───────────────────────────────────────────────────────────────────
+_GREP_SKIP_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".pdf", ".zip",
+                  ".gz", ".xz", ".zst", ".so", ".o", ".a", ".bin", ".pyc", ".lock",
+                  ".woff", ".woff2", ".ttf", ".mp3", ".mp4", ".onnx"}
+
+
+def grep(root, pattern, sub="", max_hits=60, max_line=220):
+    """Regex search under root[/sub] -> (ok, text). Uses ripgrep when present
+    (fast, honours .gitignore), else a pure-Python walk. Output is capped hard:
+    a search exists to FIND things, and 2,000 matches pasted into the context
+    window find nothing except the bill."""
+    try:
+        base = _safe(root, sub) if sub else Path(root).resolve()
+    except ValueError as ex:
+        return False, str(ex)
+    if not base.exists():
+        return False, f"no such path: {sub}"
+    rg = shutil.which("rg")
+    if rg:
+        try:
+            p = subprocess.run([rg, "-n", "--no-heading", "--color", "never",
+                                "-M", str(max_line), "-m", "20", "-e", pattern,
+                                str(base)], capture_output=True, text=True, timeout=30)
+            if p.returncode not in (0, 1):
+                return False, (p.stderr or "rg failed").strip()[:300]
+            rows = (p.stdout or "").splitlines()
+        except Exception as ex:
+            return False, f"search failed: {ex}"
+    else:
+        try:
+            rx = re.compile(pattern)
+        except re.error as ex:
+            return False, f"bad regex: {ex}"
+        rows = []
+        files = [base] if base.is_file() else None
+        walker = ([(str(base.parent), [], [base.name])] if files
+                  else os.walk(base))
+        for dirpath, dirnames, filenames in walker:
+            dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS
+                           and not d.startswith(".")]
+            for f in filenames:
+                fp = Path(dirpath) / f
+                if fp.suffix.lower() in _GREP_SKIP_EXT:
+                    continue
+                try:
+                    if fp.stat().st_size > MAX_FILE_BYTES:
+                        continue
+                    with open(fp, "r", encoding="utf-8", errors="strict") as fh:
+                        for i, line in enumerate(fh, 1):
+                            if rx.search(line):
+                                rows.append(f"{fp}:{i}:{line.rstrip()[:max_line]}")
+                except (UnicodeDecodeError, OSError):
+                    continue
+                if len(rows) > max_hits * 3:
+                    break
+    rootp = str(Path(root).resolve()) + os.sep
+    rows = [r[len(rootp):] if r.startswith(rootp) else r for r in rows]
+    if not rows:
+        return True, f"no matches for /{pattern}/"
+    more = len(rows) - max_hits
+    out = "\n".join(rows[:max_hits])
+    if more > 0:
+        out += f"\n… {more} more matches — narrow the pattern or the path"
+    return True, out
+
+
+# ── the big picture ──────────────────────────────────────────────────────────
+# Reading a repository file by file to learn its shape is the slowest, most
+# expensive way an agent can orient itself. Aider's answer is a repo map: every
+# file with the names it defines, in a few thousand tokens. This is the
+# stdlib-only version — real AST for Python, line patterns for the rest.
+_DEF_PATTERNS = {
+    (".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx"): re.compile(
+        r"^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:function\*?\s+(\w+)|class\s+(\w+)"
+        r"|(?:const|let)\s+(\w+)\s*=\s*(?:async\s*)?(?:\([^)]*\)|\w+)\s*=>|interface\s+(\w+)"
+        r"|type\s+(\w+)\s*=)"),
+    (".go",): re.compile(r"^(?:func\s+(?:\([^)]*\)\s*)?(\w+)|type\s+(\w+))"),
+    (".rs",): re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:fn|struct|enum|trait|mod)\s+(\w+)"),
+    (".sh", ".bash"): re.compile(r"^\s*(?:function\s+)?([A-Za-z_][\w-]*)\s*\(\)\s*\{?"),
+    (".c", ".h", ".cpp", ".hpp", ".cc"): re.compile(
+        r"^(?:[\w:<>*&\s]+?\s)?\**(\w+)\s*\([^;]*\)\s*\{?\s*$|^(?:struct|class|enum)\s+(\w+)"),
+    (".java", ".kt", ".cs", ".swift"): re.compile(
+        r"^\s*(?:public|private|protected|internal|open|data|abstract|final|static|\s)*"
+        r"(?:class|interface|enum|object|struct|fun|func)\s+(\w+)"),
+    (".rb",): re.compile(r"^\s*(?:def|class|module)\s+([\w.?!]+)"),
+    (".php",): re.compile(r"^\s*(?:abstract\s+|final\s+)?(?:function|class|interface|trait)\s+(\w+)"),
+    (".lua",): re.compile(r"^\s*(?:local\s+)?function\s+([\w.:]+)"),
+}
+
+
+def _project_files(root, limit=2000):
+    """Files worth knowing about: git's view when it is a repo (so .gitignore
+    is honoured), else a walk that skips the usual build and vendor dirs."""
+    root = Path(root)
+    if (root / ".git").exists() and shutil.which("git"):
+        try:
+            p = subprocess.run(["git", "-C", str(root), "ls-files", "-co", "--exclude-standard"],
+                               capture_output=True, text=True, timeout=20)
+            if p.returncode == 0:
+                return [f for f in p.stdout.splitlines() if f][:limit]
+        except Exception:
+            pass
+    out = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS
+                             and not d.startswith("."))
+        for f in sorted(filenames):
+            if f.startswith("."):
+                continue
+            out.append(str((Path(dirpath) / f).relative_to(root)))
+            if len(out) >= limit:
+                return out
+    return out
+
+
+def _py_defs(text):
+    import ast as _ast
+    try:
+        tree = _ast.parse(text)
+    except SyntaxError:
+        return None
+    names = []
+    for node in tree.body:
+        if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+            names.append(node.name + "()")
+        elif isinstance(node, _ast.ClassDef):
+            meths = [n.name for n in node.body
+                     if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef))
+                     and not (n.name.startswith("__") and n.name != "__init__")]
+            names.append(node.name + (f"[{', '.join(meths[:12])}"
+                                      f"{', …' if len(meths) > 12 else ''}]" if meths else ""))
+    return names
+
+
+def repo_map(root, max_chars=16000):
+    """'path (N lines): defs…' for every source file, capped. -> (ok, text)."""
+    root = Path(root)
+    if not root.is_dir():
+        return False, f"no such folder: {root}"
+    files = _project_files(root)
+    lines, total = [], 0
+    for rel in files:
+        fp = root / rel
+        if fp.suffix.lower() in _GREP_SKIP_EXT:
+            continue
+        try:
+            if not fp.is_file() or fp.stat().st_size > MAX_FILE_BYTES:
+                continue
+            text = fp.read_text(encoding="utf-8", errors="strict")
+        except (UnicodeDecodeError, OSError):
+            continue
+        n = text.count("\n") + (1 if text and not text.endswith("\n") else 0)
+        ext = fp.suffix.lower()
+        defs = None
+        if ext == ".py":
+            defs = _py_defs(text)
+        else:
+            for exts, rx in _DEF_PATTERNS.items():
+                if ext in exts:
+                    defs = []
+                    for ln in text.splitlines():
+                        m = rx.match(ln)
+                        if m:
+                            nm = next((g for g in m.groups() if g), None)
+                            if nm and nm not in defs and nm not in ("if", "for", "while",
+                                                                    "switch", "return"):
+                                defs.append(nm)
+                    break
+        row = f"{rel} ({n} lines)"
+        if defs:
+            shown = ", ".join(defs[:30]) + (f", … +{len(defs) - 30}" if len(defs) > 30 else "")
+            row += ": " + shown
+        if total + len(row) > max_chars:
+            lines.append(f"… {len(files) - len(lines)} more files — use glob/grep to narrow")
+            break
+        lines.append(row)
+        total += len(row) + 1
+    if not lines:
+        return True, "(no readable source files)"
+    return True, "\n".join(lines)
+
+
+def glob_files(root, pattern, limit=300):
+    """Paths under root matching a glob ('**/*.py', 'src/*.ts'), skipping
+    vendor/build dirs. -> (ok, text)."""
+    root = Path(root).resolve()
+    pattern = (pattern or "").strip()
+    if not pattern:
+        return False, "no pattern given"
+    if pattern.startswith("/") or ".." in Path(pattern).parts:
+        return False, "give a pattern relative to the working folder"
+    if "/" not in pattern and not pattern.startswith("**"):
+        pattern = "**/" + pattern
+    hits = []
+    try:
+        for p in root.glob(pattern):
+            rel = p.relative_to(root)
+            if any(part in SKIP_DIRS or part.startswith(".") for part in rel.parts[:-1]):
+                continue
+            hits.append(str(rel) + ("/" if p.is_dir() else ""))
+            if len(hits) >= limit:
+                break
+    except (ValueError, OSError) as ex:
+        return False, f"bad pattern: {ex}"
+    if not hits:
+        return True, f"no files match {pattern}"
+    hits.sort()
+    more = f"\n… stopped at {limit} matches" if len(hits) >= limit else ""
+    return True, "\n".join(hits) + more
+
+
+def read_lines(path, start=None, end=None, max_chars=48000, label=None):
+    """Read a text file, or a 1-based line range of it, for the model.
+
+    -> (ok, text, footer). A file larger than max_chars comes back in pages:
+    the footer says which lines were shown and exactly how to ask for the
+    next ones, so a 6,000-line file is readable end to end instead of being
+    silently cut at some byte count.
+    """
+    p = Path(path)
+    try:
+        if p.stat().st_size > 64 * 1024 * 1024:
+            return False, f"{p.name} is over 64 MB — grep it instead", ""
+        with open(p, "rb") as fh:
+            head = fh.read(4096)
+            if b"\x00" in head:
+                return False, f"{p.name} looks binary", ""
+            data = head + fh.read()
+    except OSError as ex:
+        return False, f"couldn't read {path}: {ex}", ""
+    lines = data.decode("utf-8", "replace").split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    n = len(lines)
+    s = max(1, int(start or 1))
+    e = min(n, int(end)) if end else n
+    if s > n:
+        return False, f"{p.name} has only {n} lines", ""
+    out, used, last = [], 0, s - 1
+    for i in range(s - 1, e):
+        ln = lines[i]
+        if used + len(ln) + 1 > max_chars and out:
+            break
+        out.append(ln)
+        used += len(ln) + 1
+        last = i + 1
+    footer = ""
+    name = label or str(path)            # echo the path the way it was asked for
+    if last < n:
+        footer = (f"[lines {s}-{last} of {n} shown — continue with "
+                  f"```read {name}:{last + 1}-{min(n, last + (last - s + 1))}```]")
+    elif s > 1 or end:
+        footer = f"[lines {s}-{last} of {n}]"
+    return True, "\n".join(out), footer

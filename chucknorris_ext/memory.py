@@ -137,21 +137,71 @@ def _norm(text):
     return re.sub(r"\s+", " ", (text or "").strip())
 
 
-def remember(text, kind="fact", weight=1.0):
-    """Store a durable fact. Dedupes near-identical text. Returns (ok, message)."""
+def remember(text, kind="fact", weight=1.0, scope=""):
+    """Store a durable fact. Dedupes near-identical text, and lets a newer fact
+    about the same subject SUPERSEDE an older one. Returns (ok, message).
+
+    scope: "" for a fact about the user (recalled everywhere), or a working-
+    folder path for a fact about that project (recalled only while it is open)
+    — supermemory's "container tags", so one repo's conventions never leak into
+    another's answers.
+    """
     text = _norm(text)
     if not text or len(text) < 3:
         return False, "nothing to remember"
     if len(text) > 400:
         text = text[:400]
     with _LOCK:
-        return _remember_locked(text, kind, weight)
+        return _remember_locked(text, kind, weight, scope or "")
 
 
-def _remember_locked(text, kind, weight):
+def _ordered_tokens(text):
+    seen, out = set(), []
+    for w in re.findall(r"[a-z0-9][a-z0-9_+.-]{1,}", (text or "").lower()):
+        if w not in _STOP and len(w) > 2 and w not in seen:
+            seen.add(w); out.append(w)
+    return out
+
+
+def _supersedes(new_text, old_text):
+    """Is new_text an UPDATE of old_text rather than a separate fact?
+
+    Supermemory models this as an "updates" relationship; without it the store
+    keeps "User's GPU is an RTX 3080" next to "User's GPU is an RTX 4090" and
+    recall serves both, so Chuck answers with whichever ranks higher that day.
+
+    Deliberately conservative — a false positive silently drops a true fact:
+    both facts need three or more content words, the same SUBJECT (their first
+    two content words, in order) and substantial overlap overall. "User prefers
+    vim" vs "User prefers dark themes" shares a subject but not enough else, so
+    both stay. The loser is archived, never deleted.
+    """
+    a, b = _ordered_tokens(new_text), _ordered_tokens(old_text)
+    if len(a) < 3 or len(b) < 3 or a[:2] != b[:2]:
+        return False
+    sa, sb = set(a), set(b)
+    return len(sa & sb) / max(1, len(sa | sb)) >= 0.5
+
+
+SUPERSEDED = MEM_DIR / "superseded.jsonl"
+
+
+def _archive(facts_out):
+    try:
+        with open(SUPERSEDED, "a", encoding="utf-8") as fh:
+            for f in facts_out:
+                f = dict(f, superseded_at=time.time())
+                fh.write(json.dumps(f, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
+def _remember_locked(text, kind, weight, scope=""):
     facts = _load()
     ntok = _tokens(text)
     for f in facts:
+        if (f.get("scope") or "") != scope:
+            continue
         ft = _tokens(f["text"])
         if not ntok or not ft:
             continue
@@ -161,9 +211,16 @@ def _remember_locked(text, kind, weight):
             f["ts"] = time.time(); f["weight"] = max(f.get("weight", 1.0), weight)
             _save_all(facts)
             return True, "already knew that (refreshed)"
+    old = [f for f in facts if (f.get("scope") or "") == scope
+           and f.get("kind") != "core" and _supersedes(text, f["text"])]
+    if old:
+        _archive(old)
+        ids = {f["id"] for f in old}
+        facts = [f for f in facts if f["id"] not in ids]
     facts.append({"id": _new_id(facts), "text": text,
                   "kind": "core" if kind == "core" else "fact",
-                  "weight": float(weight), "ts": time.time(), "hits": 0})
+                  "weight": float(weight), "ts": time.time(), "hits": 0,
+                  "scope": scope})
     # prune if over cap: drop lowest weight*recency, keep all core
     if len(facts) > _MAX_FACTS:
         core = [f for f in facts if f["kind"] == "core"]
@@ -172,7 +229,7 @@ def _remember_locked(text, kind, weight):
                       reverse=True)[:_MAX_FACTS - len(core)]
         facts = core + rest
     _save_all(facts)
-    return True, "noted"
+    return True, ("updated" if old else "noted")
 
 
 def forget(query):
@@ -305,7 +362,12 @@ def _bridge(cstem):
     return out - cstem
 
 
-def recall(context_text):
+def _in_scope(f, scope):
+    fs = f.get("scope") or ""
+    return fs == "" or (scope and fs == scope)
+
+
+def recall(context_text, scope=""):
     """Return a short list of fact strings relevant to context_text, plus core.
 
     This is what gets injected — deliberately tiny. Never returns the whole store.
@@ -319,7 +381,7 @@ def recall(context_text):
         six months ago when they're otherwise equal
     """
     with _LOCK:
-        facts = _load()
+        facts = [f for f in _load() if _in_scope(f, scope)]
         if not facts:
             return []
     cstem = set(_stems(context_text))
@@ -391,9 +453,9 @@ def recall(context_text):
     return out[:_MAX_INJECT + _MAX_CORE]
 
 
-def memory_block(context_text):
+def memory_block(context_text, scope=""):
     """The injected string (or '' if nothing relevant). Bounded + prefixed."""
-    hits = recall(context_text)
+    hits = recall(context_text, scope)
     if not hits:
         return ""
     return "What you remember about this user (use if relevant, don't force it):\n- " + \
@@ -414,6 +476,11 @@ def flush():
 def all_facts():
     """For a 'what do you remember' view — returns [(text, kind)]."""
     return [(f["text"], f["kind"]) for f in _load()]
+
+
+def all_records():
+    """Every fact with its metadata, newest first — for the memory viewer."""
+    return sorted((dict(f) for f in _load()), key=lambda f: f.get("ts", 0), reverse=True)
 
 
 def count():

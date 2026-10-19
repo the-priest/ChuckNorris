@@ -278,3 +278,47 @@ def fire_timers(n=1):
                     _TIMERS.pop(tid, None)
             except Exception as e:
                 GLibNS.errors.append(("timer", fn, e))
+
+
+# ── GTK 4 child-positioning API used by the transcript's reconcile ──────────
+def _get_parent(self):
+    return self.parent
+
+
+def _get_prev_sibling(self):
+    p = self.parent
+    if p is None or self not in p.kids:
+        return None
+    i = p.kids.index(self)
+    return p.kids[i - 1] if i > 0 else None
+
+
+def _insert_child_after(self, child, sibling):
+    if child in self.kids:
+        self.kids.remove(child)
+    if isinstance(child, Widget):
+        child.parent = self
+    if sibling is None or sibling not in self.kids:
+        self.kids.insert(0, child)
+    else:
+        self.kids.insert(self.kids.index(sibling) + 1, child)
+
+
+def _reorder_child_after(self, child, sibling):
+    _insert_child_after(self, child, sibling)
+
+
+def _get_last_child(self):
+    return self.kids[-1] if self.kids else None
+
+
+Widget.get_parent = _get_parent
+Widget.get_prev_sibling = _get_prev_sibling
+Widget.insert_child_after = _insert_child_after
+Widget.reorder_child_after = _reorder_child_after
+Widget.get_last_child = _get_last_child
+Buffer.get_char_count = lambda self: len(self.text)
+Buffer.place_cursor = lambda self, *a: None
+GdkNS.KEY_Tab = 65289
+GdkNS.KEY_Escape = 65307
+Buffer.connect = lambda self, *a, **k: 0

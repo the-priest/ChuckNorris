@@ -416,14 +416,39 @@ def _lint_js(body):
         # node --check does a syntax parse; eslint if present for real lint
         eslint = _which("eslint")
         if eslint:
-            with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as f:
-                f.write(body); p = f.name
-            try:
-                rc, out = _run([eslint, "--no-eslintrc", "--format", "compact", p])
-                return _clean_lint_output(rc, out, p, "code.js")
-            finally:
-                os.unlink(p)
+            # stdin, not a temp file: ESLint 9 skips any file outside its base
+            # path with a warning and exit 0, so a /tmp file was never linted.
+            rc, out = _run([eslint] + _eslint_args()
+                           + ["--stdin", "--stdin-filename", "code.js"], text_in=body)
+            return _clean_lint_output(rc, out, os.path.join(os.getcwd(), "code.js"),
+                                      "code.js")
     return []
+
+
+# ESLint 9 removed --no-eslintrc AND the compact formatter, so the old argv made
+# every clean file "fail" lint with "Invalid option '--eslintrc'" — the Run
+# button was withheld from working JavaScript on any current install. Flat
+# config with no lookup has no rules on, so the defect-only set is passed
+# explicitly. no-undef is left out: it needs per-environment globals and would
+# false-positive on `require`/`window`, which is worse than missing a finding.
+_ESLINT_DEFECTS = ('{"no-unreachable":"error","no-dupe-keys":"error",'
+                   '"no-dupe-args":"error","no-const-assign":"error",'
+                   '"no-self-assign":"error","no-unsafe-finally":"error",'
+                   '"no-func-assign":"error","valid-typeof":"error"}')
+_ESLINT_ARGS = []
+
+
+def _eslint_args():
+    if not _ESLINT_ARGS:
+        rc, out = _run([_which("eslint"), "--version"], timeout=15)
+        m = re.search(r"(\d+)\.", out or "")
+        major = int(m.group(1)) if m else 9
+        if major >= 9:
+            _ESLINT_ARGS.extend(["--no-config-lookup", "--rule", _ESLINT_DEFECTS,
+                                 "--format", "stylish"])
+        else:
+            _ESLINT_ARGS.extend(["--no-eslintrc", "--format", "compact"])
+    return list(_ESLINT_ARGS)
 
 
 # ── security scan ────────────────────────────────────────────────────────────
