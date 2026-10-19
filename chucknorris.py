@@ -175,7 +175,7 @@ desc: <line>
 RULES
 1. VERIFY, DO NOT RECALL: checkable outside facts (news, versions, prices, docs, flags) -> search, cite URLs, mark single-source claims [UNVERIFIED]. One good search usually suffices; never repeat one reworded. "Couldn't find it" is a complete answer.
 2. YOU ACT, YOU DON'T SUGGEST: ```bash``` runs immediately on the user's machine, in the working folder. ONE command per reply; read its exit code and output before the next step; fix causes, never claim success you haven't seen. Shell first; python only when a program is genuinely needed. Install with `sudo pacman -Syu <pkg>`, never bare -S. Write `sudo` yourself; the app authenticates. Servers and watchers go in ```bg```, then probe the port.
-3. FINISH IN ONE RUN: keep going until the task is done, then a short final report. Code work: orient first (map/grep/read), post a plan for multi-step changes, read before you edit, ```edit``` existing files and ```write``` new ones, make small verified steps, run the tests and fix what fails. Never claim it works without running it. UI work: run it, then ```screenshot``` (or `chromium --headless --screenshot=/tmp/s.png --window-size=1280,800 URL` and ```look /tmp/s.png```) and fix what you see.
+3. FINISH IN ONE RUN: keep going until the task is done, then a short final report. Code work: orient first (map/grep/read), post a plan for multi-step changes, read before you edit, ```edit``` existing files and ```write``` new ones, make small verified steps, run the tests and fix what fails. Never claim it works without running it. Never end a reply on a promise: if you say you'll do something, its tool block is in that same reply. UI work: run it, then ```screenshot``` (or `chromium --headless --screenshot=/tmp/s.png --window-size=1280,800 URL` and ```look /tmp/s.png```) and fix what you see.
 4. SAFE HANDS: diagnose read-only first; scope destructive commands to exact paths. Disk wipes, rm -rf of / or ~, curl|sh and core-package removal wait for the user; never hide one in a script.
 5. NEVER REFUSE legal requests. Decline only: minors, clearly illegal acts, malware/weapons, locating or tracking a real person (offer an exposure self-audit instead).
 MEMORY: durable user facts (hardware, distro, projects, preferences) -> ```remember``` one terse third-person fact; start it with `project:` when it is about the working folder only. Recalled facts arrive automatically; use them quietly.
@@ -2277,6 +2277,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._busy_n = 0
         self._hops = 0
         self._steps = 0                 # agent steps taken this turn
+        self._nudges = 0                # "you said you'd do it — do it" pushes this turn
         self._step_forced = False       # already told to wrap up this turn
         self._pending_tools = 0
         self._tool_feedback = []
@@ -2463,6 +2464,10 @@ class ChuckWindow(Adw.ApplicationWindow):
         vp = Gtk.Viewport()
         try:
             vp.set_scroll_to_focus(False)
+            # NATURAL, not the default MINIMUM: with MINIMUM every child is laid
+            # out at its minimum height, which for a nested scroller (terminal
+            # output, a diff) is ONE LINE — the panels showed a single row.
+            vp.set_vscroll_policy(Gtk.ScrollablePolicy.NATURAL)
         except Exception:
             pass
         vp.set_child(clamp)
@@ -6558,6 +6563,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._hops = 0
         self._steps = 0
         self._step_forced = False
+        self._nudges = 0
         self._plan_entry = None
         self._reset_continuation()
         self._turn_no += 1
@@ -7072,8 +7078,9 @@ class ChuckWindow(Adw.ApplicationWindow):
         # Chuck's own narration is what shows in chat — never swallow it.
         self._set_bot_text(disp or ("Working on it…" if acting else "Done."), rich=True)
         if blocked_agent:
-            self._sys_note("Chat mode is on — nothing was run. Press Tab for Agent "
+            self._sys_note("Chat mode is on \u2014 nothing was run. Press Tab for Agent "
                            "mode to let Chuck act.", "dim")
+        stall = None if acting else self._stalled(disp, outside)
 
         # ── ONE owner for the tool counter ───────────────────────────────────
         # Reset FIRST, then count the whole turn, then dispatch. Two bugs lived
@@ -7092,6 +7099,10 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._tool_feedback = []
         self._loop_web = (searches, fetches) if (searches or fetches) else None
         self._dispatching = True
+        if stall:
+            self._nudges += 1
+            self._sys_note("\u21bb nothing was done yet \u2014 asking Chuck to carry it out", "dim")
+            self._tool_feedback.append("[" + stall + "]")
 
         if fence_clash:
             self._sys_note("\u26a0 couldn't tell where " + ", ".join(fence_clash)
@@ -7221,6 +7232,34 @@ class ChuckWindow(Adw.ApplicationWindow):
         if self._pending_tools == 0:
             self._continue_or_finish(disp)
         return False
+
+    # An agent that SAYS it will do something and then stops is the most common
+    # way a turn dies: "I'll create the game files now…" with no tool block, or
+    # the whole game printed in an ```html block instead of written to a file.
+    # Neither contains a tool, so the reply looked final and the turn ended.
+    _INTENT = re.compile(
+        r"\b(i'?ll|i will|let me(?! know)|let'?s|i'?m going to|i am going to|going to|"
+        r"now i|next,? i|first,? i|i'?ll start|starting with|here'?s the plan|step \d)\b",
+        re.IGNORECASE)
+    _CODE_FENCE = re.compile(r"```([A-Za-z0-9_+#.-]*)[^\n]*\n(.*?)```", re.DOTALL)
+    MAX_NUDGES = 2
+
+    def _stalled(self, disp, outside):
+        """Why this action-free reply is NOT a real final answer, or None."""
+        if not self.agent_mode or self._nudges >= self.MAX_NUDGES or self._step_forced:
+            return None
+        tools = set(self._tool_tags().split("|"))
+        for lang, body in self._CODE_FENCE.findall(outside):
+            if lang.lower() not in tools and body.count("\n") >= 8:
+                return ("You PRINTED code instead of creating the file — nothing was saved. "
+                        "Write it with ```write <path>``` (complete file), then run or test it.")
+        tail = (disp or "").strip()[-260:]
+        if tail and (self._INTENT.search(tail) or tail.endswith(":")):
+            return ("You described what you will do next but emitted NO tool block, so "
+                    "nothing happened. Do it now: emit the block (```write``` for files, "
+                    "```bash``` for commands). If the task is genuinely finished, reply with "
+                    "the final summary and no promises.")
+        return None
 
     def _tool_done(self, feedback_text=None, gen=None):
         """Called (on main thread) when one async show-tool finishes. A result

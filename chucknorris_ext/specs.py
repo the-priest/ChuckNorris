@@ -187,16 +187,126 @@ _GROUPS = {
         "and the app stores it + shows a run card. To run a saved one: "
         "```runskill\\n<name>\\n```. They persist across restarts and the user can edit them.",
     ),
+    # ── engineering playbooks (in the spirit of obra/superpowers) ─────────
+    "debug": (
+        r"\b(traceback|exception|stack ?trace|segfault|bug|debug\w*|regression|failing test|"
+        r"assertionerror|typeerror|keyerror|valueerror|attributeerror|nullpointer|undefined is not|"
+        r"doesn'?t work|not working|wrong (output|result|answer)|flaky|panic(ked)?|core dumped)\b",
+        "SYSTEMATIC DEBUGGING \u2014 no guessing:\n"
+        "1. REPRODUCE: find the exact command and exact output that shows the bug. No repro, no fix.\n"
+        "2. READ the whole error bottom-up; find the first frame in the project's own code; "
+        "```read``` that code (```grep``` for the symbol, ```map``` if you're lost).\n"
+        "3. ONE hypothesis, stated in one line, tested by the smallest experiment (a print, an "
+        "assert, a 3-line script). If the result disagrees, say so and form the next one.\n"
+        "4. FIX THE ROOT CAUSE, not the symptom. Never swallow an exception, special-case the "
+        "failing input, or loosen a test to get green.\n"
+        "5. VERIFY: rerun the reproduction AND the full test suite. Add a regression test that "
+        "fails without the fix.\n"
+        "6. Three hypotheses down? Stop patching. Re-read the whole code path end to end.",
+    ),
+    "tdd": (
+        r"\b(tests?|pytest|unittest|jest|vitest|mocha|cargo test|go test|coverage|tdd|spec file|"
+        r"test suite|assertion)\b",
+        "TESTS:\n"
+        "- New behaviour or a bug fix: write the failing test FIRST, watch it fail for the right "
+        "reason, then make it pass.\n"
+        "- Test real behaviour: edge cases (empty, huge, unicode, None), failure paths, the bug "
+        "itself. Not just a smoke test.\n"
+        "- Use the project's runner (pytest -q, npm test, cargo test, go test ./..., make test) "
+        "and run the WHOLE suite before you say it works.\n"
+        "- Never delete, skip or weaken a test to get green. A failing test is information.",
+    ),
+    "review": (
+        r"\b(review|audit|code quality|refactor\w*|clean ?up|smell|tech debt|look over|"
+        r"critique|pull request|pr)\b",
+        "CODE REVIEW:\n"
+        "- Read the code fully before judging; trace real inputs through it.\n"
+        "- Correctness first: edge cases, error paths, off-by-one, None/null, races, leaked "
+        "resources, wrong assumptions about inputs.\n"
+        "- Then security (injection, secrets, path traversal, unsafe deserialisation), then "
+        "performance (N+1, quadratic loops), then clarity.\n"
+        "- Report findings ranked by severity: file:line, the failure it causes, a concrete fix. "
+        "Don't rewrite style for taste. Refactor in small, test-covered steps.",
+    ),
+    "git": (
+        r"\b(git|commit|branch|merge|rebase|conflict|stash|cherry-pick|bisect|gitignore|"
+        r"push|pull|checkout)\b",
+        "GIT:\n"
+        "- Look first: git status, git log --oneline -10, git diff --stat.\n"
+        "- Small focused commits with messages that say why. Never commit secrets or build output "
+        "(fix .gitignore).\n"
+        "- Never force-push, rebase shared history or reset --hard without the user asking.\n"
+        "- Conflicts: read both sides, keep the intent of each, run the tests after.\n"
+        "- A regression with a known-good commit: git bisect run <test command>.",
+    ),
+    "ui": (
+        r"\b(ui|ux|frontend|front-end|css|html|react|vue|svelte|angular|tailwind|layout|"
+        r"component|website|web ?app|landing page|gtk|qt|electron|responsive|dark mode|design)\b",
+        "UI WORK \u2014 build it, then LOOK at it:\n"
+        "- Run it: a dev server goes in ```bg``` (then ```logs``` until it's up).\n"
+        "- See it: ```screenshot```, or for a page `chromium --headless --disable-gpu "
+        "--screenshot=/tmp/s.png --window-size=1280,800 URL` then ```look /tmp/s.png```. "
+        "Check a narrow width too (--window-size=390,844).\n"
+        "- Fix what you SEE: alignment, overflow, contrast, spacing, focus states. Look again "
+        "after every visual change. Never call UI done from the code alone.",
+    ),
+    "perf": (
+        r"\b(slow|slowness|performance|optimi[sz]\w*|speed ?up|latency|memory leak|"
+        r"profil\w*|benchmark\w*|cpu usage|bottleneck|too much (ram|memory))\b",
+        "PERFORMANCE \u2014 measure, don't guess:\n"
+        "- Measure first: time/hyperfine, python -m cProfile -s cumtime, py-spy, perf, "
+        "/usr/bin/time -v for memory.\n"
+        "- Find THE hot spot, change one thing, measure again. Report before/after numbers.\n"
+        "- Never trade correctness for speed; keep the tests green.",
+    ),
+    "security": (
+        r"\b(security|vulnerab\w*|cve|xss|csrf|sql ?injection|injection|sanitiz\w*|"
+        r"authenticat\w*|authoriz\w*|password|secret|api key|encrypt\w*|hardening|exploit)\b",
+        "SECURITY:\n"
+        "- Secrets never in code or git: environment variables or the OS keyring.\n"
+        "- Treat input as hostile: parameterised SQL, shlex.quote / argv lists for shell, "
+        "normalise and contain paths, escape HTML output.\n"
+        "- Least privilege; auth checks on the server side.\n"
+        "- Audit dependencies (pip-audit, npm audit, cargo audit). Report risks by severity "
+        "with the fix.",
+    ),
+    "deps": (
+        r"\b(dependenc\w*|pip install|npm install|pnpm|yarn add|requirements\.txt|venv|"
+        r"virtualenv|poetry|uv (add|pip|sync)|cargo add|go get|package\.json|pyproject)\b",
+        "DEPENDENCIES:\n"
+        "- Check what the project already uses before adding anything; prefer the standard "
+        "library.\n"
+        "- Python: a virtualenv (python -m venv .venv or uv), never sudo pip; record it in "
+        "pyproject/requirements. Node: the project's manager (npm/pnpm/yarn). Rust: cargo add.\n"
+        "- Pin versions; commit the lock file.",
+    ),
 }
 
 
+_COMPILED = {k: re.compile(p) for k, (p, _s) in _GROUPS.items()}
+# On equal match counts the SPECIFIC playbook beats the generic one: a Python
+# traceback that also says "failing" wants debugging, not system repair.
+_TIE_ORDER = ["debug", "tdd", "ui", "perf", "security", "review", "deps", "git",
+              "arch", "recon", "fixit", "sysadmin", "build", "data", "web", "code",
+              "files", "media", "skills"]
+
+
 def specs_for(text):
-    """Return a list of (label, spec) for every group the text triggers."""
+    """Every group the text triggers, MOST RELEVANT FIRST.
+
+    The app sends at most two, so order is the whole game. Dictionary order
+    meant a Python traceback loaded the generic system-repair and build
+    playbooks before anything about debugging code. Groups are now ranked by
+    how many distinct trigger words the text hits (ties keep the table order).
+    """
     t = (text or "").lower()
-    hits = []
-    for label, (pat, spec) in _GROUPS.items():
-        if re.search(pat, t):
-            hits.append((label, spec))
-    return hits
+    scored = []
+    for label, (_pat, spec) in _GROUPS.items():
+        rank = _TIE_ORDER.index(label) if label in _TIE_ORDER else len(_TIE_ORDER)
+        found = {m.group(0) for m in _COMPILED[label].finditer(t)}
+        if found:
+            scored.append((-len(found), rank, label, spec))
+    scored.sort()
+    return [(label, spec) for _n, _r, label, spec in scored]
 
 

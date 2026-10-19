@@ -204,6 +204,122 @@ else
 fi
 """,
     ),
+    # ── development (run in the working folder) ───────────────────────────
+    "dev-toolchain": (
+        "Which compilers, runtimes and package managers are installed, with versions",
+        r"""#!/usr/bin/env bash
+# Read-only: what can this machine build and run?
+for t in python3 pip uv poetry node npm pnpm yarn bun deno go rustc cargo gcc g++ clang \
+         cmake make ninja java javac kotlin dotnet ruby php lua zig docker podman git gh; do
+  if command -v "$t" >/dev/null 2>&1; then
+    v=$("$t" --version 2>&1 | head -n1)
+    printf '  %-8s %s\n' "$t" "${v:0:70}"
+  fi
+done
+""",
+    ),
+    "dev-project": (
+        "Detect the project type here, how to build/test/run it, and its git state",
+        r"""#!/usr/bin/env bash
+# Read-only: orient in the current folder.
+echo "== $(pwd) =="
+[ -f pyproject.toml ]   && echo "python (pyproject.toml)  test: pytest -q  | deps: pip install -e . / uv sync"
+[ -f setup.py ]         && echo "python (setup.py)"
+[ -f requirements.txt ] && echo "python requirements.txt ($(grep -cv '^\s*#' requirements.txt) lines)"
+[ -f package.json ]     && { echo "node (package.json) scripts:"; python3 -c 'import json;[print("   ",k,"=",v) for k,v in json.load(open("package.json")).get("scripts",{}).items()]' 2>/dev/null; }
+[ -f Cargo.toml ]       && echo "rust (Cargo.toml)  test: cargo test  | run: cargo run"
+[ -f go.mod ]           && echo "go (go.mod)  test: go test ./...  | run: go run ."
+[ -f CMakeLists.txt ]   && echo "c/c++ (cmake)  build: cmake -B build && cmake --build build"
+[ -f Makefile ]         && { echo "Makefile targets:"; grep -oE '^[a-zA-Z0-9_.-]+:' Makefile | head -15 | sed 's/^/    /'; }
+[ -f Dockerfile ]       && echo "Dockerfile present"
+[ -d tests ] || [ -d test ] && echo "tests: $(find tests test -name '*test*' -type f 2>/dev/null | wc -l) test files"
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  echo; echo "git: $(git branch --show-current) | $(git status --porcelain | wc -l) changed files"
+  git log --oneline -5 2>/dev/null
+fi
+echo; echo "size: $(find . -type f -not -path './.git/*' -not -path '*/node_modules/*' | wc -l) files"
+exit 0
+""",
+    ),
+    "git-overview": (
+        "Git state at a glance: branch, status, recent commits, remotes, stash, diff stat",
+        r"""#!/usr/bin/env bash
+git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "not a git repository"; exit 0; }
+echo "== branch =="; git branch -vv --no-color | sed -n '1,10p'
+echo; echo "== status =="; git status --short | head -40
+echo; echo "== last 12 commits =="; git log --oneline --decorate -12 --no-color
+echo; echo "== remotes =="; git remote -v
+echo; echo "== stash =="; git stash list | head -5
+echo; echo "== uncommitted diff =="; git diff --stat | tail -15
+exit 0
+""",
+    ),
+    "dev-todos": (
+        "Find TODO / FIXME / HACK / XXX markers in the project",
+        r"""#!/usr/bin/env bash
+if command -v rg >/dev/null; then
+  rg -n --no-heading -e 'TODO|FIXME|HACK|XXX' -g '!node_modules' -g '!.git' . | head -80
+else
+  grep -rnE 'TODO|FIXME|HACK|XXX' --exclude-dir={.git,node_modules,.venv,venv,dist,build} . | head -80
+fi
+exit 0      # finding nothing is a fine answer, not a failure
+""",
+    ),
+    "dev-bigfiles": (
+        "The largest files in the project (skips .git, node_modules, venvs)",
+        r"""#!/usr/bin/env bash
+find . -type f -not -path './.git/*' -not -path '*/node_modules/*' -not -path '*/.venv/*' \
+     -not -path '*/venv/*' -not -path '*/__pycache__/*' -not -name '*.pyc' \
+     -printf '%s\t%p\n' 2>/dev/null | sort -rn | head -25 \
+  | awk -F'\t' '{ s=$1; u="B"; if (s>1024){s/=1024;u="K"}; if (s>1024){s/=1024;u="M"}; if (s>1024){s/=1024;u="G"}; printf "%8.1f%s  %s\n", s, u, $2 }'
+""",
+    ),
+    "py-env": (
+        "Python environment check: interpreter, virtualenv, test and lint tools",
+        r"""#!/usr/bin/env bash
+echo "python: $(command -v python3) ($(python3 --version 2>&1))"
+if [ -n "$VIRTUAL_ENV" ]; then echo "active venv: $VIRTUAL_ENV"; fi
+for d in .venv venv env; do [ -x "$d/bin/python" ] && echo "project venv: ./$d ($($d/bin/python --version 2>&1))"; done
+for t in pip uv poetry pytest ruff mypy black; do
+  command -v "$t" >/dev/null && printf '  %-7s %s\n' "$t" "$($t --version 2>&1 | head -n1)"
+done
+[ -f pyproject.toml ] && { echo; echo "pyproject dependencies:"; python3 - <<'PY'
+import tomllib
+d = tomllib.load(open("pyproject.toml", "rb"))
+for dep in d.get("project", {}).get("dependencies", [])[:30]:
+    print("   ", dep)
+PY
+}
+exit 0      # a report, not a test: a missing pyproject is not a failure
+""",
+    ),
+    "dev-test": (
+        "Detect and run this project's test suite (pytest, npm, cargo, go, make)",
+        r"""#!/usr/bin/env bash
+if [ -f run_tests.sh ]; then exec bash run_tests.sh
+elif [ -f pyproject.toml ] || [ -f pytest.ini ] || [ -d tests ] && command -v pytest >/dev/null; then exec pytest -q
+elif [ -f package.json ] && grep -q '"test"' package.json; then exec npm test --silent
+elif [ -f Cargo.toml ]; then exec cargo test
+elif [ -f go.mod ]; then exec go test ./...
+elif [ -f Makefile ] && grep -qE '^test:' Makefile; then exec make test
+elif ls tests/test_*.py test_*.py >/dev/null 2>&1; then
+  rc=0; for t in tests/test_*.py test_*.py; do [ -f "$t" ] && { python3 "$t" || rc=1; }; done; exit $rc
+else echo "no test suite found here"; exit 1; fi
+""",
+    ),
+    "port-who": (
+        "Every listening TCP/UDP port with the process that owns it",
+        r"""#!/usr/bin/env bash
+if command -v ss >/dev/null; then
+  ss -tulpnH 2>/dev/null | awk '{printf "%-5s %-28s %s\n", $1, $5, $7}' | sort -u
+elif command -v netstat >/dev/null; then
+  netstat -tulpn 2>/dev/null
+else
+  echo "neither ss nor netstat is installed (sudo pacman -Syu iproute2)"
+fi
+exit 0
+""",
+    ),
 }
 
 
@@ -214,7 +330,7 @@ def seed_into(skills_module, marker_path):
     don't re-seed every launch. Returns the number of skills newly added.
     Never overwrites a skill the user already has by that name.
     """
-    VERSION = "1"
+    VERSION = "2"           # bump when skills are added: existing installs pick them up
     try:
         if marker_path.exists() and marker_path.read_text().strip() == VERSION:
             return 0
