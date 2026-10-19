@@ -598,3 +598,18 @@ def read_lines(path, start=None, end=None, max_chars=48000, label=None):
     elif s > 1 or end:
         footer = f"[lines {s}-{last} of {n}]"
     return True, "\n".join(out), footer
+
+
+# ── diffs ────────────────────────────────────────────────────────────────────
+def diff_lines(before, after, rel, max_lines=800):
+    """Unified diff of two texts as a list of lines (capped), plus counts.
+    -> (lines, added, removed). None before = a new file."""
+    import difflib
+    a = (before or "").splitlines()
+    b = (after or "").splitlines()
+    d = list(difflib.unified_diff(a, b, f"a/{rel}", f"b/{rel}", n=3, lineterm=""))
+    added = sum(1 for ln in d if ln.startswith("+") and not ln.startswith("+++"))
+    removed = sum(1 for ln in d if ln.startswith("-") and not ln.startswith("---"))
+    if len(d) > max_lines:
+        d = d[:max_lines] + [f"… {len(d) - max_lines} more diff lines"]
+    return d, added, removed

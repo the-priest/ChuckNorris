@@ -42,7 +42,7 @@ def hist_text(w):
 
 # ═══════════════════════════════════════════════════════════════════════════
 print("\n--- prompts: small, and still carrying the rules the safety suite guards ---")
-check(len(cn.SYSTEM_PROMPT) < 3700, "agent prompt is far below v13's 5,708 chars",
+check(len(cn.SYSTEM_PROMPT) < 4000, "agent prompt stays well below v13's 5,708 chars",
       f"{len(cn.SYSTEM_PROMPT)}")
 check(len(cn.CHAT_PROMPT) < 900, "chat prompt is tiny", f"{len(cn.CHAT_PROMPT)}")
 for must in ("YOU ACT, YOU DON'T SUGGEST", "ONE command per reply", "```edit", "```task",

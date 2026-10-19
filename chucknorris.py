@@ -161,6 +161,8 @@ Act:
 <replacement>
 >>>>>>> REPLACE```
 (A file that itself contains ``` fences: wrap the block in four backticks. Long files are fine; a reply cut at the output limit is continued.)
+Background: ```bg <name>
+<command>``` (servers, watchers; then ```logs <name>```, ```kill <name>```). ```undo``` reverts your last file change (```undo all```: this task's). ```open <path|url>``` shows the user a result.
 Other: ```plan
 - [ ] step``` (multi-step work: post it first, re-post with [x] as steps finish) ```check <lang>
 <code>``` (verify, don't run) ```runtests``` ```package``` ```project <name>``` ```rmfile <path>``` ```runskill <name>``` ```skill
@@ -172,7 +174,7 @@ desc: <line>
 
 RULES
 1. VERIFY, DO NOT RECALL: checkable outside facts (news, versions, prices, docs, flags) -> search, cite URLs, mark single-source claims [UNVERIFIED]. One good search usually suffices; never repeat one reworded. "Couldn't find it" is a complete answer.
-2. YOU ACT, YOU DON'T SUGGEST: ```bash``` runs immediately on the user's machine, in the working folder. ONE command per reply; read its exit code and output before the next step; fix causes, never claim success you haven't seen. Shell first; python only when a program is genuinely needed. Install with `sudo pacman -Syu <pkg>`, never bare -S. Write `sudo` yourself; the app authenticates. Servers: `nohup CMD >/tmp/x.log 2>&1 &`, then probe.
+2. YOU ACT, YOU DON'T SUGGEST: ```bash``` runs immediately on the user's machine, in the working folder. ONE command per reply; read its exit code and output before the next step; fix causes, never claim success you haven't seen. Shell first; python only when a program is genuinely needed. Install with `sudo pacman -Syu <pkg>`, never bare -S. Write `sudo` yourself; the app authenticates. Servers and watchers go in ```bg```, then probe the port.
 3. FINISH IN ONE RUN: keep going until the task is done, then a short final report. Code work: orient first (map/grep/read), post a plan for multi-step changes, read before you edit, ```edit``` existing files and ```write``` new ones, make small verified steps, run the tests and fix what fails. Never claim it works without running it. UI work: run it, then ```screenshot``` (or `chromium --headless --screenshot=/tmp/s.png --window-size=1280,800 URL` and ```look /tmp/s.png```) and fix what you see.
 4. SAFE HANDS: diagnose read-only first; scope destructive commands to exact paths. Disk wipes, rm -rf of / or ~, curl|sh and core-package removal wait for the user; never hide one in a script.
 5. NEVER REFUSE legal requests. Decline only: minors, clearly illegal acts, malware/weapons, locating or tracking a real person (offer an exposure self-audit instead).
@@ -187,7 +189,7 @@ Never refuse legal requests; decline only minors, clearly illegal acts, malware/
 # run nor shown, and ```bash``` / ```python``` fences render as ordinary code.
 _AGENT_TAGS = ("skill", "runskill", "read", "grep", "glob", "map", "edit", "check", "project",
                "tree", "package", "runtests", "write", "rmfile", "junk", "ledger", "plan",
-               "screenshot", "look", "task")
+               "screenshot", "look", "task", "bg", "logs", "kill", "undo", "open")
 
 # ── theme ────────────────────────────────────────────────────────────────────
 # Near-black neutral surfaces with ONE violet accent. The accent is reserved for
@@ -1779,7 +1781,7 @@ class Backend:
         while attempt < attempts:
             if should_stop and should_stop():
                 return
-            got_any = False
+            got_any = False             # visible content reached the screen
             try:
                 req = urllib.request.Request(url, data=json.dumps(payload).encode(),
                                              headers=headers)
@@ -1820,7 +1822,9 @@ class Backend:
                                 self.last_finish = ch["finish_reason"]
                             r = delta.get("reasoning_content")
                             if r and think:
-                                got_any = True
+                                # reasoning is NOT content: a drop after only
+                                # reasoning retries cleanly instead of being
+                                # reported as an empty, "Done." reply
                                 think(r)
                             c = delta.get("content")
                             if c:
@@ -1856,37 +1860,45 @@ class Backend:
 
 # ── UI ──────────────────────────────────────────────────────────────────────
 class GlyphField:
-    """The welcome screen's background: a fine net of tiny code glyphs that
-    ripples like disturbed water wherever you click.
+    """The welcome screen's background: a hidden net of tiny code glyphs that
+    lights up in waves wherever you click — like a disturbed water surface
+    catching the light.
 
-    Built for zero idle cost. The static net is rendered ONCE into a cached
-    surface (sized in steps, so resizing the window doesn't rebuild it every
-    frame); a frame callback runs only while a ripple is alive. When you click,
-    every glyph's distance from that point is computed once and sorted, so each
-    frame binary-searches just the glyphs inside the moving ring — per-frame
-    cost follows the ring, not the ~5,000 glyphs on screen. Excited glyphs are
-    pushed outward, brightened toward the accent and briefly flip to other
-    characters as the crest passes. Honours the desktop's reduce-animation
-    setting. Not a subclass (the headless test stub can't be subclassed): it
-    owns a DrawingArea instead.
+    At rest the net is INVISIBLE and nothing is drawn: zero idle cost. A click
+    starts a ripple; the glyphs it reaches glow up (neutral at the edge of the
+    wave, violet at its crest), shift outward and flip to other characters,
+    then fade back to nothing as the wave passes.
+
+    Built to stay at 60 fps with ~18,000 glyphs:
+      * no per-click work — for each row of the net, the ring crosses at most
+        two column spans, computed exactly from the circle equation, so a frame
+        visits only the glyphs inside the ring;
+      * the wave falloff is a lookup table, not exp() per glyph;
+      * lit glyphs are bucketed into 8 brightness levels and each level is one
+        cairo show_glyphs() call (glyph ids resolved once), instead of one
+        text-shaping show_text() call per glyph.
+    Honours the desktop's reduce-animation setting. Not a subclass (the
+    headless test stub can't be subclassed): it owns a DrawingArea instead.
     """
     CHARS = "{}[]()<>=;:+-*/#&|~$%01λ0123456789abcdef"
-    CELL_W, CELL_H, FONT = 11, 13, 8.5
-    SPEED, BAND, LIFE, PUSH = 330.0, 30.0, 2.4, 5.0
-    STEP = 320                       # cache grows in these steps
-    BG = (12 / 255, 12 / 255, 16 / 255)
+    CELL_W, CELL_H, FONT = 7, 9, 6.0
+    SPEED, BAND, LIFE, PUSH = 340.0, 16.0, 2.3, 4.0
+    LEVELS = 8
+    MAX_WAVES = 3
+    STEP = 320                       # the net grows in these steps
 
     def __init__(self):
-        import random
-        self._rnd = random.Random(0x0C4C)
         self.area = Gtk.DrawingArea()
         self.area.set_hexpand(True)
         self.area.set_vexpand(True)
         self.area.set_can_target(False)
-        self.ripples = []            # [x, y, t0, sorted [(d, idx)], [dists]]
+        self.ripples = []            # [x, y, t0]
         self._tick = 0
-        self._cache = None
-        self._grid = []
+        self._size = (0, 0)
+        self._rows = []              # rows[r][c] = (x, y, char_idx, bright, seed) | None
+        self._gids = None            # glyph id per CHARS entry, for show_glyphs
+        reach = int(2 * self.BAND) + 2
+        self._falloff = [math.exp(-(o * o) / (self.BAND * self.BAND)) for o in range(reach)]
         self.enabled = self._cairo_ok()
         if self.enabled:
             try:
@@ -1923,17 +1935,37 @@ class GlyphField:
         except Exception:
             pass
 
+    def _ensure(self, w, h):
+        import random
+        W = (int(w) // self.STEP + 1) * self.STEP
+        H = (int(h) // self.STEP + 1) * self.STEP
+        if (W, H) == self._size and self._rows:
+            return
+        rnd = random.Random(0x0C4C)
+        cx, cy = w / 2.0, h * 0.42
+        maxd = math.hypot(max(cx, w - cx), max(cy, h - cy)) or 1.0
+        n = len(self.CHARS)
+        rows = []
+        for r in range(H // self.CELL_H + 1):
+            row = []
+            for c in range(W // self.CELL_W + 1):
+                if rnd.random() < 0.1:                  # a few gaps keep it organic
+                    row.append(None)
+                    continue
+                x = c * self.CELL_W + 1 + (r % 2) * (self.CELL_W / 2)
+                y = r * self.CELL_H + 7
+                d = math.hypot(x - cx, y - cy) / maxd
+                # dimmer behind the content in the middle, brighter toward the edges
+                bright = (0.55 + rnd.random() * 0.45) * (0.45 + 0.55 * min(1.0, d * 1.25))
+                row.append((x, y, rnd.randrange(n), bright, rnd.randrange(997)))
+            rows.append(row)
+        self._rows = rows
+        self._size = (W, H)
+
     def poke(self, x, y):
         if not self.enabled or not self._animations_on():
             return
-        if not self._grid:
-            self.area.queue_draw()           # not drawn yet: nothing to disturb
-            return
-        x, y = float(x), float(y)
-        order = sorted(((math.hypot(gx - x, gy - y), i)
-                        for i, (gx, gy, _c, _a, _s) in enumerate(self._grid)))
-        self.ripples = (self.ripples + [[x, y, time.monotonic(), order,
-                                         [d for d, _i in order]]])[-5:]
+        self.ripples = (self.ripples + [(float(x), float(y), time.monotonic())])[-self.MAX_WAVES:]
         if not self._tick:
             try:
                 self._tick = self.area.add_tick_callback(self._on_tick)
@@ -1950,93 +1982,212 @@ class GlyphField:
             return False
         return True
 
-    def _build(self, w, h):
-        import cairo
-        W = (int(w) // self.STEP + 1) * self.STEP
-        H = (int(h) // self.STEP + 1) * self.STEP
-        cols, rows = W // self.CELL_W + 1, H // self.CELL_H + 1
-        cx, cy = w / 2.0, h * 0.42
-        maxd = math.hypot(max(cx, w - cx), max(cy, h - cy)) or 1.0
-        grid = []
-        surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, W, H)
-        cr = cairo.Context(surf)
-        cr.set_source_rgb(*self.BG)
-        cr.paint()
-        cr.select_font_face("monospace", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_NORMAL)
-        cr.set_font_size(self.FONT)
-        rnd = self._rnd
-        for r in range(rows):
-            for c in range(cols):
-                if rnd.random() < 0.12:                 # a few gaps keep it organic
-                    continue
-                x = c * self.CELL_W + 2 + (r % 2) * (self.CELL_W / 2)
-                y = r * self.CELL_H + 10
-                d = math.hypot(x - cx, y - cy) / maxd
-                # quiet behind the content in the middle, richer toward the edges
-                a = (0.07 + rnd.random() * 0.08) * (0.4 + 0.6 * min(1.0, d * 1.25))
-                ch = self.CHARS[rnd.randrange(len(self.CHARS))]
-                grid.append((x, y, ch, a, rnd.randrange(997)))
-                cr.set_source_rgba(0.72, 0.70, 0.86, a)
-                cr.move_to(x, y)
-                cr.show_text(ch)
-        self._grid = grid
-        self.ripples = []                               # their sort order is stale
-        self._cache = (surf, W, H)
+    def _glyph_ids(self, cr):
+        if self._gids is None:
+            sf = cr.get_scaled_font()
+            ids = []
+            for ch in self.CHARS:
+                g = sf.text_to_glyphs(0, 0, ch, False)
+                ids.append(g[0][0] if g else 0)
+            self._gids = ids
+        return self._gids
 
-    def _draw(self, _area, cr, w, h):
-        try:
-            import cairo
-            from bisect import bisect_left, bisect_right
-        except Exception:
-            return
-        if not self._cache or self._cache[1] < w or self._cache[2] < h:
-            self._build(w, h)
-        cr.set_source_surface(self._cache[0], 0, 0)
-        cr.paint()
-        if not self.ripples:
-            return
-        now = time.monotonic()
-        hit = {}                                        # idx -> [inten, dx, dy, age]
-        b2 = self.BAND * self.BAND
-        for (rx, ry, t0, order, dists) in self.ripples:
+    def _lit(self, w, h, now):
+        """{(row, col): [intensity, dx, dy, age]} for every glyph a wave is on."""
+        hit = {}
+        cw, ch = self.CELL_W, self.CELL_H
+        fall, reach = self._falloff, len(self._falloff) - 1
+        nrows = len(self._rows)
+        for (rx, ry, t0) in self.ripples:
             age = now - t0
             rad = age * self.SPEED
-            amp = (1.0 - age / self.LIFE) ** 1.6
-            lo = bisect_left(dists, rad - 2 * self.BAND)
-            hi = bisect_right(dists, rad + 2 * self.BAND)
-            for d, i in order[lo:hi]:
-                off = d - rad
-                k = amp * math.exp(-(off * off) / b2)
-                if k < 0.03:
+            amp = (1.0 - age / self.LIFE) ** 1.5
+            if amp <= 0.02:
+                continue
+            r1, r2 = max(0.0, rad - reach), rad + reach
+            r1s, r2s = r1 * r1, r2 * r2
+            row_lo = max(0, int((ry - r2 - 7) // ch))
+            row_hi = min(nrows - 1, int((ry + r2 - 7) // ch) + 1)
+            for r in range(row_lo, row_hi + 1):
+                row = self._rows[r]
+                y = r * ch + 7
+                dy = y - ry
+                dy2 = dy * dy
+                if dy2 > r2s:
                     continue
-                gx, gy = self._grid[i][0], self._grid[i][1]
-                e = hit.setdefault(i, [0.0, 0.0, 0.0, age])
-                e[0] += k
-                if d > 0.5:
-                    e[1] += (gx - rx) / d * k * self.PUSH
-                    e[2] += (gy - ry) / d * k * self.PUSH
+                outer = math.sqrt(r2s - dy2)
+                inner = math.sqrt(r1s - dy2) if dy2 < r1s else 0.0
+                shift = 1 + (r % 2) * (cw / 2)
+                for xa, xb in ((rx - outer, rx - inner), (rx + inner, rx + outer)):
+                    c0 = max(0, int((xa - shift) // cw))
+                    c1 = min(len(row) - 1, int((xb - shift) // cw) + 1)
+                    for c in range(c0, c1 + 1):
+                        g = row[c]
+                        if g is None:
+                            continue
+                        dx = g[0] - rx
+                        d = math.sqrt(dx * dx + dy2)
+                        o = abs(d - rad)
+                        if o >= reach:
+                            continue
+                        k = amp * fall[int(o)]
+                        if k < 0.05:
+                            continue
+                        key = (r, c)
+                        e = hit.get(key)
+                        if e is None:
+                            e = hit[key] = [0.0, 0.0, 0.0, age]
+                        e[0] += k
+                        if d > 0.5:
+                            e[1] += dx / d * k * self.PUSH
+                            e[2] += dy / d * k * self.PUSH
+                    if inner == 0.0:
+                        break                           # one span covered the row
+        return hit
+
+    def _draw(self, _area, cr, w, h):
+        if not self.ripples:
+            return                                      # invisible at rest
+        try:
+            import cairo
+        except Exception:
+            return
+        self._ensure(w, h)
+        hit = self._lit(w, h, time.monotonic())
         if not hit:
             return
         cr.select_font_face("monospace", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
         cr.set_font_size(self.FONT)
-        cw, ch_ = self.CELL_W, self.CELL_H
-        # first lift every excited glyph's resting copy off, then draw the
-        # displaced ones — so a pushed glyph is never erased by its neighbour
-        cr.set_source_rgb(*self.BG)
-        for i in hit:
-            x, y = self._grid[i][0], self._grid[i][1]
-            cr.rectangle(x - 1, y - ch_ + 3, cw - 1, ch_)
-        cr.fill()
-        for i, (inten, dx, dy, age) in hit.items():
-            x, y, ch, a, seed = self._grid[i]
+        try:
+            # grey AA, no hinting: identical at 6px, far cheaper than subpixel
+            fo = cairo.FontOptions()
+            fo.set_antialias(cairo.ANTIALIAS_GRAY)
+            fo.set_hint_style(cairo.HINT_STYLE_NONE)
+            fo.set_hint_metrics(cairo.HINT_METRICS_OFF)
+            cr.set_font_options(fo)
+        except Exception:
+            pass
+        gids = self._glyph_ids(cr)
+        n, L = len(self.CHARS), self.LEVELS
+        buckets = [[] for _ in range(L)]
+        for (r, c), (inten, dx, dy, age) in hit.items():
+            x, y, ci, bright, seed = self._rows[r][c]
             inten = min(1.0, inten)
-            glyph = (self.CHARS[(seed + int(age * 26)) % len(self.CHARS)]
-                     if inten > 0.45 else ch)
-            # neutral at the edge of the wave, violet only at the crest
-            cr.set_source_rgba(0.72 + 0.03 * inten, 0.70 - 0.13 * inten, 0.86 + 0.12 * inten,
-                               min(0.95, a + inten * 0.7))
-            cr.move_to(x + dx, y + dy)
-            cr.show_text(glyph)
+            v = inten * bright
+            lvl = min(L - 1, int(v * L))
+            if lvl <= 0 and v < 0.06:
+                continue
+            if inten > 0.45:                            # flips while the crest passes
+                ci = (seed + int(age * 26)) % n
+            buckets[lvl].append((gids[ci], x + dx, y + dy))
+        for lvl, glyphs in enumerate(buckets):
+            if not glyphs:
+                continue
+            t = (lvl + 0.5) / L
+            # neutral at the edge of the wave, violet at the crest
+            cr.set_source_rgba(0.74 + 0.02 * t, 0.72 - 0.14 * t, 0.86 + 0.12 * t,
+                               min(0.9, 0.08 + t * 0.85))
+            cr.show_glyphs(glyphs)
+
+
+_FILE_FENCE = re.compile(r"^[ \t]*(`{3,4})(write|edit)(?![A-Za-z])[ \t]*(.*)$")
+_DOC_EXT = re.compile(r"\.(md|markdown|mdx|rst|txt|adoc|html?|ipynb|org)$", re.IGNORECASE)
+
+
+def file_blocks(text):
+    """Find ```write / ```edit blocks with NESTED-FENCE awareness.
+
+    A README or a docs page contains ``` fences of its own. The old non-greedy
+    regex ended the write block at the FIRST inner fence: the file was cut
+    short, and the code block that followed it inside the file was then picked
+    up as a separate ```bash block and EXECUTED. Here a 3-backtick block tracks
+    depth — an inner ```lang opens, a bare ``` closes — and only the bare ```
+    at depth zero ends it. A 4-backtick block ends only at ````. If a block
+    never balances, the old first-bare-fence rule is used, so nothing parses
+    worse than before. Returns [{tag, path, body, start, end}].
+    """
+    lines = text.split("\n")
+    offs, pos = [], 0
+    for ln in lines:
+        offs.append(pos)
+        pos += len(ln) + 1
+    out, i = [], 0
+    while i < len(lines):
+        m = _FILE_FENCE.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        fence, tag, head = m.group(1), m.group(2), m.group(3).strip()
+        j = i + 1
+        if head.endswith(fence):                     # ```write a.py``` — empty, ignore
+            i += 1
+            continue
+        if not head:                                 # path on the next line
+            if j >= len(lines):
+                break
+            head, j = lines[j].strip(), j + 1
+        body_start, end_line, end_col, depth, first_bare = j, None, None, 0, None
+        k = j
+        while k < len(lines):
+            st = lines[k].strip()
+            if len(fence) == 4:
+                if st == "````":
+                    end_line = k
+                    break
+            elif st == "```":
+                if first_bare is None:
+                    first_bare = k
+                if depth == 0:
+                    end_line = k
+                    break
+                depth -= 1
+            elif st.startswith("```") and not st.startswith("````"):
+                depth += 1
+            elif lines[k].rstrip().endswith(fence) and depth == 0 and k > j - 1:
+                end_line, end_col = k, lines[k].rstrip().rfind(fence)   # body```
+                break
+            k += 1
+        if end_line is None and first_bare is not None:
+            end_line = first_bare                    # unbalanced: old behaviour
+        if end_line is None:                         # never closed (cut off)
+            i += 1
+            continue
+        if end_col is not None:
+            body = "\n".join(lines[body_start:end_line] + [lines[end_line][:end_col]])
+        else:
+            # the fence sits on its own line, so the file's last line ended
+            # with a newline — keep it (POSIX text files end with one)
+            body = "\n".join(lines[body_start:end_line])
+            if end_line > body_start:
+                body += "\n"
+        end = offs[end_line] + len(lines[end_line])
+        # A bare ``` inside a 3-backtick block is undecidable — it may close
+        # the file or open a block inside it. For a DOCUMENT (where inner
+        # fences are expected) a later bare fence means we may have closed
+        # too early: flag it rather than write half a file and run the rest.
+        ambiguous = False
+        if len(fence) == 3 and tag == "write" and _DOC_EXT.search(head):
+            for ln in lines[end_line + 1:]:
+                if _FILE_FENCE.match(ln):
+                    break
+                if ln.strip() == "```":
+                    ambiguous = True
+                    break
+        out.append({"tag": tag, "path": head, "body": body, "ambiguous": ambiguous,
+                    "start": offs[i], "end": min(end, len(text))})
+        i = end_line + 1
+    return out
+
+
+def _cut_spans(text, spans):
+    """text with [start, end) spans removed."""
+    out, last = [], 0
+    for a, b in sorted(spans):
+        if a >= last:
+            out.append(text[last:a])
+            last = b
+    out.append(text[last:])
+    return "".join(out)
 
 
 def _lane(widget):
@@ -2148,6 +2299,10 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._activity_lock = threading.Lock()
         self._running = False           # a turn is in progress
         self._cancelled = False         # user pressed Stop
+        # Turn generation. Stop and every new turn bump it; anything that
+        # arrives late (a stream still draining, a command finishing after
+        # Stop) checks it and drops itself instead of writing into a newer turn.
+        self._gen = 0
         self._sudo_pw = None            # sudo password: memory only, this chat
         self._sudo_pw_time = 0.0        # when it was entered (30-min TTL)
         self._awaiting_input = False    # a modal (sudo prompt) is open — pause the watchdog
@@ -2165,6 +2320,11 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._dispatching = False       # _finalise is still handing out tool work
         self._plan_entry = None         # this turn's live plan card
         self._attachments = []          # the tray: files/images going with the next message
+        self._changes = []              # file checkpoints: what every write/edit replaced
+        self._turn_no = 0               # which task a change belongs to (for "undo all")
+        self._user_notes = []           # things the user did that the model must hear about
+        self._jobs = {}                 # background jobs: name -> {proc, log, cmd, card}
+        self._jobs_timer = 0
         self._tool_images = []          # images the NEXT request carries (base64, mime)
         self._reset_continuation()
         self._hint = None
@@ -2673,11 +2833,12 @@ class ChuckWindow(Adw.ApplicationWindow):
         return True
 
     def _workroot(self):
-        """Where file tools operate: the working folder, else the open project."""
+        """Where file tools operate: the working folder — exactly what the chip
+        shows. It used to fall back to the project remembered from a PREVIOUS
+        session, so with the chip reading "No folder" files were quietly
+        written into some old ~/ChuckProjects folder."""
         if self.workspace and self.workspace.is_dir():
             return self.workspace
-        if _builder:
-            return _builder.current_project()
         return None
 
     # ── history / saved chats ──
@@ -2813,6 +2974,9 @@ class ChuckWindow(Adw.ApplicationWindow):
     # only the difference is inserted or removed. Tearing every child out and
     # re-adding it on each new message is what made the transcript flicker and
     # jump while a reply was being written.
+
+    def _in_log(self, entry):
+        return entry is not None and any(e is entry for e in self._log)
 
     def _log_add(self, kind, data):
         """Record a rebuildable entry and materialise it at the bottom."""
@@ -3746,6 +3910,12 @@ class ChuckWindow(Adw.ApplicationWindow):
 
     def _on_close(self, *_):
         self._save_chat()
+        # background jobs belong to this session: don't leave a dev server
+        # holding a port after the window that started it is gone
+        try:
+            self._stop_all_jobs()
+        except Exception:
+            pass
         # Speech outlives the window otherwise — the process keeps a daemon
         # thread feeding paplay, so closing mid-answer left a disembodied voice
         # finishing the reply.
@@ -3790,6 +3960,22 @@ class ChuckWindow(Adw.ApplicationWindow):
             ctrl_on = bool(state & Gdk.ModifierType.CONTROL_MASK)
         except Exception:
             return False
+        # Settings (an Adw.Dialog) lives INSIDE this window, so its key events
+        # pass through this capture handler first: Tab flipped the mode instead
+        # of moving between fields. Shortcuts apply only to the main content.
+        try:
+            if getattr(self, "get_visible_dialog", None) and self.get_visible_dialog():
+                return False
+            focus = self.get_focus()
+            content = self.get_content()
+            if focus is not None and content is not None and focus is not content \
+                    and not focus.is_ancestor(content):
+                return False
+            if (keyval == Gdk.KEY_Tab and focus is not None and focus is not self.entry
+                    and isinstance(focus, Gtk.Text)):
+                return False                     # Tab in the chat search moves focus
+        except Exception:
+            pass
         if keyval == Gdk.KEY_Tab and not mods:
             self.toggle_mode()
             return True
@@ -3820,7 +4006,9 @@ class ChuckWindow(Adw.ApplicationWindow):
         GLib.idle_add(go)
 
     # ── run lifecycle: send↔stop button, "still working" heartbeat, watchdog ──
-    RUN_HARD_CAP = 900      # seconds: absolute ceiling on one turn (long research is fine)
+    RUN_HARD_CAP = 3600     # seconds: ceiling on one turn. It was 900, which killed real
+                            # agent work (a 25-step build-and-test task runs past 15 min);
+                            # true hangs are the stuck-watchdog's job, not this cap's.
     STUCK_AFTER = 120       # seconds with zero progress BETWEEN steps → assume stuck
     AWAIT_FIRST = 180       # seconds allowed for the model's FIRST token
     # Waiting on the first token looks identical to being stuck — nothing is
@@ -3857,6 +4045,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             return
         self._running = True
         self._cancelled = False
+        self._gen += 1
         self._run_started = time.time()
         self._last_progress = time.time()
         # flip Send → Stop
@@ -3949,6 +4138,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         if not self._running and not auto:
             return
         self._cancelled = True
+        self._gen += 1
         # reset the tool-loop so nothing re-fires.
         # This said `self._hops = MAX_TOOL_HOPS` and claimed to block further
         # hops — but the cap it is compared against is cfg('research_hops'),
@@ -4108,6 +4298,8 @@ class ChuckWindow(Adw.ApplicationWindow):
         if "```" not in text:
             return text.strip()
         tags = self._tool_tags()
+        if self.agent_mode:
+            text = _cut_spans(text, [(b["start"], b["end"]) for b in file_blocks(text)])
         shown = re.sub(r"````(?:" + tags + r")(?![A-Za-z]).*?````", "", text, flags=re.DOTALL)
         shown = re.sub(r"```(?:" + tags + r")(?![A-Za-z]).*?```", "", shown, flags=re.DOTALL)
         if partial:
@@ -5000,6 +5192,8 @@ class ChuckWindow(Adw.ApplicationWindow):
         `work` returns the feedback string; anything it raises is reported and
         the slot is still released.
         """
+        gen = self._gen
+
         def runner():
             fb = None
             try:
@@ -5018,7 +5212,8 @@ class ChuckWindow(Adw.ApplicationWindow):
                 self._busy(False)
 
                 def finish(text=fb):
-                    self._tool_done(text if text is not None else f"[{label}: no result]")
+                    self._tool_done(text if text is not None else f"[{label}: no result]",
+                                    gen=gen)
                     return False
                 GLib.idle_add(finish)
         threading.Thread(target=runner, daemon=True).start()
@@ -5225,8 +5420,10 @@ class ChuckWindow(Adw.ApplicationWindow):
                 int(m.group(3)) if m.group(3) else None)
         root = self._workroot()
         full = os.path.expanduser(spec)
-        if not os.path.isabs(full) and root is not None:
-            full = str(root / full)
+        if not os.path.isabs(full):
+            # relative: the working folder, or home when there is none — never
+            # wherever the app happened to be launched from
+            full = str((root if root is not None else Path.home()) / full)
         if _is_image_path(spec) and os.path.isfile(full):
             self._sys_note(f"\U0001F5BC {os.path.basename(full)}")
             self._image_bubble(full)
@@ -5234,6 +5431,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             return
         rng = f":{start}-{end or ''}" if start else ""
         self._sys_note(f"\U0001F4C4 read {spec}{rng}"); self._busy(True)
+        gen = self._gen
 
         def worker():
             if os.path.isfile(full) and _builder:
@@ -5247,6 +5445,8 @@ class ChuckWindow(Adw.ApplicationWindow):
 
             def show():
                 self._busy(False)
+                if gen != self._gen:
+                    return False
                 if not ok:
                     self._sys_note(content, "danger")
                     self._tool_done(f"[read {spec}: {content}]")
@@ -5316,11 +5516,22 @@ class ChuckWindow(Adw.ApplicationWindow):
     def _sub_call(self):
         """A blocking model call for a sub-agent. Each gets its own Backend so
         concurrent calls never overwrite each other's usage record."""
+        gen = self._gen
+
         def call(messages):
             b = Backend(self.settings) if isinstance(self.backend, Backend) else self.backend
             out, err = [], []
-            b.stream(messages, out.append, lambda: None, err.append,
-                     should_stop=lambda: self._cancelled)
+            stale = lambda: self._cancelled or gen != self._gen   # noqa: E731
+            if isinstance(b, Backend):
+                # a slow sub-agent call is still progress: without this a model
+                # thinking for two minutes tripped the stuck-watchdog
+                b.on_think = lambda _c: self._note_progress()
+
+            def delta(c):
+                out.append(c)
+                self._note_progress()
+            b.stream(messages, delta, lambda: None, err.append,
+                     should_stop=stale, on_open=self._note_progress)
             if err:
                 raise RuntimeError(err[0])
             sent = sum(len(m.get("content") or "") for m in messages
@@ -5341,6 +5552,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         ctx = _now_line() + (f"\nWorking folder: {self.workspace}" if self.workspace else "")
         tools = self._sub_tools()
         call = self._sub_call()
+        gen = self._gen
         self._busy(True)
 
         def one(i, brief):
@@ -5350,8 +5562,9 @@ class ChuckWindow(Adw.ApplicationWindow):
                 self._note_progress()
                 GLib.idle_add(self._sub_update, rows[i], "running", txt)
             try:
-                rep = _agents.run_subagent(brief, call, tools, max_steps=steps, on_event=ev,
-                                           should_stop=lambda: self._cancelled, context=ctx)
+                rep = _agents.run_subagent(
+                    brief, call, tools, max_steps=steps, on_event=ev, context=ctx,
+                    should_stop=lambda: self._cancelled or gen != self._gen)
                 GLib.idle_add(self._sub_update, rows[i], "done", "", rep)
             except Exception as ex:
                 rep = f"(sub-agent failed: {ex})"
@@ -5427,6 +5640,208 @@ class ChuckWindow(Adw.ApplicationWindow):
             row["exp"].set_visible(True)
         return False
 
+    # ── background jobs: servers, watchers, anything that doesn't return ────
+    JOB_DIR = CONFIG_DIR / "jobs"
+
+    def _do_bg(self, body):
+        """```bg <name>\n<command>``` (or ```bg <command>```): start it in the
+        working folder, detached, logging to a file. A dev server, a watcher,
+        a long build — then ```logs``` to read it and ```kill``` to stop it."""
+        lines = [ln for ln in (body or "").strip().splitlines() if ln.strip()]
+        if not lines:
+            self._tool_feedback.append("[bg: no command given]")
+            return
+        if len(lines) > 1 and re.fullmatch(r"[A-Za-z0-9_.-]{1,32}", lines[0].strip()):
+            name, cmd = lines[0].strip(), "\n".join(lines[1:])
+        else:
+            cmd = "\n".join(lines)
+            base = re.sub(r"[^A-Za-z0-9_.-]", "", os.path.basename(cmd.split()[0]))[:20] or "job"
+            name, n = base, 2
+            while name in self._jobs and self._job_alive(name):
+                name, n = f"{base}{n}", n + 1
+        if self._job_alive(name):
+            self._tool_feedback.append(f"[bg: a job called '{name}' is already running — "
+                                       "```kill " + name + "``` first or pick another name]")
+            return
+        if classify_command(cmd) == "critical":
+            self._tool_feedback.append("[bg refused: that command is CRITICAL and needs the "
+                                       "user's approval — run it as a normal ```bash``` step]")
+            return
+        if command_needs_sudo(cmd) and not _sudo_ready():
+            self._tool_feedback.append("[bg refused: it needs root, and a background job can't "
+                                       "ask for the password — run it as a normal ```bash``` "
+                                       "step]")
+            return
+        try:
+            self.JOB_DIR.mkdir(parents=True, exist_ok=True)
+            log = self.JOB_DIR / f"{name}.log"
+            fh = open(log, "wb")
+            env = dict(os.environ); env.update(_RUN_ENV)
+            proc = subprocess.Popen([_bash_bin(), "-c", cmd], cwd=_cwd(), stdin=subprocess.DEVNULL,
+                                    stdout=fh, stderr=subprocess.STDOUT, env=env,
+                                    start_new_session=True)
+            fh.close()
+        except Exception as ex:
+            self._tool_feedback.append(f"[bg failed to start: {ex}]")
+            return
+        job = {"proc": proc, "log": log, "cmd": cmd, "name": name, "card": None,
+               "started": time.time()}
+        self._jobs[name] = job
+        if _ledger is not None:
+            try:
+                _ledger.record("[bg] " + cmd, 0, f"started pid {proc.pid}", kind="job",
+                               chat_id=self.chat_id)
+            except Exception:
+                pass
+        job["card"] = self._job_card(job)
+        if not self._jobs_timer:
+            self._jobs_timer = GLib.timeout_add_seconds(2, self._tick_jobs)
+        # give it a moment: most broken servers die in the first second
+        self._busy(True)
+
+        def work():
+            time.sleep(1.5)
+            rc = proc.poll()
+            tail = self._log_tail(log, 25)
+            if rc is None:
+                return (f"[job '{name}' is RUNNING (pid {proc.pid}) in {_cwd() or '~'}. "
+                        f"First output:\n{tail or '(nothing yet)'}\nRead more with ```logs "
+                        f"{name}```, stop it with ```kill {name}```.]")
+            return (f"[job '{name}' EXITED immediately with code {rc}. Output:\n{tail}\n"
+                    "Fix the cause before starting it again.]")
+        self._pending_tools += 1                      # released by _tool_thread
+        self._tool_thread(work, f"bg {name}")
+
+    def _job_alive(self, name):
+        j = self._jobs.get(name)
+        return bool(j) and j["proc"].poll() is None
+
+    @staticmethod
+    def _log_tail(path, n=120, limit=12000):
+        try:
+            with open(path, "rb") as fh:
+                fh.seek(0, os.SEEK_END)
+                size = fh.tell()
+                fh.seek(max(0, size - 64 * 1024))
+                data = fh.read().decode("utf-8", "replace")
+        except OSError:
+            return ""
+        return clip_output("\n".join(data.splitlines()[-n:]), limit)
+
+    def _do_logs(self, name):
+        name = (name or "").strip()
+        if not name or name not in self._jobs:
+            listing = ", ".join(f"{k} ({'running' if self._job_alive(k) else 'exited'})"
+                                for k in self._jobs) or "none"
+            self._tool_feedback.append(f"[logs: no job '{name}'. Jobs: {listing}]")
+            return
+        j = self._jobs[name]
+        rc = j["proc"].poll()
+        state = "RUNNING" if rc is None else f"EXITED with code {rc}"
+        self._sys_note(f"\U0001F4DC logs {name}", "dim")
+        self._tool_feedback.append(f"[job '{name}' {state}. Last output:\n"
+                                   f"{self._log_tail(j['log']) or '(empty)'}]")
+
+    def _kill_job(self, name):
+        j = self._jobs.get(name)
+        if not j:
+            return f"no job '{name}'"
+        if j["proc"].poll() is None:
+            try:
+                os.killpg(os.getpgid(j["proc"].pid), signal.SIGTERM)
+                try:
+                    j["proc"].wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    os.killpg(os.getpgid(j["proc"].pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+            self._update_job_card(j)
+            return f"stopped '{name}'"
+        return f"'{name}' had already exited (code {j['proc'].poll()})"
+
+    def _do_kill(self, name):
+        name = (name or "").strip()
+        msg = self._kill_job(name)
+        self._sys_note("\u25A0 " + msg, "dim")
+        self._tool_feedback.append(f"[kill: {msg}]")
+
+    def _job_card(self, job):
+        card, head, body, foot = self._card_shell("JOB \u00b7 " + job["name"].upper(),
+                                                  lambda j=job: j["cmd"])
+        prompt = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        dollar = Gtk.Label(label="&", xalign=0, valign=Gtk.Align.START)
+        dollar.add_css_class("cmd-prompt")
+        ct = Gtk.Label(label=job["cmd"], xalign=0, wrap=True, selectable=True, hexpand=True)
+        ct.add_css_class("cmd-text"); _wrap_anywhere(ct)
+        prompt.append(dollar); prompt.append(ct)
+        body.append(prompt)
+        pill = self._pill("running", "run")
+        head.insert_child_after(pill, head.get_first_child())
+        stop = Gtk.Button(label="Stop"); stop.add_css_class("ghost")
+        stop.connect("clicked", lambda _b, n=job["name"]: (self._kill_job(n), None)[1])
+        head.append(stop)
+        info = {"pill": pill, "stop": stop}
+        self._log_pin(card)
+        return info
+
+    def _update_job_card(self, job):
+        c = job.get("card")
+        if not c:
+            return
+        rc = job["proc"].poll()
+        if rc is None:
+            secs = int(time.time() - job["started"])
+            self._set_status(c["pill"], f"running \u00b7 {secs // 60}m {secs % 60:02d}s"
+                             if secs >= 60 else f"running \u00b7 {secs}s", "run")
+        else:
+            self._set_status(c["pill"], f"exited {rc}", "ok" if rc in (0, -15) else "fail")
+            c["stop"].set_sensitive(False)
+
+    def _tick_jobs(self):
+        for j in list(self._jobs.values()):
+            self._update_job_card(j)
+        if not any(self._job_alive(n) for n in self._jobs):
+            self._jobs_timer = 0
+            return False
+        return True
+
+    def _stop_all_jobs(self):
+        for name in list(self._jobs):
+            self._kill_job(name)
+
+    def _do_open(self, target):
+        """Hand the user something: a URL in the browser, a file or folder in
+        its default app."""
+        t = (target or "").strip().strip("'\"")
+        if not t:
+            self._tool_feedback.append("[open: nothing given]")
+            return
+        if re.match(r"^https?://", t):
+            ok = open_in_brave(t)
+        else:
+            full = os.path.expanduser(t)
+            if not os.path.isabs(full):
+                full = str((self._workroot() or Path.home()) / full)
+            ok = os.path.exists(full) and _open_path(full)
+            t = full
+        self._sys_note(("\u2197 opened " if ok else "\u2717 couldn't open ") + t,
+                       "dim" if ok else "danger")
+        self._tool_feedback.append(f"[open: {'opened' if ok else 'could not open'} {t} "
+                                   "for the user]")
+
+    def _notify_done(self, disp):
+        """A desktop notification when a long task finishes while you're in
+        another window — the point of an agent is that you can look away."""
+        try:
+            if self.is_active() or time.time() - self._run_started < 20:
+                return
+            n = Gio.Notification.new("Chuck finished")
+            first = next((ln.strip() for ln in (disp or "").splitlines() if ln.strip()), "Done.")
+            n.set_body(re.sub(r"[*_`#>]", "", first)[:160])
+            self.get_application().send_notification("chuck-done", n)
+        except Exception:
+            pass
+
     def _do_screenshot(self):
         """Chuck looks at the screen: capture it, show it in the chat, and
         attach it to his next request so he actually SEES what he built."""
@@ -5485,6 +5900,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         if not run_after:
             self._sys_note(f"\U0001F50D verifying {lang}\u2026", "dim")
         self._busy(True)
+        gen = self._gen
 
         def worker():
             try:
@@ -5496,6 +5912,8 @@ class ChuckWindow(Adw.ApplicationWindow):
 
             def show():
                 self._busy(False)
+                if gen != self._gen:
+                    return False            # the turn this belonged to is over
                 if clean:
                     if not run_after:
                         self._sys_note("\u2713 " + rep.split("\n")[0].lstrip("\u2713 "), "ok")
@@ -5566,17 +5984,150 @@ class ChuckWindow(Adw.ApplicationWindow):
             return None
         return None if res.get("ok") else _codecheck.report(res)
 
+    # ── file changes: checkpointed, shown as a diff, revertible ────────────
+    def _snapshot(self, root, rel):
+        """The file's content before a change (None if it doesn't exist)."""
+        try:
+            path = _builder._safe(root, rel)
+        except Exception:
+            return None, None
+        try:
+            return path, (path.read_text(encoding="utf-8") if path.is_file() else None)
+        except (OSError, UnicodeDecodeError):
+            return path, None
+
+    def _record_change(self, path, rel, before, after, kind):
+        ch = {"path": str(path), "rel": rel, "before": before, "after": after,
+              "kind": kind, "turn": self._turn_no, "reverted": False, "card": None}
+        self._changes.append(ch)
+        del self._changes[:-200]                    # bounded history
+        ch["card"] = self._file_card(ch)
+        return ch
+
+    def _revert(self, ch, by_user=False):
+        """Put a file back the way it was before one change. -> message."""
+        if ch["reverted"]:
+            return f"{ch['rel']} was already reverted"
+        path = Path(ch["path"])
+        try:
+            if ch["before"] is None:
+                if path.is_file():
+                    path.unlink()
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(ch["before"], encoding="utf-8")
+        except OSError as ex:
+            return f"couldn't revert {ch['rel']}: {ex}"
+        ch["reverted"] = True
+        card = ch.get("card")
+        if card is not None:
+            try:
+                card["btn"].set_sensitive(False)
+                card["btn"].set_label("Reverted")
+                self._set_status(card["pill"], "reverted", "wait")
+            except Exception:
+                pass
+        what = ("deleted the new file " if ch["before"] is None else "restored ") + ch["rel"]
+        if by_user:
+            self._user_notes.append(f"the user reverted your change to {ch['rel']} ({what})")
+            self._toast(f"Reverted {ch['rel']}")
+        return what
+
+    def _do_undo(self, arg):
+        """```undo``` reverts the last file change; ```undo all``` every change
+        made since the user's last message."""
+        live = [c for c in self._changes if not c["reverted"]]
+        if not live:
+            self._tool_feedback.append("[undo: there are no file changes to revert]")
+            return
+        targets = ([c for c in live if c["turn"] == self._turn_no][::-1]
+                   if (arg or "").strip().lower() == "all" else [live[-1]])
+        if not targets:
+            self._tool_feedback.append("[undo all: no file changes in this task]")
+            return
+        done = [self._revert(c) for c in targets]
+        self._sys_note("\u21a9 " + "; ".join(done), "ok")
+        self._tool_feedback.append("[undo: " + "; ".join(done) + "]")
+
+    def _file_card(self, ch):
+        """A file change on the work lane: what, how much, the diff, Revert."""
+        diff, add, rem = _builder.diff_lines(ch["before"], ch["after"], ch["rel"])
+        kind = {"write": "NEW FILE" if ch["before"] is None else "WRITE",
+                "edit": "EDIT", "rm": "DELETE"}.get(ch["kind"], "FILE")
+        card, head, body, foot = self._card_shell(kind)
+        name = Gtk.Label(label=ch["rel"], xalign=0, hexpand=True)
+        name.add_css_class("cmd-text"); _wrap_anywhere(name)
+        stat = Gtk.Label(xalign=1)
+        stat.add_css_class("diffstat")
+        try:
+            stat.set_markup(f'<span foreground="#4ADE9A">+{add}</span>  '
+                            f'<span foreground="#F87171">\u2212{rem}</span>')
+        except Exception:
+            stat.set_text(f"+{add} -{rem}")
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        row.append(name); row.append(stat)
+        body.append(row)
+        pill = self._pill("applied", "ok")
+        head.insert_child_after(pill, head.get_first_child())
+        btn = Gtk.Button(label="Revert"); btn.add_css_class("ghost")
+        btn.set_tooltip_text("Put the file back the way it was before this change")
+        head.append(btn)
+        if diff and len(diff) > 2:
+            exp = Gtk.Expander(label=f"Diff \u00b7 {len(diff) - 2} lines")
+            exp.add_css_class("think")
+            exp.set_expanded(len(diff) <= 40)
+            dl = Gtk.Label(xalign=0, selectable=True, wrap=False)
+            dl.add_css_class("term-body")
+            dl.set_valign(Gtk.Align.START)
+            esc = lambda t: _html.escape(t, quote=False)   # noqa: E731
+            parts = []
+            for ln in diff[2:]:
+                colour = ("#4ADE9A" if ln.startswith("+") else "#F87171" if ln.startswith("-")
+                          else "#8F80C9" if ln.startswith("@@") else None)
+                parts.append(f'<span foreground="{colour}">{esc(ln)}</span>' if colour
+                             else esc(ln))
+            mk = "\n".join(parts)
+            try:
+                if _markup_ok(mk):
+                    dl.set_markup(mk)
+                else:
+                    dl.set_text("\n".join(diff[2:]))
+            except Exception:
+                dl.set_text("\n".join(diff[2:]))
+            sw = Gtk.ScrolledWindow()
+            sw.add_css_class("term-scroll")
+            try:
+                sw.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+                sw.set_max_content_height(320)
+                sw.set_propagate_natural_height(True)
+            except Exception:
+                pass
+            sw.set_child(dl)
+            self._chain_scroll(sw, vertical=True)
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+            box.add_css_class("term-card"); box.set_margin_top(6)
+            box.append(sw)
+            exp.set_child(box)
+            foot.append(exp)
+        info = {"btn": btn, "pill": pill}
+        btn.connect("clicked", lambda _b, c=ch: self._revert(c, by_user=True))
+        self._log_pin(card)
+        return info
+
     def _do_write(self, rel, content):
-        """Write one complete file into the working folder — and verify it if
-        it's code, so a broken file never sits silently in a deliverable."""
+        """Write one complete file into the working folder — checkpointed, shown
+        as a diff, and verified if it's code, so a broken file never sits
+        silently in a deliverable."""
         p = self._project_or_note()
         if p is None:
             return
-        ok, msg, path = _builder.write_file(p, rel, content)
+        path, before = self._snapshot(p, rel)
+        ok, msg, written = _builder.write_file(p, rel, content)
         if not ok:
             self._sys_note("\u2717 " + msg, "danger")
             self._tool_feedback.append(f"[write failed: {msg}]")
             return
+        self._record_change(written, rel.strip(), before, content, "write")
         bad = self._verify_file(rel, content)
         if bad:
             self._sys_note(f"\u26a0 {rel}: verification found issues", "danger")
@@ -5585,7 +6136,6 @@ class ChuckWindow(Adw.ApplicationWindow):
             return
         note = msg + ("  \u2713 verified" if Path(rel).suffix in (".py", ".sh", ".js")
                       and _codecheck else "")
-        self._sys_note("\u2713 " + note, "ok")
         self._tool_feedback.append(f"[{note}]")
 
     def _do_edit(self, rel, blocks):
@@ -5595,6 +6145,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         if p is None:
             return
         rel = rel.strip()
+        path, before = self._snapshot(p, rel)
         ok, msg = _builder.edit_file(p, rel, blocks)
         if not ok:
             self._sys_note("\u2717 " + msg, "danger")
@@ -5604,13 +6155,14 @@ class ChuckWindow(Adw.ApplicationWindow):
             content = (p / rel).read_text(encoding="utf-8", errors="ignore")
         except OSError:
             content = ""
+        if path is not None:
+            self._record_change(path, rel, before, content, "edit")
         bad = self._verify_file(rel, content)
         if bad:
             self._sys_note(f"\u26a0 {rel}: edited, but it no longer verifies", "danger")
             self._tool_feedback.append(
                 f"[{msg}, BUT the file no longer verifies — fix it:\n{bad}]")
             return
-        self._sys_note("\u2713 " + msg, "ok")
         self._tool_feedback.append(f"[{msg}]")
 
     def _grep_args(self, body):
@@ -5665,7 +6217,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         if not items:
             return
         e = self._plan_entry
-        if e is not None and e in self._log:
+        if self._in_log(e):
             e["data"]["items"] = items
             if e["w"] is not None:
                 e["w"] = None
@@ -5709,7 +6261,11 @@ class ChuckWindow(Adw.ApplicationWindow):
         p = self._project_or_note()
         if p is None:
             return
+        path, before = self._snapshot(p, rel)
         ok, msg = _builder.delete_file(p, rel)
+        if ok and before is not None:
+            # a deleted text file is checkpointed like any other change
+            self._record_change(path, rel, before, "", "rm")
         self._sys_note(("\u2713 " if ok else "\u2717 ") + msg, "ok" if ok else "danger")
         self._tool_feedback.append(f"[{msg}]")
 
@@ -5728,12 +6284,15 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._tool_done("[no project]")
             return
         self._sys_note("\u25B6 running the project's tests\u2026", "dim"); self._busy(True)
+        gen = self._gen
 
         def worker():
             rc, out = _builder.run_tests(p)
 
             def show():
                 self._busy(False)
+                if gen != self._gen:
+                    return False
                 if rc == -1:
                     self._sys_note("no tests found in the project", "danger")
                     self._tool_done("[no tests found — write tests/test_*.py or run_tests.sh, "
@@ -6001,6 +6560,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._step_forced = False
         self._plan_entry = None
         self._reset_continuation()
+        self._turn_no += 1
         self._seen_queries = []; self._seen_urls = set(); self._dead_urls = set()
         self._forced_answer = False
         self._scroll_down(force=True)       # you asked: you see the answer
@@ -6011,6 +6571,10 @@ class ChuckWindow(Adw.ApplicationWindow):
             text = ("What's in this image?" if images and len(atts) == 1 else
                     "Look at the attached file(s).")
         body = text
+        if self._user_notes:
+            # the model's picture of the files must match what's on disk
+            body = "[Since your last reply: " + "; ".join(self._user_notes) + "]\n\n" + body
+            self._user_notes = []
         for a in atts:
             if a["kind"] == "text":
                 note = (f" (first {len(a['text']):,} characters of {a['size']:,} — the "
@@ -6029,6 +6593,18 @@ class ChuckWindow(Adw.ApplicationWindow):
         # picture is paid for once instead of on every later hop.
         self._tool_images = [(a["b64"], a["mime"]) for a in images]
         self._ask_model()
+
+    def _ask_soon(self):
+        """Schedule the next model call for THIS turn only. A Stop between
+        scheduling and running used to start a fresh stream for a turn the
+        user had already ended."""
+        gen = self._gen
+
+        def go():
+            if gen == self._gen and not self._cancelled:
+                self._ask_model()
+            return False
+        GLib.idle_add(go)
 
     def _ask_model(self, vision=False):
         imgs, self._tool_images = list(self._tool_images), []
@@ -6093,6 +6669,10 @@ class ChuckWindow(Adw.ApplicationWindow):
             kept.append(m)
             used += size
         kept.reverse()
+        # Trimming from the front can leave an assistant turn first; several
+        # chat APIs reject a conversation that doesn't open with the user.
+        while len(kept) > 1 and kept[0].get("role") == "assistant":
+            kept.pop(0)
         return sys_msgs + kept
 
     def _workspace_note(self):
@@ -6181,8 +6761,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._thinking = False
         self._think_t0 = 0.0
         self._think_secs = 0
-        if self._cont_prefix is not None and self._bot_entry is not None \
-                and self._bot_entry in self._log:
+        if self._cont_prefix is not None and self._in_log(self._bot_entry):
             # continuing a reply that hit the output limit: same message, same text
             self._bot_text = self._cont_prefix
         else:
@@ -6195,12 +6774,16 @@ class ChuckWindow(Adw.ApplicationWindow):
         sent_chars = sum(len(m.get("content") or "") for m in send_msgs
                          if isinstance(m.get("content"), str))
         self._last_vision = vision
+        gen = self._gen
+
+        def stale():
+            return self._cancelled or gen != self._gen
 
         def on_think(chunk):
             # Reasoning tokens. They are progress — a model can think for well
             # over the first-token budget — so they feed the watchdog, and they
             # are kept (folded away) under the reply rather than thrown out.
-            if self._cancelled:
+            if stale():
                 return
             if not self._thinking:
                 self._think_t0 = time.time()
@@ -6216,7 +6799,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             pass
 
         def on_delta(chunk):
-            if self._cancelled:
+            if stale():
                 return
             self._awaiting_first = False
             if self._thinking:
@@ -6238,16 +6821,17 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._awaiting_first = False
             self._busy(False)
             recv = len(self._bot_text or "") + len(self._think_text or "")
+            # the tokens were billed whether or not the turn still wants them
             GLib.idle_add(lambda: (self._account(sent_chars, recv, vision), False)[1])
-            if self._cancelled:
+            if stale():
                 return
-            GLib.idle_add(self._finalise)
+            GLib.idle_add(lambda: (self._finalise() if not stale() else False, False)[1])
 
         def on_error(msg):
             self._awaiting_first = False
             self._thinking = False
             self._busy(False)
-            if self._cancelled:
+            if stale():
                 return
             if self._cont_prefix is not None:
                 partial = self._cont_prefix
@@ -6265,7 +6849,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         threading.Thread(
             target=self.backend.stream,
             args=(send_msgs, on_delta, on_done, on_error, vision),
-            kwargs={"should_stop": lambda: self._cancelled,
+            kwargs={"should_stop": stale,
                     "on_open": self._note_progress},
             daemon=True).start()
 
@@ -6282,11 +6866,17 @@ class ChuckWindow(Adw.ApplicationWindow):
     @staticmethod
     def _join_overlap(prefix, piece):
         """Glue a continuation on, dropping any stretch the model repeated
-        from the end of what it had already written."""
+        from the end of what it had already written. Text is never glued onto
+        a fence line: "```" + "Written." would read as a fence opening a
+        language called "Written." and the file block would never close."""
         top = min(len(prefix), len(piece), 400)
         for k in range(top, 11, -1):
             if prefix.endswith(piece[:k]):
-                return prefix + piece[k:]
+                piece = piece[k:]
+                break
+        last = prefix.rsplit("\n", 1)[-1].strip()
+        if piece and not piece.startswith("\n") and re.fullmatch(r"`{3,4}", last or "-"):
+            piece = "\n" + piece
         return prefix + piece
 
     def _continue_if_cut(self, text):
@@ -6302,6 +6892,10 @@ class ChuckWindow(Adw.ApplicationWindow):
             return False
         prev = self._cont_prefix or ""
         piece = text[len(prev):] if text.startswith(prev) else text
+        if not piece.strip():
+            # The model spent the whole budget reasoning and wrote nothing.
+            # Asking again would loop on empty replies; report it instead.
+            return False
         if self._cont_hist_at is None:
             self._cont_hist_at = len(self.history)
         self.history.append({"role": "assistant", "content": piece})
@@ -6309,7 +6903,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._cont_prefix = text
         self._continues += 1
         self._live(f"continuing a long reply ({self._continues})\u2026")
-        GLib.idle_add(self._ask_model)
+        self._ask_soon()
         return True
 
     def _collapse_continuation(self, text):
@@ -6341,17 +6935,22 @@ class ChuckWindow(Adw.ApplicationWindow):
         # still cut off after every continuation we allow
         truncated = getattr(self.backend, "last_finish", None) == "length"
 
+        # Tools are looked for OUTSIDE ```write/```edit bodies: a README being
+        # written may well contain ```bash or ```search examples.
+        outside = _cut_spans(text, [(b["start"], b["end"]) for b in file_blocks(text)])
+
         def grab(tag):
             # (?![A-Za-z]) stops ```video from also matching ```videos blocks,
             # and ```read from matching ```readskill/```runskill etc.
             return [x.strip() for x in
-                    re.findall(r"```" + tag + r"(?![A-Za-z])[ \t]*\n?(.*?)```", text, re.DOTALL)
+                    re.findall(r"```" + tag + r"(?![A-Za-z])[ \t]*\n?(.*?)```", outside,
+                               re.DOTALL)
                     if x.strip()]
 
         def has(tag):
             """Presence check for bodiless tags (```tree```, ```package```).
             grab() drops empty bodies, so those tags need their own test."""
-            return bool(re.search(r"```" + tag + r"(?![A-Za-z])", text))
+            return bool(re.search(r"```" + tag + r"(?![A-Za-z])", outside))
 
         # cap how many of each tool one reply can fire, so a malformed/looping
         # model can't spawn dozens of threads or cards in a single turn.
@@ -6361,13 +6960,19 @@ class ChuckWindow(Adw.ApplicationWindow):
         images = grab("images")[:CAP]
         vid_searches = grab("videos")[:CAP]     # search-and-show videos
         videos = grab("video")[:CAP]            # download by URL
-        junk = bool(re.search(r"```junk", text))
+        junk = bool(re.search(r"```junk", outside))
         skill_blocks = grab("skill")[:CAP]      # save a smart file
         runskills = grab("runskill")[:CAP]      # run a saved smart file
         reads = grab("read")[:CAP]              # read a file from disk by path
         greps = grab("grep")[:CAP]              # regex search in the working folder
         globs = grab("glob")[:CAP]              # find files by pattern
         briefs = grab("task")[:8]               # parallel read-only sub-agents
+        bgs = grab("bg")[:3]                    # background jobs
+        logss = grab("logs")[:4]
+        kills = grab("kill")[:4]
+        undo_req = has("undo")
+        undo_arg = (grab("undo") or [""])[0]
+        opens = grab("open")[:3]
         shots = has("screenshot")               # see the screen
         looks = grab("look")[:3]                # see an image file
         maps = has("map")                       # the repo map: files + what they define
@@ -6386,20 +6991,15 @@ class ChuckWindow(Adw.ApplicationWindow):
         # that itself contains ``` fences (a README) comes wrapped in FOUR
         # backticks; those are parsed first and blanked so the inner fences
         # can't be mistaken for the end of the block.
-        writes, edits = [], []
-        rest = text
-        for tag, sink in (("write", writes), ("edit", edits)):
-            for m in re.finditer(r"````" + tag + r"[ \t]*(?:\n[ \t]*)?([^\n`]+)\n(.*?)\n?````",
-                                 rest, re.DOTALL):
-                sink.append((m.group(1).strip(), m.group(2)))
-            rest = re.sub(r"````" + tag + r"\b.*?````", "", rest, flags=re.DOTALL)
-        for m in re.finditer(r"```write[ \t]*(?:\n[ \t]*)?([^\n`]+)\n(.*?)```", rest, re.DOTALL):
-            writes.append((m.group(1).strip(), m.group(2)))
-        for m in re.finditer(r"```edit[ \t]*(?:\n[ \t]*)?([^\n`]+)\n(.*?)```", rest, re.DOTALL):
-            edits.append((m.group(1).strip(), m.group(2)))
-        writes, edits = writes[:12], edits[:12]
+        fblocks = file_blocks(text)
+        writes = [(b["path"], b["body"]) for b in fblocks if b["tag"] == "write"][:12]
+        edits = [(b["path"], b["body"]) for b in fblocks if b["tag"] == "edit"][:12]
+        fence_clash = [b["path"] for b in fblocks if b.get("ambiguous")]
+        # what's left once file contents are cut out: code INSIDE a file being
+        # written is never mistaken for a block to run
+        rest = _cut_spans(text, [(b["start"], b["end"]) for b in fblocks])
         checks = []
-        for m in re.finditer(r"```check[ \t]+([a-z0-9+]+)[ \t]*\n(.*?)```", text,
+        for m in re.finditer(r"```check[ \t]+([a-z0-9+]+)[ \t]*\n(.*?)```", outside,
                              re.DOTALL | re.IGNORECASE):
             checks.append((m.group(1).strip().lower(), m.group(2)))
         checks = checks[:CAP]
@@ -6425,9 +7025,13 @@ class ChuckWindow(Adw.ApplicationWindow):
             blocked_agent = bool(skill_blocks or runskills or reads or greps or plans
                                  or projects or trees or rmfiles or packages or runtests
                                  or ledger_req or writes or edits or checks or junk
-                                 or globs or maps or shots or looks or briefs)
+                                 or globs or maps or shots or looks or briefs or bgs
+                                 or logss or kills or undo_req or opens)
+            blocked_agent = blocked_agent or bool(videos)
             codes, skill_blocks, runskills, reads, greps, plans = [], [], [], [], [], []
             globs, maps, shots, looks, briefs = [], False, False, [], []
+            bgs, logss, kills, opens, undo_req = [], [], [], [], False
+            videos = []                 # a download runs yt-dlp: that is acting
             projects, rmfiles, writes, edits, checks = [], [], [], [], []
             trees = packages = runtests = ledger_req = junk = False
 
@@ -6451,15 +7055,20 @@ class ChuckWindow(Adw.ApplicationWindow):
         if self._forced_answer:
             # he was told to answer from what he has — ignore any further research
             searches, fetches = [], []
+        if fence_clash:
+            # can't tell where the document ends: write nothing, run nothing
+            writes, edits, codes, skill_blocks, runskills = [], [], [], [], []
+            bgs = []
         if self._step_forced:
             # told to wrap up: no more actions this turn, only the summary
             codes, skill_blocks, runskills, writes, edits, checks = [], [], [], [], [], []
             runtests = packages = junk = False
+            bgs = []
         acting = bool(searches or fetches or images or vid_searches or videos or junk
                       or skill_blocks or runskills or reads or greps or codes or checks
                       or projects or writes or edits or trees or packages or runtests
                       or rmfiles or ledger_req or plans or globs or maps or shots or looks
-                      or briefs)
+                      or briefs or bgs or logss or kills or undo_req or opens)
         # Chuck's own narration is what shows in chat — never swallow it.
         self._set_bot_text(disp or ("Working on it…" if acting else "Done."), rich=True)
         if blocked_agent:
@@ -6484,10 +7093,20 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._loop_web = (searches, fetches) if (searches or fetches) else None
         self._dispatching = True
 
+        if fence_clash:
+            self._sys_note("\u26a0 couldn't tell where " + ", ".join(fence_clash)
+                           + " ends (``` fences inside it) \u2014 nothing written or run",
+                           "danger")
+            self._tool_feedback.append(
+                "[NOTHING was written or run: " + ", ".join(fence_clash) + " contains ``` "
+                "fences inside a 3-backtick ```write block, so its end is ambiguous. Send it "
+                "again wrapped in FOUR backticks: ````write <path> ... ````]")
         if truncated:
             # The reply hit max_tokens. If it was mid-block, the block never
             # closed and its tool silently never ran — say so, both ways.
-            self._sys_note("✂ the reply hit the output limit and was cut off", "danger")
+            self._sys_note("\u2702 the reply hit the output limit and was cut off"
+                           + ("" if text.strip() else " (the model used it all reasoning "
+                              "\u2014 raise Max output tokens in Settings)"), "danger")
             self._tool_feedback.append(
                 "[Your last reply was CUT OFF by the output token limit. Anything after "
                 "the cut did not happen. Continue from there; split a large file into "
@@ -6532,7 +7151,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             searches or fetches or images or vid_searches or videos or junk or skill_blocks
             or runskills or reads or greps or codes or checks or projects or writes or edits
             or trees or packages or runtests or rmfiles or ledger_req or globs or maps
-            or shots or looks or briefs)
+            or shots or looks or briefs or bgs or logss or kills or undo_req or opens)
         for body in plans:
             self._do_plan(body, nudge=plan_only)
         for nm in projects:
@@ -6543,6 +7162,16 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._do_edit(rel, body)
         for rel in rmfiles:
             self._do_rmfile(rel.strip())
+        if undo_req:
+            self._do_undo(undo_arg)
+        for body in bgs:
+            self._do_bg(body)
+        for nm in logss:
+            self._do_logs(nm)
+        for nm in kills:
+            self._do_kill(nm)
+        for t in opens:
+            self._do_open(t)
         if trees:
             self._do_tree()
         if runtests:
@@ -6593,9 +7222,10 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._continue_or_finish(disp)
         return False
 
-    def _tool_done(self, feedback_text=None):
-        """Called (on main thread) when one async show-tool finishes."""
-        if self._cancelled:
+    def _tool_done(self, feedback_text=None, gen=None):
+        """Called (on main thread) when one async show-tool finishes. A result
+        from an earlier turn (gen mismatch) is dropped, never counted here."""
+        if self._cancelled or (gen is not None and gen != self._gen):
             return
         self._note_progress()
         self._run_budget = 0            # no command is holding the watchdog open
@@ -6632,7 +7262,7 @@ class ChuckWindow(Adw.ApplicationWindow):
                                  "plainly what you could not confirm. Do NOT emit another search, "
                                  "fetch or read block."})
             self._sys_note("⏹ research budget spent — answering from what he has", "dim")
-            GLib.idle_add(self._ask_model)
+            self._ask_soon()
             return
         # Agent steps have their OWN budget. They used to share the research
         # cap (4 by default), so a task needing a fifth command simply stopped
@@ -6645,7 +7275,7 @@ class ChuckWindow(Adw.ApplicationWindow):
                                  "content": "TOOL RESULTS (continue — don't stop until the whole "
                                  "task is done, then give your final answer):\n\n"
                                  + _clip_feedback(feedback)})
-            GLib.idle_add(self._ask_model)
+            self._ask_soon()
             return
         if feedback and not self._step_forced:
             self._step_forced = True
@@ -6654,11 +7284,12 @@ class ChuckWindow(Adw.ApplicationWindow):
                                  "step:\n" + "\n\n".join(feedback)[:6000] + "\n\nNow give the final "
                                  "report: what is done, what is left, and the exact next step."})
             self._sys_note(f"⏹ step budget ({step_cap}) spent — wrapping up", "dim")
-            GLib.idle_add(self._ask_model)
+            self._ask_soon()
             return
 
         # the turn is truly finished
         self._hops = 0
+        self._notify_done(disp)
         if self.settings.get("tts", True) and disp:
             speak(disp, self.settings)
         self._save_chat()
@@ -6687,6 +7318,7 @@ class ChuckWindow(Adw.ApplicationWindow):
     def _run_web_tools(self, searches, fetches, extra_feedback=None):
         self._busy(True)
         self._activity_start("Researching")
+        gen = self._gen
 
         def worker():
             out = list(extra_feedback or [])
@@ -6833,8 +7465,15 @@ class ChuckWindow(Adw.ApplicationWindow):
                          "genuinely cannot be found, say so plainly and move on — that is a "
                          "complete answer, not a failure.")
             note = "\n".join(lines) + "\n\n"
-            self.history.append({"role": "user", "content": note + "\n\n".join(out)[:16000]})
-            GLib.idle_add(self._ask_model)
+            msg = note + "\n\n".join(out)[:16000]
+
+            def deliver():
+                # on the UI thread, and only into the turn that asked
+                if gen == self._gen and not self._cancelled:
+                    self.history.append({"role": "user", "content": msg})
+                    self._ask_model()
+                return False
+            GLib.idle_add(deliver)
         threading.Thread(target=worker, daemon=True).start()
 
     # ── settings ──
