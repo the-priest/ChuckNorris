@@ -2798,6 +2798,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         # usage: real counts from the API when it reports them, estimates when not
         self._tok_in = self._tok_out = 0
         self._usage = self._blank_usage()
+        self._cap_extra = 0.0           # spending approved past the cap, this chat
         self._session = self._blank_usage()
         self._balance = ""
         self.workspace = None
@@ -4919,6 +4920,7 @@ class ChuckWindow(Adw.ApplicationWindow):
 
     def _reset_meter(self):
         self._usage = self._blank_usage()
+        self._cap_extra = 0.0           # spending the user approved past the cap, this chat
         self._tok_in = self._tok_out = 0
         self._paint_meter()
 
@@ -7407,7 +7409,52 @@ class ChuckWindow(Adw.ApplicationWindow):
             return False
         GLib.idle_add(go)
 
+    def _over_cap(self):
+        """The chat's spending cap, if it is set and reached (and not yet
+        approved past). -> the cap in $, or 0."""
+        cap = self.cfg("cost_cap", 0.0, 0.0, 10000.0, cast=float)
+        if cap <= 0:
+            return 0
+        spent = (getattr(self, "_usage", None) or {}).get("cost", 0) or 0
+        return cap if spent >= cap + getattr(self, "_cap_extra", 0.0) else 0
+
+    def _cost_pause(self, cap, vision):
+        """Stop before the next model call and ask: the cap is the user's money."""
+        spent = self._usage.get("cost", 0)
+        card, head, cbody, foot = self._card_shell("SPENDING CAP")
+        card.add_css_class("ask-card")
+        ql = Gtk.Label(xalign=0, wrap=True, hexpand=True)
+        ql.add_css_class("prose")
+        ql.set_text(f"This chat has spent {_pricing.fmt_usd(spent)} — your cap is "
+                    f"{_pricing.fmt_usd(cap)}. The task is paused before the next model call.")
+        cbody.append(ql)
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        go = Gtk.Button(label=f"Continue (another {_pricing.fmt_usd(cap)})")
+        go.add_css_class("quick")
+        stop = Gtk.Button(label="Stop here"); stop.add_css_class("ghost")
+        row.append(go); row.append(stop)
+        foot.append(row)
+
+        def cont(_b):
+            go.set_sensitive(False); stop.set_sensitive(False)
+            # another `cap` from HERE, not from wherever the cap used to be
+            self._cap_extra = max(self._cap_extra, self._usage.get("cost", 0) - cap) + cap
+            self._start_run()
+            self._ask_model(vision)
+
+        def halt(_b):
+            go.set_sensitive(False); stop.set_sensitive(False)
+            self._sys_note("Stopped at the spending cap.", "dim")
+        go.connect("clicked", cont)
+        stop.connect("clicked", halt)
+        self._log_pin(card)
+        self._end_run()
+
     def _ask_model(self, vision=False):
+        cap = self._over_cap()
+        if cap:
+            self._cost_pause(cap, vision)
+            return
         imgs, self._tool_images = list(self._tool_images), []
         last = self.history[-1] if self.history else None
         if imgs and last and last.get("role") == "user" and isinstance(last.get("content"), str):
@@ -8701,6 +8748,8 @@ class ChuckWindow(Adw.ApplicationWindow):
              sub="How many ```task``` sub-agents run at once.")
         spin(g, "Sub-agent steps", "subagent_steps", 2, 20, 1, 8,
              sub="Tool rounds each sub-agent may take before it must report.")
+        spin(g, "Spending cap per chat ($)", "cost_cap", 0, 1000, 0.05, 0, digits=2,
+             sub="Pause and ask before spending more than this in one chat. 0 = no cap.")
         spin(g, "Context sent per request (characters)", "context_chars", 40000, 800000,
              10000, SEND_CHAR_BUDGET,
              sub="How much conversation and file content rides along. More sees more "

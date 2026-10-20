@@ -544,6 +544,39 @@ check(b.fallback_for(cn._pricing.SUGGESTED[0]) == cn._pricing.SUGGESTED[1],
 srv.shutdown()
 
 # ═══════════════════════════════════════════════════════════════════════════
+print("\n--- spending cap: pause and ask before spending more ---")
+w = agent(["```bash\necho step\n```", "Done after continuing."])
+w.settings["cost_cap"] = 0.10
+w._usage["cost"] = 0.25                      # already past it
+type_and_send(w, "keep working")
+check(len(w.backend.calls) == 0, "no model call is made past the cap")
+cards = [x for x in w.msgbox.walk() if x.get_text() == "SPENDING CAP"]
+check(cards, "a SPENDING CAP card asks first")
+check_finished(w, "cap paused")
+go = [x for x in w.msgbox.walk() if (x.get_label() or "").startswith("Continue (another")]
+check(go and "$0.10" in go[0].get_label(), "Continue offers another cap's worth", go[0].get_label() if go else None)
+if go:
+    go[0].click()
+    settle()
+check(len(w.backend.calls) >= 1 and "Done after continuing." in hist_text(w),
+      "Continue resumes the task where it paused")
+check(w._cap_extra >= 0.25, "and the allowance counts from what was already spent", w._cap_extra)
+w._usage["cost"] = w._cap_extra + 0.10 + 0.01
+w.backend.replies = ["never sent"]
+type_and_send(w, "spend more")
+check("never sent" not in hist_text(w), "spending past the new allowance pauses again")
+stop = [x for x in w.msgbox.walk() if x.get_label() == "Stop here"]
+stop[-1].click()
+check("never sent" not in hist_text(w), "Stop here stays stopped")
+w2 = agent(["Free."])
+w2.settings["cost_cap"] = 0
+w2._usage["cost"] = 99
+type_and_send(w2, "no cap")
+check("Free." in hist_text(w2), "a cap of 0 means no cap")
+w.new_chat()
+check(w._cap_extra == 0, "a new chat starts with no approved overspend")
+
+# ═══════════════════════════════════════════════════════════════════════════
 print(f"\nTOTAL V15 FAILURES: {fails + len(FAILS)}")
 assert fails == 0 and not FAILS, "v15 regressions present"
 print("ALL V15 TESTS PASSED")

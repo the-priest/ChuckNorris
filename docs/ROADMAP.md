@@ -49,7 +49,7 @@ without a network, and visible to the user as a card.
 
 - [x] **Model fallback.** Repeated 429/5xx on the chat model fall back to
       another configured model for that request, with a note.
-- [ ] **Cost guard.** An optional per-chat spending cap. Reaching it pauses
+- [x] **Cost guard.** An optional per-chat spending cap. Reaching it pauses
       the task and asks before spending more.
 - [ ] **Auto-compaction.** When a long session outgrows the context budget,
       older turns are summarized by the model into one dense note instead of
