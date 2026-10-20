@@ -577,6 +577,54 @@ w.new_chat()
 check(w._cap_extra == 0, "a new chat starts with no approved overspend")
 
 # ═══════════════════════════════════════════════════════════════════════════
+print("\n--- compaction: long sessions keep their memory ---")
+w = agent([])
+for i in range(30):
+    w.history += [{"role": "user", "content": f"request {i}: GOAL-{i} " + "x" * 300},
+                  {"role": "assistant", "content": f"did {i}"}]
+full = [dict(m) for m in w.history]
+w.entry.get_buffer().set_text("/compact")
+w.on_send()
+settle()
+check(w._compact and w._compact["upto"] == len(w.history) - cn.ChuckWindow.COMPACT_KEEP,
+      "/compact summarises all but the newest messages", w._compact and w._compact["upto"])
+check(w.history == full, "the transcript itself is untouched")
+sent = w._trim_for_send(list(w.history))
+check(sent[1]["content"].startswith("CONVERSATION SUMMARY") and "SUMMARY:" in sent[1]["content"],
+      "what is sent opens with the summary")
+check(len(sent) == 2 + cn.ChuckWindow.COMPACT_KEEP and sent[-1] == w.history[-1],
+      "followed by the newest messages as they are", len(sent))
+check(not any("GOAL-3 " in str(m.get("content")) for m in sent[2:]), "the covered turns are not re-sent")
+w._save_chat()
+w2 = new_win([], tmp)
+w2._load_chat(cn.CHATS_DIR / f"{w.chat_id}.json")
+check(w2._compact == w._compact, "the summary survives saving and reloading the chat")
+w.entry.get_buffer().set_text("/compact")
+w.on_send()
+settle()
+notes = [x.get_text() for x in w.msgbox.walk() if isinstance(x.get_text(), str)]
+check(any("Nothing to compact yet." in t for t in notes), "nothing new: it says so instead of paying again")
+w.new_chat()
+check(w._compact is None, "a new chat has no summary")
+
+w = agent([])
+w.settings["context_chars"] = 40000
+for i in range(40):
+    w.history += [{"role": "user", "content": f"step {i} " + "y" * 1500},
+                  {"role": "assistant", "content": f"ok {i}"}]
+w.backend.replies = ["Carrying on."]
+type_and_send(w, "keep going")
+settle()
+check(w._compact is not None, "past 80% of the context budget it compacts by itself")
+check(getattr(w.backend, "compactions", 0) == 1, "once", getattr(w.backend, "compactions", 0))
+w.backend.replies = ["Still here."]
+type_and_send(w, "next")
+check(json.loads(w.backend.payloads[-1])["messages"][1]["content"].startswith("CONVERSATION SUMMARY"),
+      "and the next request carries the summary")
+w.settings["auto_compact"] = False
+w.settings["context_chars"] = 40000
+
+# ═══════════════════════════════════════════════════════════════════════════
 print(f"\nTOTAL V15 FAILURES: {fails + len(FAILS)}")
 assert fails == 0 and not FAILS, "v15 regressions present"
 print("ALL V15 TESTS PASSED")

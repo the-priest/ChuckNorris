@@ -51,7 +51,7 @@ without a network, and visible to the user as a card.
       another configured model for that request, with a note.
 - [x] **Cost guard.** An optional per-chat spending cap. Reaching it pauses
       the task and asks before spending more.
-- [ ] **Auto-compaction.** When a long session outgrows the context budget,
+- [x] **Auto-compaction.** When a long session outgrows the context budget,
       older turns are summarized by the model into one dense note instead of
       silently dropped. `/compact` does it on demand.
 

@@ -55,7 +55,13 @@ class ScriptedBackend:
             fail(f"history is not JSON-serialisable: {e}")
         if on_open:
             on_open()
-        reply = self.replies.pop(0) if self.replies else "Done."
+        if str(messages[0].get("content", "")).startswith("You are compacting"):
+            # an automatic compaction: answer it without eating a scripted reply
+            self.compactions = getattr(self, "compactions", 0) + 1
+            reply = ("SUMMARY: the user asked for work in this chat; it was done step by step; "
+                     "continue from the newest messages.")
+        else:
+            reply = self.replies.pop(0) if self.replies else "Done."
         for i in range(0, len(reply), 40):
             if should_stop and should_stop():
                 return

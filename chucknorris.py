@@ -2799,6 +2799,8 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._tok_in = self._tok_out = 0
         self._usage = self._blank_usage()
         self._cap_extra = 0.0           # spending approved past the cap, this chat
+        self._compact = None            # {"upto": i, "text": summary} of history[1:i]
+        self._compacting = False
         self._session = self._blank_usage()
         self._balance = ""
         self.workspace = None
@@ -3341,6 +3343,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._save_chat()
         self._clear_sudo_pw()           # a fresh chat re-asks for root; never carry it over
         _SHELL["cwd"] = None                    # and the shell starts in the folder again
+        self._compact = None
         self.chat_id = datetime.now().strftime("%Y%m%d-%H%M%S")
         self._new_history()
         self._reset_meter()
@@ -4231,7 +4234,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             (CHATS_DIR / f"{self.chat_id}.json").write_text(json.dumps(
                 {"title": title, "ts": self.chat_id, "history": self.history,
                  "workspace": str(self.workspace) if self.workspace else "",
-                 "usage": self._usage}, indent=2))
+                 "usage": self._usage, "compact": self._compact}, indent=2))
         except Exception:
             pass
         self._refresh_sidebar()
@@ -4365,6 +4368,10 @@ class ChuckWindow(Adw.ApplicationWindow):
         else:
             self.history.insert(0, {"role": "system", "content": self._system_text()})
         self.chat_id = meta.get("ts", datetime.now().strftime("%Y%m%d-%H%M%S"))
+        c = meta.get("compact")
+        self._compact = (c if isinstance(c, dict) and isinstance(c.get("upto"), int)
+                         and isinstance(c.get("text"), str) and 1 < c["upto"] <= len(self.history)
+                         else None)
         ws = meta.get("workspace") or ""
         if ws and os.path.isdir(ws) and (not self.workspace or str(self.workspace) != ws):
             self.set_workspace(ws, announce=False)
@@ -7478,6 +7485,84 @@ class ChuckWindow(Adw.ApplicationWindow):
             v = min(hi, v)
         return v
 
+    COMPACT_PROMPT = (
+        "You are compacting an engineering agent's conversation so the work can continue "
+        "with less context. Write a dense summary, at most ~1200 words, of the conversation "
+        "below: the user's goals and requirements (quote exact wording where it matters), "
+        "decisions made and why, files created or changed and what they do, important "
+        "commands and their outcomes, the current state, open problems, and the next steps. "
+        "Facts only, no preamble, no advice to the user.")
+    COMPACT_KEEP = 6                     # newest messages always sent as they are
+
+    def _maybe_auto_compact(self, messages):
+        """When what we'd send is nearing the context budget, compact in the
+        background so the NEXT request carries a summary instead of losing the
+        oldest turns outright."""
+        if self._compacting or not self.settings.get("auto_compact", True):
+            return
+        budget = self.cfg("context_chars", SEND_CHAR_BUDGET, 40000, 800000)
+        size = sum(len(m["content"]) if isinstance(m.get("content"), str) else 2000
+                   for m in messages[1:])
+        done = self._compact["upto"] if self._compact else 1
+        if size > budget * 0.8 and len(self.history) - done > self.COMPACT_KEEP + 6:
+            GLib.idle_add(lambda: (self.compact_now(auto=True), False)[1])
+
+    def compact_now(self, auto=False):
+        """Summarise everything but the newest few messages, in the background.
+        The transcript is never touched: the summary only replaces those turns
+        in what is SENT. /compact runs it on demand."""
+        if self._compacting:
+            return False
+        upto = len(self.history) - self.COMPACT_KEEP
+        prev = self._compact
+        start = prev["upto"] if prev else 1
+        if upto - start < 2:
+            if not auto:
+                self._sys_note("Nothing to compact yet.", "dim")
+            return False
+        parts = []
+        if prev:
+            parts.append("EARLIER SUMMARY:\n" + prev["text"])
+        for m in self.history[start:upto]:
+            c = m.get("content")
+            if not isinstance(c, str):
+                c = " ".join(x.get("text", "") for x in c if isinstance(x, dict))
+            parts.append(f"[{m.get('role')}] " + clip_output(c, 4000))
+        transcript = clip_output("\n\n".join(parts), 150000)
+        msgs = [{"role": "system", "content": self.COMPACT_PROMPT},
+                {"role": "user", "content": transcript}]
+        self._compacting = True
+        chat = self.chat_id
+        self._sys_note("\U0001F5DC compacting earlier turns\u2026", "dim")
+
+        def work():
+            out, err = [], []
+            b = Backend(self.settings) if isinstance(self.backend, Backend) else self.backend
+            try:
+                b.stream(msgs, out.append, lambda: None, err.append)
+            except Exception as ex:
+                err.append(str(ex))
+            text = "".join(out).strip()
+
+            def land():
+                self._compacting = False
+                if chat != self.chat_id:
+                    return False                 # the user moved on to another chat
+                if err or len(text) < 40:
+                    self._sys_note("\u26a0 couldn't compact: " + (err[0] if err else
+                                                                   "empty summary"), "danger")
+                    return False
+                self._account(len(transcript), len(text), usage=getattr(b, "last_usage", None),
+                              model=getattr(b, "last_model", None))
+                self._compact = {"upto": upto, "text": text}
+                self._sys_note(f"\U0001F5DC compacted {upto - start} earlier messages into a "
+                               f"{len(text) // 1000 or 1}k summary", "dim")
+                self._save_chat()
+                return False
+            GLib.idle_add(land)
+        threading.Thread(target=work, daemon=True).start()
+        return True
+
     def _trim_for_send(self, messages):
         """Bound the conversation actually sent to the model.
 
@@ -7489,6 +7574,13 @@ class ChuckWindow(Adw.ApplicationWindow):
         """
         if not messages:
             return messages
+        c = self._compact
+        if c and 1 < c["upto"] < len(messages) - 1:
+            # the summary stands in for every turn it covers
+            messages = (messages[:1] + [{"role": "user", "content":
+                        "CONVERSATION SUMMARY (earlier turns, compacted — the work so far):\n"
+                        + c["text"]}] + messages[c["upto"]:])
+        self._maybe_auto_compact(messages)
         # Compress BEFORE deciding what fits. The old order dropped whole blobs
         # the moment the budget was tight, which threw away the middle of a
         # research chain entirely; squeezing them first means more of the chain

@@ -105,7 +105,9 @@ class Router:
                should_stop=None, attempts=3, on_open=None):
         json.dumps(messages)                               # must stay serialisable
         first = str(messages[0].get("content", ""))
-        if first.startswith(cn._agents.SUB_PROMPT[:60]):
+        if first.startswith("You are compacting"):
+            reply = "SUMMARY: work so far, compacted for the test."
+        elif first.startswith(cn._agents.SUB_PROMPT[:60]):
             with self.lock:
                 self.sub_calls.append(messages)
             reply = self.sub(messages)               # outside the lock: concurrent
