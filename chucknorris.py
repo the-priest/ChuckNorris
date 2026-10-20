@@ -7362,7 +7362,7 @@ class ChuckWindow(Adw.ApplicationWindow):
                 self._sys_note("MCP is unavailable (module missing).", "danger")
             else:
                 st = self._mcp.status()
-                self._sys_note(("MCP servers (" + str(self.MCP_CONFIG) + "):\n"
+                self._sys_note(("MCP servers (" + _short_path(self.MCP_CONFIG) + "):\n"
                                 + "\n".join(f"{n:<14} {state:<9} {d}" for n, state, d in st))
                                if st else f"No MCP servers. Add them to {self.MCP_CONFIG} "
                                "(Claude Desktop format: {\"mcpServers\": {...}}), then /mcp reload.",
@@ -8971,7 +8971,7 @@ class ChuckWindow(Adw.ApplicationWindow):
                 self.mcp_reload()
                 GLib.timeout_add(1500, lambda: (fill_mcp(), False)[1])
             bar = Adw.ActionRow(); bar.set_title("mcp.json")
-            bar.set_subtitle(_html.escape(str(self.MCP_CONFIG)))
+            bar.set_subtitle(_html.escape(_short_path(self.MCP_CONFIG)))
             eb = Gtk.Button(label="Edit"); eb.add_css_class("quick"); eb.set_valign(Gtk.Align.CENTER)
             rb = Gtk.Button(label="Reload"); rb.add_css_class("quick"); rb.set_valign(Gtk.Align.CENTER)
             eb.connect("clicked", edit_mcp); rb.connect("clicked", reload_mcp)
