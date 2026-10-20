@@ -511,7 +511,25 @@ def security_scan(lang, body):
 
 
 # ── public: full pipeline ────────────────────────────────────────────────────
-def check(lang, body, tests=None):
+_SUMMARY = re.compile(r"(?i)^(found \d+ errors?\.?|\[\*\] \d+ fixable.*|no fixes available.*)$")
+_UNDEFINED = re.compile(r"[Uu]ndefined name [`'\"]?([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def _drop_known(findings, known):
+    """Lint findings minus 'undefined name x' for names a live session
+    already defines (a ```py``` block builds on the ones before it)."""
+    if not known:
+        return findings
+    out = []
+    for f in findings:
+        lines = [ln for ln in str(f).splitlines()
+                 if not ((m := _UNDEFINED.search(ln)) and m.group(1) in known)]
+        if any(ln.strip() and not _SUMMARY.match(ln.strip()) for ln in lines):
+            out.append("\n".join(lines))
+    return out
+
+
+def check(lang, body, tests=None, known_names=()):
     """Run the full verify pipeline. Returns a dict:
        {ok, lang, syntax_ok, syntax_err, lint[], security[], tests{...}}
 
@@ -541,7 +559,7 @@ def check(lang, body, tests=None):
     # 2. lint (only if syntax ok — lint output on broken syntax is noise)
     if res["syntax_ok"]:
         if lang == "python":
-            res["lint"] = _lint_python(body)
+            res["lint"] = _drop_known(_lint_python(body), set(known_names))
         elif lang == "bash":
             res["lint"] = _lint_shell(body)
         elif lang == "js":

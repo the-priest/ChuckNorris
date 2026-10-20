@@ -614,6 +614,75 @@ else:
 srv.shutdown()
 
 # ═══════════════════════════════════════════════════════════════════════════
+print("\n--- the py session: one interpreter per chat ---")
+ws = folder("pysess")
+(ws / "data.csv").write_text("a,b\n1,2\n3,4\n")
+w = agent(["Loading it.\n```py\nimport csv\nrows = list(csv.DictReader(open('data.csv')))\nlen(rows)\n```",
+           "```py\ntotal = sum(int(r['a']) for r in rows)\nprint('total', total)\n```",
+           "```py\nrows[99]\n```",
+           "```py\nrows.append({'a': '5', 'b': '6'})\nsum(int(r['a']) for r in rows)\n```",
+           "```python\nprint(rows)\n```",
+           "Total is 9."], ws)
+type_and_send(w, "sum column a")
+h = hist_text(w)
+check("RAN that py block in the persistent session" in h and "\n2\n" in h,
+      "a py block runs in the folder and shows its last value", h[-600:])
+check("total 4" in h, "the next block still has its variables (no reload)")
+check("IndexError" in h and 'File "<py 3>", line 1' in h and "FAILED" in h,
+      "an error comes back as a clean traceback pointing at the block")
+check("\n9\n" in h, "an error doesn't lose the session")
+check("Undefined name `rows`" in h or "undefined name 'rows'" in h,
+      "```python stays a one-shot script: the verifier flags the session's names there", h[-900:])
+check("Session variables: csv, rows, total" in h, "the agent is told what's defined")
+check(not any("undefined name 'rows'" in str(m.get("content")) for m in w.history),
+      "the verifier knows the session's names (no false 'undefined name')")
+cards = [x for x in w.msgbox.walk() if x.get_text() == "PYTHON SESSION"]
+check(len(cards) == 4, "each py block gets a PYTHON SESSION card", len(cards))
+pid = w._py.proc.pid
+w.backend.replies = ["```py\nimport time\nfor i in range(600):\n    time.sleep(0.1)\n```", "Stopped."]
+w.entry.get_buffer().set_text("long loop")
+w.on_send()
+time.sleep(1.5)
+w.stop_run()
+settle()
+check(w._py is not None and w._py.alive() and w._py.proc.pid == pid,
+      "Stop interrupts a py block without killing the session")
+w.backend.replies = ["```py\nlen(rows)\n```", "Still 3."]
+type_and_send(w, "still there?")
+check("\n3\n" in hist_text(w).split("still there?")[-1], "and its variables survive the Stop")
+w.backend.replies = ["```py\nname = input('who?')\n```", "No keyboard."]
+type_and_send(w, "ask me")
+check("has no keyboard" in hist_text(w), "input() fails fast instead of hanging")
+w.backend.replies = ["```py\nimport os\nos._exit(3)\n```", "```py\nlen(rows)\n```", "Gone."]
+type_and_send(w, "crash it")
+tail = hist_text(w).split("crash it")[-1]
+check("exited with code 3" in tail and "FRESH" in tail and "NameError" in tail,
+      "a crashed session restarts, and says the old variables are gone", tail[-400:])
+import site
+os.environ.setdefault("PYTHONUSERBASE", site.USER_BASE or "")   # the kernel runs under the test HOME
+w._py_close()
+have_mpl = subprocess.run([sys.executable, "-c", "import matplotlib"], capture_output=True).returncode == 0
+w.backend.replies = ["```py\nrows = [1, 2, 3]\n```", "ok"]
+type_and_send(w, "again")
+if have_mpl:
+    w.backend.replies = ["```py\nimport matplotlib.pyplot as plt\nplt.plot([1, 4, 9])\nplt.title('squares')\n```",
+                         "Plotted."]
+    w._tool_images = []
+    type_and_send(w, "plot it")
+    tail = hist_text(w).split("plot it")[-1]
+    check("1 figure(s) saved" in tail and ".plot_" in tail, "a matplotlib figure is saved and reported")
+    pngs = [p for p in cn.CONFIG_DIR.glob(".plot_*.png")]
+    check(pngs and pngs[0].read_bytes()[:4] == b"\x89PNG", "as a real PNG")
+else:
+    print("  [SKIP] matplotlib not installed: plots untested here")
+old_pid = w._py.proc.pid if w._py and w._py.alive() else None
+w.new_chat()
+check(w._py is None and (old_pid is None or not os.path.exists(f"/proc/{old_pid}")
+                         or "zombie" in open(f"/proc/{old_pid}/status").read().lower()),
+      "a new chat ends the session")
+check_finished(w, "pysession")
+
+# ═══════════════════════════════════════════════════════════════════════════
 print(f"\nTOTAL V16 FAILURES: {fails + len(FAILS)}")
 assert fails == 0 and not FAILS, "v16 regressions present"
 print("ALL V16 TESTS PASSED")

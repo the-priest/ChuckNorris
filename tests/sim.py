@@ -77,7 +77,7 @@ def settle(limit=60):
     for _ in range(limit):
         alive = [t for t in threading.enumerate()
                  if t is not threading.current_thread() and t.is_alive()
-                 and not t.name.startswith("mcp-")]      # server readers live forever
+                 and not t.name.startswith(("mcp-", "pysession-"))]   # readers live as long as their process
         if not alive:
             return True
         for t in alive:

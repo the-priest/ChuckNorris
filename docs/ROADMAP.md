@@ -92,7 +92,7 @@ there's nothing to look at.
 - [x] **Hooks.** Settings: a command after every file write (a formatter,
       with `{path}`) and one before the agent may finish (tests, lint). Their
       results go to the model, so it fixes what they find.
-- [ ] **Python session.** ```py``` blocks run in one persistent interpreter
+- [x] **Python session.** ```py``` blocks run in one persistent interpreter
       per chat: data loaded once stays loaded, plots are saved and shown.
 
 ### Phase 7 — the web as it really is

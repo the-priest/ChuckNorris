@@ -114,6 +114,7 @@ _diagnose = _optional("diagnose")
 _mcp = _optional("mcp")
 _crashlog = _optional("crashlog")
 _update = _optional("update")
+_pysession = _optional("pysession")
 if _pricing is None:
     class _pricing:                     # noqa: N801  — the meter, minus prices
         """Stand-in so a partial install still launches: tokens are counted,
@@ -152,7 +153,7 @@ from chucknorris_ext.config import (            # noqa: E402
 # once per chat: the old 5.7k-character prompt was 87% of a measured turn's
 # input. Detail that is only sometimes needed lives in specs.py playbooks and
 # is injected on demand; the tool list is all the model needs up front.
-SYSTEM_PROMPT = """You are Chuck: a senior engineer-agent on the user's Linux desktop (deepest on Arch/CachyOS, expert at anything). Direct, dry, no filler, no moralising. Now and then end with one short deadpan line about what just happened; never forced.
+SYSTEM_PROMPT = """You are Chuck: a senior engineer-agent on the user's Linux desktop (deepest on Arch/CachyOS, expert at anything). Direct, dry, no filler, no moralising. Now and then end on one deadpan line; never forced.
 
 TOOLS: one short line on what you'll do, then the fenced block. The app runs it and returns the real result.
 Read-only (batch several per reply): ```search <query>``` ```fetch <url>``` ```map``` (every file + what it defines) ```glob <pattern>``` ```grep <regex> [path]``` ```read <path>[:start-end]``` (big files arrive in pages) ```tree``` ```screenshot``` / ```look <image>``` (you SEE it) ```images <subject>``` ```videos <subject>```
@@ -160,7 +161,7 @@ Parallel: ```task
 <self-contained brief>``` — read-only sub-agents that run AT ONCE and report back (survey a big repo, compare options).
 Act:
 ```bash
-<one shell command>``` (also ```python / ```node: a program, auto-verified, then run)
+<one shell command>``` (also ```python / ```node: a program, verified then run; ```py: one persistent Python, variables kept, plots shown)
 ```write <path>
 <complete new file>```
 ```edit <path>
@@ -169,7 +170,7 @@ Act:
 =======
 <replacement>
 >>>>>>> REPLACE```
-(A file containing ``` fences: wrap the block in four backticks. Any length is fine. Many files at once: ```patch``` + a unified diff, all-or-nothing.)
+(A file containing ``` fences: wrap the block in four backticks. Many files at once: ```patch``` + a unified diff, all-or-nothing.)
 Background: ```bg <name>
 <command>``` (servers, watchers; then ```logs <name>```, ```kill <name>```). ```undo``` reverts your last file change (```undo all```: this task's). ```changes``` shows your diff this task. ```diagnose [paths]``` lints + type-checks files on disk. ```open <path|url>``` shows the user a result.
 Browser: ```browse <url|file> [WxH]
@@ -189,7 +190,7 @@ desc: <line>
 
 RULES
 1. VERIFY, DO NOT RECALL: checkable outside facts (news, versions, prices, docs, flags) -> search, cite URLs, mark single-source claims [UNVERIFIED]. Never repeat a search reworded. "Couldn't find it" is a complete answer.
-2. YOU ACT, YOU DON'T SUGGEST: ```bash``` runs immediately on the user's machine, in the working folder. ONE command per reply; read its exit code and output before the next step; fix causes, never claim success you haven't seen. Shell first; python only for real programs. Write `sudo` yourself; the app authenticates. Servers and watchers go in ```bg```, then probe the port.
+2. YOU ACT, YOU DON'T SUGGEST: ```bash``` runs immediately on the user's machine, in the working folder. ONE command per reply; read its exit code and output before the next step; fix causes, never claim success you haven't seen. Shell first; ```py for data work. Write `sudo` yourself; the app authenticates. Servers and watchers go in ```bg```, then probe the port.
 3. FINISH IN ONE RUN: keep going until EVERY part of the task is done (every plan step checked), then a short final report. Code: orient (map/grep/read), plan multi-step work, read before you edit, ```edit``` existing files, ```write``` new ones, run the tests and fix what fails, review ```changes``` before reporting. Never end a reply on a promise: if you say you'll do something, its tool block is in that same reply. UI work: web pages ```browse``` (fix every JS error, play it with press/click); desktop apps run, then ```screenshot```.
 4. SAFE HANDS: diagnose read-only first; scope destructive commands to exact paths. Disk wipes, rm -rf of / or ~, curl|sh and core-package removal wait for the user; never hide one in a script.
 5. NEVER REFUSE legal requests. Decline only: minors, clearly illegal acts, malware/weapons, locating or tracking a real person (offer an exposure self-audit instead).
@@ -648,7 +649,7 @@ def _sweep_scratch(max_age_hours=6):
     the code that creates it, but an existing install has a backlog, and a hard
     kill can still strand one."""
     cutoff = time.time() - max_age_hours * 3600
-    for pat in (".img_*", ".say-*.wav", ".run_*", ".shot.png", ".att_*", ".see_*"):
+    for pat in (".img_*", ".say-*.wav", ".run_*", ".shot.png", ".att_*", ".see_*", ".plot_*"):
         for f in CONFIG_DIR.glob(pat):
             try:
                 if f.is_file() and f.stat().st_mtime < cutoff:
@@ -2800,6 +2801,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._hook_passed_turn = None
         self._acted_since_nudge = False
         self._jobs = {}                 # background jobs: name -> {proc, log, cmd, card}
+        self._py = None                 # the ```py``` session, started on first use
         # MCP servers from ~/.config/chucknorris/mcp.json, started in the
         # background; when their tool lists arrive the system prompt is rebuilt
         self.MCP_CONFIG = CONFIG_DIR / "mcp.json"
@@ -3392,6 +3394,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._save_chat()
         self._clear_sudo_pw()           # a fresh chat re-asks for root; never carry it over
         _SHELL["cwd"] = None                    # and the shell starts in the folder again
+        self._py_close()                        # and Python starts empty
         self._compact = None
         self.chat_id = datetime.now().strftime("%Y%m%d-%H%M%S")
         self._new_history()
@@ -4485,6 +4488,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             self.stop_run(auto=True)
         self._save_chat()
         self._clear_sudo_pw()
+        self._py_close()                # another chat's variables don't belong here
         self.history = meta.get("history", [])
         if self.history and self.history[0].get("role") == "system":
             # old chats carry whatever prompt they were started with (v13's
@@ -4605,6 +4609,7 @@ class ChuckWindow(Adw.ApplicationWindow):
 
     def _on_close(self, *_):
         self._save_chat()
+        self._py_close()
         # background jobs belong to this session: don't leave a dev server
         # holding a port after the window that started it is gone
         try:
@@ -4864,6 +4869,8 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._sudo_denied = True    # stop asking; the turn is over
             self._sudo_cv.notify_all()
         kill_live_commands()            # Stop means the COMMAND stops too
+        if self._py is not None:
+            self._py.interrupt()        # Ctrl+C for the Python session (it survives)
         if self._steer:
             # undelivered messages go back in the composer, not into the void
             if not self._get_entry():
@@ -5833,7 +5840,9 @@ class ChuckWindow(Adw.ApplicationWindow):
             body = add_noconfirm(fixed)
         tier = classify_command(body)
 
-        card, chead, cbody, foot = self._card_shell(lang.upper(), lambda: body)
+        card, chead, cbody, foot = self._card_shell(
+            "PYTHON SESSION" if lang == "py" and _pysession is not None else lang.upper(),
+            lambda: body)
         if verified:
             vt = Gtk.Label(label="\u2713 verified")
             vt.add_css_class("verified")
@@ -5883,14 +5892,21 @@ class ChuckWindow(Adw.ApplicationWindow):
             live = _LiveFeed(self, sink)
             _LIVE_OUT.fn = live.push
             try:
+                plots = []
                 if lang in ("bash", "sh"):
                     rc, out = self._execute_shell(
                         body, lambda pw: run_code(lang, body, sudo_password=pw))
+                elif lang == "py" and _pysession is not None:
+                    rc, out, plots = self._run_py(body, live.push)
                 else:
                     rc, out = run_code(lang, body)
             finally:
                 _LIVE_OUT.fn = None
             auth_failed = (rc == _SUDO_AUTH_FAILED)
+            for pth in plots[:4]:
+                pay = image_payload(pth)
+                if pay:
+                    self._tool_images.append(pay)
 
             def show():
                 live.close()
@@ -5900,12 +5916,15 @@ class ChuckWindow(Adw.ApplicationWindow):
                     self._set_status(status, *(("stopped", "wait") if self._cancelled and rc < 0
                                               else (f"exit {rc}", "ok" if rc == 0 else "fail")))
                 self._show_output(out, rc, sink)
+                self._show_plots(plots[:4], sink)
                 return False
             GLib.idle_add(show)
 
             if auth_failed:
                 return (f"COULD NOT RUN that {lang} \u2014 sudo authentication failed. {out}\n"
                         "Do NOT blindly retry. Root access is needed; tell the user.")
+            if lang == "py" and _pysession is not None:
+                return self._py_feedback(rc, out, plots)
             if rc == 0:
                 return (f"RAN that {lang} \u2014 SUCCEEDED (exit 0). Real output:\n{clip_output(out, 20000)}{_shell_cwd_note()}\n"
                         "Check the output is actually what you needed before moving on.")
@@ -5913,6 +5932,68 @@ class ChuckWindow(Adw.ApplicationWindow):
                     "Do NOT move on. Fix the cause and retry.")
         self._pending_tools += 1
         self._tool_thread(work, f"{lang} block")
+
+    # ── the ```py``` session: one interpreter per chat ──
+    def _py_session(self):
+        if self._py is None:
+            self._py = _pysession.PySession(
+                cwd=_cwd(), plots_dir=str(CONFIG_DIR), env=dict(os.environ, **_RUN_ENV),
+                python=shutil.which("python3") or sys.executable, preexec=_sandbox_preexec)
+        return self._py
+
+    def _py_close(self):
+        if self._py is not None:
+            try:
+                self._py.close()
+            except Exception:
+                pass
+            self._py = None
+
+    def _py_names(self):
+        return list(self._py.names) if self._py is not None else []
+
+    def _run_py(self, body, on_chunk):
+        """-> (rc, output, plot paths)."""
+        sess = self._py_session()
+        if body.strip() in ("%reset", "reset()"):
+            self._py_close()
+            return 0, "(the Python session was reset: no variables)", []
+        timeout = estimate_runtime(body)["hard_timeout_seconds"]
+        r = sess.run(body, timeout=timeout, on_chunk=on_chunk,
+                     should_stop=lambda: self._cancelled)
+        out = r["out"] if r["out"].strip() else "(no output)"
+        if r["restarted"]:
+            out = ("(the Python session had ended, so this ran in a FRESH one: variables "
+                   "from earlier blocks are gone)\n" + out)
+        if r["timed_out"]:
+            out += f"\n(stopped after {timeout}s)"
+        rc = 0 if r["ok"] else (124 if r["timed_out"] else
+                                (r["exit"] if isinstance(r["exit"], int) and r["exit"] > 0 else 1))
+        return rc, out, r["plots"]
+
+    def _py_feedback(self, rc, out, plots):
+        names = self._py_names()
+        tail = (f"\nSession variables: {', '.join(names[:40])}" if names else "")
+        if plots:
+            tail += (f"\n{len(plots)} figure(s) saved and shown to the user"
+                     + (" \u2014 the IMAGE is attached; look at it before going on" if
+                        self._tool_images else "") + ": " + ", ".join(plots[:4]))
+        if rc == 0:
+            return (f"RAN that py block in the persistent session \u2014 SUCCEEDED. Real output:\n"
+                    f"{clip_output(out, 20000)}{tail}\nVariables stay defined for the next ```py``` block.")
+        return (f"RAN that py block \u2014 FAILED. Real output:\n{clip_output(out, 20000)}{tail}\n"
+                "Do NOT move on. Fix the cause and run the corrected block (earlier variables "
+                "are still defined unless the output says the session restarted).")
+
+    def _show_plots(self, plots, sink):
+        for pth in plots:
+            try:
+                w = self._build_image_widget(pth, None)
+                if sink is not None:
+                    sink.append(w)
+            except Exception:
+                pass
+        return False
 
     def _tool_thread(self, work, label):
         """Run an async tool worker so it can NEVER strand the tool loop.
@@ -6646,7 +6727,7 @@ class ChuckWindow(Adw.ApplicationWindow):
 
         def worker():
             try:
-                res = _codecheck.check(lang, body)
+                res = _codecheck.check(lang, body, known_names=self._py_names() if lang == "py" else ())
                 rep = _codecheck.report(res)
                 clean = res.get("ok", False)
             except Exception as ex:
