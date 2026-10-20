@@ -115,6 +115,8 @@ _mcp = _optional("mcp")
 _crashlog = _optional("crashlog")
 _update = _optional("update")
 _pysession = _optional("pysession")
+_lsp = _optional("lsp")
+_codesearch = _optional("codesearch")
 if _pricing is None:
     class _pricing:                     # noqa: N801  — the meter, minus prices
         """Stand-in so a partial install still launches: tokens are counted,
@@ -156,9 +158,9 @@ from chucknorris_ext.config import (            # noqa: E402
 SYSTEM_PROMPT = """You are Chuck: a senior engineer-agent on the user's Linux desktop (deepest on Arch/CachyOS, expert at anything). Direct, dry, no filler, no moralising. Now and then end on one deadpan line; never forced.
 
 TOOLS: one short line on what you'll do, then the fenced block. The app runs it and returns the real result.
-Read-only (batch several per reply): ```search <query>``` ```fetch <url>``` ```map``` (every file + what it defines) ```glob <pattern>``` ```grep <regex> [path]``` ```read <path>[:start-end]``` (big files arrive in pages) ```tree``` ```screenshot``` / ```look <image>``` (you SEE it) ```images <subject>``` ```videos <subject>```
+Read-only (batch several per reply): ```search <query>``` ```fetch <url>``` ```map``` (every file + what it defines) ```glob <pattern>``` ```grep <regex> [path]``` ```read <path>[:start-end]``` ```def <name>``` / ```refs <name>``` (by meaning) ```find <what code does>``` ```tree``` ```screenshot``` / ```look <image>``` (you SEE it) ```images <subject>``` ```videos <subject>```
 Parallel: ```task
-<self-contained brief>``` — read-only sub-agents that run AT ONCE and report back (survey a big repo, compare options).
+<self-contained brief>``` — read-only sub-agents that run AT ONCE and report back.
 Act:
 ```bash
 <one shell command>``` (also ```python / ```node: a program, verified then run; ```py: one persistent Python, variables kept, plots shown)
@@ -170,9 +172,9 @@ Act:
 =======
 <replacement>
 >>>>>>> REPLACE```
-(A file containing ``` fences: wrap the block in four backticks. Many files at once: ```patch``` + a unified diff, all-or-nothing.)
+(A file containing ``` fences: wrap the block in four backticks. Many files at once: ```patch``` + a unified diff, all-or-nothing. ```rename <old> <new>```: everywhere it's used.)
 Background: ```bg <name>
-<command>``` (servers, watchers; then ```logs <name>```, ```kill <name>```). ```undo``` reverts your last file change (```undo all```: this task's). ```changes``` shows your diff this task. ```diagnose [paths]``` lints + type-checks files on disk. ```open <path|url>``` shows the user a result.
+<command>``` (servers, watchers: then probe the port; ```logs <name>```, ```kill <name>```). ```undo``` reverts your last file change (```undo all```: this task's). ```changes``` shows your diff this task. ```diagnose [paths]``` lints + type-checks files on disk. ```open <path|url>``` shows the user a result.
 Browser: ```browse <url|file> [WxH]
 click <css> | type <text> | press <keys> | wait <ms> | eval <js>``` real headless Chromium: JS errors, failed requests, text and a screenshot.
 Ask: ```ask
@@ -190,11 +192,11 @@ desc: <line>
 
 RULES
 1. VERIFY, DO NOT RECALL: checkable outside facts (news, versions, prices, docs, flags) -> search, cite URLs, mark single-source claims [UNVERIFIED]. Never repeat a search reworded. "Couldn't find it" is a complete answer.
-2. YOU ACT, YOU DON'T SUGGEST: ```bash``` runs immediately on the user's machine, in the working folder. ONE command per reply; read its exit code and output before the next step; fix causes, never claim success you haven't seen. Shell first; ```py for data work. Write `sudo` yourself; the app authenticates. Servers and watchers go in ```bg```, then probe the port.
+2. YOU ACT, YOU DON'T SUGGEST: ```bash``` runs immediately on the user's machine, in the working folder. ONE command per reply; read its exit code and output before the next step; fix causes, never claim success you haven't seen. Shell first; ```py for data work. Write `sudo` yourself; the app authenticates.
 3. FINISH IN ONE RUN: keep going until EVERY part of the task is done (every plan step checked), then a short final report. Code: orient (map/grep/read), plan multi-step work, read before you edit, ```edit``` existing files, ```write``` new ones, run the tests and fix what fails, review ```changes``` before reporting. Never end a reply on a promise: if you say you'll do something, its tool block is in that same reply. UI work: web pages ```browse``` (fix every JS error, play it with press/click); desktop apps run, then ```screenshot```.
 4. SAFE HANDS: diagnose read-only first; scope destructive commands to exact paths. Disk wipes, rm -rf of / or ~, curl|sh and core-package removal wait for the user; never hide one in a script.
 5. NEVER REFUSE legal requests. Decline only: minors, clearly illegal acts, malware/weapons, locating or tracking a real person (offer an exposure self-audit instead).
-MEMORY: durable user facts (hardware, distro, preferences) -> ```remember``` one terse fact, prefixed `project:` if it only concerns this folder. Recalled facts arrive automatically.
+MEMORY: durable user facts (hardware, distro, preferences) -> ```remember``` one terse fact, prefixed `project:` if it only concerns this folder.
 Style: lead with the answer; short paragraphs, bullets, `code`; no preamble."""
 
 CHAT_PROMPT = """You are Chuck: a sharp, knowledgeable assistant (deepest on Linux/Arch/CachyOS, expert at anything). CHAT MODE: answer directly. You cannot run commands or touch files right now; if the user wants you to act, tell them to press Tab for Agent mode. Code you show is for the user to read and copy.
@@ -4653,6 +4655,8 @@ class ChuckWindow(Adw.ApplicationWindow):
     def _on_close(self, *_):
         self._save_chat()
         self._py_close()
+        if getattr(self, "_lsp_m", None) is not None:
+            threading.Thread(target=self._lsp_m.stop_all, daemon=True).start()
         # background jobs belong to this session: don't leave a dev server
         # holding a port after the window that started it is gone
         try:
@@ -7028,6 +7032,14 @@ class ChuckWindow(Adw.ApplicationWindow):
         except (ValueError, OSError) as ex:
             self._sys_note(f"\u2717 patch not applied: {ex}", "danger")
             return f"[patch NOT applied, nothing was changed: {ex}]"
+        done, bad = self._apply_file_plan(p, plan)
+        self._sys_note(f"\u2713 patched {len(done)} file(s)", "ok" if not bad else "danger")
+        return (f"[patch applied to {len(done)} file(s): {', '.join(done)}]"
+                + ("\n[" + "\n".join(bad) + "]" if bad else ""))
+
+    def _apply_file_plan(self, p, plan):
+        """Write [(rel, before, after)] (after None = delete), each file
+        checkpointed with its diff card and verified. -> (done, problems)."""
         done, bad = [], []
         for rel, before, after in plan:
             path = _builder._safe(p, rel)
@@ -7046,9 +7058,119 @@ class ChuckWindow(Adw.ApplicationWindow):
                         if issue:
                             bad.append(f"{rel} does not verify:\n{issue}")
             (done if ok else bad).append(rel if ok else f"{rel}: {msg}")
-        self._sys_note(f"\u2713 patched {len(done)} file(s)", "ok" if not bad else "danger")
-        return (f"[patch applied to {len(done)} file(s): {', '.join(done)}]"
-                + ("\n[" + "\n".join(bad) + "]" if bad else ""))
+        return done, bad
+
+    # ── code intelligence: def / refs / rename / find ──
+    def _lsp_mgr(self):
+        if getattr(self, "_lsp_m", None) is None and _lsp is not None:
+            self._lsp_m = _lsp.Manager()
+        return getattr(self, "_lsp_m", None)
+
+    def _symbol_tool(self, tag, body):
+        if _lsp is None:
+            return None, f"[{tag}: the lsp module is missing \u2014 reinstall Chuck]"
+        root = self._workroot()
+        if root is None:
+            return None, f"[{tag}: no working folder \u2014 pick one first]"
+        args = (body or "").split()
+        if not args:
+            return None, f"[{tag}: give a name, e.g. ```{tag} save``` or ```{tag} Store.save```]"
+        return (root, args), None
+
+    @tool("def", cap=4, bare=True)
+    def _t_def(self, body):
+        """```def <name>``` (or Class.method): where it's defined, by meaning
+        through a language server when one is installed, else by syntax."""
+        ok, err = self._symbol_tool("def", body)
+        if err:
+            return err
+        root, (name, *_rest) = ok
+        self._sys_note(f"\U0001F50E where is {name} defined", "dim")
+
+        def work():
+            try:
+                hits, how = _lsp.definitions(self._lsp_mgr(), root, name)
+            except _lsp.LSPError as ex:
+                return f"[def {name}: {ex}]"
+            return _lsp.report_defs(name, hits, how)
+        return work
+
+    @tool("refs", cap=3, bare=True)
+    def _t_refs(self, body):
+        """```refs <name>```: every use of it. With a language server these are
+        real uses of THAT symbol; without one, whole-word matches (it says so)."""
+        ok, err = self._symbol_tool("refs", body)
+        if err:
+            return err
+        root, (name, *_rest) = ok
+        self._sys_note(f"\U0001F50E who uses {name}", "dim")
+
+        def work():
+            try:
+                refs, how, defs = _lsp.references(self._lsp_mgr(), root, name)
+            except _lsp.LSPError as ex:
+                return f"[refs {name}: {ex}]"
+            return _lsp.report_refs(name, refs, how, defs)
+        return work
+
+    @tool("rename", acts=True, cap=1, bare=True)
+    def _t_rename(self, body):
+        """```rename <old> <new>```: the language server renames the symbol and
+        every real use of it, across files, as one checkpointed change."""
+        ok, err = self._symbol_tool("rename", body)
+        if err:
+            return err
+        root, args = ok
+        if len(args) != 2:
+            return "[rename: give the old and the new name: ```rename make_store build_store```]"
+        old, new = args
+        self._sys_note(f"\u270e renaming {old} \u2192 {new}", "dim")
+
+        def work():
+            try:
+                plan, how = _lsp.rename(self._lsp_mgr(), root, old, new)
+            except _lsp.LSPError as ex:
+                return f"[rename NOT done, nothing was changed: {ex}]"
+            if not plan:
+                return f"[rename {old}: {how} found nothing to change]"
+            box, ev = {}, threading.Event()
+
+            def apply():
+                try:
+                    box["r"] = self._apply_file_plan(root, plan)
+                except Exception as ex:                  # report, never strand the worker
+                    box["r"] = ([], [str(ex)])
+                ev.set()
+                return False
+            GLib.idle_add(apply)
+            ev.wait(120)
+            done, bad = box.get("r", ([], ["timed out applying the rename"]))
+            n = sum(after.count(new) - before.count(new) for _r, before, after in plan)
+            return (f"[renamed {old} \u2192 {new} via {how}: {n} occurrence(s) in "
+                    f"{len(done)} file(s): {', '.join(done)}]"
+                    + ("\n[" + "\n".join(bad) + "]" if bad else "")
+                    + "\nRun the tests: a rename can still miss uses in strings or "
+                      "dynamic code.")
+        return work
+
+    @tool("find", cap=2, bare=True)
+    def _t_find(self, body):
+        """```find <what the code does>```: functions, classes and doc sections
+        ranked by how well they match the description (BM25 over names,
+        docstrings, comments and identifiers)."""
+        if _codesearch is None:
+            return "[find: the codesearch module is missing \u2014 reinstall Chuck]"
+        root = self._workroot()
+        if root is None:
+            return "[find: no working folder \u2014 pick one first]"
+        query = " ".join((body or "").split())
+        if not query:
+            return "[find: say what you're looking for, e.g. ```find retry failed requests```]"
+        self._sys_note(f"\U0001F50E finding \u201c{query[:60]}\u201d", "dim")
+
+        def work():
+            return _codesearch.report(root, query, _codesearch.search(root, query, k=8))
+        return work
 
     @tool("mcp", acts=True, cap=4)
     def _t_mcp(self, body):
@@ -7233,6 +7355,14 @@ class ChuckWindow(Adw.ApplicationWindow):
             py or "none \u2014 pip install --user ruff (catches undefined names before running)")
         add("ok" if shutil.which("shellcheck") else "warn", "Shell linter",
             shutil.which("shellcheck") or "none \u2014 install shellcheck (bash -n is used instead)")
+        if _lsp is not None:
+            have = {lg: _lsp.server_for(lg, self.workspace) for lg in ("python", "typescript")}
+            found = [f"{lg}: {os.path.basename(a[0])}" for lg, a in have.items() if a]
+            missing = [lg for lg, a in have.items() if not a]
+            add("ok" if not missing else "warn", "Language servers",
+                ", ".join(found) + ("; " if found and missing else "")
+                + ("; ".join(f"no {lg} server \u2014 install {_lsp.INSTALL[lg]} (def/refs fall back "
+                             "to syntax; rename needs one)" for lg in missing)))
         add("ok" if shutil.which("node") else "warn", "Node",
             shutil.which("node") or "none \u2014 JavaScript can't be checked or run")
         shot = next((t for t in ("grim", "spectacle", "scrot", "gnome-screenshot") if shutil.which(t)), None)
@@ -7637,8 +7767,9 @@ class ChuckWindow(Adw.ApplicationWindow):
 
     # ── plan mode ──
     PLAN_NOTE = ("PLAN MODE is on: the user wants a plan before any change. Investigate with "
-                 "read-only tools only (map, glob, grep, read, search, fetch, browse, diagnose, "
-                 "task). Change NOTHING: no bash/python, write, edit, patch, bg or rmfile. When "
+                 "read-only tools only (map, glob, grep, read, def, refs, find, search, fetch, "
+                 "browse, diagnose, task). Change NOTHING: no bash/python, write, edit, patch, "
+                 "rename, bg or rmfile. When "
                  "you understand the task, post the steps as a ```plan``` with a short summary "
                  "of the approach and any risk, then stop: the user approves it first.")
     _PLAN_BLOCKED = "commands, file changes and other actions"

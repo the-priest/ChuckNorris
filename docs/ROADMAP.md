@@ -128,13 +128,13 @@ reaches only local servers.
 
 ### Phase 10 — code intelligence
 
-- [ ] **Symbols.** ```def <name>``` and ```refs <name>``` answer "where is this
+- [x] **Symbols.** ```def <name>``` and ```refs <name>``` answer "where is this
       defined / used" through a real language server when one is installed
       (pyright, typescript-language-server, rust-analyzer, gopls), with the
       AST/regex map as the fallback.
-- [ ] **Rename.** ```rename <old> <new>``` applies a language server's rename
+- [x] **Rename.** ```rename <old> <new>``` applies a language server's rename
       across the project as one checkpointed, revertible change.
-- [ ] **Search by meaning.** ```find <description>``` ranks files and
+- [x] **Search by meaning.** ```find <description>``` ranks files and
       functions by relevance (BM25 over identifiers, docstrings and comments,
       stdlib only), for "where do we handle retries?" in an unfamiliar repo.
 
