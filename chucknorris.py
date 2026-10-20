@@ -1280,10 +1280,7 @@ def _run_sudo_askpass(script, password, timeout, env):
     e2["SUDO_ASKPASS"] = helper
     e2["CHUCK_SUDO_PW"] = password
     try:
-        p = subprocess.run([_bash_bin(), "-c", _inject_askpass(script)],
-                           stdin=subprocess.DEVNULL, cwd=_cwd(),
-                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                           timeout=timeout, text=True, errors="replace", env=e2)
+        p = _guarded_proc([_bash_bin(), "-c", _inject_askpass(script)], timeout, e2)
         low = (p.stderr or "").lower()
         if p.returncode != 0 and ("a terminal is required" in low or "askpass" in low
                                   or "no password was provided" in low
@@ -1312,10 +1309,8 @@ def _run_sudo(script, password, timeout, env):
     # rc 97 is our private "auth failed" sentinel.
     prelude = f"{binname} -k 2>/dev/null\n{binname} -S -p '' -v || exit 97\n"
     try:
-        p = subprocess.run([_bash_bin(), "-c", prelude + script],
-                           input=password + "\n", cwd=_cwd(),
-                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                           timeout=timeout, text=True, errors="replace", env=env)
+        p = _guarded_proc([_bash_bin(), "-c", prelude + script], timeout, env,
+                          input_text=password + "\n")
     except subprocess.TimeoutExpired:
         return 124, _timeout_note(script, timeout)
     except Exception as ex:
@@ -1365,8 +1360,8 @@ _LONG_WORDS = {"upgrade", "dist-upgrade", "install", "update", "build",
 # Long-running servers / daemons — these do NOT return on their own.
 _SERVER_CMDS = {
     "flask", "uvicorn", "gunicorn", "hypercorn", "daphne", "streamlit", "gradio",
-    "node", "nodemon", "deno", "bun", "rails", "puma", "jekyll", "hugo",
-    "http-server", "serve", "ng", "next", "nuxt", "vite", "webpack-dev-server",
+    "nodemon", "puma", "jekyll", "hugo",
+    "http-server", "serve", "webpack-dev-server",
     "php-fpm", "nginx", "httpd", "caddy", "mongod", "mysqld", "mariadbd",
     "postgres", "redis-server", "ncat", "socat",
 }
@@ -1399,9 +1394,15 @@ def estimate_runtime(command):
         elif head in ("python", "python3", "py") and (
                 "runserver" in " ".join(rest) or "http.server" in " ".join(rest)):
             server_hit = True
-        elif head in ("npm", "yarn", "pnpm") and any(
+        elif head in ("npm", "yarn", "pnpm", "bun", "deno") and any(
                 w in ("start", "dev", "serve", "preview", "watch") for w in rest):
             server_hit = True
+        elif head in ("next", "nuxt", "vite", "ng", "rails") and (
+                not rest or rest[0] in ("dev", "start", "serve", "preview", "s", "server")):
+            server_hit = True                    # `vite build`, `next lint` finish
+        elif head in ("node", "deno", "bun") and rest and re.search(
+                r"(?:^|/)(?:server|serve|app)\.[cm]?[jt]s$", rest[-1]):
+            server_hit = True                    # `node server.js`; `node build.js` finishes
     if server_hit and not backgrounded:
         return {"kind": "server", "expected_seconds": 8, "hard_timeout_seconds": 25,
                 "is_server": True, "backgrounded": False}
@@ -1414,9 +1415,11 @@ def estimate_runtime(command):
         return {"kind": "long", "expected_seconds": 300, "hard_timeout_seconds": 1800,
                 "is_server": False, "backgrounded": False}
     if heads and all(h in _QUICK_CMDS for h in heads):
-        return {"kind": "quick", "expected_seconds": 5, "hard_timeout_seconds": 30,
+        return {"kind": "quick", "expected_seconds": 5, "hard_timeout_seconds": 120,
                 "is_server": False, "backgrounded": False}
-    return {"kind": "unknown", "expected_seconds": 30, "hard_timeout_seconds": 120,
+    # Unknown means "a script, a test run, a render": give it room. A hang is
+    # still bounded, and Stop kills it at once.
+    return {"kind": "unknown", "expected_seconds": 30, "hard_timeout_seconds": 600,
             "is_server": False, "backgrounded": False}
 
 
@@ -1465,56 +1468,68 @@ def run_command(cmd, timeout=None, sudo_password=None):
     return _run_shell(cmd, timeout=timeout, sudo_password=sudo_password)
 
 
+# Every command Chuck is running right now, so Stop can end them. Stop used to
+# end only the TURN: the command itself ran on, invisibly, until its timeout.
+_LIVE_PROCS = set()
+_LIVE_LOCK = threading.Lock()
+
+
+def _guarded_proc(argv, timeout, env, input_text=None):
+    """Run argv in its own process group, registered as live while it runs.
+    Returns a CompletedProcess. On timeout the WHOLE tree is killed and
+    TimeoutExpired is raised; a Stop (kill_live_commands) ends it early with
+    whatever exit status the kill produced."""
+    proc = subprocess.Popen(argv, cwd=_cwd(),
+                            stdin=subprocess.PIPE if input_text is not None
+                            else subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, errors="replace", env=env,
+                            preexec_fn=_sandbox_preexec)
+    with _LIVE_LOCK:
+        _LIVE_PROCS.add(proc)
+    try:
+        try:
+            out, err = proc.communicate(input=input_text, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _kill_tree(proc)
+            try:
+                proc.communicate(timeout=5)
+            except Exception:
+                pass
+            raise
+    finally:
+        with _LIVE_LOCK:
+            _LIVE_PROCS.discard(proc)
+    return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+
+
+def kill_live_commands():
+    """Kill every command Chuck is running (their whole process trees)."""
+    with _LIVE_LOCK:
+        procs = list(_LIVE_PROCS)
+    for p in procs:
+        if p.poll() is None:
+            _kill_tree(p)
+    return len(procs)
+
+
 def _run_guarded(argv, timeout, env, timeout_note):
-    """subprocess.run, but the child gets its own process group and resource
-    limits, and a timeout kills the whole tree.
+    """subprocess.run, but the child gets its own process group, and a timeout
+    (or Stop) kills the whole tree.
 
     subprocess.run's own timeout kills only the direct child. A skill that
     backgrounds work, or a shell that spawned a compile, left orphans running
     after Chuck had already given up on them and moved on — invisible processes
     still eating the box.
     """
-    nproc = _user_tasks() + _NPROC_HEADROOM     # counted here: preexec runs post-fork
-    proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, cwd=_cwd(),
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=True, errors="replace", env=env,
-                            preexec_fn=lambda: _sandbox_preexec(nproc))
     try:
-        out, err = proc.communicate(timeout=timeout)
+        p = _guarded_proc(argv, timeout, env)
     except subprocess.TimeoutExpired:
-        _kill_tree(proc)
-        try:
-            proc.communicate(timeout=5)
-        except Exception:
-            pass
         return 124, timeout_note()
-    return proc.returncode, _shell_out_parts(out, err)
+    return p.returncode, _shell_out_parts(p.stdout, p.stderr)
 
 
-_NPROC_HEADROOM = 4096
-
-
-def _user_tasks():
-    """How many processes + threads this user already runs, desktop included."""
-    uid, n = str(os.getuid()), 0
-    try:
-        pids = [d for d in os.listdir("/proc") if d.isdigit()]
-    except OSError:
-        return 0
-    for pid in pids:
-        try:
-            with open(f"/proc/{pid}/status") as fh:
-                st = fh.read()
-        except OSError:
-            continue
-        m = re.search(r"^Uid:\s+(\d+)", st, re.MULTILINE)
-        if m and m.group(1) == uid:
-            t = re.search(r"^Threads:\s+(\d+)", st, re.MULTILINE)
-            n += int(t.group(1)) if t else 1
-    return n
-
-
-def _sandbox_preexec(nproc=None):
+def _sandbox_preexec():
     """Applied in the child, after fork, before exec.
 
     Chuck's own note said skills "run raw in-process" and needed restricted
@@ -1538,17 +1553,16 @@ def _sandbox_preexec(nproc=None):
         pass
     try:
         import resource
-        # generous ceilings: high enough that ordinary work never notices,
-        # low enough that a runaway cannot take the machine with it.
-        # RLIMIT_NPROC counts EVERY task the user owns, the whole desktop
-        # included: a flat 512 was already exceeded on a normal Plasma session,
-        # so every fork failed ("fork: Resource temporarily unavailable").
-        # The cap is what's running now plus headroom. No address-space cap:
-        # Chromium, Node and the JVM reserve tens of GB they never touch, and
-        # RLIMIT_AS made all of them fail to start.
-        if nproc:
-            _limit(resource, "RLIMIT_NPROC", nproc)   # no fork bombs
-        _limit(resource, "RLIMIT_FSIZE", 2 * 1024 ** 3)  # 2 GiB single file
+        # NO process, memory or file-size caps. Each one broke real work:
+        #  * RLIMIT_NPROC counts EVERY task the user owns, the whole desktop
+        #    included — a flat 512 was already exceeded on a normal Plasma
+        #    session, so every fork failed ("fork: Resource temporarily
+        #    unavailable"), and any count-based cap can be tripped the same way;
+        #  * RLIMIT_AS stopped Chromium, Node and the JVM from starting (they
+        #    reserve tens of GB of address space they never touch);
+        #  * RLIMIT_FSIZE killed downloads and builds of large files.
+        # Runaways are handled by the process group above: a timeout or Stop
+        # kills the whole tree. Commands run like they would in your terminal.
         _limit(resource, "RLIMIT_CORE", 0)             # no core dumps
     except Exception:
         pass
@@ -1620,8 +1634,7 @@ def run_code(lang, body, timeout=None, sudo_password=None):
         argv = _LANG_RUN[lang](str(tmp))
         env = dict(os.environ)
         env.update(_RUN_ENV)
-        p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout,
-                           stdin=subprocess.DEVNULL, env=env, cwd=_cwd())
+        p = _guarded_proc(argv, timeout, env)
         return p.returncode, _shell_out(p)
     except subprocess.TimeoutExpired:
         return 124, _timeout_note(body, timeout)
@@ -4229,6 +4242,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         with self._sudo_cv:
             self._sudo_denied = True    # stop asking; the turn is over
             self._sudo_cv.notify_all()
+        kill_live_commands()            # Stop means the COMMAND stops too
         # drain the busy counter
         self._busy_n = 0
         self.spinner.stop(); self.spinner.set_visible(False)
@@ -5151,7 +5165,8 @@ class ChuckWindow(Adw.ApplicationWindow):
                 if auth_failed:
                     self._set_status(status, "sudo auth failed", "fail")
                 else:
-                    self._set_status(status, f"exit {rc}", "ok" if rc == 0 else "fail")
+                    self._set_status(status, *(("stopped", "wait") if self._cancelled and rc < 0
+                                              else (f"exit {rc}", "ok" if rc == 0 else "fail")))
                 self._show_output(out, rc, sink)
                 return False
             GLib.idle_add(show)
@@ -5242,7 +5257,8 @@ class ChuckWindow(Adw.ApplicationWindow):
                 if auth_failed:
                     self._set_status(status, "sudo auth failed", "fail")
                 else:
-                    self._set_status(status, f"exit {rc}", "ok" if rc == 0 else "fail")
+                    self._set_status(status, *(("stopped", "wait") if self._cancelled and rc < 0
+                                              else (f"exit {rc}", "ok" if rc == 0 else "fail")))
                 self._show_output(out, rc, sink)
                 return False
             GLib.idle_add(show)

@@ -38,18 +38,30 @@ import tempfile
 #            nothing to fix, and it looped until the hop budget ran out. They are
 #            now surfaced on the card and in the report without withholding it.
 BLOCK, ADVISE = "block", "advise"
+# `rm -rf /` or `rm -rf ~` spelled out inside a program: never a fix-it-later
+_WIPE = r"rm\s+-(?:rf|fr|r\s+-f|f\s+-r)\s+[/~](?=[\s'\"*]|$)"
 
 _SEC = {
     "python": [
-        (r"\beval\s*\(", "eval() on dynamic input is RCE-prone — use ast.literal_eval", BLOCK),
-        (r"\bexec\s*\(", "exec() executes arbitrary code — avoid on untrusted input", BLOCK),
+        # model.eval() in PyTorch, df.eval() in pandas, and `def eval(self):` on
+        # your own class are methods, not the builtin
+        (r"(?<![.\w])(?<!def )eval\s*\(",
+         "eval() on dynamic input is RCE-prone — use ast.literal_eval", BLOCK),
+        (r"(?<![.\w])(?<!def )exec\s*\(", "exec() executes arbitrary code — avoid on untrusted input", BLOCK),
         (r"subprocess\.(?:call|run|Popen|check_output)\([^)]*shell\s*=\s*True",
-         "shell=True with a built string is command-injection-prone — pass a list", BLOCK),
-        (r"os\.system\s*\(", "os.system() is injection-prone — use subprocess with a list", BLOCK),
+         "shell=True with a built string is command-injection-prone — pass a list", ADVISE),
+        # A command BUILT from variables is injection; os.system("clear") in a
+        # terminal game is not. Block the first, only flag the second.
+        (r"os\.system\s*\([^)]*(?:\+|%|\.format\(|\bf['\"])",
+         "os.system() with a built string is injection-prone — use subprocess with a list", BLOCK),
+        (r"os\.system\s*\((?![^)]*(?:\+|%|\.format\(|\bf['\"]))",
+         "os.system() runs a shell — subprocess with a list is safer", ADVISE),
+        (_WIPE, "recursively deletes / or ~", BLOCK),
         (r"yaml\.load\s*\((?![^)]*Loader\s*=\s*yaml\.SafeLoader)",
-         "yaml.load without SafeLoader is unsafe — use yaml.safe_load", BLOCK),
+         "yaml.load without SafeLoader is unsafe — use yaml.safe_load", ADVISE),
+        # token = "STRING" in every tokenizer ever written
         (r"(password|secret|api[_-]?key|token)\s*=\s*['\"][^'\"]{6,}['\"]",
-         "hard-coded secret — load from env/secret store instead", BLOCK),
+         "hard-coded secret — load from env/secret store instead", ADVISE),
         (r"\bpickle\.loads?\s*\(", "pickle on untrusted data is RCE — use json", ADVISE),
         (r"\bmd5\b|\bsha1\b", "MD5/SHA1 are weak for security — fine for checksums, "
                               "use SHA-256+ if this is security-relevant", ADVISE),
@@ -60,18 +72,22 @@ _SEC = {
     "js": [
         (r"\beval\s*\(", "eval() is RCE-prone", BLOCK),
         (r"child_process\.exec\s*\(",
-         "child_process.exec runs a shell — use execFile/spawn with args", BLOCK),
+         "child_process.exec runs a shell — use execFile/spawn with args", ADVISE),
         (r"(password|secret|api[_-]?key|token)\s*[:=]\s*['\"][^'\"]{6,}['\"]",
-         "hard-coded secret", BLOCK),
+         "hard-coded secret", ADVISE),
+        (_WIPE, "recursively deletes / or ~", BLOCK),
         (r"innerHTML\s*=", "innerHTML with dynamic data is XSS-prone — use textContent", ADVISE),
         (r"Math\.random\(\).*(token|password|secret)",
          "Math.random isn't cryptographically secure", ADVISE),
     ],
     "bash": [
-        (r"\beval\s+", "eval in bash is injection-prone", BLOCK),
+        # eval "$(ssh-agent -s)", eval "$(pyenv init -)": everyday setup
+        (r"\beval\s+", "eval in bash is injection-prone", ADVISE),
         (r"rm\s+-rf\s+\$", "rm -rf on an unquoted/var path — guard it", BLOCK),
         (r"curl\s+[^|]*\|\s*(?:sudo\s+)?(?:bash|sh)\b",
-         "curl | bash executes remote code unread", BLOCK),
+         # the CRITICAL gate already asks the user; blocking here too made
+         # official installers (rustup, bun, nvm) impossible even with consent
+         "curl | bash executes remote code unread", ADVISE),
         (r"chmod\s+777", "chmod 777 is world-writable — tighten permissions", ADVISE),
     ],
 }
@@ -374,7 +390,10 @@ def _lint_python(body):
             #   unused imports, likely bugs. NOT style rules (import sorting, line
             #   length): withholding working code over formatting taste would trap
             #   the model in a pointless fix loop.
-            rc, out = _run([tool, "check", "--isolated", "--select", "E9,F,B",
+            # E9,F63,F7,F82: only what FAILS at runtime (syntax, undefined
+            # names, return outside a function). Unused imports and variables
+            # run fine; blocking on them sent the model round in fix loops.
+            rc, out = _run([tool, "check", "--isolated", "--select", "E9,F63,F7,F82",
                             "--output-format", "concise", p])
             findings += _clean_lint_output(rc, out, p, "code.py")
         finally:
@@ -384,15 +403,31 @@ def _lint_python(body):
             f.write(body); p = f.name
         try:
             rc, out = _run(["pyflakes", p])
-            findings += _clean_lint_output(rc, out, p, "code.py")
+            findings += _fatal_only(_clean_lint_output(rc, out, p, "code.py"))
         finally:
             os.unlink(p)
     else:
         # No external linter: fall back to the stdlib AST analysis above rather
         # than to compile(), which only re-runs the syntax check that already
         # passed and therefore found nothing, ever.
-        findings += _analyze_python(body)
+        findings += _fatal_only(_analyze_python(body))
     return findings
+
+
+# pyflakes / AST findings that do not stop the program from running
+_HARMLESS = ("imported but unused", "assigned to but never used", "redefinition of unused",
+             "f-string is missing placeholders", "unable to detect undefined names",
+             "shadowed by loop variable", "may be undefined, or defined from star")
+
+
+def _fatal_only(findings):
+    """Keep only the findings that would make the code fail when run."""
+    out = []
+    for f in findings:
+        lines = [ln for ln in str(f).splitlines() if not any(h in ln for h in _HARMLESS)]
+        if any(ln.strip() for ln in lines):
+            out.append("\n".join(lines))
+    return out
 
 
 def _lint_shell(body):

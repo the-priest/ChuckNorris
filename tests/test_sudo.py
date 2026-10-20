@@ -49,7 +49,13 @@ def test_units():
     for c, (kind, cap) in {"pacman -Syu ripgrep": ("long", 1800),
                            "git clone https://x": ("long", 1800),
                            "npm start": ("server", 25),
-                           "ls": ("quick", 30),
+                           "ls": ("quick", 120),
+                           "node build.js": ("unknown", 600),
+                           "node server.js": ("server", 25),
+                           "vite build": ("long", 1800),
+                           "vite": ("server", 25),
+                           "bun run dev": ("server", 25),
+                           "pytest -q": ("unknown", 600),
                            "nohup node s.js &": ("background", 15)}.items():
         e = cn.estimate_runtime(c)
         if e["kind"] != kind or e["hard_timeout_seconds"] != cap:

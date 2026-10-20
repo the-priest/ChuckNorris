@@ -8,7 +8,7 @@ Runs commands, edits real code, reads whole repos, sees screenshots, runs sub-ag
 ![version](https://img.shields.io/badge/version-14.1.0-8b5cf6?style=flat-square&labelColor=0c0c10)
 ![gtk](https://img.shields.io/badge/GTK4-libadwaita-8b5cf6?style=flat-square&labelColor=0c0c10)
 ![python](https://img.shields.io/badge/Python-3.11_·_3.12_·_3.13-8b5cf6?style=flat-square&labelColor=0c0c10)
-![suites](https://img.shields.io/badge/test_suites-19-2ea043?style=flat-square&labelColor=0c0c10)
+![suites](https://img.shields.io/badge/test_suites-20-2ea043?style=flat-square&labelColor=0c0c10)
 ![deps](https://img.shields.io/badge/runtime_deps-stdlib_+_GTK-2ea043?style=flat-square&labelColor=0c0c10)
 ![licence](https://img.shields.io/badge/licence-MIT-8b5cf6?style=flat-square&labelColor=0c0c10)
 
@@ -166,7 +166,7 @@ Arch / CachyOS first-class; apt and dnf supported. The installer handles GTK4 + 
 ./run_tests.sh
 ```
 
-Nineteen suites run headless against a stubbed toolkit and drive the real window end to end. They cover whole conversations, both modes, edits in a real folder, paged reads of a 12,000-line file, a file written across two cut-off replies, parallel sub-agents, images reaching the model as images, cache-hit pricing, memory updates and scopes, an agent that stops early or never stops, late streams from a stopped turn, undo and background jobs, a README whose example must not run, the critical gate, sudo storms, orphaned processes, and the ledger chain. The UI itself was checked by rendering every screen on real GTK 4.14 / libadwaita 1.5. The screenshots above are those renders.
+Twenty suites run headless against a stubbed toolkit and drive the real window end to end. They cover whole conversations, both modes, edits in a real folder, paged reads of a 12,000-line file, a file written across two cut-off replies, parallel sub-agents, images reaching the model as images, cache-hit pricing, memory updates and scopes, an agent that stops early or never stops, late streams from a stopped turn, undo and background jobs, a README whose example must not run, the critical gate, sudo storms, orphaned processes, and the ledger chain. `test_deep.py` runs whole sessions with real processes and ports, plus 180 seeded random model replies that must never hang the app, run something they shouldn't, or write outside the folder. The UI itself was checked by rendering every screen on real GTK 4.14 / libadwaita 1.5. The screenshots above are those renders.
 
 ## Being straight with you
 

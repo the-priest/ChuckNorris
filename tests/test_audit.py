@@ -339,18 +339,20 @@ type_and_send(w, "write outside")
 check(not (tmp / "outside.txt").exists() and "give a path inside the project" in hist_text(w),
       "an absolute path OUTSIDE the working folder is still refused")
 
-print("\n--- commands can fork on a busy desktop ---")
-check(cn._user_tasks() > 0, "the user's running tasks are counted")
-rc, out = cn.run_command("ulimit -v; ulimit -u; python3 -c 'import threading;"
+print("\n--- commands run like they would in a terminal ---")
+rc, out = cn.run_command("ulimit -v; ulimit -u; ulimit -f; python3 -c 'import threading;"
                          "[threading.Thread(target=lambda:None).start() for _ in range(600)];"
                          "print(\"spawned\")'")
 lines = out.split()
 check(rc == 0 and "spawned" in out, "a command may start 600 threads (the old cap was 512 total)",
       out[-200:])
-check(lines and lines[0] == "unlimited", "no address-space cap that would kill Chromium or Node",
+hard_u = __import__("resource").getrlimit(__import__("resource").RLIMIT_NPROC)[0]
+want_u = "unlimited" if hard_u == __import__("resource").RLIM_INFINITY else str(hard_u)
+check(lines[:1] == ["unlimited"], "no address-space cap that would kill Chromium or Node",
       lines[:1])
-check(len(lines) > 1 and lines[1].isdigit() and int(lines[1]) >= cn._NPROC_HEADROOM,
-      "a process cap still exists, with real headroom", lines[1:2])
+check(lines[1:2] == [want_u], "no process cap of our own (the desktop's tasks count against it)",
+      f"{lines[1:2]} vs inherited {want_u}")
+check(lines[2:3] == ["unlimited"], "no file-size cap that kills big downloads", lines[2:3])
 
 # ═══════════════════════════════════════════════════════════════════════════
 print(f"\nTOTAL AUDIT FAILURES: {fails + len(FAILS)}")

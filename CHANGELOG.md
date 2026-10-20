@@ -44,14 +44,32 @@ Covered by `tests/test_completion.py` and `tests/test_audit.py` (both new).
   toolchain, project survey, git overview, TODOs, big files, Python env, test
   runner discovery, who-holds-this-port.
 
-### From a real run (asked for an HTML Tetris)
+### Nothing gets in the model's way
 
 - **Every command failed with `fork: Resource temporarily unavailable`.**
   Commands ran with `RLIMIT_NPROC=512`, but that limit counts every task the
   user owns, the whole desktop included, and a normal Plasma session is already
-  past 512. The cap is now what's running plus 4,096. The 4 GiB address-space
-  cap is gone too: Chromium, Node and the JVM reserve far more than they use,
-  and it stopped them from starting at all.
+  past 512. Commands now run with no process, memory or file-size caps of
+  Chuck's own, exactly as they would in your terminal. The 4 GiB address-space
+  cap had also stopped Chromium, Node and the JVM from starting at all.
+- **Stop really stops.** Esc and *New chat* ended the turn but left the
+  command running until its timeout. Every command now runs in its own process
+  group, and Stop kills the whole tree within a second. This includes
+  ```python``` / ```node``` programs and sudo commands, which used to lose their
+  child processes on a timeout too.
+- **Timeouts fit real work.** `node build.js`, `next build` and `bun test` were
+  treated as servers and killed after 25 s. Now only things that serve
+  (`node server.js`, `vite`, `npm run dev`) count as servers. Unrecognized
+  commands get 10 minutes instead of 2, and quick ones 2 minutes instead of 30 s.
+- **Code is never withheld over style.** Python verification now blocks only on
+  what fails at runtime: syntax errors, undefined names, `return` outside a
+  function. Unused imports and unused variables no longer block. The security
+  scan stopped blocking `model.eval()`, a class's own `def eval(self)`,
+  `os.system("clear")`, `token = "STRING"` in a tokenizer and
+  `eval "$(ssh-agent -s)"`; it flags them instead. Real injection (`os.system`
+  on a built string), `eval()` on input, and `rm -rf /` or `rm -rf ~` inside a
+  program still block. `curl | sh` installers wait for your approval as
+  CRITICAL commands instead of being refused outright.
 - **"couldn't tell where tetris.html ends"** was a false alarm. The check for
   stray fences after a doc write counted the closing fence of the *next* tool
   block (the ```bash screenshot command). It now tracks depth there as well.
@@ -66,6 +84,25 @@ Covered by `tests/test_completion.py` and `tests/test_audit.py` (both new).
 - **Icons drew as blank squares** under themes that lack Adwaita's symbolic
   icons (Breeze, for one). Chuck uses the Adwaita icon set for its own window
   when it's installed, and the installer now installs it.
+
+### Tests
+
+- **`tests/test_deep.py`**: whole sessions with real commands, files,
+  processes and ports:
+  - a library built and debugged against real unittest output;
+  - a web app served from a background job and fetched over HTTP;
+  - 400-process and 800-thread commands;
+  - Stop killing a running command's tree;
+  - a 2,000-line file across three cut-off replies;
+  - whole-repo reading;
+  - parallel read-only sub-agents;
+  - a 40-turn session that saves and reloads;
+  - 180 seeded random model replies in both modes. Every run must finish
+    cleanly; nothing CRITICAL or embedded in a document may run; nothing may be
+    written outside the folder.
+- Every suite now runs with its own throwaway HOME. They used to write the real
+  `~/.config/chucknorris/settings.json`, and Agent mode leaked from one suite
+  into the next.
 
 ### Audit fixes
 
