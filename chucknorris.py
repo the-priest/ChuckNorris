@@ -7485,6 +7485,52 @@ class ChuckWindow(Adw.ApplicationWindow):
             v = min(hi, v)
         return v
 
+    def export_markdown(self):
+        """This chat as a readable Markdown document."""
+        title = next((m["content"][:80] for m in self.history
+                      if m.get("role") == "user" and isinstance(m.get("content"), str)
+                      and not m["content"].startswith(("TOOL RESULTS", "I ran ", "CONTINUE:"))),
+                     "Chat")
+        u = self._usage
+        lines = [f"# {title.splitlines()[0]}", "",
+                 f"*{datetime.now().strftime('%Y-%m-%d %H:%M')} · "
+                 f"{(self.settings.get('model') or DEFAULT_MODEL).split('/')[-1]} · "
+                 f"{'Agent' if self.agent_mode else 'Chat'} mode"
+                 + (f" · {self.workspace}" if self.workspace else "")
+                 + (f" · {_pricing.fmt_usd(u['cost'])}" if u.get("calls") else "") + "*", ""]
+        for m in self.history[1:]:
+            c = m.get("content")
+            if not isinstance(c, str):
+                c = " ".join(x.get("text", "") for x in c if isinstance(x, dict)) + " [image]"
+            role = m.get("role")
+            internal = c.startswith(("TOOL RESULTS", "I ran ", "STEP BUDGET", "RESEARCH BUDGET",
+                                     "CONTINUE:", "FILE "))
+            if role == "user" and internal:
+                body = clip_output(c, 6000).replace("</details>", "&lt;/details&gt;")
+                lines += ["<details><summary>Tool results</summary>", "", "````text", body,
+                          "````", "", "</details>", ""]
+            elif role == "user":
+                lines += ["## You", "", c, ""]
+            else:
+                lines += ["## Chuck", "", c, ""]
+        return "\n".join(lines).rstrip() + "\n"
+
+    def export_chat(self):
+        """/export: write the chat as Markdown next to your downloads."""
+        out_dir = Path.home() / "Downloads"
+        if not out_dir.is_dir():
+            out_dir = DATA_DIR / "exports"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        path = out_dir / f"chuck-{self.chat_id}.md"
+        try:
+            path.write_text(self.export_markdown(), encoding="utf-8")
+        except OSError as ex:
+            self._sys_note(f"\u2717 couldn't export: {ex}", "danger")
+            return None
+        self._sys_note(f"\U0001F4C4 exported to {path}", "ok")
+        self._toast(f"Exported {path.name}")
+        return path
+
     COMPACT_PROMPT = (
         "You are compacting an engineering agent's conversation so the work can continue "
         "with less context. Write a dense summary, at most ~1200 words, of the conversation "

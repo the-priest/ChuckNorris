@@ -625,6 +625,22 @@ w.settings["auto_compact"] = False
 w.settings["context_chars"] = 40000
 
 # ═══════════════════════════════════════════════════════════════════════════
+print("\n--- export: a chat as Markdown ---")
+w = agent(["Running it.\n```bash\necho exported-output\n```", "It printed the line."])
+type_and_send(w, "print something")
+w.entry.get_buffer().set_text("/export")
+w.on_send()
+outs = list((Path.home() / "Downloads").glob("chuck-*.md")) + list((cn.DATA_DIR / "exports").glob("chuck-*.md"))
+check(outs, "/export writes a Markdown file")
+md = outs[-1].read_text() if outs else ""
+check(md.startswith("# print something"), "titled by the first request", md[:60])
+check("## You\n\nprint something" in md and "## Chuck\n\nIt printed the line." in md,
+      "user and Chuck turns are headed sections")
+check("<details><summary>Tool results</summary>" in md and "exported-output" in md,
+      "tool results are folded away, not lost")
+check("You are Chuck" not in md, "the system prompt is never exported")
+
+# ═══════════════════════════════════════════════════════════════════════════
 print(f"\nTOTAL V15 FAILURES: {fails + len(FAILS)}")
 assert fails == 0 and not FAILS, "v15 regressions present"
 print("ALL V15 TESTS PASSED")
