@@ -1,5 +1,23 @@
 # Changelog
 
+## 15.1.0 — Brave and Camoufox
+
+- **Brave is the preferred browser.** Automatic mode looks for Brave first
+  (native, `/opt`, Flatpak, Snap), then Chromium, then Chrome, all driven over
+  the DevTools protocol.
+- **Camoufox** — a Firefox build that sites can't fingerprint — through its
+  Playwright API, with the same results as the Chromium path: uncaught errors
+  with file and line (Firefox stack traces parsed), console errors and
+  warnings, failed requests and HTTP errors, every action, the visible text and
+  a screenshot.
+- **Settings → Agent → Browser** chooses Automatic, Brave, Chromium, Chrome or
+  Camoufox and shows which binary is in use. A path to any browser binary
+  works too (in `settings.json`), and an unavailable choice says what to
+  install. `CHUCK_CAMOUFOX=1 ./install.sh` installs Camoufox.
+- The browse report and card name the browser that ran.
+- A missing file loaded by a page is reported once, as a failed request,
+  not also as a console error.
+
 ## 15.0.0 — a modern harness
 
 The plan is in `docs/ROADMAP.md`, ticked item by item as it shipped. Every

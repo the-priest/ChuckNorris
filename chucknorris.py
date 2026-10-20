@@ -6601,7 +6601,8 @@ class ChuckWindow(Adw.ApplicationWindow):
         def work():
             shot = _scratch_png(".browse_")
             try:
-                r = _browser.browse(target, actions, size=size, root=root, shot_path=shot)
+                r = _browser.browse(target, actions, size=size, root=root, shot_path=shot,
+                                    engine=self.settings.get("browser") or "auto")
             except FileNotFoundError as ex:
                 return f"[browse: {ex}]"
             except Exception as ex:
@@ -8941,6 +8942,33 @@ class ChuckWindow(Adw.ApplicationWindow):
              10000, SEND_CHAR_BUDGET,
              sub="How much conversation and file content rides along. More sees more "
                  "of a big repo at once; less is cheaper. ~4 characters per token.")
+
+        if _browser is not None:
+            g = group(pg, "Browser",
+                      "What the browse tool drives. Brave and Chromium are fast and exact; "
+                      "Camoufox is a Firefox build that sites can't tell from a person.")
+            labels = ["Automatic (Brave first)", "Brave", "Chromium", "Chrome", "Camoufox"]
+            keys = list(_browser.ENGINES)
+            br = Adw.ComboRow(); br.set_title("Browser")
+            br.set_model(Gtk.StringList.new(labels))
+            cur = (S.get("browser") or "auto").lower()
+            br.set_selected(keys.index(cur) if cur in keys else 0)
+            status = Adw.ActionRow(); status.set_title("In use")
+
+            def show_engine(*_a):
+                try:
+                    kind, exe = _browser.resolve_engine(S.get("browser") or "auto")
+                    status.set_subtitle(_html.escape("Camoufox" + (f" ({exe})" if exe else "")
+                                                     if kind == "camoufox" else exe))
+                except RuntimeError as ex:
+                    status.set_subtitle(_html.escape(str(ex)))
+
+            def on_pick(*_a):
+                changed("browser", keys[br.get_selected()])
+                show_engine()
+            br.connect("notify::selected", on_pick)
+            g.add(br); g.add(status)
+            show_engine()
 
         if self._mcp is not None:
             g = group(pg, "MCP servers",

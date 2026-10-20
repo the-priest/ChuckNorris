@@ -83,6 +83,22 @@ if [ ! -f "$VOICE" ]; then
   fi
 fi
 
+# Optional: Camoufox, a Firefox build sites can't fingerprint, for ```browse```.
+# CHUCK_CAMOUFOX=1 ./install.sh   (then pick Camoufox in Settings > Agent > Browser)
+if [ "${CHUCK_CAMOUFOX:-0}" = "1" ]; then
+  step "installing Camoufox (optional browser)"
+  if pip install --user --break-system-packages -U 'camoufox[geoip]' >/dev/null 2>&1 \
+     || pip install --user -U 'camoufox[geoip]' >/dev/null 2>&1; then
+    python3 -m camoufox fetch >/dev/null 2>&1 && ok "Camoufox ready" \
+      || info "Camoufox installed, but its browser download failed — run: python3 -m camoufox fetch"
+  else
+    info "Camoufox install skipped (pip failed) — browse will use Brave/Chromium"
+  fi
+fi
+if command -v brave >/dev/null || command -v brave-browser >/dev/null; then
+  info "Brave found — browse will use it"
+fi
+
 step "installing Chuck"
 # Copy a whole source tree into place: the app, its package, its art.
 install_tree() {

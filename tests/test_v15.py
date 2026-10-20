@@ -281,6 +281,151 @@ else:
     print("  [SKIP] no Chromium here — browser behaviour untested")
 
 # ═══════════════════════════════════════════════════════════════════════════
+print("\n--- browser choice: Brave first, Camoufox on request ---")
+import types
+from contextlib import contextmanager
+bindir = folder("fakebin")
+for name in ("brave", "chromium"):
+    f = bindir / name
+    f.write_text("#!/bin/sh\nexit 0\n"); f.chmod(0o755)
+old_path, old_env = os.environ.get("PATH", ""), os.environ.pop("CHROME_BIN", None)
+os.environ["PATH"] = str(bindir) + os.pathsep + old_path
+try:
+    check(br.resolve_engine("auto") == ("cdp", str(bindir / "brave")),
+          "Automatic prefers Brave when it's installed", br.resolve_engine("auto"))
+    check(br.resolve_engine("chromium") == ("cdp", str(bindir / "chromium")),
+          "an explicit choice is honoured")
+    (bindir / "brave").unlink()
+    try:
+        br.resolve_engine("brave")
+        check(False, "asking for Brave when it isn't installed is a clear error")
+    except RuntimeError as ex:
+        check("Brave isn't installed" in str(ex), "asking for Brave when it isn't installed is a clear error")
+    check(br.resolve_engine("auto")[0] == "cdp", "Automatic falls back to another Chromium-family browser")
+    check(br.resolve_engine(str(bindir / "chromium")) == ("cdp", str(bindir / "chromium")),
+          "a path to a browser binary works")
+finally:
+    os.environ["PATH"] = old_path
+    if old_env:
+        os.environ["CHROME_BIN"] = old_env
+
+# a stand-in Camoufox (its real binary can't be downloaded in CI); the page
+# speaks the Playwright API and reports errors the way FIREFOX does
+camo_calls = []
+
+
+class FakePage:
+    def __init__(self, vp):
+        self.vp, self.handlers, self.keys = vp, {}, []
+
+    def on(self, ev, fn):
+        self.handlers[ev] = fn
+
+    def goto(self, url, **kw):
+        L = types.SimpleNamespace
+        self.handlers["console"](L(type="error", text="boom from console",
+                                   location={"url": url, "lineNumber": 11}))
+        self.handlers["console"](L(type="error", text="Failed to load resource: x",
+                                   location={"url": url, "lineNumber": 1}))
+        self.handlers["console"](L(type="warning", text="careful", location={}))
+        self.handlers["pageerror"](L(name="ReferenceError", message="scroe is not defined",
+                                     stack="draw@" + url + ":25:7\n@" + url + ":30:1"))
+        self.handlers["requestfailed"](L(url=url.replace("index.html", "gone.js"),
+                                         failure="NS_ERROR_FILE_NOT_FOUND"))
+        self.handlers["response"](L(url="http://x/api", status=404))
+
+    def wait_for_timeout(self, ms): pass
+    def query_selector(self, sel): return None if sel == "#nope" else object()
+    def click(self, sel, **kw): camo_calls.append(("click", sel))
+    def evaluate(self, js): return "SCORE 12" if "score" in js else "page text"
+    def title(self): return "Snake"
+    def set_viewport_size(self, vp): self.vp = vp
+    def screenshot(self, path): Path(path).write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    @property
+    def keyboard(self):
+        page = self
+        return types.SimpleNamespace(press=lambda k: page.keys.append(k), type=lambda t: None)
+
+    @property
+    def mouse(self):
+        return types.SimpleNamespace(click=lambda x, y: None, wheel=lambda a, b: None)
+
+
+class FakeCamoufox:
+    def __init__(self, **kw):
+        camo_calls.append(("launch", kw))
+
+    def __enter__(self):
+        return types.SimpleNamespace(new_page=lambda viewport: FakePage(viewport))
+
+    def __exit__(self, *a):
+        camo_calls.append(("closed",))
+
+
+mod = types.ModuleType("camoufox"); sub = types.ModuleType("camoufox.sync_api")
+sub.Camoufox = FakeCamoufox; mod.sync_api = sub
+saved_mods = {k: sys.modules.get(k) for k in ("camoufox", "camoufox.sync_api")}
+sys.modules["camoufox"], sys.modules["camoufox.sync_api"] = mod, sub
+try:
+    ws = folder("camo")
+    (ws / "index.html").write_text("<p>hi</p>")
+    r = br.browse("index.html", ["press ArrowLeft right space", "eval document.getElementById('score').textContent",
+                                 "click #nope", "click #go"], root=str(ws),
+                  shot_path=str(tmp / "camo.png"), engine="camoufox", settle=0)
+    rep = br.report(r)
+    check(("launch", {"headless": True}) in camo_calls and ("closed",) in camo_calls,
+          "Camoufox is launched headless and always closed", camo_calls)
+    check("Camoufox)" in rep, "the report says which browser ran", rep[:120])
+    check("Uncaught ReferenceError: scroe is not defined (index.html:25)" in rep,
+          "a Firefox-style stack still yields file and line", rep)
+    check("console.error: boom from console (index.html:12)" in rep, "console errors keep their line")
+    check("Failed to load resource" not in rep and "gone.js: NS_ERROR_FILE_NOT_FOUND" in rep
+          and "http://x/api: HTTP 404" in rep, "failed requests and HTTP errors are reported once")
+    check('→ "SCORE 12"' in rep and "click #nope: FAILED: no element matches" in rep
+          and "click #go: ok" in rep, "actions run through Playwright, failures are results")
+    check(r["shot"] and Path(r["shot"]).exists(), "the screenshot is written")
+    camo_calls.clear()
+    br.browse("index.html", [], root=str(ws), engine="/opt/camoufox/camoufox-bin", settle=0)
+    check(("launch", {"headless": True, "executable_path": "/opt/camoufox/camoufox-bin"}) in camo_calls,
+          "a path to a Camoufox binary is passed through")
+    w = agent(["```browse index.html```", "Seen."], ws)
+    w.settings["browser"] = "camoufox"
+    type_and_send(w, "check it with camoufox")
+    check("Camoufox)" in hist_text(w) and "scroe is not defined" in hist_text(w),
+          "the browse tool uses the browser chosen in Settings")
+    check_finished(w, "camoufox browse")
+finally:
+    for k, v in saved_mods.items():
+        if v is None:
+            sys.modules.pop(k, None)
+        else:
+            sys.modules[k] = v
+try:
+    from playwright.sync_api import sync_playwright
+except ImportError:
+    sync_playwright = None
+if sync_playwright and br.find_chrome():
+    @contextmanager
+    def real_pw():
+        with sync_playwright() as p:
+            b = p.chromium.launch(executable_path=br.find_chrome(), headless=True)
+            try:
+                yield b
+            finally:
+                b.close()
+    ws = folder("realpw")
+    (ws / "index.html").write_text("<title>T</title><p id=s>0</p><script>let n=0;"
+                                   "addEventListener('keydown',e=>{n++;s.textContent=n});"
+                                   "setTimeout(()=>{nope()},30)</script>")
+    r = br.browse_playwright("index.html", ["press ArrowLeft ArrowRight", "eval s.textContent"],
+                             (800, 600), str(ws), None, 0.4, 30, real_pw)
+    check(any("nope is not defined" in e for e in r["errors"]) and '→ "2"' in " ".join(r["steps"]),
+          "the Playwright path works against a real browser", r["errors"])
+else:
+    print("  [SKIP] Playwright not installed — real Playwright path untested here")
+
+# ═══════════════════════════════════════════════════════════════════════════
 print("\n--- diagnose: real problems from real tools ---")
 ws = folder("diag")
 (ws / "pkg").mkdir()

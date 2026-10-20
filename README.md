@@ -5,7 +5,7 @@
 **A desktop coding and system agent for Linux, on SiliconFlow models.**
 Runs commands, edits real code, plays its own web apps in a real browser, reads whole repos, speaks MCP, runs sub-agents in parallel, and tells you what it all cost.
 
-![version](https://img.shields.io/badge/version-15.0.0-8b5cf6?style=flat-square&labelColor=0c0c10)
+![version](https://img.shields.io/badge/version-15.1.0-8b5cf6?style=flat-square&labelColor=0c0c10)
 ![gtk](https://img.shields.io/badge/GTK4-libadwaita-8b5cf6?style=flat-square&labelColor=0c0c10)
 ![python](https://img.shields.io/badge/Python-3.11_·_3.12_·_3.13-8b5cf6?style=flat-square&labelColor=0c0c10)
 ![suites](https://img.shields.io/badge/test_suites-21-2ea043?style=flat-square&labelColor=0c0c10)
@@ -78,6 +78,8 @@ Click the folder chip (or **Ctrl+O**) to point the session at a project. Command
 Web pages and games get opened in a real browser and *played*: arrow keys pressed, buttons clicked, state read back with JavaScript. The BROWSER card shows you what it found, so a typo that throws on every frame never ships as "done".
 
 <img src="assets/screenshots/browse.png" alt="A BROWSER card: one uncaught ReferenceError with its line, the key presses and JS result, and a screenshot of the game" width="100%">
+
+**Which browser:** Brave if you have it, otherwise Chromium or Chrome. They all speak the DevTools protocol Chuck drives directly, with no extra dependencies. Or choose **[Camoufox](https://camoufox.com)**, a Firefox build that websites can't fingerprint, in Settings → Agent → Browser. It's for research on sites that block automation. Install it with `CHUCK_CAMOUFOX=1 ./install.sh`, or `pip install --user -U 'camoufox[geoip]' && python3 -m camoufox fetch`.
 
 Long builds stream into their card while they run, with a clock, and a finished log opens on its last lines, where the errors are.
 

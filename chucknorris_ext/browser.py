@@ -28,24 +28,84 @@ import time
 import urllib.parse
 import urllib.request
 
-_CANDIDATES = ("chromium", "chromium-browser", "google-chrome", "google-chrome-stable",
-               "chrome", "brave", "brave-browser", "microsoft-edge", "vivaldi")
+_BRAVE = ("brave", "brave-browser", "brave-browser-stable", "brave-browser-beta",
+          "/opt/brave-bin/brave", "/opt/brave.com/brave/brave", "/usr/lib/brave-bin/brave",
+          "/snap/bin/brave", "/var/lib/flatpak/exports/bin/com.brave.Browser",
+          "~/.local/share/flatpak/exports/bin/com.brave.Browser")
+_CHROMIUM = ("chromium", "chromium-browser", "/usr/lib/chromium/chromium", "/snap/bin/chromium",
+             "/var/lib/flatpak/exports/bin/org.chromium.Chromium",
+             "~/.local/share/flatpak/exports/bin/org.chromium.Chromium",
+             "/opt/pw-browsers/chromium")
+_CHROME = ("google-chrome", "google-chrome-stable", "/opt/google/chrome/chrome", "chrome",
+           "microsoft-edge", "microsoft-edge-stable", "vivaldi", "vivaldi-stable")
+ENGINES = ("auto", "brave", "chromium", "chrome", "camoufox")
+CAMOUFOX_INSTALL = ("pip install --user -U 'camoufox[geoip]' && python3 -m camoufox fetch")
 
 
-def find_chrome():
-    """The first Chromium-family browser on this machine, or None."""
+def _first(names):
+    for n in names:
+        p = os.path.expanduser(n)
+        if os.sep in p:
+            if os.path.isfile(p) and os.access(p, os.X_OK):
+                return p
+        else:
+            w = shutil.which(p)
+            if w:
+                return w
+    return None
+
+
+def find_chrome(prefer="auto"):
+    """A Chromium-family browser (they all speak the DevTools protocol):
+    CHROME_BIN wins, then the preferred one, then Brave, Chromium, Chrome."""
     env = os.environ.get("CHROME_BIN") or os.environ.get("CHUCK_CHROME")
     if env and os.path.isfile(env) and os.access(env, os.X_OK):
         return env
-    for name in _CANDIDATES:
-        p = shutil.which(name)
-        if p:
-            return p
-    for p in ("/opt/pw-browsers/chromium", "/usr/lib/chromium/chromium",
-              "/snap/bin/chromium", "/opt/google/chrome/chrome"):
-        if os.path.isfile(p) and os.access(p, os.X_OK):
-            return p
+    order = {"brave": (_BRAVE,), "chromium": (_CHROMIUM,), "chrome": (_CHROME,)}.get(
+        prefer, ())
+    for group in order + (_BRAVE, _CHROMIUM, _CHROME):
+        found = _first(group)
+        if found:
+            return found
     return None
+
+
+def camoufox_available():
+    try:
+        import camoufox.sync_api  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def resolve_engine(pref="auto"):
+    """-> ('cdp', executable) or ('camoufox', executable_path_or_None).
+    Raises RuntimeError with what to install when the choice isn't available."""
+    pref = (pref or "auto").strip()
+    low = pref.lower()
+    if low == "camoufox" or (os.sep in pref and "camoufox" in os.path.basename(pref).lower()):
+        if not camoufox_available():
+            raise RuntimeError("Camoufox isn't installed. Install it with: " + CAMOUFOX_INSTALL)
+        return "camoufox", (os.path.expanduser(pref) if os.sep in pref else None)
+    if os.sep in pref or pref.startswith("~"):
+        p = os.path.expanduser(pref)
+        if os.path.isfile(p) and os.access(p, os.X_OK):
+            return "cdp", p
+        raise RuntimeError(f"browser not found or not executable: {pref}")
+    groups = {"brave": _BRAVE, "chromium": _CHROMIUM, "chrome": _CHROME}
+    if low in groups:
+        exe = _first(groups[low])                     # that browser, or a clear no
+        if not exe:
+            raise RuntimeError(f"{pref.capitalize()} isn't installed (or isn't on PATH) — "
+                               "install it, or pick Automatic in Settings")
+        return "cdp", exe
+    exe = find_chrome("auto")
+    if exe:
+        return "cdp", exe
+    if low == "auto" and camoufox_available():
+        return "camoufox", None
+    raise RuntimeError("no browser found: install Brave or Chromium (or Camoufox: "
+                       + CAMOUFOX_INSTALL + ")")
 
 
 # ── a minimal WebSocket client (RFC 6455), enough for the DevTools protocol ──
@@ -337,14 +397,27 @@ def to_url(target, root=None):
 
 
 def browse(target, actions=(), size=(1280, 800), root=None, shot_path=None,
-           settle=0.6, chrome=None, timeout=60):
+           settle=0.6, chrome=None, timeout=60, engine="auto"):
     """Load target, run actions, report. -> dict(url, title, text, errors,
-    warnings, logs, failed, steps, shot, ms). Raises RuntimeError when no
-    browser is available or it can't start."""
-    chrome = chrome or find_chrome()
+    warnings, logs, failed, steps, shot, ms, engine). Raises RuntimeError when
+    no browser is available or it can't start.
+
+    engine: 'auto' (Brave, Chromium, Chrome — then Camoufox), 'brave',
+    'chromium', 'chrome', 'camoufox', or a path to a browser binary."""
     if not chrome:
-        raise RuntimeError("no Chromium-family browser found (install chromium, or set "
-                           "CHROME_BIN)")
+        kind, exe = resolve_engine(engine)
+        if kind == "camoufox":
+            r = browse_playwright(target, actions, size, root, shot_path, settle, timeout,
+                                  launcher=_camoufox_launcher(exe))
+            r["engine"] = "Camoufox"
+            return r
+        chrome = exe
+    r = _browse_cdp(target, actions, size, root, shot_path, settle, chrome, timeout)
+    r["engine"] = os.path.basename(chrome)
+    return r
+
+
+def _browse_cdp(target, actions, size, root, shot_path, settle, chrome, timeout):
     url = to_url(target, root)
     t0 = time.time()
     profile = tempfile.mkdtemp(prefix="chuck_browse_")
@@ -428,10 +501,147 @@ def browse(target, actions=(), size=(1280, 800), root=None, shot_path=None,
         shutil.rmtree(profile, ignore_errors=True)
 
 
+# ── Playwright backend (Camoufox: a Firefox build for undetectable browsing) ──
+# Camoufox doesn't speak the Chromium DevTools protocol; it is driven through
+# Playwright (which its Python package wraps). The page API is the same for
+# any Playwright browser, so this path is exercised with any of them; only
+# the launcher is Camoufox-specific.
+def _camoufox_launcher(executable=None):
+    from contextlib import contextmanager
+
+    @contextmanager
+    def launch():
+        from camoufox.sync_api import Camoufox
+        kw = {"headless": True}
+        if executable:
+            kw["executable_path"] = executable
+        with Camoufox(**kw) as browser:
+            yield browser
+    return launch
+
+
+_PW_KEYS = {"enter": "Enter", "tab": "Tab", "escape": "Escape", "esc": "Escape",
+            "space": "Space", "backspace": "Backspace", "delete": "Delete",
+            "arrowleft": "ArrowLeft", "arrowup": "ArrowUp", "arrowright": "ArrowRight",
+            "arrowdown": "ArrowDown", "left": "ArrowLeft", "up": "ArrowUp",
+            "right": "ArrowRight", "down": "ArrowDown", "home": "Home", "end": "End",
+            "pageup": "PageUp", "pagedown": "PageDown"}
+_STACK_LOC = re.compile(r"((?:file|https?)://[^\s)]+?):(\d+):(\d+)")
+
+
+def _pw_where(url, line):
+    name = (url or "").rsplit("/", 1)[-1]
+    return f" ({name}:{line})" if name and line else (f" ({name})" if name else "")
+
+
+def browse_playwright(target, actions, size, root, shot_path, settle, timeout, launcher):
+    url = to_url(target, root)
+    t0 = time.time()
+    errors, warnings, logs, failed, steps = [], [], [], [], []
+    with launcher() as browser:
+        w, h = size
+        page = browser.new_page(viewport={"width": w, "height": h})
+
+        def on_console(m):
+            loc = m.location or {}
+            where = _pw_where(loc.get("url"), (loc.get("lineNumber") or 0) + 1
+                              if loc.get("url") else None)
+            if m.type in ("error", "assert"):
+                if m.text.startswith("Failed to load resource"):
+                    return                       # reported once, under failed requests
+                errors.append(f"console.error: {m.text}{where}")
+            elif m.type == "warning":
+                warnings.append(f"console.warn: {m.text}{where}")
+            else:
+                logs.append(m.text)
+
+        def on_error(e):
+            msg = getattr(e, "message", None) or str(e)
+            name = getattr(e, "name", "") or ""
+            hit = _STACK_LOC.search(getattr(e, "stack", "") or "")
+            where = _pw_where(hit.group(1), hit.group(2)) if hit else ""
+            if name and not msg.startswith(name):
+                msg = f"{name}: {msg}"
+            errors.append(f"Uncaught {msg.splitlines()[0]}{where}")
+
+        def on_failed(req):
+            f = req.failure
+            failed.append(f"{req.url}: {f if isinstance(f, str) else (f or {}).get('errorText', f)}")
+
+        def on_response(resp):
+            if resp.status >= 400:
+                failed.append(f"{resp.url}: HTTP {resp.status}")
+        page.on("console", on_console)
+        page.on("pageerror", on_error)
+        page.on("requestfailed", on_failed)
+        page.on("response", on_response)
+        try:
+            page.goto(url, wait_until="load", timeout=20000)
+        except Exception as ex:
+            errors.append(f"navigation: {str(ex).splitlines()[0]}")
+        page.wait_for_timeout(int(settle * 1000))
+        for raw in actions:
+            if time.time() - t0 > timeout:
+                steps.append(f"{raw}: skipped (time limit)")
+                continue
+            verb, _, arg = raw.strip().partition(" ")
+            verb, arg = verb.lower(), arg.strip()
+            try:
+                if verb == "click":
+                    m = re.fullmatch(r"\s*(\d+)\s*[, ]\s*(\d+)\s*", arg)
+                    if m:
+                        page.mouse.click(int(m.group(1)), int(m.group(2)))
+                    else:
+                        if page.query_selector(arg) is None:
+                            raise ValueError(f"no element matches {arg!r}")
+                        page.click(arg, timeout=5000)
+                    res = "ok"
+                elif verb == "type":
+                    page.keyboard.type(arg); res = "ok"
+                elif verb in ("press", "key"):
+                    for k in arg.split():
+                        page.keyboard.press(_PW_KEYS.get(k.lower(), k))
+                    res = "ok"
+                elif verb == "wait":
+                    page.wait_for_timeout(min(10000, int(float(arg or 500)))); res = "ok"
+                elif verb == "scroll":
+                    page.mouse.wheel(0, int(float(arg or 600))); res = "ok"
+                elif verb in ("eval", "js"):
+                    v = page.evaluate(arg)
+                    res = "→ " + (json.dumps(v)[:1500] if v is not None else "undefined")
+                elif verb in ("goto", "open"):
+                    page.goto(to_url(arg, root), wait_until="load", timeout=20000); res = "ok"
+                elif verb == "size":
+                    m = re.fullmatch(r"(\d+)\s*[x×]\s*(\d+)", arg)
+                    if not m:
+                        raise ValueError("size wants WIDTHxHEIGHT")
+                    page.set_viewport_size({"width": int(m.group(1)), "height": int(m.group(2))})
+                    res = "ok"
+                else:
+                    raise ValueError(f"unknown action {verb!r} (click, type, press, wait, "
+                                     "scroll, eval, goto, size)")
+                page.wait_for_timeout(150)
+            except Exception as ex:
+                res = f"FAILED: {str(ex).splitlines()[0]}"
+            steps.append(f"{raw.strip()}: {res}")
+        page.wait_for_timeout(200)
+        title = page.title() or ""
+        text = page.evaluate("document.body ? document.body.innerText : ''") or ""
+        shot = None
+        if shot_path:
+            page.screenshot(path=shot_path)
+            shot = shot_path
+    dedup = lambda xs: list(dict.fromkeys(xs))       # noqa: E731
+    return {"url": url, "title": title, "text": text, "errors": dedup(errors),
+            "warnings": dedup(warnings), "logs": logs, "failed": dedup(failed),
+            "steps": steps, "shot": shot, "ms": int((time.time() - t0) * 1000), "size": size}
+
+
 def report(r, text_cap=1500):
     """The result as feedback for the model."""
     w, h = r["size"]
-    out = [f"BROWSE {r['url']} ({w}x{h}, {r['ms']} ms) — title: {r['title'] or '(none)'}"]
+    eng = f", {r['engine']}" if r.get("engine") else ""
+    out = [f"BROWSE {r['url']} ({w}x{h}, {r['ms']} ms{eng}) — title: {r['title'] or '(none)'}"]
     out.append(f"JS errors ({len(r['errors'])}):" + ("\n  " + "\n  ".join(r["errors"][:20])
                                                     if r["errors"] else " none"))
     if r["failed"]:
