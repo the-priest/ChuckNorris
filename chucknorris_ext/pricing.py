@@ -155,9 +155,9 @@ def fmt_usd(x):
         return ""
     if x < 0.01:
         return f"${x:.4f}"
-    if x < 1:
+    if x < 0.1:
         return f"${x:.3f}"
-    return f"${x:.2f}"
+    return f"${x:.2f}"                   # $0.50, not $0.500
 
 
 def fmt_tokens(n):

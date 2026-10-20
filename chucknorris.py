@@ -3124,7 +3124,12 @@ class ChuckWindow(Adw.ApplicationWindow):
             getattr(cclamp, f"set_margin_{m}")(v)
 
         body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True)
-        body.append(self.view_stack); body.append(cclamp)
+        # toasts float over the TRANSCRIPT, just above the composer — not over
+        # the composer's own controls, which they used to cover
+        self.toasts = Adw.ToastOverlay()
+        self.toasts.set_child(self.view_stack)
+        self.toasts.set_vexpand(True)
+        body.append(self.toasts); body.append(cclamp)
 
         # sidebar: new chat, search, saved chats
         side_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
@@ -3181,9 +3186,7 @@ class ChuckWindow(Adw.ApplicationWindow):
 
         outer = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
         outer.append(self.sidebar); outer.append(body)
-        self.toasts = Adw.ToastOverlay()
-        self.toasts.set_child(outer)
-        tv = Adw.ToolbarView(); tv.add_top_bar(header); tv.set_content(self.toasts)
+        tv = Adw.ToolbarView(); tv.add_top_bar(header); tv.set_content(outer)
         self.set_content(tv)
         self._narrow = False
         self._add_breakpoints()
@@ -3470,8 +3473,10 @@ class ChuckWindow(Adw.ApplicationWindow):
                 b.connect("clicked", lambda _b, p=prompt: self._prefill(p))
             grid.append(b)
         box.append(grid)
-        keys = Gtk.Label(label="Tab  switch Agent / Chat     Ctrl+O  working folder     "
-                               "Enter  send     Shift+Enter  new line", xalign=0.5)
+        keys = Gtk.Label(label=("Tab  switch Agent / Chat     Ctrl+O  working folder     "
+                                "/  commands     @  files" if self.agent_mode else
+                                "Tab  switch Agent / Chat     /  commands     "
+                                "Shift+Enter  new line"), xalign=0.5)
         keys.add_css_class("empty-keys"); keys.set_margin_top(26)
         keys.set_wrap(True); keys.set_justify(Gtk.Justification.CENTER)
         box.append(keys)
@@ -3676,6 +3681,10 @@ class ChuckWindow(Adw.ApplicationWindow):
             return
         d = e["data"]
         txt = d.get("text", "") or ""
+        try:
+            content.set_visible(bool(txt.strip()))   # no empty prose box leaving a gap
+        except Exception:
+            pass
         segs = md_segments(txt) if d.get("rich") else [("plain", txt)]
         if not segs:
             segs = [("plain", "")]
@@ -5405,8 +5414,8 @@ class ChuckWindow(Adw.ApplicationWindow):
         """Attach the result of a run. Inside its own card when we have one, so
         the command and what it printed stay one object; otherwise as a
         standalone panel in the transcript."""
-        if not (out or "").strip():
-            return
+        if not (out or "").strip() or out.strip() == "(no output)":
+            return                       # an empty result needs no panel saying so
         if sink is not None:
             # The card's own status chip already states the exit code, so the
             # panel doesn't repeat it — two identical pills side by side just
@@ -7993,7 +8002,7 @@ class ChuckWindow(Adw.ApplicationWindow):
                 lines += ["<details><summary>Tool results</summary>", "", "````text", body,
                           "````", "", "</details>", ""]
             elif role == "user":
-                lines += ["## You", "", c, ""]
+                lines += ["## You", "", self._typed_text(c), ""]
             else:
                 lines += ["## Chuck", "", c, ""]
         return "\n".join(lines).rstrip() + "\n"
@@ -8604,7 +8613,9 @@ class ChuckWindow(Adw.ApplicationWindow):
                       or briefs or bgs or logss or kills or undo_req or opens or asks
                       or reg_calls)
         # Chuck's own narration is what shows in chat — never swallow it.
-        self._set_bot_text(disp or ("Working on it…" if acting else "Done."), rich=True)
+        # a step that is only tool blocks says nothing: its cards are the story
+        # ("Working on it…" used to stay there long after the step was done)
+        self._set_bot_text(disp or ("" if acting else "Done."), rich=True)
         if blocked_agent:
             self._sys_note("Chat mode is on \u2014 nothing was run. Press Tab for Agent "
                            "mode to let Chuck act.", "dim")
