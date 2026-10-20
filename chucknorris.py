@@ -346,6 +346,7 @@ expander title:hover { color: @mute; }
 
 /* ── tool cards ──────────────────────────────────────────────────────── */
 .cmd-card  { background-color: @surface; border: 1px solid @line; border-radius: 12px; }
+.term-live .term-label { color: @accent_hi; }
 .card-head { padding: 6px 8px 6px 12px; border-bottom: 1px solid @line; }
 /* the one card that waits on YOU: an accent edge, nothing louder */
 .ask-card  { border-color: alpha(@accent, 0.45); }
@@ -1576,22 +1577,77 @@ _LIVE_PROCS = set()
 _LIVE_LOCK = threading.Lock()
 
 
+# A worker thread that wants to watch its command's output as it happens sets
+# _LIVE_OUT.fn (called with each decoded chunk, from reader threads). Thread-
+# local, so it needs threading through no signatures and can't leak between
+# commands, which each run on their own worker.
+_LIVE_OUT = threading.local()
+
+
+def _streamed(proc, input_text, timeout, on_chunk):
+    """communicate(), but each chunk of stdout/stderr also goes to on_chunk as
+    it arrives. -> (out, err). Raises TimeoutExpired like communicate()."""
+    import codecs
+    bufs = {"out": [], "err": []}
+
+    def reader(stream, key):
+        dec = codecs.getincrementaldecoder("utf-8")("replace")
+        fd = stream.fileno()
+        while True:
+            try:
+                data = os.read(fd, 65536)
+            except OSError:
+                break
+            if not data:
+                break
+            text = dec.decode(data)
+            if text:
+                bufs[key].append(text)
+                try:
+                    on_chunk(text)
+                except Exception:
+                    pass
+        tail = dec.decode(b"", final=True)
+        if tail:
+            bufs[key].append(tail)
+
+    threads = [threading.Thread(target=reader, args=(proc.stdout, "out"), daemon=True),
+               threading.Thread(target=reader, args=(proc.stderr, "err"), daemon=True)]
+    for t in threads:
+        t.start()
+    if proc.stdin is not None:
+        try:
+            if input_text:
+                proc.stdin.write(input_text.encode())
+            proc.stdin.close()
+        except OSError:
+            pass
+    proc.wait(timeout=timeout)                       # raises TimeoutExpired
+    for t in threads:
+        t.join(timeout=5)
+    return "".join(bufs["out"]), "".join(bufs["err"])
+
+
 def _guarded_proc(argv, timeout, env, input_text=None):
     """Run argv in its own process group, registered as live while it runs.
     Returns a CompletedProcess. On timeout the WHOLE tree is killed and
     TimeoutExpired is raised; a Stop (kill_live_commands) ends it early with
     whatever exit status the kill produced."""
+    on_chunk = getattr(_LIVE_OUT, "fn", None)
     proc = subprocess.Popen(argv, cwd=_cwd(),
                             stdin=subprocess.PIPE if input_text is not None
                             else subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=True, errors="replace", env=env,
-                            preexec_fn=_sandbox_preexec)
+                            text=on_chunk is None, errors="replace" if on_chunk is None else None,
+                            env=env, preexec_fn=_sandbox_preexec)
     with _LIVE_LOCK:
         _LIVE_PROCS.add(proc)
     try:
         try:
-            out, err = proc.communicate(input=input_text, timeout=timeout)
+            if on_chunk is not None:
+                out, err = _streamed(proc, input_text, timeout, on_chunk)
+            else:
+                out, err = proc.communicate(input=input_text, timeout=timeout)
         except subprocess.TimeoutExpired:
             _kill_tree(proc)
             try:
@@ -2029,6 +2085,139 @@ class Backend:
 
 
 # ── UI ──────────────────────────────────────────────────────────────────────
+def _follow_bottom(sw, alive=lambda: True):
+    """Keep a scrolled window pinned to its newest line, like a terminal — but
+    only while it is at the bottom, so scrolling up to read is never yanked
+    back. The pin is deferred to idle: notify::upper fires during allocation,
+    and a value set then moves the scrollbar but not the content."""
+    st = {"follow": True, "pending": False}
+    try:
+        adj = sw.get_vadjustment()
+    except Exception:
+        return st
+
+    def pin():
+        st["pending"] = False
+        if st["follow"] and alive():
+            adj.set_value(adj.get_upper() - adj.get_page_size())
+        return False
+
+    def on_size(a, *_):
+        if st["follow"] and not st["pending"]:
+            st["pending"] = True
+            GLib.idle_add(pin)
+
+    def on_value(a, *_):
+        if not st["pending"]:                    # our own pin isn't the user scrolling
+            st["follow"] = a.get_value() >= a.get_upper() - a.get_page_size() - 24
+    try:
+        adj.connect("notify::upper", on_size)
+        adj.connect("notify::page-size", on_size)   # the panel grows to its cap
+        adj.connect("value-changed", on_value)
+    except Exception:
+        pass
+    return st
+
+
+class _LiveFeed:
+    """A command's output, shown in its card WHILE it runs.
+
+    push() is called from reader threads with each chunk; the panel is built
+    lazily on the first one (a quick command never shows it) and refreshed at
+    most five times a second, keeping the last 12k characters, pinned to the
+    bottom like a terminal. close() (UI thread) removes it; the final, full
+    output panel replaces it."""
+    TAIL = 12000
+
+    def __init__(self, win, sink):
+        self.win, self.sink = win, sink
+        self.lock = threading.Lock()
+        self.text = ""
+        self.lines = 0
+        self.panel = self.label = self.meta = self.sw = None
+        self.scheduled = False
+        self.closed = False
+        self.t0 = time.time()
+
+    def push(self, chunk):
+        if self.sink is None:
+            return
+        with self.lock:
+            self.text = (self.text + chunk)[-self.TAIL:]
+            self.lines += chunk.count("\n")
+            if self.scheduled or self.closed:
+                return
+            self.scheduled = True
+        GLib.timeout_add(200, self._flush)
+
+    def _flush(self):
+        with self.lock:
+            self.scheduled = False
+            if self.closed:
+                return False
+            text, lines = self.text, self.lines
+        try:
+            if self.panel is None:
+                self._build()
+            self.label.set_text(text.rstrip("\n"))
+            self.meta.set_text(self._meta_text())
+        except Exception:
+            pass
+        return False
+
+    def _meta_text(self):
+        secs = int(time.time() - self.t0)
+        t = f"{secs // 60}m {secs % 60:02d}s" if secs >= 60 else f"{secs}s"
+        return f"{self.lines} line{'' if self.lines == 1 else 's'} \u00b7 {t}"
+
+    def _tick(self):
+        if self.closed or self.meta is None:
+            return False
+        try:
+            self.meta.set_text(self._meta_text())
+        except Exception:
+            return False
+        return True
+
+    def _build(self):
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        card.add_css_class("term-card"); card.add_css_class("term-live")
+        head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        head.add_css_class("term-head")
+        tl = Gtk.Label(label="LIVE", xalign=0); tl.add_css_class("term-label")
+        self.meta = Gtk.Label(label="", xalign=0, hexpand=True)
+        self.meta.add_css_class("term-meta")
+        head.append(tl); head.append(self.meta)
+        self.label = Gtk.Label(label="", xalign=0, selectable=False, wrap=False)
+        self.label.add_css_class("term-body")
+        self.label.set_valign(Gtk.Align.START)
+        self.sw = Gtk.ScrolledWindow()
+        self.sw.add_css_class("term-scroll")
+        try:
+            self.sw.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+            self.sw.set_max_content_height(220)
+            self.sw.set_propagate_natural_height(True)
+        except Exception:
+            pass
+        self.sw.set_child(self.label)
+        self.win._chain_scroll(self.sw, vertical=True)
+        _follow_bottom(self.sw, lambda: not self.closed)
+        GLib.timeout_add_seconds(1, self._tick)    # the clock runs through silent steps
+        card.append(head); card.append(self.sw)
+        self.sink.append(card)
+        self.panel = card
+
+    def close(self):
+        with self.lock:
+            self.closed = True
+        if self.panel is not None:
+            try:
+                self.sink.remove(self.panel)
+            except Exception:
+                pass
+            self.panel = None
+
+
 class GlyphField:
     """The welcome screen's background: a hidden net of tiny code glyphs that
     lights up in waves wherever you click — like a disturbed water surface
@@ -4930,6 +5119,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             pass
         sw.set_child(body)
         self._chain_scroll(sw, vertical=True)
+        _follow_bottom(sw)              # open on the END of a long log: that's where errors are
 
         fold = Gtk.Button(label="hide")
         fold.add_css_class("ghost")
@@ -5291,10 +5481,16 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._arm_run_budget(cmd)
 
         def work():
-            rc, out = self._execute_shell(cmd, lambda pw: run_command(cmd, sudo_password=pw))
+            live = _LiveFeed(self, sink)
+            _LIVE_OUT.fn = live.push
+            try:
+                rc, out = self._execute_shell(cmd, lambda pw: run_command(cmd, sudo_password=pw))
+            finally:
+                _LIVE_OUT.fn = None
             auth_failed = (rc == _SUDO_AUTH_FAILED)
 
             def show():
+                live.close()
                 if auth_failed:
                     self._set_status(status, "sudo auth failed", "fail")
                 else:
@@ -5379,14 +5575,20 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._arm_run_budget(body)
 
         def work():
-            if lang in ("bash", "sh"):
-                rc, out = self._execute_shell(
-                    body, lambda pw: run_code(lang, body, sudo_password=pw))
-            else:
-                rc, out = run_code(lang, body)
+            live = _LiveFeed(self, sink)
+            _LIVE_OUT.fn = live.push
+            try:
+                if lang in ("bash", "sh"):
+                    rc, out = self._execute_shell(
+                        body, lambda pw: run_code(lang, body, sudo_password=pw))
+                else:
+                    rc, out = run_code(lang, body)
+            finally:
+                _LIVE_OUT.fn = None
             auth_failed = (rc == _SUDO_AUTH_FAILED)
 
             def show():
+                live.close()
                 if auth_failed:
                     self._set_status(status, "sudo auth failed", "fail")
                 else:

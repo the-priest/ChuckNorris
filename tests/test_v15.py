@@ -372,6 +372,45 @@ check("old.txt (deleted" in hist_text(w), "changes reports a deleted file as del
 check_finished(w, "patch")
 
 # ═══════════════════════════════════════════════════════════════════════════
+print("\n--- live output: long commands stream into their card ---")
+import gtkstub
+got, t0 = [], time.time()
+cn._LIVE_OUT.fn = lambda c: got.append((time.time() - t0, c))
+rc, out = cn.run_command("for i in 1 2 3; do echo tick$i; sleep 0.25; done; printf 'caf\\xc3'; printf '\\xa9\\n'")
+cn._LIVE_OUT.fn = None
+check(rc == 0 and out.startswith("tick1\ntick2\ntick3"), "the full output is still returned", out)
+check(len(got) >= 3 and got[0][0] < 0.2 and got[-1][0] > 0.5,
+      "chunks arrive while the command runs, not at the end", [(round(a, 2), b) for a, b in got])
+check("café" in "".join(c for _, c in got), "a UTF-8 character split across writes decodes whole")
+rc, out = cn.run_command("echo quiet")
+check(out.strip() == "quiet", "without a live sink, commands run as before")
+w = agent([])
+sink = gtkstub.Widget()
+feed = cn._LiveFeed(w, sink)
+feed.push("line one\n")
+feed.push("line two\n")
+check(not sink.kids, "nothing is drawn until the first refresh tick")
+gtkstub.fire_timers(1)
+check(len(sink.kids) == 1 and "term-live" in sink.kids[0].classes, "then one LIVE panel appears in the card")
+texts = [x.get_text() for x in sink.walk() if isinstance(x.get_text(), str)]
+check(any("line one\nline two" == t for t in texts), "showing the output so far", texts)
+feed.push("x" * 20000)
+gtkstub.fire_timers(1)
+texts = [x.get_text() for x in sink.walk() if isinstance(x.get_text(), str)]
+check(any(t.endswith("x" * 100) for t in texts) and all(len(t) <= cn._LiveFeed.TAIL for t in texts),
+      "only the newest 12k characters are kept", [len(t) for t in texts])
+feed.close()
+check(not sink.kids, "close() removes it (the full output panel replaces it)")
+feed.push("late\n")
+gtkstub.fire_timers(1)
+check(not sink.kids, "output after close never resurrects it")
+ws = folder("live")
+w = agent(["```bash\nfor i in $(seq 1 5); do echo n$i; done\n```", "Done."], ws)
+type_and_send(w, "count")
+check(not [x for x in w.msgbox.walk() if "term-live" in x.classes], "no LIVE panel is left behind")
+check("n5" in hist_text(w), "the model still gets the full output")
+
+# ═══════════════════════════════════════════════════════════════════════════
 print(f"\nTOTAL V15 FAILURES: {fails + len(FAILS)}")
 assert fails == 0 and not FAILS, "v15 regressions present"
 print("ALL V15 TESTS PASSED")
