@@ -133,12 +133,14 @@ while True:
 class PySession:
     """A persistent interpreter. Thread-safe: runs are serialised."""
 
-    def __init__(self, cwd=None, plots_dir=None, env=None, python=None, preexec=None):
+    def __init__(self, cwd=None, plots_dir=None, env=None, python=None, preexec=None,
+                 wrap=None):
         self.cwd = cwd
         self.plots_dir = plots_dir
         self.env = dict(env or os.environ)
         self.python = python or sys.executable or "python3"
         self.preexec = preexec
+        self.wrap = wrap                 # argv -> argv (a sandbox), or None to refuse
         self.proc = None
         self.q = None
         self.names = []
@@ -157,8 +159,13 @@ class PySession:
             os.makedirs(self.plots_dir, exist_ok=True)
             env["CHUCK_PLOTS"] = str(self.plots_dir)
         kw = {"start_new_session": True} if self.preexec is None else {"preexec_fn": self.preexec}
+        argv = [self.python, "-u", "-c", KERNEL]
+        if self.wrap is not None:
+            argv = self.wrap(argv, env)
+            if argv is None:
+                raise OSError("this folder is Sandboxed but bubblewrap isn't installed")
         self.proc = subprocess.Popen(
-            [self.python, "-u", "-c", KERNEL], cwd=self.cwd or None, env=env,
+            argv, cwd=self.cwd or None, env=env,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, **kw)
         self.q = q = queue.Queue()
         fd = self.proc.stdout.fileno()
@@ -220,7 +227,12 @@ class PySession:
         if not self.alive():
             restarted = self.started > 0                 # it existed and is gone
             self.close()
-            self._start()
+            try:
+                self._start()
+            except OSError as ex:
+                return {"ok": False, "out": f"(the Python session couldn't start: {ex})",
+                        "plots": [], "names": [], "restarted": False, "interrupted": False,
+                        "timed_out": False, "died": True, "exit": None}
         nonce = secrets.token_hex(8)
         res = {"ok": False, "out": "", "plots": [], "names": self.names, "restarted": restarted,
                "interrupted": False, "timed_out": False, "died": False, "exit": None}

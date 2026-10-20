@@ -275,6 +275,83 @@ check(w5._checkpoint("x") is None, "your home folder is never snapshotted")
 settle()
 
 # ═══════════════════════════════════════════════════════════════════════════
+print("\n--- folder access: sandboxed and read-only ---")
+import socketserver, threading
+ws = tmp / "acc"
+ws.mkdir()
+# not under /tmp: the sandbox gives commands a private /tmp, which would hide
+# it rather than show it read-only
+outside = Path(tempfile.mkdtemp(prefix="chuck_v17_out_", dir="/var/tmp"))
+(ws / "f.txt").write_text("orig\n")
+srv = socketserver.TCPServer(("127.0.0.1", 0), socketserver.BaseRequestHandler)
+threading.Thread(target=srv.serve_forever, daemon=True).start()
+port = srv.server_address[1]
+probe = f"python3 -c \"import socket; socket.create_connection(('127.0.0.1', {port}), 2); print('NET-OK')\""
+if shutil.which("bwrap"):
+    w = agent([f"```bash\necho in > in.txt && echo out > {outside}/o.txt; echo rc=$?\n```",
+               f"```bash\n{probe}\n```",
+               "```bash\nsudo pacman -Syu\n```",
+               "```bash\nmkdir -p sub && cd sub\n```", "```bash\npwd\n```",
+               "Done."], ws)
+    check(w.set_access("sandbox"), "a folder can be sandboxed")
+    check(w._ws_lbl.get_label() == "acc \u00b7 offline", "the folder chip says so", w._ws_lbl.get_label())
+    check("FOLDER ACCESS: sandboxed, offline" in w.history[0]["content"], "and so does the model's prompt")
+    type_and_send(w, "try everything")
+    h = hist_text(w)
+    check((ws / "in.txt").exists() and not (outside / "o.txt").exists() and "Read-only file system" in h,
+          "inside the folder writes work; outside it they fail", h[-1500:])
+    check("output:\nNET-OK" not in h and ("unreachable" in h.lower() or "refused" in h.lower()),
+          "offline: no network, not even to a local port")
+    check("this folder is Sandboxed, so nothing can use sudo" in h, "sudo is refused up front")
+    check(h.rstrip().count(str(ws / "sub")) >= 1 and str(ws / "sub") in h.split("pwd")[-1],
+          "cd still carries between commands")
+    w.set_access("sandbox-net")
+    w.backend.replies = [f"```bash\n{probe}\n```", "ok"]
+    type_and_send(w, "network now")
+    check("output:\nNET-OK" in hist_text(w).split("network now")[-1], "sandboxed with network: it connects")
+    w.backend.replies = [f"```py\nopen('{outside}/py.txt', 'w').write('x')\n```",
+                         f"```py\nopen('{ws}/mine.txt', 'w').write('y')\n```", "ok"]
+    type_and_send(w, "python too")
+    tail = hist_text(w).split("python too")[-1]
+    check("Read-only file system" in tail and not (outside / "py.txt").exists()
+          and (ws / "mine.txt").exists(), "the py session is sandboxed too", tail[-600:])
+    w.backend.replies = [f"```bg writer\necho bg > {outside}/bg.txt; echo bg > {ws}/bg.txt\n```", "ok"]
+    type_and_send(w, "background")
+    time.sleep(1.0)
+    check((ws / "bg.txt").exists() and not (outside / "bg.txt").exists(), "and so are background jobs")
+    w.set_access("full")
+    check(cn._SANDBOX["on"] is False and w._ws_lbl.get_label() == "acc", "Full access lifts it")
+    w.backend.replies = [f"```bash\necho out > {outside}/o.txt\n```", "ok"]
+    type_and_send(w, "now outside")
+    check((outside / "o.txt").exists(), "and commands write anywhere again")
+    w.set_access("sandbox")
+    w2 = agent([], outside)
+    check(cn._SANDBOX["on"] is False and w2._folder_access() == "full",
+          "access is per folder: another folder is unaffected")
+    w2.set_workspace(ws, announce=False)
+    check(cn._SANDBOX["on"] is True, "and it comes back with the folder")
+    w2.set_access("full")
+else:
+    print("  [SKIP] bubblewrap not installed: sandbox untested here")
+w = agent(["```bash\necho changed > f.txt\n```", "```write new.txt\nx\n```", "I'd change f.txt."], ws)
+w.set_access("readonly")
+type_and_send(w, "change it")
+h = hist_text(w)
+check((ws / "f.txt").read_text() == "orig\n" and not (ws / "new.txt").exists() and "READ-ONLY FOLDER" in h,
+      "read-only: nothing runs or changes, and the agent is told why")
+w.entry.get_buffer().set_text("/access")
+w.on_send()
+texts = [x.get_text() for x in w.msgbox.walk() if isinstance(x.get_text(), str)]
+check("ACCESS" in texts and "Read-only" in texts and "Sandboxed, offline" in texts and "current" in texts,
+      "/access lists the choices and marks the current one")
+use = [x for x in w.msgbox.walk() if isinstance(x, cn.Gtk.Button) and x.get_label() == "Use"]
+use[0].emit("clicked")                         # Full access
+check(w._folder_access() == "full", "one click changes it")
+srv.shutdown()
+shutil.rmtree(outside, ignore_errors=True)
+settle()
+
+# ═══════════════════════════════════════════════════════════════════════════
 print(f"\nTOTAL V17 FAILURES: {fails + len(FAILS)}")
 shutil.rmtree(tmp, ignore_errors=True)
 assert fails == 0 and not FAILS, "v17 regressions present"

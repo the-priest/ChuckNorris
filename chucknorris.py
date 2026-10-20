@@ -646,13 +646,17 @@ def apply_font_size(px):
 
 
 
+PLOTS_DIR = CONFIG_DIR / "plots"      # ```py``` figures (writable inside the sandbox)
+
+
 def _sweep_scratch(max_age_hours=6):
     """Drop stale scratch files in CONFIG_DIR (fetched images, synthesised wavs,
     interpreter temp files, an old screenshot). Each of these is now unlinked by
     the code that creates it, but an existing install has a backlog, and a hard
     kill can still strand one."""
     cutoff = time.time() - max_age_hours * 3600
-    for pat in (".img_*", ".say-*.wav", ".run_*", ".shot.png", ".att_*", ".see_*", ".plot_*"):
+    for pat in (".img_*", ".say-*.wav", ".run_*", ".shot.png", ".att_*", ".see_*", ".plot_*",
+                "plots/.plot_*"):
         for f in CONFIG_DIR.glob(pat):
             try:
                 if f.is_file() and f.stat().st_mtime < cutoff:
@@ -1543,6 +1547,10 @@ def _run_shell(script, timeout=None, sudo_password=None):
     (a package build gets 30 min; a server that never returns is capped fast)."""
     if timeout is None:
         timeout = estimate_runtime(script)["hard_timeout_seconds"]
+    if _SANDBOX["on"] and command_needs_sudo(script):
+        return 126, ("(not run: this folder is Sandboxed, so nothing can use sudo or change the "
+                     "system. If it truly needs root, ask the user to give the folder Full "
+                     "access with /access.)")
     env = dict(os.environ)
     env.update(_RUN_ENV)
     cwd_file = None
@@ -1650,12 +1658,53 @@ def _streamed(proc, input_text, timeout, on_chunk):
     return "".join(bufs["out"]), "".join(bufs["err"])
 
 
+# A folder's access can be "Sandboxed" (/access, Settings): then commands,
+# code and the ```py``` session run under bubblewrap: the whole system
+# read-only, only the working folder writable, a private /tmp, no sudo, and
+# no network unless the folder allows it. Module-level, like _WORKDIR, so
+# every runner sees the same policy.
+_SANDBOX = {"on": False, "net": False, "root": None, "writable": []}
+SANDBOX_NO_BWRAP = ("(not run: this folder is Sandboxed but bubblewrap isn't installed \u2014 "
+                    "install bubblewrap, or give the folder Full access with /access)")
+
+
+def _bwrap_argv(argv, env=None):
+    root = _SANDBOX["root"]
+    args = [shutil.which("bwrap") or "bwrap", "--ro-bind", "/", "/", "--dev", "/dev",
+            "--proc", "/proc", "--tmpfs", "/tmp", "--ro-bind-try", "/tmp/.X11-unix",
+            "/tmp/.X11-unix", "--die-with-parent", "--new-session"]
+    binds = [root] + list(_SANDBOX.get("writable") or [])
+    cwdf = (env or {}).get("CHUCK_CWD_FILE")
+    if cwdf:
+        binds.append(cwdf)                    # where the shell reports its `cd`
+    for b in binds:
+        if b and os.path.exists(b):
+            args += ["--bind", b, b]
+    if not _SANDBOX["net"]:
+        args.append("--unshare-net")
+    return args + ["--"] + list(argv)
+
+
+def _sandboxed(argv, env=None):
+    """argv as it must run under the current policy, or None when the folder is
+    sandboxed and there is no bubblewrap to do it (then it must not run)."""
+    if not _SANDBOX["on"]:
+        return list(argv)
+    if not shutil.which("bwrap"):
+        return None
+    return _bwrap_argv(argv, env)
+
+
 def _guarded_proc(argv, timeout, env, input_text=None):
     """Run argv in its own process group, registered as live while it runs.
     Returns a CompletedProcess. On timeout the WHOLE tree is killed and
     TimeoutExpired is raised; a Stop (kill_live_commands) ends it early with
     whatever exit status the kill produced."""
     on_chunk = getattr(_LIVE_OUT, "fn", None)
+    wrapped = _sandboxed(argv, env)
+    if wrapped is None:
+        return subprocess.CompletedProcess(argv, 126, "", SANDBOX_NO_BWRAP)
+    argv = wrapped
     proc = subprocess.Popen(argv, cwd=_cwd(),
                             stdin=subprocess.PIPE if input_text is not None
                             else subprocess.DEVNULL,
@@ -2862,6 +2911,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._refresh_sidebar()
         GLib.timeout_add_seconds(600, self._sweep_chats)
         self._apply_mode(announce=False)
+        self._apply_access()                    # this window's folder policy, not a stale one
         self._show_empty_hint()
         GLib.timeout_add_seconds(20, self._update_check)   # once a day, after startup settles
 
@@ -3242,6 +3292,14 @@ class ChuckWindow(Adw.ApplicationWindow):
         # In the system message, not the per-hop note: rules change rarely, so
         # they belong in the cached prefix rather than re-billed on every hop.
         rules = project_instructions(self.workspace)
+        acc = self._folder_access() if self.agent_mode and "settings" in self.__dict__ else "full"
+        if acc != "full":
+            text += {"sandbox": "\n\nFOLDER ACCESS: sandboxed, offline. Only the working folder "
+                                "is writable; no network, no sudo. Work within that.",
+                     "sandbox-net": "\n\nFOLDER ACCESS: sandboxed. Only the working folder is "
+                                    "writable; no sudo. Work within that.",
+                     "readonly": "\n\nFOLDER ACCESS: read-only. Nothing may be run or changed; "
+                                 "investigate and answer."}[acc]
         if self.agent_mode and getattr(self, "_mcp", None) is not None:
             tools = self._mcp.index()          # costs nothing when no server is set up
             if tools:
@@ -3360,6 +3418,7 @@ class ChuckWindow(Adw.ApplicationWindow):
                    if isinstance(r, str) and r != str(p)]
             self.settings["recent_workspaces"] = [str(p)] + rec[:7]
             save_settings(self.settings)
+        self._apply_access()
         try:
             self._ws_lbl.set_label(p.name if p else "No folder")
             if p:
@@ -5993,8 +6052,9 @@ class ChuckWindow(Adw.ApplicationWindow):
     def _py_session(self):
         if self._py is None:
             self._py = _pysession.PySession(
-                cwd=_cwd(), plots_dir=str(CONFIG_DIR), env=dict(os.environ, **_RUN_ENV),
-                python=shutil.which("python3") or sys.executable, preexec=_sandbox_preexec)
+                cwd=_cwd(), plots_dir=str(PLOTS_DIR), env=dict(os.environ, **_RUN_ENV),
+                python=shutil.which("python3") or sys.executable, preexec=_sandbox_preexec,
+                wrap=_sandboxed)
         return self._py
 
     def _py_close(self):
@@ -6556,7 +6616,12 @@ class ChuckWindow(Adw.ApplicationWindow):
             log = self.JOB_DIR / f"{name}.log"
             fh = open(log, "wb")
             env = dict(os.environ); env.update(_RUN_ENV)
-            proc = subprocess.Popen([_bash_bin(), "-c", cmd], cwd=_cwd(), stdin=subprocess.DEVNULL,
+            argv = _sandboxed([_bash_bin(), "-c", cmd], env)
+            if argv is None:
+                fh.close()
+                self._tool_feedback.append("[bg " + SANDBOX_NO_BWRAP[1:-1] + "]")
+                return
+            proc = subprocess.Popen(argv, cwd=_cwd(), stdin=subprocess.DEVNULL,
                                     stdout=fh, stderr=subprocess.STDOUT, env=env,
                                     start_new_session=True)
             fh.close()
@@ -7447,6 +7512,92 @@ class ChuckWindow(Adw.ApplicationWindow):
         threading.Thread(target=lambda: GLib.idle_add(done, work()), daemon=True).start()
         return rows
 
+    # ── folder access: full / sandboxed / read-only ──
+    ACCESS = [("full", "Full access", "commands run as you, anywhere you can"),
+              ("sandbox-net", "Sandboxed", "only this folder is writable; network allowed"),
+              ("sandbox", "Sandboxed, offline", "only this folder is writable; no network"),
+              ("readonly", "Read-only", "nothing is run or changed; Chuck only reads")]
+
+    def _folder_access(self):
+        acc = self.settings.get("folder_access") or {}
+        return (acc.get(str(self.workspace), "full") if self.workspace and isinstance(acc, dict)
+                else "full")
+
+    def _apply_access(self):
+        """Make the module-level sandbox policy match this folder's access."""
+        mode = self._folder_access()
+        was = (_SANDBOX["on"], _SANDBOX["net"], _SANDBOX["root"])
+        _SANDBOX.update(on=mode.startswith("sandbox"), net=mode == "sandbox-net",
+                        root=str(self.workspace) if self.workspace else None,
+                        writable=[str(PLOTS_DIR)])
+        try:
+            PLOTS_DIR.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        if was != (_SANDBOX["on"], _SANDBOX["net"], _SANDBOX["root"]) and getattr(self, "_py", None):
+            self._py_close()                     # the Python session restarts under the new rules
+        try:
+            label = dict((k, l) for k, l, _d in self.ACCESS)[mode]
+            short = {"sandbox-net": "sandbox", "sandbox": "offline", "readonly": "read-only"}
+            self._ws_lbl.set_label((self.workspace.name if self.workspace else "No folder")
+                                   + (f" \u00b7 {short[mode]}" if mode in short else ""))
+            self.ws_btn.set_tooltip_text(f"Working folder \u2014 access: {label} (/access)")
+        except Exception:
+            pass
+        return mode
+
+    def set_access(self, mode):
+        if not self.workspace:
+            self._sys_note("Pick a working folder first: access is set per folder.", "danger")
+            return False
+        if mode not in [k for k, _l, _d in self.ACCESS]:
+            return False
+        if mode.startswith("sandbox") and not shutil.which("bwrap"):
+            self._sys_note("Sandboxing needs bubblewrap (pacman -Syu bubblewrap / apt install "
+                           "bubblewrap). Access left unchanged.", "danger")
+            return False
+        acc = dict(self.settings.get("folder_access") or {})
+        if mode == "full":
+            acc.pop(str(self.workspace), None)
+        else:
+            acc[str(self.workspace)] = mode
+        self.settings["folder_access"] = acc
+        save_settings(self.settings)
+        self._apply_access()
+        self._refresh_system()
+        label = dict((k, l) for k, l, _d in self.ACCESS)[mode]
+        self._sys_note(f"\U0001F512 {self.workspace.name}: {label}" if mode != "full"
+                       else f"{self.workspace.name}: Full access", "ok")
+        return True
+
+    def show_access(self):
+        """/access: choose this folder's access, one click."""
+        if not self.workspace:
+            self._sys_note("Pick a working folder first: access is set per folder.", "dim")
+            return False
+        cur = self._folder_access()
+        card, head, body, foot = self._card_shell("ACCESS")
+        head.insert_child_after(self._pill(self.workspace.name, "run"), head.get_first_child())
+        for key, label, desc in self.ACCESS:
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+            col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True)
+            t = Gtk.Label(label=label, xalign=0); t.add_css_class("doctor-name")
+            d = Gtk.Label(label=desc + ("" if key == "full" or not key.startswith("sandbox")
+                                        or shutil.which("bwrap") else " (needs bubblewrap)"),
+                          xalign=0, wrap=True)
+            d.add_css_class("dim")
+            col.append(t); col.append(d)
+            row.append(col)
+            if key == cur:
+                row.append(self._pill("current", "ok"))
+            else:
+                b = Gtk.Button(label="Use"); b.add_css_class("quick"); b.set_valign(Gtk.Align.CENTER)
+                b.connect("clicked", lambda _b, k=key: (self.set_access(k), self.show_access()))
+                row.append(b)
+            body.append(row)
+        self._log_pin(card)
+        return True
+
     # ── checkpoints: /rewind ──
     CHECKPOINT_STORE = DATA_DIR / "checkpoints"
 
@@ -8238,6 +8389,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         ("/review", "Chuck reviews the uncommitted changes for bugs"),
         ("/undo", "revert the last file change"),
         ("/rewind", "put the folder AND the chat back to before any step"),
+        ("/access", "this folder: full access, sandboxed, or read-only"),
         ("/retry", "ask the last question again  (Ctrl+R; \u2191 edits it)"),
         ("/plan", "plan mode on/off: propose first, act after you approve"),
         ("/agent  /chat", "switch mode"),
@@ -8277,6 +8429,8 @@ class ChuckWindow(Adw.ApplicationWindow):
             self.run_doctor()
         elif cmd == "rewind":
             self.show_rewind()
+        elif cmd == "access":
+            self.show_access()
         elif cmd == "update":
             self.run_update()
         elif cmd in ("commit", "review"):
@@ -9231,7 +9385,8 @@ class ChuckWindow(Adw.ApplicationWindow):
             runtests = packages = junk = False
             bgs = []
         plan_blocked = []
-        if self.agent_mode and self.plan_mode:
+        readonly = self.agent_mode and not self.plan_mode and self._folder_access() == "readonly"
+        if self.agent_mode and (self.plan_mode or readonly):
             # nothing changes until the user approves the plan
             plan_blocked = ([f"```{lang}```" for lang, _ in codes] + [f"write {p}" for p, _ in writes]
                             + [f"edit {p}" for p, _ in edits] + [f"bg {b[:30]}" for b in bgs]
@@ -9244,7 +9399,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             runtests = packages = junk = undo_req = False
             kills, projects = [], []
             reg_calls = [c for c in reg_calls if not _TOOL_REG[c[0]]["acts"]]
-            if plans:
+            if plans and not readonly:
                 self._asked = True               # a proposed plan waits for the user
         if fence_clash or self._step_forced:
             reg_calls = [c for c in reg_calls if not _TOOL_REG[c[0]]["acts"]]
@@ -9413,7 +9568,13 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._do_map()
         if briefs and _agents:
             self._do_tasks(briefs)
-        if plan_blocked:
+        if plan_blocked and readonly:
+            self._sys_note("\U0001F512 read-only folder \u2014 nothing was run or changed", "dim")
+            self._tool_feedback.append(
+                "[READ-ONLY FOLDER: not run: " + ", ".join(plan_blocked[:8]) + ". The user made "
+                "this folder read-only: investigate with read-only tools and answer; say what "
+                "you would change, or ask them to change its access (/access).]")
+        elif plan_blocked:
             self._sys_note("\U0001F4CB plan mode \u2014 nothing was run or changed", "dim")
             self._tool_feedback.append(
                 "[PLAN MODE: not run: " + ", ".join(plan_blocked[:8]) + ". Investigate with "

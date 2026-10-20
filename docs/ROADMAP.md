@@ -144,10 +144,10 @@ reaches only local servers.
       folder is snapshotted into a shadow git repository (yours is never
       touched). `/rewind` restores files AND conversation to any earlier step,
       including what a command (a code generator, `npm install`) changed.
-- [ ] **Sandbox mode.** An option to run commands and ```py``` inside
+- [x] **Sandbox mode.** An option to run commands and ```py``` inside
       bubblewrap: writes only to the project, no network unless allowed, the
       rest of the system read-only.
-- [ ] **Permission profiles.** Per-folder rules (allow all / ask before writes
+- [x] **Permission profiles.** Per-folder rules (allow all / ask before writes
       outside the folder / ask before network / read-only), shown as a chip in
       the composer.
 
