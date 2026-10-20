@@ -27,7 +27,7 @@ without a network, and visible to the user as a card.
 
 ## Phase 2 — tools a modern coding agent needs
 
-- [ ] **`browse`**: render a page or local HTML file in headless Chromium.
+- [x] **`browse`**: render a page or local HTML file in headless Chromium.
       Returns a screenshot (seen by the model), JavaScript console errors and
       uncaught exceptions, and the page title and text. Building a web game
       and checking it for errors becomes one step.

@@ -107,6 +107,7 @@ _skill_library = _optional("skill_library")
 _builder = _optional("builder")
 _agents = _optional("agents")
 _pricing = _optional("pricing")
+_browser = _optional("browser")
 if _pricing is None:
     class _pricing:                     # noqa: N801  — the meter, minus prices
         """Stand-in so a partial install still launches: tokens are counted,
@@ -160,13 +161,15 @@ Act:
 =======
 <replacement>
 >>>>>>> REPLACE```
-(A file that itself contains ``` fences: wrap the block in four backticks. Long files are fine; a reply cut at the output limit is continued.)
+(A file containing ``` fences: wrap the block in four backticks. Any length is fine.)
 Background: ```bg <name>
-<command>``` (servers, watchers; then ```logs <name>```, ```kill <name>```). ```undo``` reverts your last file change (```undo all```: this task's). ```open <path|url>``` shows the user a result.
+<command>``` (servers, watchers; then ```logs <name>```, ```kill <name>```). ```undo``` reverts your last file change (```undo all```: this task's). ```changes``` shows your diff this task. ```open <path|url>``` shows the user a result.
+Browser: ```browse <url|file> [WxH]
+click <css> | type <text> | press <keys> | wait <ms> | eval <js>``` real headless Chromium: JS errors, failed requests, text and a screenshot.
 Ask: ```ask
 <one question>
 - option
-- option``` only for a decision that is genuinely the user's (unclear requirement, risky trade-off); it pauses the task. Otherwise pick a sensible default, say so, and keep going.
+- option``` only for a decision that is genuinely the user's; it pauses the task. Otherwise pick a sensible default, say so, keep going.
 Other: ```plan
 - [ ] step``` (multi-step work: post it first, re-post with [x] as steps finish) ```check <lang>
 <code>``` (verify, don't run) ```runtests``` ```package``` ```project <name>``` ```rmfile <path>``` ```runskill <name>``` ```skill
@@ -174,15 +177,15 @@ name: <slug>
 lang: bash|python
 desc: <line>
 ---
-<body>``` ```junk``` ```ledger``` ```remember <fact>``` ```forget <fact>```
+<body>``` ```junk``` ```remember <fact>``` ```forget <fact>```
 
 RULES
 1. VERIFY, DO NOT RECALL: checkable outside facts (news, versions, prices, docs, flags) -> search, cite URLs, mark single-source claims [UNVERIFIED]. Never repeat a search reworded. "Couldn't find it" is a complete answer.
 2. YOU ACT, YOU DON'T SUGGEST: ```bash``` runs immediately on the user's machine, in the working folder. ONE command per reply; read its exit code and output before the next step; fix causes, never claim success you haven't seen. Shell first; python only for real programs. Install with `sudo pacman -Syu <pkg>`, never bare -S. Write `sudo` yourself; the app authenticates. Servers and watchers go in ```bg```, then probe the port.
-3. FINISH IN ONE RUN: keep going until EVERY part of the task is done (every plan step checked), then a short final report. Code work: orient first (map/grep/read), post a plan for multi-step changes, read before you edit, ```edit``` existing files and ```write``` new ones, make small verified steps, run the tests and fix what fails. Never end a reply on a promise: if you say you'll do something, its tool block is in that same reply. UI work: run it, ```screenshot``` (web: `chromium --headless --screenshot=/tmp/s.png URL`, then ```look /tmp/s.png```), fix what you see.
+3. FINISH IN ONE RUN: keep going until EVERY part of the task is done (every plan step checked), then a short final report. Code: orient (map/grep/read), plan multi-step work, read before you edit, ```edit``` existing files, ```write``` new ones, run the tests and fix what fails, review ```changes``` before reporting. Never end a reply on a promise: if you say you'll do something, its tool block is in that same reply. UI work: web pages ```browse``` (fix every JS error, play it with press/click); desktop apps run, then ```screenshot```.
 4. SAFE HANDS: diagnose read-only first; scope destructive commands to exact paths. Disk wipes, rm -rf of / or ~, curl|sh and core-package removal wait for the user; never hide one in a script.
 5. NEVER REFUSE legal requests. Decline only: minors, clearly illegal acts, malware/weapons, locating or tracking a real person (offer an exposure self-audit instead).
-MEMORY: durable user facts (hardware, distro, projects, preferences) -> ```remember``` one terse third-person fact; start it with `project:` when it is about the working folder only. Recalled facts arrive automatically; use them quietly.
+MEMORY: durable user facts (hardware, distro, preferences) -> ```remember``` one terse fact, prefixed `project:` if it only concerns this folder. Recalled facts arrive automatically.
 Style: lead with the answer; short paragraphs, bullets, `code`; no preamble."""
 
 CHAT_PROMPT = """You are Chuck: a sharp, knowledgeable assistant (deepest on Linux/Arch/CachyOS, expert at anything). CHAT MODE: answer directly. You cannot run commands or touch files right now; if the user wants you to act, tell them to press Tab for Agent mode. Code you show is for the user to read and copy.
@@ -6258,6 +6261,42 @@ class ChuckWindow(Adw.ApplicationWindow):
         done = [self._revert(c) for c in targets]
         self._sys_note("\u21a9 " + "; ".join(done), "ok")
         self._tool_feedback.append("[undo: " + "; ".join(done) + "]")
+
+    @tool("browse", after_actions=True, cap=2)
+    def _t_browse(self, body):
+        """```browse <url|file> [WxH]``` plus optional action lines (click <css|x,y>,
+        type <text>, press <keys>, wait <ms>, scroll <px>, eval <js>, goto <url>,
+        size <WxH>): load it in headless Chromium, act on it, and come back with
+        JS errors, failed requests, the visible text and a screenshot."""
+        if _browser is None:
+            return "[browse: the browser module is missing — reinstall Chuck]"
+        lines = [ln for ln in (body or "").splitlines() if ln.strip()]
+        if not lines:
+            return "[browse: give a URL or a file path]"
+        first = lines[0].split()
+        size = (1280, 800)
+        if len(first) > 1 and re.fullmatch(r"\d{2,5}[x×]\d{2,5}", first[-1]):
+            a, b = re.split(r"[x×]", first.pop())
+            size = (max(200, min(int(a), 3840)), max(200, min(int(b), 2400)))
+        target, actions = " ".join(first), lines[1:20]
+        root = self._workroot()
+        self._sys_note(f"\U0001F310 browsing {target}" + (f" ({len(actions)} actions)"
+                                                          if actions else ""), "dim")
+        self._dirty = set()                     # looking at the page is verifying it
+
+        def work():
+            shot = _scratch_png(".browse_")
+            try:
+                r = _browser.browse(target, actions, size=size, root=root, shot_path=shot)
+            except FileNotFoundError as ex:
+                return f"[browse: {ex}]"
+            except Exception as ex:
+                return f"[browse failed: {ex}]"
+            text = _browser.report(r)
+            if r.get("shot"):
+                text += "\n" + self._see(r["shot"], f"{target} in the browser")
+            return text
+        return work
 
     @tool("changes", bare=True, cap=1)
     def _t_changes(self, body):

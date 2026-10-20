@@ -236,6 +236,47 @@ check(len(w.history) == 1, "/clear starts a new chat")
 check_finished(w, "slash")
 
 # ═══════════════════════════════════════════════════════════════════════════
+print("\n--- browse: a real headless browser the agent drives ---")
+from chucknorris_ext import browser as br
+check(br.to_url("localhost:8000/x") == "http://localhost:8000/x", "host:port becomes http://")
+check(br.to_url("https://a.b/c") == "https://a.b/c", "a URL passes through")
+try:
+    br.to_url("nope.html", str(tmp))
+    check(False, "a missing file is an error")
+except FileNotFoundError:
+    check(True, "a missing file is an error")
+if br.find_chrome():
+    ws = folder("browse")
+    (ws / "index.html").write_text(
+        "<!doctype html><title>Game</title><p id=s>0</p><button id=b>Go</button>"
+        "<script src='gone.js'></script><script>let n=0;"
+        "b.onclick=()=>{n+=10;s.textContent=n};"
+        "addEventListener('keydown',e=>{if(e.key==='ArrowLeft'){n+=1;s.textContent=n}});"
+        "setTimeout(()=>{brokenCall()},50);</script>")
+    w = agent(["```browse index.html 800x600\nclick #b\npress ArrowLeft ArrowLeft\n"
+               "eval document.getElementById('s').textContent\n```", "Fixing the error."], ws)
+    type_and_send(w, "check the game")
+    h = hist_text(w)
+    check("BROWSE file://" in h and "(800x600" in h, "the page loads at the requested size")
+    check("Uncaught ReferenceError: brokenCall is not defined (index.html:1)" in h,
+          "an uncaught exception is reported with file and line", h[-900:])
+    check("gone.js: net::ERR_FILE_NOT_FOUND" in h, "a missing script is a failed request")
+    check(h.count("ERR_FILE_NOT_FOUND") == 1, "reported once, not twice")
+    check('→ "12"' in h, "clicks and key presses really reach the page (score 12)")
+    check("IMAGE of index.html in the browser is attached" in h, "the screenshot reaches the model")
+    check_finished(w, "browse")
+    w = agent(["```bash\necho building\n```\n```browse index.html```", "Ok."], ws)
+    type_and_send(w, "build and browse")
+    check("browse index.html held back" in hist_text(w),
+          "browse beside a command waits until the command has run")
+    w = agent(["```browse missing.html```", "Ok."], ws)
+    type_and_send(w, "browse nothing")
+    check("[browse: no such file: missing.html]" in hist_text(w), "a missing page is a clear result")
+    check_finished(w, "browse missing")
+else:
+    print("  [SKIP] no Chromium here — browser behaviour untested")
+
+# ═══════════════════════════════════════════════════════════════════════════
 print(f"\nTOTAL V15 FAILURES: {fails + len(FAILS)}")
 assert fails == 0 and not FAILS, "v15 regressions present"
 print("ALL V15 TESTS PASSED")
