@@ -12,7 +12,7 @@ Runs commands, edits real code, plays its own web apps in a real browser, keeps 
 ![deps](https://img.shields.io/badge/runtime_deps-stdlib_+_GTK-2ea043?style=flat-square&labelColor=0c0c10)
 ![licence](https://img.shields.io/badge/licence-MIT-8b5cf6?style=flat-square&labelColor=0c0c10)
 
-<img src="assets/screenshots/welcome.png" alt="Chuck's welcome screen: a dark window with a field of tiny code glyphs rippling from a click" width="100%">
+<img src="assets/screenshots/welcome.png" alt="Chuck's welcome screen: a woven field of tiny code glyphs struck by a click, its uneven wavefront and echo spreading under the welcome card" width="100%">
 
 </div>
 
