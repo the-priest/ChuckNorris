@@ -78,7 +78,7 @@ there's nothing to look at.
       reaches the agent at its next step ("from the user, mid-task") and shows
       as a queued bubble until delivered. No more waiting for a run to finish
       to say "not that file".
-- [ ] **Plan mode.** A toggle in the composer (and `/plan`): the agent
+- [x] **Plan mode.** A toggle in the composer (and `/plan`): the agent
       investigates read-only and proposes a plan card with Approve and Revise.
       Nothing is changed until you approve; approving runs it.
 - [ ] **Retry and edit.** Ctrl+R retries the last answer. ↑ in an empty

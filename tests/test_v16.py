@@ -116,6 +116,55 @@ type_and_send(w, "normal message")
 check(len([m for m in w.history if m["role"] == "user"]) == 1, "an idle send is unchanged")
 
 # ═══════════════════════════════════════════════════════════════════════════
+print("\n--- plan mode: propose, approve, then act ---")
+ws = folder("planmode")
+(ws / "a.py").write_text("print('a')\n")
+w = agent(["Looking first.\n```read a.py```",
+           "```write b.py\nprint(1)\n```\n```bash\necho SHOULD_NOT_RUN\n```",
+           "```plan\n- [ ] write b.py\n- [ ] run it\n```\nApproach: a one-line script, then run it."],
+          ws)
+w.set_plan_mode(True)
+type_and_send(w, "add b.py and run it")
+h = hist_text(w)
+check("print('a')" in h, "read-only tools still work in plan mode")
+check(not (ws / "b.py").exists() and "SHOULD_NOT_RUN\n" not in h.split("echo SHOULD_NOT_RUN")[-1],
+      "nothing is written or run before approval")
+check("PLAN MODE: not run" in h, "the model is told why")
+pe = w._plan_entry
+check(pe and pe["data"].get("approval") == "pending", "the proposed plan waits for approval")
+check(len(w.backend.calls) == 3 and "unfinished step(s)" not in h,
+      "the turn ends on the plan, with no nudge to act", len(w.backend.calls))
+check_finished(w, "plan proposed")
+w.backend.replies = ["```write b.py\nprint(1)\n```\n```bash\npython3 b.py\n```",
+                     "```plan\n- [x] write b.py\n- [x] run it\n```\nDone."]
+approve = [x for x in w.msgbox.walk() if x.get_label() == "Approve & run"]
+check(approve, "the plan card has Approve & run")
+if approve:
+    approve[0].click()
+    settle()
+check((ws / "b.py").exists() and "RAN that bash" in hist_text(w), "approving runs the plan")
+check(not w.plan_mode, "and turns plan mode off")
+check(w._plan_entry is pe and all(st == "x" for st, _ in pe["data"]["items"]),
+      "the run ticks off the SAME plan card", pe["data"]["items"])
+check(pe["data"]["approval"] == "approved", "which is marked approved")
+check_finished(w, "plan approved")
+
+w = agent(["```plan\n- [ ] something risky\n```\nThat's the plan."], ws)
+w.set_plan_mode(True)
+type_and_send(w, "plan something")
+rev = [x for x in w.msgbox.walk() if x.get_label() == "Revise"]
+rev[0].click()
+check(w._plan_entry["data"]["approval"] == "revise" and w.plan_mode,
+      "Revise keeps plan mode on and drops the buttons")
+w.entry.get_buffer().set_text("/plan")
+w.on_send()
+check(not w.plan_mode, "/plan toggles it")
+w.set_agent_mode(False, announce=False)
+w.entry.get_buffer().set_text("/plan")
+w.on_send()
+check(w.agent_mode and w.plan_mode, "/plan in Chat mode switches to Agent with planning on")
+
+# ═══════════════════════════════════════════════════════════════════════════
 print(f"\nTOTAL V16 FAILURES: {fails + len(FAILS)}")
 assert fails == 0 and not FAILS, "v16 regressions present"
 print("ALL V16 TESTS PASSED")

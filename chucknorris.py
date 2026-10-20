@@ -348,6 +348,7 @@ expander title:hover { color: @mute; }
 /* ── tool cards ──────────────────────────────────────────────────────── */
 .cmd-card  { background-color: @surface; border: 1px solid @line; border-radius: 12px; }
 .term-live .term-label { color: @accent_hi; }
+.plan-card.plan-proposed { border-color: alpha(@accent, 0.45); }
 .slash-cmd   { color: @accent_hi; font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace; font-size: 12.5px; }
 .browse-err  { color: #F87171; font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace; font-size: 12px; }
 .browse-warn { color: #FBBF24; font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace; font-size: 12px; }
@@ -2779,6 +2780,8 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._turn_no = 0               # which task a change belongs to (for "undo all")
         self._user_notes = []           # things the user did that the model must hear about
         self._steer = []                # messages typed while a task runs, for its next step
+        self.plan_mode = False          # investigate read-only, propose, wait for approval
+        self._carry_plan = None         # an approved plan card the next turn ticks off
         self._quiet_send = False
         self._jobs = {}                 # background jobs: name -> {proc, log, cmd, card}
         # MCP servers from ~/.config/chucknorris/mcp.json, started in the
@@ -3032,6 +3035,12 @@ class ChuckWindow(Adw.ApplicationWindow):
         self.agent_btn.connect("toggled", self._on_mode_btn)
         sw.append(self.agent_btn); sw.append(self.chat_btn)
         bar.append(sw)
+        self.plan_btn = Gtk.ToggleButton(label="Plan")
+        self.plan_btn.add_css_class("chip"); self.plan_btn.set_valign(Gtk.Align.CENTER)
+        self.plan_btn.set_tooltip_text("Plan first: Chuck investigates read-only and proposes a "
+                                       "plan; nothing changes until you approve it  (/plan)")
+        self.plan_btn.connect("toggled", lambda b: self.set_plan_mode(b.get_active()))
+        bar.append(self.plan_btn)
 
         self.ws_btn = Gtk.Button()
         self.ws_btn.add_css_class("chip")
@@ -3246,6 +3255,10 @@ class ChuckWindow(Adw.ApplicationWindow):
             self.history[0]["content"] = self._system_text()
         self._sync_placeholder()
         self._update_subtitle()
+        try:
+            self.plan_btn.set_visible(self.agent_mode)    # planning is for acting
+        except Exception:
+            pass
         if self._hint is not None:
             self._show_empty_hint()
         if announce:
@@ -3267,6 +3280,9 @@ class ChuckWindow(Adw.ApplicationWindow):
             ph.set_label("Say what to do with the attachment\u2026")
         elif getattr(self, "_running", False):
             ph.set_label("Type to steer \u2014 Chuck reads it at his next step  \u00b7  Esc stops")
+        elif self.agent_mode and getattr(self, "plan_mode", False):
+            ph.set_label("Plan mode \u2014 describe the task; Chuck proposes a plan before "
+                         "changing anything")
         elif self.agent_mode:
             ph.set_label("Ask Chuck to do something\u2026" + (
                 f"  (in {self.workspace.name})" if self.workspace else "")
@@ -3541,7 +3557,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         if k == "note":
             return _lane(self._build_note(d))
         if k == "plan":
-            return _lane(self._build_plan(d.get("items") or []))
+            return _lane(self._build_plan(d.get("items") or [], e))
         if k == "image":
             return _lane(self._build_image_widget(d.get("path"), d.get("src")))
         return Gtk.Label(label="")
@@ -6981,7 +6997,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._tool_feedback.append(f"[plan noted: {len(items) - left}/{len(items)} done. "
                                        f"Do the next step now: {nxt}]")
 
-    def _build_plan(self, items):
+    def _build_plan(self, items, entry=None):
         card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         card.add_css_class("plan-card")
         done = sum(1 for st, _t in items if st == "x")
@@ -7002,11 +7018,75 @@ class ChuckWindow(Adw.ApplicationWindow):
             else:
                 ic, ic_css, tx_css = "\u25cb", "plan-box", "plan-todo"
             il = Gtk.Label(label=ic); il.add_css_class(ic_css); il.set_valign(Gtk.Align.START)
-            tl = Gtk.Label(label=t, xalign=0, wrap=True, hexpand=True)
+            il.set_margin_top(3)                  # level with the rich text's first line
+            tl = Gtk.Label(xalign=0, wrap=True, hexpand=True)
             _wrap_anywhere(tl); tl.add_css_class(tx_css)
+            set_rich(tl, t)                       # `code` and **bold** in a step render
             row.append(il); row.append(tl)
             card.append(row)
+        state = (entry or {}).get("data", {}).get("approval")
+        if state == "pending":
+            card.add_css_class("plan-proposed")
+            bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            bar.set_margin_top(6)
+            ok = Gtk.Button(label="Approve & run"); ok.add_css_class("quick")
+            rv = Gtk.Button(label="Revise"); rv.add_css_class("ghost")
+            ok.connect("clicked", lambda *_a: self._approve_plan(entry))
+            rv.connect("clicked", lambda *_a: self._revise_plan(entry))
+            bar.append(ok); bar.append(rv)
+            card.append(bar)
+        elif state == "approved":
+            l = Gtk.Label(label="\u2713 approved", xalign=0); l.add_css_class("plan-tick")
+            card.append(l)
         return card
+
+    # ── plan mode ──
+    PLAN_NOTE = ("PLAN MODE is on: the user wants a plan before any change. Investigate with "
+                 "read-only tools only (map, glob, grep, read, search, fetch, browse, diagnose, "
+                 "task). Change NOTHING: no bash/python, write, edit, patch, bg or rmfile. When "
+                 "you understand the task, post the steps as a ```plan``` with a short summary "
+                 "of the approach and any risk, then stop: the user approves it first.")
+    _PLAN_BLOCKED = "commands, file changes and other actions"
+
+    def set_plan_mode(self, on):
+        on = bool(on)
+        if getattr(self, "_plan_guard", False):
+            return
+        self.plan_mode = on
+        try:
+            self._plan_guard = True
+            self.plan_btn.set_active(on)
+            (self.plan_btn.add_css_class if on else self.plan_btn.remove_css_class)("chip-on")
+        except Exception:
+            pass
+        finally:
+            self._plan_guard = False
+        self._sync_placeholder()
+        self._toast("Plan mode \u2014 Chuck proposes, you approve, then he acts" if on
+                    else "Plan mode off")
+
+    def _approve_plan(self, entry):
+        if self._running or not self._in_log(entry):
+            return
+        entry["data"]["approval"] = "approved"
+        entry["w"] = None
+        self._apply_window()
+        self.set_plan_mode(False)
+        self._carry_plan = entry                 # the run ticks THIS card off
+        self.entry.get_buffer().set_text("Approved \u2014 carry out the plan now, step by "
+                                         "step, ticking it off as you go.")
+        self.on_send()
+
+    def _revise_plan(self, entry):
+        if self._in_log(entry):
+            entry["data"]["approval"] = "revise"
+            entry["w"] = None
+            self._apply_window()
+        self._sys_note("Say what to change \u2014 Chuck will revise the plan.", "dim")
+        try:
+            self.entry.grab_focus()
+        except Exception:
+            pass
 
     def _do_rmfile(self, rel):
         p = self._project_or_note()
@@ -7313,6 +7393,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         ("/compact", "summarise the conversation so far into one note"),
         ("/model <name>", "switch model (part of the name is enough)"),
         ("/undo", "revert the last file change"),
+        ("/plan", "plan mode on/off: propose first, act after you approve"),
         ("/agent  /chat", "switch mode"),
         ("/folder [path]", "set the working folder (no path: choose one)"),
         ("/cost", "what this chat has cost"),
@@ -7340,6 +7421,10 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._log_pin(card)
         elif cmd == "clear":
             self.new_chat()
+        elif cmd == "plan":
+            if not self.agent_mode:
+                self.set_agent_mode(True)
+            self.set_plan_mode(not self.plan_mode if arg not in ("on", "off") else arg == "on")
         elif cmd in ("agent", "chat"):
             self.set_agent_mode(cmd == "agent")
         elif cmd == "model":
@@ -7435,7 +7520,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._verify_nudges = 0
         self._dirty = set()
         self._asked = False
-        self._plan_entry = None
+        self._plan_entry, self._carry_plan = self._carry_plan, None
         self._reset_continuation()
         self._turn_no += 1
         self._refresh_system()                  # instruction files edited since?
@@ -7801,6 +7886,8 @@ class ChuckWindow(Adw.ApplicationWindow):
                 scan.append(c)
         task_text = "\n".join(scan)
         note = [_now_line()]
+        if self.agent_mode and self.plan_mode:
+            note.append(self.PLAN_NOTE)
         if self.agent_mode:
             ws = self._workspace_note()
             if ws:
@@ -8186,6 +8273,22 @@ class ChuckWindow(Adw.ApplicationWindow):
             codes, skill_blocks, runskills, writes, edits, checks = [], [], [], [], [], []
             runtests = packages = junk = False
             bgs = []
+        plan_blocked = []
+        if self.agent_mode and self.plan_mode:
+            # nothing changes until the user approves the plan
+            plan_blocked = ([f"```{lang}```" for lang, _ in codes] + [f"write {p}" for p, _ in writes]
+                            + [f"edit {p}" for p, _ in edits] + [f"bg {b[:30]}" for b in bgs]
+                            + [f"rmfile {r}" for r in rmfiles]
+                            + [t for t, _ in reg_calls if _TOOL_REG[t]["acts"]]
+                            + (["runskill"] if (skill_blocks or runskills) else [])
+                            + (["runtests"] if runtests else []) + (["package"] if packages else [])
+                            + (["undo"] if undo_req else []) + (["kill"] if kills else []))
+            codes, writes, edits, bgs, rmfiles, skill_blocks, runskills = [], [], [], [], [], [], []
+            runtests = packages = junk = undo_req = False
+            kills, projects = [], []
+            reg_calls = [c for c in reg_calls if not _TOOL_REG[c[0]]["acts"]]
+            if plans:
+                self._asked = True               # a proposed plan waits for the user
         if fence_clash or self._step_forced:
             reg_calls = [c for c in reg_calls if not _TOOL_REG[c[0]]["acts"]]
         acting = bool(searches or fetches or images or vid_searches or videos or junk
@@ -8283,8 +8386,13 @@ class ChuckWindow(Adw.ApplicationWindow):
             or trees or packages or runtests or rmfiles or ledger_req or globs or maps
             or shots or looks or briefs or bgs or logss or kills or undo_req or opens
             or reg_calls)
+        proposing = self.agent_mode and self.plan_mode and bool(plans)
         for body in plans:
-            self._do_plan(body, nudge=plan_only)
+            self._do_plan(body, nudge=plan_only and not proposing)
+        if proposing and self._in_log(self._plan_entry):
+            self._plan_entry["data"]["approval"] = "pending"   # Approve / Revise buttons
+            self._plan_entry["w"] = None
+            self._apply_window()
         for nm in projects:
             self._do_project(nm.strip())
         for rel, body in writes:
@@ -8342,6 +8450,11 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._do_map()
         if briefs and _agents:
             self._do_tasks(briefs)
+        if plan_blocked:
+            self._sys_note("\U0001F4CB plan mode \u2014 nothing was run or changed", "dim")
+            self._tool_feedback.append(
+                "[PLAN MODE: not run: " + ", ".join(plan_blocked[:8]) + ". Investigate with "
+                "read-only tools, then post the ```plan```; the user approves it before you act.]")
         for rtag, rbody in reg_calls:
             self._run_registered(rtag, rbody)
         if held_see:
@@ -8374,7 +8487,8 @@ class ChuckWindow(Adw.ApplicationWindow):
 
     def _stalled(self, disp, outside):
         """Why this action-free reply is NOT a real final answer, or None."""
-        if not self.agent_mode or self._nudges >= self.MAX_NUDGES or self._step_forced:
+        if (not self.agent_mode or self._nudges >= self.MAX_NUDGES or self._step_forced
+                or self.plan_mode):
             return None
         tools = set(self._tool_tags().split("|"))
         for lang, body in self._CODE_FENCE.findall(outside):
@@ -8396,7 +8510,8 @@ class ChuckWindow(Adw.ApplicationWindow):
 
     def _completion_gap(self, disp=""):
         """(note, instruction) if the agent is about to stop with work left, else None."""
-        if not self.agent_mode or self._step_forced or self._asked or self._cancelled:
+        if (not self.agent_mode or self._step_forced or self._asked or self._cancelled
+                or self.plan_mode):
             return None
         if (disp or "").strip().endswith("?"):
             return None                 # it asked the user something: waiting is right
