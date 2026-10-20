@@ -6042,6 +6042,10 @@ class ChuckWindow(Adw.ApplicationWindow):
         gen = self._gen
 
         def call(messages):
+            if self._over_cap():
+                # sub-agents spend real money too: eight of them must not run
+                # on past the cap while the main loop waits to ask
+                raise RuntimeError("the chat's spending cap is reached")
             b = Backend(self.settings) if isinstance(self.backend, Backend) else self.backend
             out, err = [], []
             stale = lambda: self._cancelled or gen != self._gen   # noqa: E731
@@ -7594,7 +7598,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         """When what we'd send is nearing the context budget, compact in the
         background so the NEXT request carries a summary instead of losing the
         oldest turns outright."""
-        if self._compacting or not self.settings.get("auto_compact", True):
+        if self._compacting or not self.settings.get("auto_compact", True) or self._over_cap():
             return
         budget = self.cfg("context_chars", SEND_CHAR_BUDGET, 40000, 800000)
         size = sum(len(m["content"]) if isinstance(m.get("content"), str) else 2000
@@ -7608,6 +7612,13 @@ class ChuckWindow(Adw.ApplicationWindow):
         The transcript is never touched: the summary only replaces those turns
         in what is SENT. /compact runs it on demand."""
         if self._compacting:
+            return False
+        if getattr(self, "_cont_prefix", None) is not None:
+            # mid-way through a reply that is being continued: its scaffolding
+            # is about to be collapsed out of history, so wait for it
+            if not auto:
+                self._sys_note("Busy finishing a long reply \u2014 /compact again in a moment.",
+                               "dim")
             return False
         upto = len(self.history) - self.COMPACT_KEEP
         prev = self._compact
@@ -7642,8 +7653,8 @@ class ChuckWindow(Adw.ApplicationWindow):
 
             def land():
                 self._compacting = False
-                if chat != self.chat_id:
-                    return False                 # the user moved on to another chat
+                if chat != self.chat_id or upto > len(self.history) - 1:
+                    return False                 # another chat, or history changed under it
                 if err or len(text) < 40:
                     self._sys_note("\u26a0 couldn't compact: " + (err[0] if err else
                                                                    "empty summary"), "danger")
@@ -7950,6 +7961,13 @@ class ChuckWindow(Adw.ApplicationWindow):
         """Replace the pieces + CONTINUE prompts with the one stitched reply."""
         if self._cont_hist_at is not None:
             del self.history[self._cont_hist_at:]
+            c = self._compact
+            if c and c["upto"] > self._cont_hist_at:
+                # a summary must never reach past the end of the history it
+                # summarises: it would hide the messages that now sit there
+                c["upto"] = self._cont_hist_at
+                if c["upto"] < 2:
+                    self._compact = None
         self._reset_continuation()
 
     def _finalise(self):

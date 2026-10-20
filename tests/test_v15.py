@@ -511,6 +511,14 @@ check({f: (ws / f).read_text() for f in before} == before,
       "one hunk that doesn't match changes NOTHING, in any file")
 check("patch NOT applied, nothing was changed" in hist_text(w) and "README.md: hunk 1" in hist_text(w),
       "and the model is told which hunk failed")
+(ws / "twice.py").write_text("one\ntwo\nthree\n")
+w.backend.replies = ["```patch\n--- a/twice.py\n+++ b/twice.py\n@@ -1 +1 @@\n-one\n+ONE\n"
+                     "--- a/twice.py\n+++ b/twice.py\n@@ -3 +3 @@\n-three\n+THREE\n```", "Ok."]
+type_and_send(w, "same file twice")
+check((ws / "twice.py").read_text() == "ONE\ntwo\nTHREE\n",
+      "a diff naming the same file twice applies both sections")
+check(len([x for x in w.msgbox.walk() if x.get_label() == "Revert"]) == 5,
+      "and checkpoints it once (Revert restores the original)")
 w.backend.replies = ["```changes all```", "Ok."]
 type_and_send(w, "review all")
 check("old.txt (deleted" in hist_text(w), "changes reports a deleted file as deleted")
@@ -713,6 +721,17 @@ check("never sent" not in hist_text(w), "spending past the new allowance pauses 
 stop = [x for x in w.msgbox.walk() if x.get_label() == "Stop here"]
 stop[-1].click()
 check("never sent" not in hist_text(w), "Stop here stays stopped")
+ws = folder("capsub")
+w3 = agent([], ws)
+w3.settings["cost_cap"] = 0.10
+w3._usage["cost"] = 0.0
+sub_call = w3._sub_call()
+w3._usage["cost"] = 0.50
+try:
+    sub_call([{"role": "system", "content": "x"}, {"role": "user", "content": "y"}])
+    check(False, "a sub-agent can't spend past the cap")
+except RuntimeError as ex:
+    check("spending cap" in str(ex), "a sub-agent can't spend past the cap")
 w2 = agent(["Free."])
 w2.settings["cost_cap"] = 0
 w2._usage["cost"] = 99
@@ -768,6 +787,20 @@ check(json.loads(w.backend.payloads[-1])["messages"][1]["content"].startswith("C
       "and the next request carries the summary")
 w.settings["auto_compact"] = False
 w.settings["context_chars"] = 40000
+
+w = agent([])
+for i in range(20):
+    w.history += [{"role": "user", "content": f"u{i}"}, {"role": "assistant", "content": f"a{i}"}]
+w._cont_prefix = "half a reply"
+check(w.compact_now() is False and w._compact is None,
+      "no compaction starts in the middle of a reply that is being continued")
+w._cont_prefix = None
+w._compact = {"upto": 30, "text": "S" * 50}
+w._cont_hist_at = 12
+w._collapse_continuation("stitched")
+check(len(w.history) == 12 and w._compact["upto"] == 12,
+      "collapsing a continuation clamps the summary so it never hides newer messages",
+      (len(w.history), w._compact))
 
 # ═══════════════════════════════════════════════════════════════════════════
 print("\n--- export: a chat as Markdown ---")

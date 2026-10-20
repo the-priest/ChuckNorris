@@ -713,23 +713,35 @@ def plan_patch(root, text):
     """Work out a whole diff without touching disk.
     -> [(rel, before|None, after|None)] — after None means delete. Raises ValueError."""
     out = []
+    pending = {}                      # rel -> content after earlier sections of this diff
+
+    def current(rel, path):
+        if rel in pending:
+            return pending[rel]
+        return path.read_text(encoding="utf-8") if path.is_file() else None
     for f in parse_unified_diff(text):
         rel = f["new"] or f["old"]
         if rel is None:
             raise ValueError("a file with /dev/null on both sides")
         path = _safe(root, rel)
-        before = path.read_text(encoding="utf-8") if path.is_file() else None
+        before = current(rel, path)
         if f["new"] is None:                                     # deletion
             if before is None:
                 raise ValueError(f"{rel}: can't delete — it doesn't exist")
             out.append((rel, before, None))
+            pending[rel] = None
             continue
         if f["old"] is None and before is not None and f["hunks"]:
             # a "new file" that exists: apply as an edit only if it's a full rewrite
             raise ValueError(f"{rel}: already exists — diff it against its current content")
         after = apply_hunks(before or "", f["hunks"], rel)
         if f["old"] and f["new"] and f["old"] != f["new"]:     # a rename
-            out.append((f["old"], _safe(root, f["old"]).read_text(encoding="utf-8")
-                        if _safe(root, f["old"]).is_file() else None, None))
+            out.append((f["old"], current(f["old"], _safe(root, f["old"])), None))
+            pending[f["old"]] = None
         out.append((rel, before, after))
-    return out
+        pending[rel] = after
+    # one entry per file: the first 'before' (what's on disk), the last 'after'
+    merged = {}
+    for rel, before, after in out:
+        merged[rel] = (merged[rel][0], after) if rel in merged else (before, after)
+    return [(rel, b, a) for rel, (b, a) in merged.items()]
