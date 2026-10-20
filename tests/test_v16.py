@@ -321,6 +321,242 @@ check(not any(e.get("kind") == "fold" and "reopened-output" in e["data"]["text"]
       "a retry rewinds that turn's results too (they belonged to the old answer)")
 
 # ═══════════════════════════════════════════════════════════════════════════
+print("\n--- /doctor and the crash log ---")
+os.environ["XDG_STATE_HOME"] = str(tmp / "state")
+log = cn._crashlog
+check(log.log_path() == tmp / "state" / "chucknorris" / "chuck.log", "the log lives under XDG_STATE_HOME")
+check(log.recent() == [], "no log yet: nothing recent")
+log.record("tool bash", "Traceback (most recent call last):\n  File x\nValueError: boom one")
+log.record("thread worker", "Traceback\nKeyError: 'two'")
+r = log.recent()
+check([k for _w, k, _l in r] == ["thread worker", "tool bash"] and r[1][2] == "ValueError: boom one",
+      "recent() reads entries back newest first, with the last traceback line", r)
+old = log.log_path().read_text().replace(time.strftime("%Y-%m-%d"), "2001-01-01")
+log.log_path().write_text(old)
+check(log.recent() == [], "entries older than a week are not 'recent'")
+log.log_path().write_text("x" * (log.MAX_BYTES + 10))
+log.record("big", "after rotate")
+check(log.log_path().with_suffix(".log.1").exists() and log.log_path().stat().st_size < 200,
+      "the log rotates past 1 MB, keeping one old copy")
+log.log_path().unlink()
+ws = folder("doctor")
+w = agent(["```changes```", "Done."], ws)
+
+
+def explode(*a, **k):
+    raise ValueError("tool exploded on purpose")
+
+
+real = cn._TOOL_REG["changes"]["fn"]
+try:
+    cn._TOOL_REG["changes"]["fn"] = explode
+    type_and_send(w, "what changed")
+finally:
+    cn._TOOL_REG["changes"]["fn"] = real
+logged = log.log_path().read_text() if log.log_path().exists() else ""
+check("tool exploded on purpose" in logged and f"v{cn._config.VERSION}" in logged,
+        "a tool that raises is written to the crash log with its traceback", logged[:300])
+calls = len(w.backend.calls)
+w.entry.get_buffer().set_text("/doctor")
+w.on_send()
+check([x for x in w.msgbox.walk() if x.get_text() == "DOCTOR"], "/doctor shows a DOCTOR card")
+texts = [x.get_text() for x in w.msgbox.walk() if isinstance(x.get_text(), str)]
+for name in ("API key", "Model", "Working folder", "Python linter", "Disk", "Errors (7 days)", "API"):
+    check(name in texts, f"with a {name} row")
+check(any(t.endswith("to look at") or t == "all good" for t in texts), "and a verdict pill")
+rows = w.doctor_checks()
+check(all(st in ("ok", "warn", "fail") for st, _n, _d in rows), "every row has a state")
+check(dict((n, st) for st, n, _d in rows)["API key"] == "ok", "a set key reads ok")
+errs = [d for st, n, d in rows if n == "Errors (7 days)"]
+check(errs and "recent" in errs[0] and "tool exploded" in errs[0], "logged errors show up in the doctor", errs)
+check(len(w.backend.calls) == calls, "without calling the model")
+settle()
+check_finished(w, "doctor")
+
+# ═══════════════════════════════════════════════════════════════════════════
+print("\n--- update check and /update ---")
+import io
+import shutil
+import tarfile
+up = cn._update
+check(up.parse_version('X = 1\nVERSION = "15.2.0"\n') == "15.2.0", "reads VERSION from a config file")
+check(up.is_newer("15.10.0", "15.9.9") and not up.is_newer("15.1.0", "15.1.0")
+      and not up.is_newer("15.0.9", "15.1.0") and not up.is_newer(None, "1.0"),
+      "compares versions as numbers, not strings")
+st = tmp / "upstate" / "update.json"
+check(up.due(st), "never checked: a check is due")
+up.mark_checked(st, "15.2.0", now=1000)
+check(not up.due(st, now=1000 + 3600) and up.due(st, now=1000 + 25 * 3600), "then once a day")
+check(up.verify_tree(cn.HERE) == cn._config.VERSION, "this source tree verifies as complete")
+
+
+def src_copy(name, version, breaker=None):
+    """A copy of this repo's app files as GitHub's archive lays them out."""
+    root = tmp / name / "ChuckNorris-main"
+    (root / "chucknorris_ext").mkdir(parents=True)
+    shutil.copy(cn.HERE / "chucknorris.py", root / "chucknorris.py")
+    for f in (cn.HERE / "chucknorris_ext").glob("*.py"):
+        shutil.copy(f, root / "chucknorris_ext" / f.name)
+    cfg = root / "chucknorris_ext" / "config.py"
+    cfg.write_text(cfg.read_text().replace(f'VERSION = "{cn._config.VERSION}"', f'VERSION = "{version}"'))
+    (root / "assets").mkdir()
+    (root / "assets" / "new-art.png").write_bytes(b"png")
+    if breaker:
+        breaker(root)
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        tf.add(root, arcname="ChuckNorris-main")
+    return buf.getvalue()
+
+
+class Opener:
+    def __init__(self, archive=b"", config=""):
+        self.archive, self.config, self.urls = archive, config, []
+
+    def open(self, req, timeout=None):
+        self.urls.append(req.full_url)
+        if req.full_url == up.ARCHIVE_URL:
+            return io.BytesIO(self.archive)
+        if req.full_url == up.CONFIG_URL:
+            return io.BytesIO(self.config.encode())
+        raise OSError("unexpected url " + req.full_url)
+
+
+def old_install(name):
+    app = tmp / name / "app"
+    (app / "chucknorris_ext").mkdir(parents=True)
+    (app / "chucknorris.py").write_text("OLD = 1\n")
+    (app / "chucknorris_ext" / "config.py").write_text('VERSION = "1.0.0"\n')
+    return app
+
+
+check(up.remote_version(Opener(config='VERSION = "99.0.0"\n')) == (True, "99.0.0"),
+      "the remote version is read from GitHub's config.py")
+check(up.remote_version(Opener(config="nothing"))[0] is False, "a page with no version is not a version")
+app = old_install("up_ok")
+ok, msg, v = up.apply(app, tmp / "up_ok" / "assets", opener=Opener(src_copy("src_ok", "99.0.0")))
+check(ok and v == "99.0.0", "/update installs the new version", msg)
+check((app / "chucknorris.py").read_text() == (cn.HERE / "chucknorris.py").read_text()
+      and 'VERSION = "99.0.0"' in (app / "chucknorris_ext" / "config.py").read_text(),
+      "the app and its package are replaced")
+check(not (app / "chucknorris_ext.old").exists() and not (app / "chucknorris_ext.new").exists()
+      and not (app / "chucknorris.py.new").exists(), "and no staging copies are left behind")
+check((tmp / "up_ok" / "assets" / "new-art.png").exists(), "its art is installed too")
+for label, brk, why in [
+        ("a module missing", lambda r: (r / "chucknorris_ext" / "net.py").unlink(), "missing modules"),
+        ("a file that doesn't compile", lambda r: (r / "chucknorris_ext" / "web.py").write_text("def (:\n"),
+         "doesn't compile")]:
+    app = old_install("up_bad" + str(len(label)))
+    ok, msg, v = up.apply(app, None, opener=Opener(src_copy("src_bad" + str(len(label)), "99.0.0", brk)))
+    check(not ok and why in msg and "nothing was changed" in msg, f"a download with {label} is refused", msg)
+    check((app / "chucknorris.py").read_text() == "OLD = 1\n"
+          and (app / "chucknorris_ext" / "config.py").read_text() == 'VERSION = "1.0.0"\n',
+          "and the installed copy is untouched")
+app = old_install("up_dl")
+ok, msg, v = up.apply(app, None, opener=Opener(b"not a tarball"))
+check(not ok and (app / "chucknorris.py").read_text() == "OLD = 1\n", "a corrupt archive changes nothing", msg)
+
+# a git clone is pulled, never overwritten
+origin = tmp / "origin"
+origin.mkdir()
+gg = lambda d, *a: subprocess.run(["git", "-C", str(d), *a], capture_output=True, text=True)
+src = tmp / "src_git"
+shutil.copytree(cn.HERE / "chucknorris_ext", origin / "chucknorris_ext",
+                ignore=shutil.ignore_patterns("__pycache__"))
+shutil.copy(cn.HERE / "chucknorris.py", origin / "chucknorris.py")
+gg(origin, "init", "-q", "-b", "main"); gg(origin, "config", "user.email", "t@e.com")
+gg(origin, "config", "user.name", "T"); gg(origin, "add", "-A"); gg(origin, "commit", "-qm", "v1")
+clone = tmp / "clone"
+subprocess.run(["git", "clone", "-q", str(origin), str(clone)], capture_output=True)
+cfg = origin / "chucknorris_ext" / "config.py"
+cfg.write_text(cfg.read_text().replace(f'VERSION = "{cn._config.VERSION}"', 'VERSION = "99.1.0"'))
+gg(origin, "commit", "-qam", "bump")
+ok, msg, v = up.apply(clone, None)
+check(ok and v == "99.1.0", "a git clone is updated with a fast-forward pull", msg)
+cfg.write_text(cfg.read_text().replace('VERSION = "99.1.0"', 'VERSION = "99.2.0"'))
+gg(origin, "commit", "-qam", "bump2")
+(clone / "chucknorris_ext" / "config.py").write_text("# my local edit\n" + cfg.read_text())
+gg(clone, "commit", "-qam", "local")
+ok, msg, v = up.apply(clone, None)
+check(not ok and "nothing was changed" in msg and "# my local edit" in
+      (clone / "chucknorris_ext" / "config.py").read_text(), "local commits are never overwritten", msg)
+
+# the window side
+w = agent([])
+real_rv, real_apply = up.remote_version, up.apply
+calls = []
+try:
+    up.remote_version = lambda *a, **k: (True, cn._config.VERSION)
+    w.UPDATE_STATE = tmp / "upstate" / "w.json"
+    w.run_update()
+    settle()
+    texts = [x.get_text() for x in w.msgbox.walk() if isinstance(x.get_text(), str)]
+    check("UPDATE" in texts and "up to date" in texts, "/update on the newest version says so", texts[-6:])
+    up.remote_version = lambda *a, **k: (True, "99.0.0")
+    up.apply = lambda *a, **k: (calls.append(a), (True, "installed v99.0.0", "99.0.0"))[1]
+    w.entry.get_buffer().set_text("/update")
+    w.on_send()
+    settle()
+    texts = [x.get_text() for x in w.msgbox.walk() if isinstance(x.get_text(), str)]
+    check(calls and calls[0][0] == cn.HERE, "/update installs into the folder Chuck runs from")
+    check("v99.0.0 ready" in texts and any("Restart Chuck to use it" in t for t in texts),
+          "and says a restart picks it up", texts[-6:])
+    check(any(isinstance(x, cn.Gtk.Button) and x.get_label() == "Restart now" for x in w.msgbox.walk()),
+          "with a Restart now button")
+    n = len(calls)
+    w.run_update()
+    settle()
+    check(len(calls) == n, "a second /update before restarting doesn't download again")
+    w._update_ready = None
+    up.apply = lambda *a, **k: (False, "download failed (URLError) \u2014 nothing was changed", None)
+    w.run_update()
+    settle()
+    texts = [x.get_text() for x in w.msgbox.walk() if isinstance(x.get_text(), str)]
+    check("failed" in texts and any("nothing was changed" in t for t in texts), "a failed update says so")
+    toasts = []
+    w._update_toast = lambda v: toasts.append(v)
+    os.environ.pop("CHUCK_NO_UPDATE_CHECK", None)
+    w.UPDATE_STATE = tmp / "upstate" / "daily.json"          # never checked
+    w.settings["check_updates"] = False
+    w._update_check()
+    settle()
+    check(not toasts, "the daily check can be turned off")
+    w.settings["check_updates"] = True
+    w._update_check()
+    settle()
+    check(toasts == ["99.0.0"], "the daily check finds a newer version", toasts)
+    toasts.clear()
+    w._update_check()
+    settle()
+    check(not toasts, "and asks GitHub at most once a day")
+finally:
+    os.environ["CHUCK_NO_UPDATE_CHECK"] = "1"
+    up.remote_version, up.apply = real_rv, real_apply
+check_finished(w, "update")
+w = agent(["Remember me."])
+type_and_send(w, "a chat worth keeping")
+execd = []
+real_execv = os.execv
+os.execv = lambda exe, argv: execd.append(argv)
+try:
+    w.restart_app()
+finally:
+    os.execv = real_execv
+check(execd and execd[0][-1].endswith("chucknorris.py") and os.environ.get("CHUCK_REOPEN") == w.chat_id
+      and (cn.CHATS_DIR / f"{w.chat_id}.json").exists(),
+      "Restart now saves the chat and starts a fresh Chuck", execd)
+shown = []
+real_present = cn.ChuckWindow.present
+cn.ChuckWindow.present = lambda self: shown.append(self)
+try:
+    cn.ChuckApp().do_activate()
+finally:
+    cn.ChuckWindow.present = real_present
+check(shown and shown[0].chat_id == w.chat_id
+      and any(e.get("kind") == "user" for e in shown[0]._log) and "CHUCK_REOPEN" not in os.environ,
+      "and the restarted Chuck reopens that chat", shown and shown[0].chat_id)
+
+# ═══════════════════════════════════════════════════════════════════════════
 print(f"\nTOTAL V16 FAILURES: {fails + len(FAILS)}")
 assert fails == 0 and not FAILS, "v16 regressions present"
 print("ALL V16 TESTS PASSED")

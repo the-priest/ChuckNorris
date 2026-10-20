@@ -16,6 +16,7 @@ import sys, json, time, threading, tempfile, io
 from pathlib import Path
 # A throwaway HOME before the app is imported: its config paths are computed
 # at import, and a test must never write the user's real settings.
+os.environ.setdefault("CHUCK_NO_UPDATE_CHECK", "1")   # tests never phone GitHub
 if not os.environ.get("CHUCK_TEST_HOME"):
     os.environ["CHUCK_TEST_HOME"] = os.environ["HOME"] = tempfile.mkdtemp(prefix="chuck_home_")
 sys.path.insert(0, '.')

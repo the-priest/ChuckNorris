@@ -7,7 +7,7 @@ for t in tests/test_*.py; do
   # real ~/.config/chucknorris, or leak settings (Agent mode, recent folders)
   # into the next one
   th=$(mktemp -d)
-  out=$(HOME="$th" python3 "$t" 2>&1 | tail -1)
+  out=$(HOME="$th" CHUCK_NO_UPDATE_CHECK=1 python3 "$t" 2>&1 | tail -1)
   rm -rf -- "$th"
   case "$out" in
     *PASSED*|*VERIFIED*)

@@ -20,6 +20,7 @@ import time
 import html as _html
 import base64
 import shlex
+import traceback
 import shutil
 import tempfile
 import socket
@@ -110,6 +111,8 @@ _pricing = _optional("pricing")
 _browser = _optional("browser")
 _diagnose = _optional("diagnose")
 _mcp = _optional("mcp")
+_crashlog = _optional("crashlog")
+_update = _optional("update")
 if _pricing is None:
     class _pricing:                     # noqa: N801  — the meter, minus prices
         """Stand-in so a partial install still launches: tokens are counted,
@@ -132,6 +135,8 @@ HERE = Path(__file__).resolve().parent
 _STREAM_REPAINT = 0.05      # seconds between mid-stream repaints (20/s)
 
 from chucknorris_ext import config as _config   # noqa: E402
+if _crashlog is not None:
+    _crashlog.set_version(_config.VERSION)   # stamped even before startup
 from chucknorris_ext.config import (            # noqa: E402
     APP_ID, DEFAULT_MODEL, DEFAULT_VISION, DEFAULT_BASE,
     DATA_DIR, CONFIG_DIR, CHATS_DIR, DL_DIR,
@@ -352,6 +357,9 @@ expander title:hover { color: @mute; }
 .term-live .term-label { color: @accent_hi; }
 .plan-card.plan-proposed { border-color: alpha(@accent, 0.45); }
 .suggest-flow > flowboxchild { padding: 0; background: none; }
+.doctor-warn { color: #FBBF24; font-weight: 700; }
+.doctor-fail { color: #F87171; font-weight: 700; }
+.doctor-name { color: @ink; font-size: 12.5px; }
 .slash-cmd   { color: @accent_hi; font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace; font-size: 12.5px; }
 .browse-err  { color: #F87171; font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace; font-size: 12px; }
 .browse-warn { color: #FBBF24; font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace; font-size: 12px; }
@@ -2847,6 +2855,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         GLib.timeout_add_seconds(600, self._sweep_chats)
         self._apply_mode(announce=False)
         self._show_empty_hint()
+        GLib.timeout_add_seconds(20, self._update_check)   # once a day, after startup settles
 
     # ── layout ───────────────────────────────────────────────────────────────
     def _build_ui(self):
@@ -5926,6 +5935,8 @@ class ChuckWindow(Adw.ApplicationWindow):
                 # bind to a plain local: `except ... as exc` unbinds exc when the
                 # block exits, which would break the closure below.
                 why = str(exc)
+                if _crashlog is not None:
+                    _crashlog.record(f"tool {label}", traceback.format_exc())
                 fb = f"[{label} failed: {why}]"
 
                 def note(w=why):
@@ -7063,6 +7074,220 @@ class ChuckWindow(Adw.ApplicationWindow):
         exp.set_child(box)
         return exp
 
+    # ── /doctor ──
+    def doctor_checks(self):
+        """[(state, name, detail)] — state is ok, warn or fail. Local checks
+        only; the API check runs in the background (doctor_api)."""
+        S, rows = self.settings, []
+
+        def add(state, name, detail):
+            rows.append((state, name, detail))
+        try:
+            gtkv = f"GTK {Gtk.get_major_version()}.{Gtk.get_minor_version()}"
+            adwv = f"libadwaita {Adw.get_major_version()}.{Adw.get_minor_version()}"
+        except Exception:
+            gtkv, adwv = "GTK ?", "libadwaita ?"
+        add("ok", "Chuck", f"v{_config.VERSION} \u00b7 Python {sys.version.split()[0]} \u00b7 {gtkv} \u00b7 {adwv}")
+        key = self.backend.key()
+        add("ok" if key else "fail", "API key",
+            "set" if key else "missing \u2014 add a SiliconFlow key in Settings \u203a Model")
+        add("ok", "Model", (S.get("model") or DEFAULT_MODEL)
+            + (f" \u00b7 fallback {S.get('fallback_model')}" if S.get("fallback_model") else ""))
+        add("ok" if self.workspace else "warn", "Working folder",
+            _short_path(self.workspace) if self.workspace else "none \u2014 pick one for project work (/folder)")
+        if _browser is not None:
+            try:
+                kind, exe = _browser.resolve_engine(S.get("browser") or "auto")
+                add("ok", "Browser", "Camoufox" if kind == "camoufox" else exe)
+            except RuntimeError as ex:
+                add("warn", "Browser", f"{ex} \u2014 browse won't work")
+        py = shutil.which("ruff") or shutil.which("pyflakes")
+        add("ok" if py else "warn", "Python linter",
+            py or "none \u2014 pip install --user ruff (catches undefined names before running)")
+        add("ok" if shutil.which("shellcheck") else "warn", "Shell linter",
+            shutil.which("shellcheck") or "none \u2014 install shellcheck (bash -n is used instead)")
+        add("ok" if shutil.which("node") else "warn", "Node",
+            shutil.which("node") or "none \u2014 JavaScript can't be checked or run")
+        shot = next((t for t in ("grim", "spectacle", "scrot", "gnome-screenshot") if shutil.which(t)), None)
+        add("ok" if shot else "warn", "Screenshots", shot or "no capture tool \u2014 install grim (Wayland) or scrot (X11)")
+        voice = shutil.which("piper") or shutil.which("espeak-ng")
+        add("ok" if voice else "warn", "Voice", voice or "no piper or espeak-ng \u2014 replies can't be read aloud")
+        if self._mcp is not None:
+            st = self._mcp.status()
+            bad = [(n, d) for n, state, d in st if state in ("failed", "error")]
+            add("fail" if bad else "ok", "MCP servers",
+                ("none configured" if not st else
+                 ", ".join(f"{n} {state}" for n, state, _d in st))
+                + (f" \u2014 {bad[0][0]}: {bad[0][1]}" if bad else ""))
+        try:
+            free = shutil.disk_usage(str(Path.home())).free / 1e9
+            add("ok" if free > 2 else "warn", "Disk", f"{free:.1f} GB free in your home"
+                + ("" if free > 2 else " \u2014 low; builds and downloads may fail"))
+        except OSError:
+            pass
+        if _crashlog is not None:
+            errs = _crashlog.recent(3)
+            add("warn" if errs else "ok", "Errors (7 days)",
+                (f"{len(errs)} recent \u2014 latest {errs[0][0]}: {errs[0][2][:140]}  "
+                 f"(log: {_short_path(_crashlog.log_path())})") if errs
+                else "none logged")
+        return rows
+
+    def run_doctor(self):
+        """/doctor: one card that says what works and how to fix what doesn't."""
+        rows = self.doctor_checks()
+        card, head, body, foot = self._card_shell(
+            "DOCTOR", lambda: "\n".join(f"[{st}] {n}: {d}" for st, n, d in rows))
+        bad = sum(1 for st, _n, _d in rows if st != "ok")
+        pill = self._pill(f"{bad} to look at" if bad else "all good", "wait" if bad else "ok")
+        head.insert_child_after(pill, head.get_first_child())
+        grid = Gtk.Grid(column_spacing=12, row_spacing=6)
+        icon = {"ok": ("\u2713", "plan-tick"), "warn": ("!", "doctor-warn"), "fail": ("\u2717", "doctor-fail")}
+        api_detail = None
+        for i, (st, name, detail) in enumerate(rows + [("warn", "API", "checking\u2026")]):
+            ic, css = icon[st]
+            il = Gtk.Label(label=ic); il.add_css_class(css)
+            nl = Gtk.Label(label=name, xalign=0); nl.add_css_class("doctor-name")
+            dl = Gtk.Label(label=detail, xalign=0, wrap=True, hexpand=True, selectable=True)
+            dl.add_css_class("dim"); _wrap_anywhere(dl)
+            grid.attach(il, 0, i, 1, 1); grid.attach(nl, 1, i, 1, 1); grid.attach(dl, 2, i, 1, 1)
+            if name == "API":
+                api_detail, api_icon = dl, il
+        body.append(grid)
+        self._log_pin(card)
+        key, base = self.backend.key(), self.backend.base()
+
+        def work():
+            if not key:
+                return ("fail", "no key to check")
+            try:
+                ok, msg = _pricing.fetch_balance(base, key, opener=_config.api_opener())
+            except Exception as ex:
+                ok, msg = False, str(ex)
+            return ("ok" if ok else "fail", f"reachable \u00b7 balance {msg}" if ok
+                    else f"{msg} \u2014 check the key and your connection")
+
+        def done(res):
+            st, text = res
+            try:
+                api_detail.set_text(text)
+                api_icon.set_text(icon[st][0])
+                for c in ("plan-tick", "doctor-warn", "doctor-fail"):
+                    api_icon.remove_css_class(c)
+                api_icon.add_css_class(icon[st][1])
+            except Exception:
+                pass
+            return False
+        threading.Thread(target=lambda: GLib.idle_add(done, work()), daemon=True).start()
+        return rows
+
+    # ── updates ──
+    UPDATE_STATE = DATA_DIR / "update.json"
+
+    def _update_check(self, force=False):
+        """Once a day: is there a newer Chuck on GitHub? A toast if so."""
+        if _update is None or os.environ.get("CHUCK_NO_UPDATE_CHECK"):
+            return False
+        if not force and (not self.settings.get("check_updates", True)
+                          or not _update.due(self.UPDATE_STATE)):
+            return False
+
+        def work():
+            ok, v = _update.remote_version()
+            if ok:
+                _update.mark_checked(self.UPDATE_STATE, v)
+                if _update.is_newer(v, _config.VERSION):
+                    GLib.idle_add(self._update_toast, v)
+        threading.Thread(target=work, daemon=True, name="update-check").start()
+        return False
+
+    def _update_toast(self, version):
+        try:
+            t = Adw.Toast.new(f"Chuck {version} is out (you have {_config.VERSION})")
+            t.set_button_label("Update")
+            t.set_timeout(0)                      # stays until dismissed
+            t.connect("button-clicked", lambda *_a: self.run_update())
+            self.toasts.add_toast(t)
+        except Exception:
+            self._sys_note(f"Chuck {version} is out — /update installs it.", "dim")
+        return False
+
+    @staticmethod
+    def _asset_dir():
+        return HERE.parent / "assets" if HERE.name == "app" else HERE / "assets"
+
+    def run_update(self):
+        """/update: fetch the newest Chuck, check it, swap it in, offer a restart."""
+        if _update is None:
+            self._sys_note("The updater module is missing — re-run the installer.", "danger")
+            return
+        if getattr(self, "_updating", False):
+            return
+        self._updating = True
+        card, head, body, foot = self._card_shell("UPDATE")
+        pill = self._pill("checking…", "run")
+        head.insert_child_after(pill, head.get_first_child())
+        status = Gtk.Label(label=f"You have v{_config.VERSION}. Looking for a newer one…",
+                           xalign=0, wrap=True)
+        status.add_css_class("dim"); _wrap_anywhere(status)
+        body.append(status)
+        self._log_pin(card)
+
+        def set_pill(text, kind):
+            for k in ("run", "ok", "wait", "fail"):
+                pill.remove_css_class(f"pill-{k}")
+            pill.set_text(text)
+            pill.add_css_class(f"pill-{kind}")
+
+        def progress(line):
+            GLib.idle_add(lambda: (status.set_text(line + "…"), False)[1])
+
+        def work():
+            if getattr(self, "_update_ready", None):
+                return ("ok", f"installed v{self._update_ready}", self._update_ready)
+            ok, v = _update.remote_version()
+            if not ok:
+                return ("fail", v, None)
+            _update.mark_checked(self.UPDATE_STATE, v)
+            if not _update.is_newer(v, _config.VERSION):
+                return ("ok", f"You're on the newest Chuck (v{_config.VERSION}).", None)
+            ok, msg, nv = _update.apply(HERE, self._asset_dir(), log=progress)
+            return ("ok" if ok else "fail", msg, nv)
+
+        def done(res):
+            self._updating = False
+            st, msg, nv = res
+            status.set_text(msg if not nv else
+                            f"{msg[0].upper()}{msg[1:]}. Restart Chuck to use it — "
+                            "this chat is saved and reopens.")
+            set_pill("up to date" if st == "ok" and not nv else
+                     f"v{nv} ready" if nv else "failed", "ok" if st == "ok" else "fail")
+            if nv:
+                self._update_ready = nv
+                rb = Gtk.Button(label="Restart now"); rb.add_css_class("quick")
+                rb.add_css_class("accent-btn"); rb.set_halign(Gtk.Align.START)
+                rb.connect("clicked", lambda *_a: self.restart_app())
+                foot.append(rb)
+                foot.set_visible(True)
+            if st == "fail" and _crashlog is not None:
+                _crashlog.record("update", msg)
+            return False
+        threading.Thread(target=lambda: GLib.idle_add(done, work()), daemon=True,
+                         name="update").start()
+
+    def restart_app(self):
+        """Save everything, then replace this process with a fresh Chuck that
+        reopens the current chat."""
+        chat = self.chat_id
+        self._on_close()
+        argv = [sys.executable, str(HERE / "chucknorris.py")]
+        if chat:
+            os.environ["CHUCK_REOPEN"] = str(chat)
+        try:
+            os.execv(sys.executable, argv)
+        except OSError as ex:
+            self._sys_note(f"Couldn't restart ({ex}) — close and reopen Chuck.", "danger")
+
     # ── git ──
     def _git(self, *args, timeout=15):
         root = self._workroot()
@@ -7647,6 +7872,8 @@ class ChuckWindow(Adw.ApplicationWindow):
         ("/memory", "open the memory panel"),
         ("/export", "save this chat as Markdown"),
         ("/mcp [reload]", "MCP servers and their tools"),
+        ("/doctor", "check your setup: key, model, browser, tools, errors"),
+        ("/update", "install the newest Chuck (then restart)"),
     ]
 
     def _slash(self, text):
@@ -7672,6 +7899,10 @@ class ChuckWindow(Adw.ApplicationWindow):
             self.retry_last()
         elif cmd == "diff":
             self.show_git_diff()
+        elif cmd == "doctor":
+            self.run_doctor()
+        elif cmd == "update":
+            self.run_update()
         elif cmd in ("commit", "review"):
             if not self.workspace:
                 self._sys_note("Pick a working folder first (/folder).", "danger")
@@ -8273,6 +8504,8 @@ class ChuckWindow(Adw.ApplicationWindow):
             # button stuck on Stop and the turn half-dead — which is why a failed
             # first message could take several tries to recover from.
             self._sys_note(f"⚠ couldn't start that turn: {ex}", "danger")
+            if _crashlog is not None:
+                _crashlog.record("turn start", traceback.format_exc())
             self._busy(False)
             self._end_run()
 
@@ -8952,6 +9185,8 @@ class ChuckWindow(Adw.ApplicationWindow):
         try:
             res = _TOOL_REG[tag]["fn"](self, body)
         except Exception as ex:
+            if _crashlog is not None:
+                _crashlog.record(f"tool {tag}", traceback.format_exc())
             self._sys_note(f"\u2717 {tag} failed: {ex}", "danger")
             self._tool_feedback.append(f"[{tag} failed: {ex}]")
             return
@@ -9583,6 +9818,29 @@ class ChuckWindow(Adw.ApplicationWindow):
             ob.connect("clicked", lambda *_a: _open_path(str(_ledger.LEDGER.parent)))
             lr.add_suffix(vb); lr.add_suffix(ob)
             g.add(lr)
+        if _crashlog is not None:
+            g = group(pg, "Error log",
+                      "Errors Chuck hit, with tracebacks — attach this file to a bug report. "
+                      "It never contains your key, settings or chats.")
+            er = Adw.ActionRow(); er.set_title("chuck.log")
+            errs = _crashlog.recent(1, days=3650)
+            er.set_subtitle(_html.escape(_short_path(_crashlog.log_path()) + (
+                f" · last: {errs[0][0]}" if errs else " · empty")))
+            lb = Gtk.Button(label="Open"); lb.add_css_class("quick"); lb.set_valign(Gtk.Align.CENTER)
+            lb.set_sensitive(bool(errs))
+            lb.connect("clicked", lambda *_a: _open_path(str(_crashlog.log_path())))
+            db = Gtk.Button(label="Run /doctor"); db.add_css_class("quick")
+            db.set_valign(Gtk.Align.CENTER)
+
+            def doctor_from_settings(*_a):
+                try:
+                    dlg.close()
+                except Exception:
+                    pass
+                self.run_doctor()
+            db.connect("clicked", doctor_from_settings)
+            er.add_suffix(lb); er.add_suffix(db)
+            g.add(er)
 
         # ── Voice ──
         pg = page("Voice", "audio-speakers-symbolic")
@@ -9626,6 +9884,10 @@ class ChuckWindow(Adw.ApplicationWindow):
         switch(g, "Send the model API through the proxy too", "proxy_api", True,
                sub="With this off your prompts bypass the proxy.", net=True)
         spin(g, "Reuse fetched pages for (s)", "web_cache_seconds", 0, 600, 15, 90)
+        if _update is not None:
+            g = group(pg, "Updates")
+            switch(g, "Check for a new version once a day", "check_updates", True,
+                   sub="Reads one small file from GitHub. /update installs it.")
         g = group(pg, "Reset")
         rr = Adw.ActionRow(); rr.set_title("Reset tuning to defaults")
         rr.set_subtitle("Keeps your key, model, proxy and folders.")
@@ -9671,6 +9933,8 @@ class ChuckApp(Adw.Application):
 
     def do_startup(self):
         Adw.Application.do_startup(self)
+        if _crashlog is not None:
+            _crashlog.install(_config.VERSION)       # errors land in a file you can send
         # Dark, always: the palette is designed dark, and a light system theme
         # would otherwise bring up light libadwaita dialogs over a dark window.
         try:
@@ -9711,7 +9975,18 @@ class ChuckApp(Adw.Application):
             threading.Thread(target=_seed, daemon=True).start()
 
     def do_activate(self):
-        (self.props.active_window or ChuckWindow(self)).present()
+        win = self.props.active_window
+        if win is None:
+            win = ChuckWindow(self)
+            # after /update's restart: reopen the chat that was on screen
+            chat = os.environ.pop("CHUCK_REOPEN", "")
+            path = CHATS_DIR / f"{chat}.json"
+            if re.fullmatch(r"[\w-]+", chat or "") and path.exists():
+                try:
+                    win._load_chat(path)
+                except Exception:
+                    pass
+        win.present()
 
 
 def main():

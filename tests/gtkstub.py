@@ -163,7 +163,13 @@ class GioNS:
     def __getattr__(self, n): return _widget_factory
 
 
+class Grid(Widget):
+    def attach(self, w, *pos):
+        self.append(w)
+
+
 class GtkNS:
+    Grid = Grid
     Box = Label = Button = ToggleButton = CheckButton = Revealer = Widget
     ScrolledWindow = TextView = Overlay = Picture = Spinner = Widget
     EventControllerKey = CssProvider = Widget

@@ -103,13 +103,13 @@ there's nothing to look at.
 
 ### Phase 8 — operations
 
-- [ ] **`/doctor`.** One card checking the API key and balance, the model,
+- [x] **`/doctor`.** One card checking the API key and balance, the model,
       browsers, linters, MCP servers, voice and disk, with the fix for each
       problem.
-- [ ] **Crash log.** Exceptions on the UI thread and in tools are written to
+- [x] **Crash log.** Exceptions on the UI thread and in tools are written to
       `~/.local/state/chucknorris/chuck.log`; Settings opens it; `/doctor`
       shows the latest.
-- [ ] **Update check.** Once a day, compare with the version on GitHub; a
+- [x] **Update check.** Once a day, compare with the version on GitHub; a
       toast when there's a new one; `/update` runs the installer.
 
 ### Phase 9 — proof
