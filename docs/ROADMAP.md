@@ -114,6 +114,72 @@ there's nothing to look at.
 
 ### Phase 9 — proof
 
-- [ ] Tests for every item, deep tests where it touches real processes.
+- [x] Tests for every item, deep tests where it touches real processes.
+- [x] README, CHANGELOG, screenshots on real GTK.
+- [x] Prompt budget re-checked.
+
+## v17 — the next gaps
+
+v16 made Chuck steerable and dependable. What still separates it from the
+best agents: it navigates code by text, not by meaning or by symbol; undo
+covers files it wrote, not everything a command changed; only one task can
+run at a time; desktop apps it builds can be seen but not driven; and MCP
+reaches only local servers.
+
+### Phase 10 — code intelligence
+
+- [ ] **Symbols.** ```def <name>``` and ```refs <name>``` answer "where is this
+      defined / used" through a real language server when one is installed
+      (pyright, typescript-language-server, rust-analyzer, gopls), with the
+      AST/regex map as the fallback.
+- [ ] **Rename.** ```rename <old> <new>``` applies a language server's rename
+      across the project as one checkpointed, revertible change.
+- [ ] **Search by meaning.** ```find <description>``` ranks files and
+      functions by relevance (BM25 over identifiers, docstrings and comments,
+      stdlib only), for "where do we handle retries?" in an unfamiliar repo.
+
+### Phase 11 — safer autonomy
+
+- [ ] **Checkpoints of everything.** Before each step that acts, the working
+      folder is snapshotted into a shadow git repository (yours is never
+      touched). `/rewind` restores files AND conversation to any earlier step,
+      including what a command (a code generator, `npm install`) changed.
+- [ ] **Sandbox mode.** An option to run commands and ```py``` inside
+      bubblewrap: writes only to the project, no network unless allowed, the
+      rest of the system read-only.
+- [ ] **Permission profiles.** Per-folder rules (allow all / ask before writes
+      outside the folder / ask before network / read-only), shown as a chip in
+      the composer.
+
+### Phase 12 — more than one thing at once
+
+- [ ] **Background tasks.** Send a task to the background and keep chatting;
+      it runs in its own chat with its own folder, and a notification says when
+      it's done or needs an answer.
+- [ ] **Resume after a crash.** An in-flight turn's state is saved as it goes;
+      reopening Chuck after a crash or power cut offers to continue it.
+- [ ] **Scheduled tasks.** "Every morning, update the system and tell me what
+      changed": a schedule in Settings, results waiting as a chat.
+
+### Phase 13 — desktop apps it can drive
+
+- [ ] **Accessibility driver.** ```app``` launches a GTK/Qt/Electron app and
+      acts on it through AT-SPI: list the controls, click a button by its
+      name, type into a field, read a label. Desktop apps get the same
+      build–play–fix loop web pages have.
+- [ ] **Voice input.** Push-to-talk with a local whisper.cpp model; nothing
+      leaves the machine.
+
+### Phase 14 — ecosystem
+
+- [ ] **Remote MCP.** Streamable-HTTP MCP servers (with OAuth), MCP resources
+      and prompts, alongside the stdio servers.
+- [ ] **Custom commands.** `.chuck/commands/<name>.md` in a project (or the
+      config folder) becomes `/name`, with `$ARGUMENTS`.
+
+### Phase 15 — proof
+
+- [ ] Tests for every item, real language servers and real AT-SPI where
+      they're installed.
 - [ ] README, CHANGELOG, screenshots on real GTK.
 - [ ] Prompt budget re-checked.

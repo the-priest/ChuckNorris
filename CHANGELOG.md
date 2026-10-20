@@ -1,5 +1,83 @@
 # Changelog
 
+## 16.0.0 — steer it, trust it, keep it running
+
+The second roadmap (`docs/ROADMAP.md`, phases 5–9), shipped item by item with
+tests in `tests/test_v16.py`.
+
+### Steer it and trust it
+
+- **Steer mid-task.** Enter while Chuck works queues your message; it reaches
+  the agent at its next step and shows as a queued bubble until delivered.
+  Undelivered messages go back to the composer on Stop.
+- **Plan mode.** The **Plan** toggle in the composer (or `/plan`): Chuck
+  investigates read-only and proposes a plan card with **Approve & run** and
+  **Revise**. Changing tools are refused until you approve. A proposed plan
+  shows no step as under way.
+- **Retry and edit.** Ctrl+R (or `/retry`) asks the last question again; ↑ in
+  an empty composer edits your last message and resends from there. A retry
+  rewinds that turn's tool results too.
+- A reopened chat now shows what the machine did (tool results, folded)
+  instead of only the conversation.
+
+### The workflow around the code
+
+- **Git:** `/diff` (the working tree as a card, no model call), `/commit`
+  (Chuck stages the right changes and writes the message from the diff) and
+  `/review` (a bug review of the uncommitted diff that changes nothing).
+- **Hooks** in Settings → Agent: a command after every file write (`{path}`,
+  optionally filtered by glob) and one Chuck must pass before he may finish.
+  Results go to the model; a hook that never passes stops after three rounds.
+- **A persistent Python session.** ```` ```py ```` blocks share one
+  interpreter per chat: data loaded once stays loaded, the last value is
+  shown, matplotlib figures come back as images (to the model too, when it
+  can see). Output streams live and tracebacks point at the block. Stop sends
+  Ctrl+C and the variables survive; a kernel that ignores it is killed and
+  the next block says it started fresh. `input()` fails fast. The verifier
+  knows the session's names, so building on an earlier block isn't flagged.
+  ```` ```python ```` stays a one-shot script. A new chat, switching chats or
+  closing Chuck ends the session.
+
+### The web as it really is
+
+- **Pages that refuse a plain fetch are read through the browser.** A bot
+  wall, a 403 for anything that isn't a browser, or a page that is empty
+  without JavaScript is fetched again in Brave, Chromium, Chrome or Camoufox,
+  which waits up to 10 s for the check to clear and reads the article text.
+  A wall that never clears is reported as blocked, not returned as content.
+  At most two browsers at once; 404s aren't retried. It can be turned off.
+- Headless Chromium no longer announces itself as `HeadlessChrome`.
+
+### Operations
+
+- **`/doctor`**: one card checking the key and balance, model, working folder,
+  browser, linters, Node, screenshots, voice, MCP servers, disk and recent
+  errors, each problem with its fix. No model call.
+- **Crash log**: uncaught errors (UI thread and worker threads) and tool
+  failures go to `~/.local/state/chucknorris/chuck.log` with a timestamp,
+  version and traceback; rotates at 1 MB. Never keys, settings or chats.
+  Settings → Agent → Error log opens it.
+- **Updates**: a daily check against GitHub (Settings → General can turn it
+  off) and a toast with **Update**. `/update` installs without sudo: a git
+  clone gets `git pull --ff-only` (local commits are never overwritten); an
+  installed copy downloads one archive, verifies every module, including the
+  ones `config` imports, is present and compiles, then swaps it in.
+  **Restart now** saves the chat and reopens it in the new Chuck.
+
+### Fixes
+
+- Toasts sit over the transcript only, no longer over the composer.
+- "Working on it…" no longer stays on a step that only ran tools.
+- Money shows as `$0.50`, not `$0.500`.
+- An exported chat shows what you typed, not the internal notes prefix.
+- The byline after a fallback names the model that answered.
+- A file card for a write that changed nothing says "no change" and has no
+  Revert.
+- The plan nudge can no longer spend three paid calls on a reply that only
+  talked.
+- Narrow windows: the sidebar collapses below 900 px and secondary header
+  buttons hide below 680 px; the welcome screen reflows instead of clipping.
+
 ## 15.1.0 — Brave and Camoufox
 
 - **Brave is the preferred browser.** Automatic mode looks for Brave first

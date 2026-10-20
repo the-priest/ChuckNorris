@@ -7556,7 +7556,8 @@ class ChuckWindow(Adw.ApplicationWindow):
         cl = Gtk.Label(label=f"{done}/{len(items)}"); cl.add_css_class("plan-head")
         hd.append(hl); hd.append(cl)
         card.append(hd)
-        cur_marked = False
+        state = (entry or {}).get("data", {}).get("approval")
+        cur_marked = state == "pending"           # nothing is under way until it's approved
         for st, t in items:
             row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
             now = st == ">" or (st == " " and not cur_marked)
@@ -7574,7 +7575,6 @@ class ChuckWindow(Adw.ApplicationWindow):
             set_rich(tl, t)                       # `code` and **bold** in a step render
             row.append(il); row.append(tl)
             card.append(row)
-        state = (entry or {}).get("data", {}).get("approval")
         if state == "pending":
             card.add_css_class("plan-proposed")
             bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)

@@ -3,12 +3,12 @@
 # Chuck
 
 **A desktop coding and system agent for Linux, on SiliconFlow models.**
-Runs commands, edits real code, plays its own web apps in a real browser, reads whole repos, speaks MCP, runs sub-agents in parallel, and tells you what it all cost.
+Runs commands, edits real code, plays its own web apps in a real browser, keeps a live Python session, reads whole repos, speaks MCP, runs sub-agents in parallel, plans before it acts when you ask, and tells you what it all cost.
 
-![version](https://img.shields.io/badge/version-15.1.0-8b5cf6?style=flat-square&labelColor=0c0c10)
+![version](https://img.shields.io/badge/version-16.0.0-8b5cf6?style=flat-square&labelColor=0c0c10)
 ![gtk](https://img.shields.io/badge/GTK4-libadwaita-8b5cf6?style=flat-square&labelColor=0c0c10)
 ![python](https://img.shields.io/badge/Python-3.11_·_3.12_·_3.13-8b5cf6?style=flat-square&labelColor=0c0c10)
-![suites](https://img.shields.io/badge/test_suites-21-2ea043?style=flat-square&labelColor=0c0c10)
+![suites](https://img.shields.io/badge/test_suites-22-2ea043?style=flat-square&labelColor=0c0c10)
 ![deps](https://img.shields.io/badge/runtime_deps-stdlib_+_GTK-2ea043?style=flat-square&labelColor=0c0c10)
 ![licence](https://img.shields.io/badge/licence-MIT-8b5cf6?style=flat-square&labelColor=0c0c10)
 
@@ -53,6 +53,7 @@ Click the folder chip (or **Ctrl+O**) to point the session at a project. Command
 | `edit` | Aider-style `SEARCH/REPLACE` blocks. Only the changed lines are sent, so it's cheap on output tokens. All-or-nothing, whitespace-tolerant, re-verified after the edit. |
 | `write` | New files of any length. A reply that hits the output limit is **continued automatically** and stitched (repeated overlap trimmed) before the file is written. |
 | `bash` · `python` · `node` | One step at a time, auto-verified before it runs (real defects only, never style), real exit code back. Output streams live into the card. `cd` carries to the next command, like a terminal. |
+| `py` | **One Python that lives as long as the chat**, notebook-style: load data once and keep using it, see the last value, get matplotlib figures back as images. |
 | `patch` | A multi-file unified diff, applied all-or-nothing. Hunks are found by their context, so wrong line numbers don't matter. |
 | `browse` | A real headless Chromium. Load a page or file, click, type, press keys, run JS. Back come uncaught errors with file and line, failed requests, the page text and a screenshot. |
 | `diagnose` | LSP-lite: lint and type-check files on disk with whatever is installed (ruff, mypy, pyright, tsc, eslint, shellcheck, cargo, go vet). |
@@ -65,7 +66,7 @@ Click the folder chip (or **Ctrl+O**) to point the session at a project. Command
 | `runtests` · `package` · `tree` | Run the project's own tests, zip the result, show what was built. |
 | `screenshot` · `look` | Chuck **sees**: the screen, or any image (a page rendered with headless Chromium, a plot, a mockup). Build a UI, look at it, fix it. |
 | `task` | **Parallel sub-agents.** Each `task` block is a read-only sub-agent with its own model loop. Several run at once and report back; only their summaries enter the main context. |
-| `search` · `fetch` | Live web research across SearXNG instances, with sources cited. |
+| `search` · `fetch` | Live web research across SearXNG instances, with sources cited. A page that blocks a plain fetch (a bot check, or nothing until JavaScript runs) is read through the browser instead. |
 | `remember` · `forget` | Long-term memory (below). |
 | `mcp` | Any Model Context Protocol server's tools (below). |
 
@@ -73,13 +74,29 @@ Click the folder chip (or **Ctrl+O**) to point the session at a project. Command
 
 **Sub-agents are read-only by design.** Parallel writers would trample each other's edits and race each other's sudo prompts. Parallel readers can't. They survey, research and report; the main agent acts, one verified step at a time.
 
+## Steer it, plan it, retry it
+
+- **Talk while it works.** Press Enter mid-task and your message is queued and delivered at the agent's next step. A *"not that file"* lands without waiting for the run to finish.
+- **Plan mode.** Toggle **Plan** in the composer (or `/plan`). Chuck investigates read-only and proposes a plan card. Nothing changes until you press **Approve & run**, and **Revise** sends it back.
+- **Retry and edit.** **Ctrl+R** asks the last question again. **↑** in an empty composer edits your last message and resends from there.
+
+<img src="assets/screenshots/plan-mode.png" alt="Plan mode: Chuck read the game, then proposed a four-step plan card with Approve & run and Revise" width="100%">
+
+## The workflow around the code
+
+- **Git.** `/diff` shows the working tree as a card. `/commit` has Chuck stage the right changes and write the message from the diff. `/review` has him review the uncommitted diff for bugs before you push.
+- **Hooks.** Settings → Agent takes a command to run after every file write (a formatter, with `{path}`, optionally only for matching files) and one he must pass before he may finish (`pytest -q`, a linter). Their results go back to the model, so he fixes what they find.
+- **A Python session.** ```` ```py ```` blocks share one interpreter per chat. Load a dataset once, then explore it block by block. Stop interrupts a long loop and keeps the variables, and a figure comes back as an image he can look at. ```` ```python ```` stays a fresh one-shot script.
+
+<img src="assets/screenshots/python-session.png" alt="Two PYTHON SESSION cards: the first loads a CSV, the second plots it, with the chart shown in the card" width="100%">
+
 ## It plays what it builds
 
 Web pages and games get opened in a real browser and *played*: arrow keys pressed, buttons clicked, state read back with JavaScript. The BROWSER card shows you what it found, so a typo that throws on every frame never ships as "done".
 
 <img src="assets/screenshots/browse.png" alt="A BROWSER card: one uncaught ReferenceError with its line, the key presses and JS result, and a screenshot of the game" width="100%">
 
-**Which browser:** Brave if you have it, otherwise Chromium or Chrome. They all speak the DevTools protocol Chuck drives directly, with no extra dependencies. Or choose **[Camoufox](https://camoufox.com)**, a Firefox build that websites can't fingerprint, in Settings → Agent → Browser. It's for research on sites that block automation. Install it with `CHUCK_CAMOUFOX=1 ./install.sh`, or `pip install --user -U 'camoufox[geoip]' && python3 -m camoufox fetch`.
+**Which browser:** Brave if you have it, otherwise Chromium or Chrome. They all speak the DevTools protocol Chuck drives directly, with no extra dependencies. Or choose **[Camoufox](https://camoufox.com)**, a Firefox build that websites can't fingerprint, in Settings → Agent → Browser. It's for research on sites that block automation. Research also falls back to the browser by itself: a page that refuses a plain fetch is read in it, after its bot check has cleared. Install Camoufox with `CHUCK_CAMOUFOX=1 ./install.sh`, or `pip install --user -U 'camoufox[geoip]' && python3 -m camoufox fetch`.
 
 Long builds stream into their card while they run, with a clock, and a finished log opens on its last lines, where the errors are.
 
@@ -168,6 +185,11 @@ All of it is visible, searchable, addable and deletable in the Memory panel.
 - **A model is down?** After its retries, that request is answered by a fallback model (automatic, or your choice in Settings), and the chat says so.
 - **Watching spend?** Set a per-chat spending cap. When a chat reaches it, the task pauses and asks before spending more.
 - **Esc** stops the turn *and* the command it was running, whole process tree included.
+- **`/doctor`** checks your setup in one card: key and balance, model, browser, linters, screenshots, voice, MCP servers, disk, and recent errors, each with the fix.
+- **A crash log.** Errors on the UI thread, in worker threads and in tools are written to `~/.local/state/chucknorris/chuck.log` with their tracebacks (never keys or chats), so a bug report has something in it. Settings opens it.
+- **Updates.** Once a day Chuck checks GitHub for a newer version and offers it. `/update` installs it without sudo. A git clone gets a fast-forward pull, and an installed copy is downloaded, checked and swapped in whole. **Restart now** reopens your chat.
+
+<img src="assets/screenshots/doctor.png" alt="The DOCTOR card: a row per check with a green tick or an amber warning and the fix" width="100%">
 
 ## Safety that doesn't get in your way
 
@@ -178,7 +200,8 @@ Commands run on their own; that's the point of an agent. **CRITICAL** ones (disk
 | key | action |
 |---|---|
 | **Tab** | switch Agent / Chat |
-| **Enter** · **Shift+Enter** | send · new line |
+| **Enter** · **Shift+Enter** | send (or, while it works, steer) · new line |
+| **Ctrl+R** · **↑** | retry the last answer · edit your last message |
 | **Ctrl+V** | paste text, an image, or copied files |
 | **Ctrl+O** | working folder |
 | **Ctrl+N** · **Ctrl+B** · **Ctrl+,** | new chat · chats sidebar · settings |
@@ -211,7 +234,7 @@ Arch / CachyOS first-class; apt and dnf supported. The installer handles GTK4 + 
 ./run_tests.sh
 ```
 
-Twenty-one suites run headless against a stubbed toolkit and drive the real window end to end. They cover whole conversations, both modes, edits in a real folder, paged reads of a 12,000-line file, a file written across two cut-off replies, parallel sub-agents, images reaching the model as images, cache-hit pricing, memory updates and scopes, an agent that stops early or never stops, late streams from a stopped turn, undo and background jobs, a README whose example must not run, the critical gate, sudo storms, orphaned processes, and the ledger chain. `test_deep.py` runs whole sessions with real processes and ports, plus 180 seeded random model replies that must never hang the app, run something they shouldn't, or write outside the folder. The UI itself was checked by rendering every screen on real GTK 4.14 / libadwaita 1.5. The screenshots above are those renders.
+Twenty-two suites run headless against a stubbed toolkit and drive the real window end to end. They cover whole conversations, both modes, edits in a real folder, paged reads of a 12,000-line file, a file written across two cut-off replies, parallel sub-agents, images reaching the model as images, cache-hit pricing, memory updates and scopes, an agent that stops early or never stops, late streams from a stopped turn, undo and background jobs, steering mid-task, plan approval, git and hooks, a Python session that survives Stop, bot walls on a local site read through real Chromium, updates that refuse a broken download, a README whose example must not run, the critical gate, sudo storms, orphaned processes, and the ledger chain. `test_deep.py` runs whole sessions with real processes and ports, plus 180 seeded random model replies that must never hang the app, run something they shouldn't, or write outside the folder. The UI itself was checked by rendering every screen on real GTK 4.14 / libadwaita 1.5. The screenshots above are those renders.
 
 ## Being straight with you
 
