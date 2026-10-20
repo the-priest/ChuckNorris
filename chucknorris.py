@@ -162,7 +162,7 @@ Act:
 =======
 <replacement>
 >>>>>>> REPLACE```
-(A file containing ``` fences: wrap the block in four backticks. Any length is fine.)
+(A file containing ``` fences: wrap the block in four backticks. Any length is fine. Many files at once: ```patch``` + a unified diff, all-or-nothing.)
 Background: ```bg <name>
 <command>``` (servers, watchers; then ```logs <name>```, ```kill <name>```). ```undo``` reverts your last file change (```undo all```: this task's). ```changes``` shows your diff this task. ```diagnose [paths]``` lints + type-checks files on disk. ```open <path|url>``` shows the user a result.
 Browser: ```browse <url|file> [WxH]
@@ -2260,7 +2260,7 @@ class GlyphField:
             cr.show_glyphs(glyphs)
 
 
-_FILE_FENCE = re.compile(r"^[ \t]*(`{3,4})(write|edit)(?![A-Za-z])[ \t]*(.*)$")
+_FILE_FENCE = re.compile(r"^[ \t]*(`{3,4})(write|edit|patch)(?![A-Za-z])[ \t]*(.*)$")
 _DOC_EXT = re.compile(r"\.(md|markdown|mdx|rst|txt|adoc|html?|ipynb|org)$", re.IGNORECASE)
 
 
@@ -2291,6 +2291,21 @@ def file_blocks(text):
         j = i + 1
         if head.endswith(fence):                     # ```write a.py``` — empty, ignore
             i += 1
+            continue
+        if tag == "patch":
+            # A diff: every body line starts with ' ', '+' or '-', so the ONLY
+            # line that can be exactly the fence is the closing one — no depth
+            # counting, no four backticks needed, even for a README's ``` lines.
+            k = j
+            while k < len(lines) and lines[k].rstrip() != fence:
+                k += 1
+            if k >= len(lines):
+                i += 1
+                continue
+            body = "\n".join(([head] if head else []) + lines[j:k]) + "\n"
+            out.append({"tag": "patch", "path": "", "body": body, "ambiguous": False,
+                        "start": offs[i], "end": min(offs[k] + len(lines[k]), len(text))})
+            i = k + 1
             continue
         if not head:                                 # path on the next line
             if j >= len(lines):
@@ -6319,6 +6334,43 @@ class ChuckWindow(Adw.ApplicationWindow):
             return _diagnose.report(found, summary, notes, label)
         return work
 
+    @tool("patch", acts=True, cap=0)
+    def _t_patch(self, body):
+        """```patch``` with a unified diff (git diff style), any number of files:
+        applied all-or-nothing. Hunks are located by their context, so slightly
+        wrong line numbers don't matter; a hunk that doesn't match changes
+        NOTHING anywhere. New files (--- /dev/null) and deletions (+++ /dev/null)
+        work; every file is checkpointed like an edit."""
+        p = self._project_or_note()
+        if p is None:
+            return "[patch: no working folder]"
+        try:
+            plan = _builder.plan_patch(p, body)
+        except (ValueError, OSError) as ex:
+            self._sys_note(f"\u2717 patch not applied: {ex}", "danger")
+            return f"[patch NOT applied, nothing was changed: {ex}]"
+        done, bad = [], []
+        for rel, before, after in plan:
+            path = _builder._safe(p, rel)
+            if after is None:
+                ok, msg = _builder.delete_file(p, rel)
+                if ok:
+                    self._record_change(path, rel, before, "", "rm")
+            else:
+                ok, msg, written = _builder.write_file(p, rel, after)
+                if ok:
+                    self._record_change(written, rel, before, after,
+                                        "write" if before is None else "edit")
+                    if self._CODE_EXT.search(rel):
+                        self._dirty.add(rel)
+                        issue = self._verify_file(rel, after)
+                        if issue:
+                            bad.append(f"{rel} does not verify:\n{issue}")
+            (done if ok else bad).append(rel if ok else f"{rel}: {msg}")
+        self._sys_note(f"\u2713 patched {len(done)} file(s)", "ok" if not bad else "danger")
+        return (f"[patch applied to {len(done)} file(s): {', '.join(done)}]"
+                + ("\n[" + "\n".join(bad) + "]" if bad else ""))
+
     @tool("changes", bare=True, cap=1)
     def _t_changes(self, body):
         """```changes``` — every file this task changed, net of reverts, as one
@@ -6329,10 +6381,11 @@ class ChuckWindow(Adw.ApplicationWindow):
         for c in self._changes:
             if c["reverted"] or (not scope_all and c["turn"] != self._turn_no):
                 continue
+            after = None if c["kind"] == "rm" else c["after"]
             if c["path"] in net:
-                net[c["path"]][2] = c["after"]
+                net[c["path"]][2] = after
             else:
-                net[c["path"]] = [c["rel"], c["before"], c["after"]]
+                net[c["path"]] = [c["rel"], c["before"], after]
         self._sys_note("\U0001F4CB reviewing the changes", "dim")
         if not net:
             return "[changes: no file changes " + ("in this chat]" if scope_all else
@@ -7434,6 +7487,8 @@ class ChuckWindow(Adw.ApplicationWindow):
         for rtag, spec in _TOOL_REG.items():
             items = grab(rtag)[:spec["cap"]] or ([""] if spec["bare"] and has(rtag) else [])
             reg_calls += [(rtag, b) for b in items]
+        # ```patch``` bodies come from the fence-aware parser, like write/edit
+        reg_calls += [("patch", b["body"]) for b in fblocks if b["tag"] == "patch"][:4]
 
         blocked_agent = False
         if not self.agent_mode:

@@ -622,3 +622,114 @@ def diff_lines(before, after, rel, max_lines=800):
     if len(d) > max_lines:
         d = d[:max_lines] + [f"… {len(d) - max_lines} more diff lines"]
     return d, added, removed
+
+
+# ── unified diffs: several files, one atomic change ─────────────────────────
+_HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+
+
+def _diff_path(p):
+    p = p.strip().split("\t")[0].strip()
+    if p == "/dev/null":
+        return None
+    if p.startswith(("a/", "b/")):
+        p = p[2:]
+    return p
+
+
+def parse_unified_diff(text):
+    """-> [{'old': path|None, 'new': path|None, 'hunks': [(old_start, [lines])]}].
+    Raises ValueError on a diff it can't read."""
+    files, cur, hunk = [], None, None
+    lines = (text or "").splitlines()
+    i = 0
+    while i < len(lines):
+        ln = lines[i]
+        if ln.startswith("--- ") and i + 1 < len(lines) and lines[i + 1].startswith("+++ "):
+            cur = {"old": _diff_path(ln[4:]), "new": _diff_path(lines[i + 1][4:]), "hunks": []}
+            files.append(cur)
+            hunk = None
+            i += 2
+            continue
+        m = _HUNK.match(ln)
+        if m:
+            if cur is None:
+                raise ValueError("a hunk before any ---/+++ file header")
+            hunk = (int(m.group(1)), [])
+            cur["hunks"].append(hunk)
+        elif hunk is not None and (ln.startswith((" ", "+", "-")) or ln == ""):
+            hunk[1].append(ln if ln else " ")
+        elif ln.startswith("\\"):                       # "\ No newline at end of file"
+            pass
+        elif ln.startswith(("diff ", "index ", "new file", "deleted file", "similarity",
+                            "rename ", "old mode", "new mode")):
+            pass
+        i += 1
+    if not files:
+        raise ValueError("no ---/+++ file headers found")
+    return files
+
+
+def _find(hay, needle, near, loose):
+    """Index of needle (a list of lines) in hay, nearest to `near`. -1 if absent;
+    -2 if it occurs more than once at the same distance (ambiguous)."""
+    if not needle:
+        return min(max(near, 0), len(hay))
+    norm = (lambda s: s.rstrip()) if not loose else (lambda s: " ".join(s.split()))
+    n = [norm(x) for x in needle]
+    hits = [i for i in range(len(hay) - len(n) + 1)
+            if norm(hay[i]) == n[0] and [norm(x) for x in hay[i:i + len(n)]] == n]
+    if not hits:
+        return -1
+    hits.sort(key=lambda i: abs(i - near))
+    if len(hits) > 1 and abs(hits[0] - near) == abs(hits[1] - near):
+        return -2
+    return hits[0]
+
+
+def apply_hunks(content, hunks, label):
+    """Apply hunks to text. -> new text. Raises ValueError naming the hunk."""
+    had_nl = content.endswith("\n") if content else True
+    lines = content.splitlines() if content else []
+    offset = 0
+    for k, (start, body) in enumerate(hunks, 1):
+        old = [x[1:] for x in body if x[:1] in (" ", "-")]
+        new = [x[1:] for x in body if x[:1] in (" ", "+")]
+        near = max(0, start - 1 + offset)
+        at = _find(lines, old, near, loose=False)
+        if at == -1:
+            at = _find(lines, old, near, loose=True)
+        if at == -1:
+            raise ValueError(f"{label}: hunk {k} doesn't match the file (its context and "
+                             "removed lines must be the file's current lines — read it again)")
+        if at == -2:
+            raise ValueError(f"{label}: hunk {k} matches more than one place — add context")
+        lines[at:at + len(old)] = new
+        offset += len(new) - len(old)
+    return "\n".join(lines) + ("\n" if (had_nl and lines) else "")
+
+
+def plan_patch(root, text):
+    """Work out a whole diff without touching disk.
+    -> [(rel, before|None, after|None)] — after None means delete. Raises ValueError."""
+    out = []
+    for f in parse_unified_diff(text):
+        rel = f["new"] or f["old"]
+        if rel is None:
+            raise ValueError("a file with /dev/null on both sides")
+        path = _safe(root, rel)
+        before = path.read_text(encoding="utf-8") if path.is_file() else None
+        if f["new"] is None:                                     # deletion
+            if before is None:
+                raise ValueError(f"{rel}: can't delete — it doesn't exist")
+            out.append((rel, before, None))
+            continue
+        if f["old"] is None and before is not None and f["hunks"]:
+            # a "new file" that exists: apply as an edit only if it's a full rewrite
+            raise ValueError(f"{rel}: already exists — diff it against its current content")
+        after = apply_hunks(before or "", f["hunks"], rel)
+        if f["old"] and f["new"] and f["old"] != f["new"]:     # a rename
+            out.append((f["old"], _safe(root, f["old"]).read_text(encoding="utf-8")
+                        if _safe(root, f["old"]).is_file() else None, None))
+        out.append((rel, before, after))
+    return out

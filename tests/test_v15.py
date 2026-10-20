@@ -305,6 +305,73 @@ type_and_send(w, "no folder")
 check("no working folder" in hist_text(w), "with no folder it says so")
 
 # ═══════════════════════════════════════════════════════════════════════════
+print("\n--- patch: multi-file unified diffs, all-or-nothing ---")
+ws = folder("patch")
+(ws / "app.py").write_text("def greet(name):\n    return 'hi ' + name\n\n\nprint(greet('x'))\n")
+(ws / "README.md").write_text("# App\n\n```bash\npython3 app.py\n```\n")
+(ws / "old.txt").write_text("remove me\n")
+diff = """```patch
+--- a/app.py
++++ b/app.py
+@@ -90,2 +90,2 @@
+ def greet(name):
+-    return 'hi ' + name
++    return f'Hello, {name}!'
+--- a/README.md
++++ b/README.md
+@@ -3,3 +3,4 @@
+ ```bash
+ python3 app.py
++touch PWNED_BY_PATCH
+ ```
+--- /dev/null
++++ b/lib/util.py
+@@ -0,0 +1,2 @@
++def double(x):
++    return 2 * x
+--- a/old.txt
++++ /dev/null
+@@ -1 +0,0 @@
+-remove me
+```"""
+w = agent([diff, "```bash\npython3 app.py\n```", "Patched and ran."], ws)
+type_and_send(w, "refactor")
+h = hist_text(w)
+check("Hello, {name}!" in (ws / "app.py").read_text(), "a hunk with wrong line numbers lands by its context")
+check("touch PWNED_BY_PATCH" in (ws / "README.md").read_text() and not (ws / "PWNED_BY_PATCH").exists(),
+      "a diff touching a README's ``` lines applies, and its content never runs")
+check((ws / "lib" / "util.py").read_text() == "def double(x):\n    return 2 * x\n", "a new file is created")
+check(not (ws / "old.txt").exists(), "a deleted file is removed")
+check("patch applied to 4 file(s)" in h, "the model hears what was applied")
+check("Hello, x!" in h, "and the patched code runs")
+check(len([x for x in w.msgbox.walk() if x.get_label() == "Revert"]) == 4, "each file got a Revert card")
+
+before = {f: (ws / f).read_text() for f in ("app.py", "README.md")}
+bad = """```patch
+--- a/app.py
++++ b/app.py
+@@ -1,2 +1,2 @@
+ def greet(name):
+-    return f'Hello, {name}!'
++    return 'changed'
+--- a/README.md
++++ b/README.md
+@@ -1 +1 @@
+-# A heading that is not there
++# New
+```"""
+w.backend.replies = [bad, "It didn't apply."]
+type_and_send(w, "bad patch")
+check({f: (ws / f).read_text() for f in before} == before,
+      "one hunk that doesn't match changes NOTHING, in any file")
+check("patch NOT applied, nothing was changed" in hist_text(w) and "README.md: hunk 1" in hist_text(w),
+      "and the model is told which hunk failed")
+w.backend.replies = ["```changes all```", "Ok."]
+type_and_send(w, "review all")
+check("old.txt (deleted" in hist_text(w), "changes reports a deleted file as deleted")
+check_finished(w, "patch")
+
+# ═══════════════════════════════════════════════════════════════════════════
 print(f"\nTOTAL V15 FAILURES: {fails + len(FAILS)}")
 assert fails == 0 and not FAILS, "v15 regressions present"
 print("ALL V15 TESTS PASSED")

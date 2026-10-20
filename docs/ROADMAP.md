@@ -36,7 +36,7 @@ without a network, and visible to the user as a card.
       shellcheck, cargo check, go vet). Real errors only, with file:line.
 - [x] **`changes`**: every file this task changed, with a compact diff, so
       the agent can review its own work before calling it done.
-- [ ] **`patch`**: apply a multi-file unified diff atomically, with
+- [x] **`patch`**: apply a multi-file unified diff atomically, with
       checkpoints. Big refactors in one block.
 - [ ] **Live command output.** Long builds stream into their card as they
       run, instead of appearing at the end.
