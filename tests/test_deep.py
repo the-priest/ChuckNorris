@@ -21,6 +21,7 @@ run something it shouldn't, or crash?"
   7. code is never withheld over style
   8. parallel sub-agents, and they really are read-only
   9. a 40-turn session: the payload stays bounded, the chat reloads intact
+ 9b. a web game written, played in a real browser, debugged, played again
  10. fuzz, Agent mode: 120 random replies — always finishes, never runs
      anything it shouldn't, never writes outside the folder
  11. fuzz, Chat mode: nothing is ever run or written
@@ -382,6 +383,39 @@ check([m["content"] for m in w2.history[1:]] == [m["content"] for m in w.history
 check(w2.workspace == ws, "including its working folder", w2.workspace)
 
 # ═══════════════════════════════════════════════════════════════════════════
+print("\n--- 9b. a web game, built and debugged in a real browser ---")
+from chucknorris_ext import browser as _br
+if _br.find_chrome():
+    ws = folder("webgame")
+    buggy = ("<!doctype html><title>Dodge</title><canvas id=c width=200 height=100></canvas>"
+             "<p id=score>0</p><script>\nlet score = 0;\n"
+             "addEventListener('keydown', e => { if (e.key === 'ArrowRight') { score++; "
+             "document.getElementById('scroe').textContent = score; } });\n</script>\n")
+    w = agent([
+        "Writing the game.\n```write index.html\n" + buggy + "```",
+        "Playing it.\n```browse index.html 640x400\npress ArrowRight\n```",
+        "A typo: `scroe`. Fixing.\n```edit index.html\n<<<<<<< SEARCH\n"
+        "document.getElementById('scroe')\n=======\ndocument.getElementById('score')\n"
+        ">>>>>>> REPLACE\n```",
+        "Playing it again.\n```browse index.html 640x400\npress ArrowRight ArrowRight\n"
+        "eval document.getElementById('score').textContent\n```",
+        "```changes```",
+        "Done: arrow keys score points, no JS errors.",
+    ], ws)
+    type_and_send(w, "make a tiny dodge game in html")
+    h = hist_text(w)
+    first, second = (h.split("BROWSE ")[1:3] + ["", ""])[:2]
+    check("Uncaught TypeError" in first and "index.html:3" in first,
+          "the first play-through catches the real JS error with its line", first[:400])
+    check("JS errors (0): none" in second and '→ "2"' in second,
+          "after the fix: no errors, and two key presses score 2", second[:400])
+    check("CHANGES (1 file(s))" in h and "index.html (new" in h, "the agent reviewed its own diff")
+    check("nothing ran after the last change" not in h, "browsing counted as verifying the change")
+    check_finished(w, "web game")
+else:
+    print("  [SKIP] no Chromium here")
+
+# ═══════════════════════════════════════════════════════════════════════════
 print("\n--- 10. fuzz, Agent mode: 120 random replies ---")
 rng = random.Random(1337)
 fz = folder("fuzz")
@@ -422,6 +456,18 @@ FRAGMENTS = [
     lambda: "🚀" * 200,
     lambda: "```task\nlook at notes.md\n```",
     lambda: "```bg tick\nsleep 0.2\n```",
+    lambda: "```diagnose```",
+    lambda: "```diagnose src/f1.py```",
+    lambda: "```changes```",
+    lambda: "```changes all```",
+    lambda: "```patch\n--- a/src/f1.py\n+++ b/src/f1.py\n@@ -1 +1 @@\n-print(1)\n+print(2)\n```",
+    lambda: "```patch\nthis is not a diff\n```",
+    lambda: "```patch\n--- a/../../etc/passwd\n+++ b/../../etc/passwd\n@@ -1 +1 @@\n-x\n+y\n```",
+    lambda: "```patch\n--- /dev/null\n+++ b/README2.md\n@@ -0,0 +1,3 @@\n+```bash\n+touch PWNED_PATCH\n+```\n```",
+    lambda: '```mcp fake.add\n{"a": 1, "b": 2}\n```',
+    lambda: "```mcp fake.add\nnot json\n```",
+    lambda: "```mcp nobody.tool```",
+    lambda: "```browse nope_missing.html```",
 ]
 
 
@@ -429,6 +475,10 @@ def fuzz_sub(messages):
     return "REPORT: nothing to see."
 
 
+cn.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+(cn.CONFIG_DIR / "mcp.json").write_text(json.dumps({"mcpServers": {"fake": {
+    "command": sys.executable, "args": [str(Path(__file__).with_name("fake_mcp_server.py"))]}}}))
+seen_tools = {}
 for i in range(120):
     replies = []
     for _ in range(rng.randint(1, 3)):
@@ -445,14 +495,25 @@ for i in range(120):
         fail_msg = f"iteration {i} raised {type(ex).__name__}: {ex}"
         check(False, "a fuzz iteration never raises", fail_msg)
         break
+    for key, needle in (("mcp", "[mcp fake.add OK]"), ("patch", "patch applied"),
+                        ("patch_refused", "patch NOT applied"), ("diagnose", "DIAGNOSE "),
+                        ("changes", "CHANGES (")):
+        if needle in hist_text(w):
+            seen_tools[key] = seen_tools.get(key, 0) + 1
     w._stop_all_jobs()
+    w._on_close()                     # stops its MCP server too
     before = len(FAILS)
     check_finished(w, f"fuzz {i}")
     check_history(w, f"fuzz {i}")
     if len(FAILS) > before:
         print("     replies were:", [r[:120] for r in replies])
         break
-bad = [p for p in ("CRIT_RAN", "CRIT_RAN2", "PWNED_FUZZ", "PWNED_FUZZ2") if (fz / p).exists()]
+(cn.CONFIG_DIR / "mcp.json").unlink()
+check(all(seen_tools.get(k) for k in ("mcp", "patch", "patch_refused", "diagnose", "changes")),
+      "the fuzz really exercised mcp, patch (applied and refused), diagnose and changes",
+      seen_tools)
+bad = [p for p in ("CRIT_RAN", "CRIT_RAN2", "PWNED_FUZZ", "PWNED_FUZZ2", "PWNED_PATCH")
+       if (fz / p).exists()]
 check(not bad, "120 iterations: no CRITICAL command and no file's contents ever ran", bad)
 check((fz / "fuzz_ok.txt").exists(), "while ordinary commands did run")
 check(not (tmp / "escape.txt").exists() and not Path("/etc/chuck_should_never_exist").exists(),
