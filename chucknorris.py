@@ -195,6 +195,28 @@ _AGENT_TAGS = ("skill", "runskill", "read", "grep", "glob", "map", "edit", "chec
                "tree", "package", "runtests", "write", "rmfile", "junk", "ledger", "plan",
                "screenshot", "look", "task", "bg", "logs", "kill", "undo", "open")
 
+# ── tool registry ───────────────────────────────────────────────────────────
+# Newer tools register here instead of being threaded through _finalise by
+# hand (eight edits per tool, and forgetting one was a bug every time). A
+# handler takes the block body and returns either a feedback string (done
+# now) or a zero-argument callable, which runs on a worker thread and returns
+# the feedback. It may build cards before returning: it runs on the UI thread.
+#   agent_only     never parsed in Chat mode (and its block is hidden there)
+#   acts           changes something, so it is dropped when the turn is told
+#                  to stop acting (step budget spent, ambiguous file block)
+#   after_actions  would observe the world, so it is held back when a command
+#                  runs in the same reply (it would see the state before it)
+#   bare           may appear with no body: ```changes```
+_TOOL_REG = {}
+
+
+def tool(tag, agent_only=True, acts=False, cap=4, after_actions=False, bare=False):
+    def deco(fn):
+        _TOOL_REG[tag] = {"fn": fn, "agent_only": agent_only, "acts": acts, "cap": cap,
+                          "after_actions": after_actions, "bare": bare}
+        return fn
+    return deco
+
 # ── theme ────────────────────────────────────────────────────────────────────
 # Near-black neutral surfaces with ONE violet accent. The accent is reserved for
 # what is interactive or live (send, the active mode, focus, running steps), so
@@ -924,6 +946,40 @@ def prime_context():
     threading.Thread(target=gather_context, daemon=True).start()
 
 
+_INSTRUCTION_FILES = ("CHUCK.md", "AGENTS.md", "CLAUDE.md", ".chuck/instructions.md")
+_INSTRUCTION_CAP = 12000
+
+
+def _read_capped(path, cap=_INSTRUCTION_CAP):
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return ""
+    if len(text) > cap:
+        text = text[:cap] + f"\n… (cut at {cap} characters — read {path} for the rest)"
+    return text
+
+
+def project_instructions(root):
+    """The user's standing rules: ~/.config/chucknorris/CHUCK.md for everything,
+    plus the first of CHUCK.md / AGENTS.md / CLAUDE.md in the working folder.
+    Returned as one block for the system prompt ('' when there are none)."""
+    out = []
+    g = _read_capped(CONFIG_DIR / "CHUCK.md")
+    if g:
+        out.append("USER INSTRUCTIONS (~/.config/chucknorris/CHUCK.md) — always follow:\n" + g)
+    if root:
+        for name in _INSTRUCTION_FILES:
+            f = Path(root) / name
+            if f.is_file():
+                t = _read_capped(f)
+                if t:
+                    out.append(f"PROJECT INSTRUCTIONS ({name} in the working folder) — "
+                               f"follow them for work here:\n{t}")
+                break
+    return "\n\n".join(out)
+
+
 def gather_context(refresh=False):
     with _CTX_LOCK:
         if not refresh and _CTX["text"] is not None:
@@ -1045,9 +1101,25 @@ def _scratch_png(prefix):
 _WORKDIR = {"path": None}
 
 
+# Where the shell is. `cd` in one command carries to the next, the way a
+# terminal does (each command is a fresh bash, so it used to be forgotten).
+# Reset to the working folder whenever that changes, and on a new chat.
+_SHELL = {"cwd": None}
+
+
 def _cwd():
-    p = _WORKDIR["path"]
-    return str(p) if p and os.path.isdir(str(p)) else None
+    for p in (_SHELL["cwd"], _WORKDIR["path"]):
+        if p and os.path.isdir(str(p)):
+            return str(p)
+    return None
+
+
+def _shell_cwd_note():
+    """' (shell is now in X)' when a cd left the shell outside the working folder."""
+    c, w = _SHELL["cwd"], _WORKDIR["path"]
+    if c and os.path.isdir(c) and (not w or os.path.realpath(c) != os.path.realpath(str(w))):
+        return f"\n(The shell is now in {c} — file tools still resolve paths in the working folder.)"
+    return ""
 
 
 _RUN_ENV = {
@@ -1446,6 +1518,30 @@ def _run_shell(script, timeout=None, sudo_password=None):
         timeout = estimate_runtime(script)["hard_timeout_seconds"]
     env = dict(os.environ)
     env.update(_RUN_ENV)
+    cwd_file = None
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        fd, cwd_file = tempfile.mkstemp(prefix=".cwd_", dir=str(CONFIG_DIR))
+        os.close(fd)
+        env["CHUCK_CWD_FILE"] = cwd_file
+        # same line as the script's first, so bash's "line N:" errors stay right
+        script = "trap 'pwd -P >\"$CHUCK_CWD_FILE\" 2>/dev/null' EXIT; " + script
+    except OSError:
+        cwd_file = None
+    try:
+        return _run_shell_in(script, timeout, sudo_password, env)
+    finally:
+        if cwd_file:
+            try:
+                where = Path(cwd_file).read_text().strip()
+                if where and os.path.isdir(where):
+                    _SHELL["cwd"] = where
+                os.unlink(cwd_file)
+            except OSError:
+                pass
+
+
+def _run_shell_in(script, timeout, sudo_password, env):
     if command_needs_sudo(script) and not _sudo_ready():
         pe = detect_priv_esc()
         if pe["tool"] is None:
@@ -2812,7 +2908,20 @@ class ChuckWindow(Adw.ApplicationWindow):
     # ── mode: Agent (acts) / Chat (answers) ──────────────────────────────────
     def _system_text(self):
         base = SYSTEM_PROMPT if self.agent_mode else CHAT_PROMPT
-        return base + "\n\nCurrent machine:\n" + gather_context()
+        text = base + "\n\nCurrent machine:\n" + gather_context()
+        # In the system message, not the per-hop note: rules change rarely, so
+        # they belong in the cached prefix rather than re-billed on every hop.
+        rules = project_instructions(self.workspace)
+        return text + ("\n\n" + rules if rules else "")
+
+    def _refresh_system(self):
+        """Rebuild history[0] (mode, machine, instructions). Only a real change
+        rewrites it, so the API's prompt cache survives an unchanged prefix."""
+        h = getattr(self, "history", None)
+        if h and h[0].get("role") == "system":
+            new = self._system_text()
+            if h[0].get("content") != new:
+                h[0]["content"] = new
 
     def set_agent_mode(self, on, announce=True):
         on = bool(on)
@@ -2900,6 +3009,8 @@ class ChuckWindow(Adw.ApplicationWindow):
                 return False
         self.workspace = p
         _WORKDIR["path"] = str(p) if p else None
+        _SHELL["cwd"] = None                    # a new folder: the shell starts there
+        self._refresh_system()                  # that folder's CHUCK.md / AGENTS.md
         if p:
             rec = [r for r in (self.settings.get("recent_workspaces") or [])
                    if isinstance(r, str) and r != str(p)]
@@ -2943,6 +3054,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             self.stop_run(auto=True)
         self._save_chat()
         self._clear_sudo_pw()           # a fresh chat re-asks for root; never carry it over
+        _SHELL["cwd"] = None                    # and the shell starts in the folder again
         self.chat_id = datetime.now().strftime("%Y%m%d-%H%M%S")
         self._new_history()
         self._reset_meter()
@@ -4376,7 +4488,7 @@ class ChuckWindow(Adw.ApplicationWindow):
     _CODE_TAGS = "python|py|node|javascript|js|bash|sh"
 
     def _tool_tags(self):
-        tags = self._WEB_TAGS + "|" + "|".join(_AGENT_TAGS)
+        tags = self._WEB_TAGS + "|" + "|".join(_AGENT_TAGS + tuple(_TOOL_REG))
         return tags + "|" + self._CODE_TAGS if self.agent_mode else tags
 
     def _display_text(self, text, partial=False):
@@ -5177,10 +5289,10 @@ class ChuckWindow(Adw.ApplicationWindow):
                         "(a wrong/absent password or a sudoers policy); tell the user and "
                         "either wait for them or suggest they run it in a terminal.")
             if rc == 0:
-                return (f"RAN `{cmd}` \u2014 SUCCEEDED (exit 0). Real output:\n{clip_output(out, 20000)}\n"
+                return (f"RAN `{cmd}` \u2014 SUCCEEDED (exit 0). Real output:\n{clip_output(out, 20000)}{_shell_cwd_note()}\n"
                         "Verify this output actually shows what you needed. If the whole task "
                         "is done, give the final answer; otherwise take the NEXT single step.")
-            return (f"RAN `{cmd}` \u2014 FAILED (exit {rc}). Real output:\n{clip_output(out, 20000)}\n"
+            return (f"RAN `{cmd}` \u2014 FAILED (exit {rc}). Real output:\n{clip_output(out, 20000)}{_shell_cwd_note()}\n"
                     "Do NOT move on. Read the error, fix the cause, and either retry the "
                     "corrected command or explain why it can't work.")
         self._pending_tools += 1
@@ -5267,9 +5379,9 @@ class ChuckWindow(Adw.ApplicationWindow):
                 return (f"COULD NOT RUN that {lang} \u2014 sudo authentication failed. {out}\n"
                         "Do NOT blindly retry. Root access is needed; tell the user.")
             if rc == 0:
-                return (f"RAN that {lang} \u2014 SUCCEEDED (exit 0). Real output:\n{clip_output(out, 20000)}\n"
+                return (f"RAN that {lang} \u2014 SUCCEEDED (exit 0). Real output:\n{clip_output(out, 20000)}{_shell_cwd_note()}\n"
                         "Check the output is actually what you needed before moving on.")
-            return (f"RAN that {lang} \u2014 FAILED (exit {rc}). Real output:\n{clip_output(out, 20000)}\n"
+            return (f"RAN that {lang} \u2014 FAILED (exit {rc}). Real output:\n{clip_output(out, 20000)}{_shell_cwd_note()}\n"
                     "Do NOT move on. Fix the cause and retry.")
         self._pending_tools += 1
         self._tool_thread(work, f"{lang} block")
@@ -6097,6 +6209,8 @@ class ChuckWindow(Adw.ApplicationWindow):
               "kind": kind, "turn": self._turn_no, "reverted": False, "card": None}
         self._changes.append(ch)
         del self._changes[:-200]                    # bounded history
+        if rel.strip().lstrip("./") in _INSTRUCTION_FILES:
+            self._refresh_system()                  # rules it just wrote apply now
         ch["card"] = self._file_card(ch)
         return ch
 
@@ -6144,6 +6258,39 @@ class ChuckWindow(Adw.ApplicationWindow):
         done = [self._revert(c) for c in targets]
         self._sys_note("\u21a9 " + "; ".join(done), "ok")
         self._tool_feedback.append("[undo: " + "; ".join(done) + "]")
+
+    @tool("changes", bare=True, cap=1)
+    def _t_changes(self, body):
+        """```changes``` — every file this task changed, net of reverts, as one
+        compact diff per file: the agent reviews its own work before it calls
+        it done. ```changes all``` covers the whole chat."""
+        scope_all = (body or "").strip().lower() == "all"
+        net = {}                                      # path -> [rel, first before, last after]
+        for c in self._changes:
+            if c["reverted"] or (not scope_all and c["turn"] != self._turn_no):
+                continue
+            if c["path"] in net:
+                net[c["path"]][2] = c["after"]
+            else:
+                net[c["path"]] = [c["rel"], c["before"], c["after"]]
+        self._sys_note("\U0001F4CB reviewing the changes", "dim")
+        if not net:
+            return "[changes: no file changes " + ("in this chat]" if scope_all else
+                                                  "in this task yet]")
+        parts, budget = [], 24000
+        for rel, before, after in net.values():
+            if before == after:
+                continue
+            diff, add, rem = _builder.diff_lines(before, after, rel)
+            kind = "new" if before is None else "deleted" if after is None else "modified"
+            text = "\n".join(diff[2:]) if diff else ""
+            if len(text) > budget:
+                text = text[:budget] + "\n… (diff clipped — read the file for the rest)"
+            budget = max(2000, budget - len(text))
+            parts.append(f"{rel} ({kind}, +{add} -{rem})\n{text}".rstrip())
+        if not parts:
+            return "[changes: every change was undone — the files are as they started]"
+        return "CHANGES (" + str(len(parts)) + " file(s)):\n\n" + "\n\n".join(parts)
 
     def _file_card(self, ch):
         """A file change on the work lane: what, how much, the diff, Revert."""
@@ -6638,8 +6785,105 @@ class ChuckWindow(Adw.ApplicationWindow):
         b = self.entry.get_buffer()
         return b.get_text(b.get_start_iter(), b.get_end_iter(), False).strip()
 
+    # @src/app.py, @README.md, @~/notes.txt — at the start or after a space, so
+    # an e-mail address is never one. Trailing punctuation isn't part of it.
+    _MENTION = re.compile(r"(?:(?<=\s)|^)@((?:~|\.{1,2})?/?[\w.\-+/]*[\w\-+])")
+
+    def _attach_mentions(self, text):
+        """Attach every @file the message names that exists. -> names attached."""
+        got = []
+        for tok in self._MENTION.findall(text or "")[:10]:
+            p = Path(os.path.expanduser(tok))
+            if not p.is_absolute():
+                if not self.workspace:
+                    continue
+                p = self.workspace / tok
+            if p.is_file() and self.add_attachment(str(p), display_name=tok):
+                got.append(tok)
+        return got
+
+    SLASH_HELP = [
+        ("/help", "this list"),
+        ("/init", "survey the folder and write a CHUCK.md of its conventions"),
+        ("/clear", "start a new chat"),
+        ("/compact", "summarise the conversation so far into one note"),
+        ("/model <name>", "switch model (part of the name is enough)"),
+        ("/undo", "revert the last file change"),
+        ("/agent  /chat", "switch mode"),
+        ("/folder [path]", "set the working folder (no path: choose one)"),
+        ("/cost", "what this chat has cost"),
+        ("/memory", "open the memory panel"),
+        ("/export", "save this chat as Markdown"),
+    ]
+
+    def _slash(self, text):
+        """Run a /command typed in the composer. -> True if it was one. Anything
+        that merely starts with a slash (/etc/fstab is broken) is a message."""
+        m = re.match(r"^/([a-z]+)(?:\s+(.*))?$", (text or "").strip(), re.DOTALL)
+        if not m:
+            return False
+        cmd, arg = m.group(1), (m.group(2) or "").strip()
+        if cmd == "help":
+            self._sys_note("Commands:\n" + "\n".join(f"{c:<16} {d}" for c, d in self.SLASH_HELP),
+                           "dim")
+        elif cmd == "clear":
+            self.new_chat()
+        elif cmd in ("agent", "chat"):
+            self.set_agent_mode(cmd == "agent")
+        elif cmd == "model":
+            ids = list(dict.fromkeys(list(_pricing.SUGGESTED) + list(_pricing.PRICES)))
+            hit = [i for i in ids if arg and arg.lower() in i.lower()]
+            if not arg:
+                self._sys_note("Model: " + (self.settings.get("model") or DEFAULT_MODEL), "dim")
+            elif hit:
+                self.set_model(hit[0])
+                self._sys_note("Model: " + hit[0], "ok")
+            else:
+                self.set_model(arg)
+                self._sys_note("Model: " + arg + " (not in the price list)", "dim")
+        elif cmd == "undo":
+            live = [c for c in self._changes if not c["reverted"]]
+            self._sys_note("\u21a9 " + self._revert(live[-1], by_user=True) if live
+                           else "Nothing to undo.", "dim")
+        elif cmd == "folder":
+            if arg:
+                if not self.set_workspace(arg):
+                    self._sys_note(f"Not a folder: {arg}", "danger")
+            else:
+                self.open_workspace()
+        elif cmd == "cost":
+            u, ss = self._usage, self._session
+            self._sys_note(f"This chat: {_pricing.fmt_usd(u['cost'])} \u00b7 "
+                           f"{_pricing.fmt_tokens(u['prompt'])} in, "
+                           f"{_pricing.fmt_tokens(u['completion'])} out, {u['calls']} calls. "
+                           f"Session: {_pricing.fmt_usd(ss['cost'])}.", "dim")
+        elif cmd == "memory":
+            self.open_memory()
+        elif cmd == "init":
+            if not self.workspace:
+                self._sys_note("Pick a working folder first (/folder).", "danger")
+                return True
+            self.set_agent_mode(True, announce=False)
+            self.entry.get_buffer().set_text(
+                "Survey this project (map, read the key files, the build and test setup) and "
+                "write CHUCK.md in its root: what it is, how to build, run and test it, the "
+                "layout, and the conventions a new engineer must follow. Short and concrete. "
+                "If CHUCK.md exists, update it instead.")
+            self.on_send()
+        elif cmd == "compact" and hasattr(self, "compact_now"):
+            self.compact_now()
+        elif cmd == "export" and hasattr(self, "export_chat"):
+            self.export_chat()
+        else:
+            return False
+        return True
+
     def on_send(self, *_):
         text = self._get_entry()
+        if text and not self._attachments and self._slash(text):
+            self.entry.get_buffer().set_text("")
+            return
+        self._attach_mentions(text)
         # legacy single-slot attachments (kept for anything that still sets them)
         if self.pending_file:
             fname, fbody = self.pending_file
@@ -6667,6 +6911,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._plan_entry = None
         self._reset_continuation()
         self._turn_no += 1
+        self._refresh_system()                  # instruction files edited since?
         self._seen_queries = []; self._seen_urls = set(); self._dead_urls = set()
         self._forced_answer = False
         self._scroll_down(force=True)       # you asked: you see the answer
@@ -7125,6 +7370,10 @@ class ChuckWindow(Adw.ApplicationWindow):
                     code_hits.append((m.start(), lang, cbody))
         code_hits.sort(key=lambda t: t[0])
         codes = [(lang, body) for _pos, lang, body in code_hits]   # (lang, body)
+        reg_calls = []                          # registered tools, in registry order
+        for rtag, spec in _TOOL_REG.items():
+            items = grab(rtag)[:spec["cap"]] or ([""] if spec["bare"] and has(rtag) else [])
+            reg_calls += [(rtag, b) for b in items]
 
         blocked_agent = False
         if not self.agent_mode:
@@ -7162,10 +7411,20 @@ class ChuckWindow(Adw.ApplicationWindow):
         # A screenshot or ```look``` beside a command or a write would see the
         # world BEFORE that action ran: dispatch is one pass, and the command
         # finishes later. It read a stale /tmp/s.png, or none at all.
-        held_see = []
+        if not self.agent_mode:
+            gated = [c for c in reg_calls if _TOOL_REG[c[0]]["agent_only"]]
+            if gated:
+                blocked_agent = True
+                reg_calls = [c for c in reg_calls if c not in gated]
+        async_action = bool(codes or skill_blocks or runskills or bgs or runtests or packages
+                            or any(_TOOL_REG[t]["acts"] for t, _ in reg_calls))
+        held_reg = [c for c in reg_calls
+                    if _TOOL_REG[c[0]]["after_actions"] and async_action]
+        reg_calls = [c for c in reg_calls if c not in held_reg]
+        held_see = [f"{t} {b.splitlines()[0] if b else ''}".strip() for t, b in held_reg]
         if (shots or looks) and (codes or skill_blocks or runskills or writes or edits
                                  or bgs or runtests or packages):
-            held_see = (["screenshot"] if shots else []) + [f"look {p.strip()}" for p in looks]
+            held_see += (["screenshot"] if shots else []) + [f"look {p.strip()}" for p in looks]
             shots, looks = False, []        # never dispatched, so never counted
         disp = self._display_text(text, partial=True)
         if self._forced_answer:
@@ -7180,11 +7439,14 @@ class ChuckWindow(Adw.ApplicationWindow):
             codes, skill_blocks, runskills, writes, edits, checks = [], [], [], [], [], []
             runtests = packages = junk = False
             bgs = []
+        if fence_clash or self._step_forced:
+            reg_calls = [c for c in reg_calls if not _TOOL_REG[c[0]]["acts"]]
         acting = bool(searches or fetches or images or vid_searches or videos or junk
                       or skill_blocks or runskills or reads or greps or codes or checks
                       or projects or writes or edits or trees or packages or runtests
                       or rmfiles or ledger_req or plans or globs or maps or shots or looks
-                      or briefs or bgs or logss or kills or undo_req or opens or asks)
+                      or briefs or bgs or logss or kills or undo_req or opens or asks
+                      or reg_calls)
         # Chuck's own narration is what shows in chat — never swallow it.
         self._set_bot_text(disp or ("Working on it…" if acting else "Done."), rich=True)
         if blocked_agent:
@@ -7272,7 +7534,8 @@ class ChuckWindow(Adw.ApplicationWindow):
             searches or fetches or images or vid_searches or videos or junk or skill_blocks
             or runskills or reads or greps or codes or checks or projects or writes or edits
             or trees or packages or runtests or rmfiles or ledger_req or globs or maps
-            or shots or looks or briefs or bgs or logss or kills or undo_req or opens)
+            or shots or looks or briefs or bgs or logss or kills or undo_req or opens
+            or reg_calls)
         for body in plans:
             self._do_plan(body, nudge=plan_only)
         for nm in projects:
@@ -7332,6 +7595,8 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._do_map()
         if briefs and _agents:
             self._do_tasks(briefs)
+        for rtag, rbody in reg_calls:
+            self._run_registered(rtag, rbody)
         if held_see:
             self._tool_feedback.append(
                 "[" + ", ".join(held_see) + " held back: it was in the same reply as an action "
@@ -7463,6 +7728,22 @@ class ChuckWindow(Adw.ApplicationWindow):
             self.entry.grab_focus()
         except Exception:
             pass
+
+    def _run_registered(self, tag, body):
+        """Dispatch one registered tool (see _TOOL_REG). A handler that raises
+        is reported to the model as a result, never left hanging."""
+        try:
+            res = _TOOL_REG[tag]["fn"](self, body)
+        except Exception as ex:
+            self._sys_note(f"\u2717 {tag} failed: {ex}", "danger")
+            self._tool_feedback.append(f"[{tag} failed: {ex}]")
+            return
+        if callable(res):
+            self._busy(True)
+            self._pending_tools += 1                  # released by _tool_thread
+            self._tool_thread(res, tag)
+        elif res:
+            self._tool_feedback.append(res)
 
     def _tool_done(self, feedback_text=None, gen=None):
         """Called (on main thread) when one async show-tool finishes. A result
