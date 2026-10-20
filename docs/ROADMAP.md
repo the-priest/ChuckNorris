@@ -140,7 +140,7 @@ reaches only local servers.
 
 ### Phase 11 — safer autonomy
 
-- [ ] **Checkpoints of everything.** Before each step that acts, the working
+- [x] **Checkpoints of everything.** Before each step that acts, the working
       folder is snapshotted into a shadow git repository (yours is never
       touched). `/rewind` restores files AND conversation to any earlier step,
       including what a command (a code generator, `npm install`) changed.

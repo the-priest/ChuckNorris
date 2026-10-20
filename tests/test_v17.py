@@ -211,6 +211,70 @@ if getattr(w, "_lsp_m", None) is not None:
 settle()
 
 # ═══════════════════════════════════════════════════════════════════════════
+print("\n--- checkpoints and /rewind ---")
+import subprocess
+cn.ChuckWindow.CHECKPOINT_STORE = tmp / "cpstore"
+ws = tmp / "cp"
+ws.mkdir()
+(ws / "a.txt").write_text("v1\n")
+(ws / "keep.txt").write_text("keep\n")
+g = lambda *a: subprocess.run(["git", "-C", str(ws), *a], capture_output=True, text=True)
+g("init", "-q"); g("add", "-A"); g("-c", "user.email=t@e", "-c", "user.name=T", "commit", "-qm", "mine")
+w = agent(["```bash\necho v2 > a.txt && echo made > gen.txt\n```",
+           "```bash\nrm keep.txt && mkdir -p out/deep && echo x > out/deep/f.txt\n```",
+           "Did it."], ws)
+type_and_send(w, "change things with commands")
+check(len(w._checkpoints) == 2 and w._checkpoints[0]["ask"] == "change things with commands",
+      "a snapshot before each acting step", [c["label"] for c in w._checkpoints])
+check(not (ws / "keep.txt").exists() and (ws / "gen.txt").exists(), "(the commands ran)")
+w.entry.get_buffer().set_text("/rewind")
+w.on_send()
+check([x for x in w.msgbox.walk() if x.get_text() == "REWIND"], "/rewind shows the checkpoints")
+texts = [x.get_text() for x in w.msgbox.walk() if isinstance(x.get_text(), str)]
+check(any("2 files differ now" in t for t in texts) and any("4 files differ now" in t for t in texts),
+      "each says how many files differ from it now", [t for t in texts if "differ" in t])
+btns = [x for x in w.msgbox.walk() if isinstance(x, cn.Gtk.Button) and x.get_label() == "Rewind"]
+btns[-1].emit("clicked")                  # oldest: before the first step
+check((ws / "a.txt").read_text() == "v1\n" and (ws / "keep.txt").exists()
+      and not (ws / "gen.txt").exists() and not (ws / "out").exists(),
+      "rewinding restores changed and deleted files, removes created ones and their folders")
+check(not any(m["role"] == "assistant" for m in w.history[1:]) and
+      w._get_entry() == "change things with commands",
+      "and the chat goes back too: your message waits in the composer", w._get_entry())
+check(g("status", "--short").stdout == "" and "mine" in g("log", "--oneline").stdout
+      and len(g("log", "--oneline").stdout.splitlines()) == 1, "your own git repo is untouched")
+und = [c for c in w._checkpoints if c["label"] == "undo the rewind"]
+check(len(und) == 1, "the rewind itself can be undone")
+w.entry.get_buffer().set_text("")
+w.rewind_to(und[0])
+check((ws / "gen.txt").exists() and not (ws / "keep.txt").exists()
+      and (ws / "out" / "deep" / "f.txt").exists() and "Did it." in hist_text(w),
+      "undoing it brings back the files and the conversation")
+cp2 = [c for c in w._checkpoints if c["label"].startswith("bash: rm keep.txt")]
+check(len(cp2) == 1, "the later step's checkpoint is still there", [c["label"] for c in w._checkpoints])
+w.rewind_to(cp2[0])
+check((ws / "keep.txt").exists() and (ws / "gen.txt").exists() and (ws / "a.txt").read_text() == "v2\n",
+      "rewinding to a later step keeps what earlier steps did")
+check(w.history[-1]["role"] == "user" and "TOOL RESULTS" in w.history[-1]["content"]
+      and w._get_entry() == "", "the chat ends at that step's input, ready to continue")
+w._save_chat()
+w2 = new_win([], tmp)
+w2._load_chat(cn.CHATS_DIR / f"{w.chat_id}.json")
+check(len(w2._checkpoints) == len(w._checkpoints), "checkpoints are saved with the chat")
+w3 = agent(["```bash\necho busy\n```", "ok"], ws)
+w3._running = True
+check(w3.rewind_to(w._checkpoints[0]) is False, "no rewinding in the middle of a run")
+w3._running = False
+w4 = agent(["```bash\necho off > off.txt\n```", "ok"], ws)
+w4.settings["checkpoints"] = False
+type_and_send(w4, "no snapshots")
+check(w4._checkpoints == [], "snapshots can be turned off in Settings")
+w4.settings["checkpoints"] = True
+w5 = agent(["```bash\necho hi\n```", "ok"], Path.home())
+check(w5._checkpoint("x") is None, "your home folder is never snapshotted")
+settle()
+
+# ═══════════════════════════════════════════════════════════════════════════
 print(f"\nTOTAL V17 FAILURES: {fails + len(FAILS)}")
 shutil.rmtree(tmp, ignore_errors=True)
 assert fails == 0 and not FAILS, "v17 regressions present"

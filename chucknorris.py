@@ -116,6 +116,7 @@ _crashlog = _optional("crashlog")
 _update = _optional("update")
 _pysession = _optional("pysession")
 _lsp = _optional("lsp")
+_checkpoint = _optional("checkpoint")
 _codesearch = _optional("codesearch")
 if _pricing is None:
     class _pricing:                     # noqa: N801  — the meter, minus prices
@@ -2829,6 +2830,8 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._usage = self._blank_usage()
         self._cap_extra = 0.0           # spending approved past the cap, this chat
         self._compact = None            # {"upto": i, "text": summary} of history[1:i]
+        self._checkpoints = []          # folder snapshots for /rewind (see _checkpoint)
+        self._cp_off = set()            # folders too big (or not allowed) to snapshot
         self._compacting = False
         self._session = self._blank_usage()
         self._balance = ""
@@ -3398,6 +3401,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         _SHELL["cwd"] = None                    # and the shell starts in the folder again
         self._py_close()                        # and Python starts empty
         self._compact = None
+        self._checkpoints = []
         self.chat_id = datetime.now().strftime("%Y%m%d-%H%M%S")
         self._new_history()
         self._reset_meter()
@@ -4345,7 +4349,8 @@ class ChuckWindow(Adw.ApplicationWindow):
             (CHATS_DIR / f"{self.chat_id}.json").write_text(json.dumps(
                 {"title": title, "ts": self.chat_id, "history": self.history,
                  "workspace": str(self.workspace) if self.workspace else "",
-                 "usage": self._usage, "compact": self._compact}, indent=2))
+                 "usage": self._usage, "compact": self._compact,
+                 "checkpoints": self._checkpoints[-200:]}, indent=2))
         except Exception:
             pass
         self._refresh_sidebar()
@@ -4510,6 +4515,10 @@ class ChuckWindow(Adw.ApplicationWindow):
         else:
             self.history.insert(0, {"role": "system", "content": self._system_text()})
         self.chat_id = meta.get("ts", datetime.now().strftime("%Y%m%d-%H%M%S"))
+        cps = meta.get("checkpoints")
+        self._checkpoints = [c for c in cps if isinstance(c, dict) and isinstance(c.get("sha"), str)
+                             and isinstance(c.get("root"), str) and isinstance(c.get("hist"), int)
+                             ] if isinstance(cps, list) else []
         c = meta.get("compact")
         self._compact = (c if isinstance(c, dict) and isinstance(c.get("upto"), int)
                          and isinstance(c.get("text"), str) and 1 < c["upto"] <= len(self.history)
@@ -7438,6 +7447,112 @@ class ChuckWindow(Adw.ApplicationWindow):
         threading.Thread(target=lambda: GLib.idle_add(done, work()), daemon=True).start()
         return rows
 
+    # ── checkpoints: /rewind ──
+    CHECKPOINT_STORE = DATA_DIR / "checkpoints"
+
+    def _checkpoint(self, label):
+        """Snapshot the working folder before a step that may change it.
+        Synchronous on purpose: the step must not start changing files while
+        the snapshot is still being read."""
+        root = self._workroot()
+        if (_checkpoint is None or root is None or not self.settings.get("checkpoints", True)
+                or str(root) in self._cp_off):
+            return None
+        try:
+            sha = _checkpoint.Shadow(root, self.CHECKPOINT_STORE).snapshot(label)
+        except _checkpoint.CheckpointError as ex:
+            self._cp_off.add(str(root))
+            self._sys_note(f"/rewind is off for this folder: {ex}", "dim")
+            return None
+        ask = next((self._typed_text(m.get("content")) for m in reversed(self.history)
+                    if self._is_real_user(m)), "")
+        cp = {"sha": sha, "root": str(root), "hist": len(self.history) - 1, "label": label,
+              "ask": (ask or "")[:80], "t": time.time()}
+        self._checkpoints = (self._checkpoints + [cp])[-200:]
+        return cp
+
+    def show_rewind(self):
+        """/rewind: the checkpoints, newest first, each with what changed since."""
+        cps = [c for c in self._checkpoints if c["hist"] <= len(self.history) or c.get("history")]
+        if not cps:
+            self._sys_note("No checkpoints yet \u2014 Chuck snapshots the folder before each step "
+                           "that changes it.", "dim")
+            return False
+        card, head, body, foot = self._card_shell("REWIND")
+        hint = Gtk.Label(label="Puts the files AND the conversation back to before that step. "
+                               "Rewinding is itself undoable.", xalign=0, wrap=True)
+        hint.add_css_class("dim"); body.append(hint)
+        now = time.time()
+        for cp in reversed(cps[-12:]):
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+            col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True)
+            t = Gtk.Label(label=cp["label"] if cp.get("history") else f"before  {cp['label']}",
+                          xalign=0)
+            t.add_css_class("doctor-name")
+            try:
+                t.set_ellipsize(Pango.EllipsizeMode.END)
+            except Exception:
+                pass
+            try:
+                n = len(_checkpoint.Shadow(cp["root"], self.CHECKPOINT_STORE)
+                        .changed_since(cp["sha"]))
+            except Exception:
+                n = None
+            ago = int(now - cp.get("t", now))
+            ago = (f"{ago // 3600} h ago" if ago >= 3600 else f"{ago // 60} min ago" if ago >= 60
+                   else "just now")
+            meta = " \u00b7 ".join(x for x in (
+                f"\u201c{cp['ask']}\u201d" if cp.get("ask") else "", ago,
+                "" if n is None else ("no files differ now" if n == 0 else
+                                      f"{n} file{'' if n == 1 else 's'} differ now")) if x)
+            m = Gtk.Label(label=meta, xalign=0, wrap=True); m.add_css_class("dim")
+            _wrap_anywhere(m)
+            col.append(t); col.append(m)
+            b = Gtk.Button(label="Rewind"); b.add_css_class("quick"); b.set_valign(Gtk.Align.CENTER)
+            b.connect("clicked", lambda _b, c=cp: self.rewind_to(c))
+            row.append(col); row.append(b)
+            body.append(row)
+        self._log_pin(card)
+        return True
+
+    def rewind_to(self, cp):
+        """Restore the folder to a checkpoint and the chat to before that step."""
+        if self._running:
+            self._sys_note("Stop the current run first (Esc), then rewind.", "danger")
+            return False
+        if _checkpoint is None:
+            return False
+        try:
+            before, changed = _checkpoint.Shadow(cp["root"], self.CHECKPOINT_STORE).restore(cp["sha"])
+        except _checkpoint.CheckpointError as ex:
+            self._sys_note(f"\u2717 couldn't rewind: {ex}", "danger")
+            return False
+        undo = {"sha": before, "root": cp["root"], "hist": len(self.history),
+                "label": "undo the rewind", "ask": "", "t": time.time(),
+                "history": [dict(m) for m in self.history],
+                "later": [c for c in self._checkpoints if not c.get("history")]}
+        if cp.get("history"):                     # undoing a rewind: everything comes back
+            self.history = [dict(m) for m in cp["history"]]
+            self._rebuild_transcript()
+            self._checkpoints = list(cp.get("later") or []) + [undo]
+        else:
+            self._rewind_to(cp["hist"])
+            self._checkpoints = [c for c in self._checkpoints if c is not cp
+                                 and not c.get("history") and c["hist"] < len(self.history)] + [undo]
+        self._changes = []              # file checkpoints for `undo` describe a state that's gone
+        self._reset_turn_state()
+        last = self.history[-1] if len(self.history) > 1 else None
+        if last is not None and self._is_real_user(last) and not cp.get("history"):
+            self.history.pop()          # your message, back in the composer to send again
+            self._rebuild_transcript()
+            if not self._get_entry():
+                self.entry.get_buffer().set_text(self._typed_text(last.get("content")))
+        self._sys_note(f"\u27f2 rewound {len(changed)} file{'' if len(changed) == 1 else 's'} and "
+                       f"the chat to before: {cp['label']}" + ("" if cp.get("history") else
+                                                               "  (/rewind again to undo)"), "ok")
+        self._save_chat()
+        return True
+
     # ── updates ──
     UPDATE_STATE = DATA_DIR / "update.json"
 
@@ -8122,6 +8237,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         ("/commit [msg]", "Chuck stages the right changes and commits"),
         ("/review", "Chuck reviews the uncommitted changes for bugs"),
         ("/undo", "revert the last file change"),
+        ("/rewind", "put the folder AND the chat back to before any step"),
         ("/retry", "ask the last question again  (Ctrl+R; \u2191 edits it)"),
         ("/plan", "plan mode on/off: propose first, act after you approve"),
         ("/agent  /chat", "switch mode"),
@@ -8159,6 +8275,8 @@ class ChuckWindow(Adw.ApplicationWindow):
             self.show_git_diff()
         elif cmd == "doctor":
             self.run_doctor()
+        elif cmd == "rewind":
+            self.show_rewind()
         elif cmd == "update":
             self.run_update()
         elif cmd in ("commit", "review"):
@@ -9162,6 +9280,10 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._tool_feedback = []
         self._loop_web = (searches, fetches) if (searches or fetches) else None
         self._dispatching = True
+        if (self.agent_mode and not blocked_agent and not self.plan_mode and not fence_clash
+                and (codes or writes or edits or rmfiles or bgs or runskills or packages
+                     or projects or undo_req or any(_TOOL_REG[t]["acts"] for t, _ in reg_calls))):
+            self._checkpoint(self._actions_of(text) or "a step")
         if stall:
             self._nudges += 1
             self._sys_note("\u21bb nothing was done yet \u2014 asking Chuck to carry it out", "dim")
@@ -10012,6 +10134,10 @@ class ChuckWindow(Adw.ApplicationWindow):
         entry(g, "After each file write  ({path} = the file)", "hook_after_write", "")
         entry(g, "  \u2026only for files matching (e.g. *.py, *.ts)", "hook_after_write_glob", "*")
         entry(g, "Before he may finish  (e.g. pytest -q)", "hook_before_done", "")
+        if _checkpoint is not None:
+            switch(g, "Snapshot the folder before each step", "checkpoints", True,
+                   sub="So /rewind can put files and the chat back, even after a command "
+                       "changed them. Kept in a private repository; yours is never touched.")
 
         if _browser is not None:
             g = group(pg, "Browser",
