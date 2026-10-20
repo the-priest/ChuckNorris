@@ -108,6 +108,7 @@ _builder = _optional("builder")
 _agents = _optional("agents")
 _pricing = _optional("pricing")
 _browser = _optional("browser")
+_diagnose = _optional("diagnose")
 if _pricing is None:
     class _pricing:                     # noqa: N801  — the meter, minus prices
         """Stand-in so a partial install still launches: tokens are counted,
@@ -163,7 +164,7 @@ Act:
 >>>>>>> REPLACE```
 (A file containing ``` fences: wrap the block in four backticks. Any length is fine.)
 Background: ```bg <name>
-<command>``` (servers, watchers; then ```logs <name>```, ```kill <name>```). ```undo``` reverts your last file change (```undo all```: this task's). ```changes``` shows your diff this task. ```open <path|url>``` shows the user a result.
+<command>``` (servers, watchers; then ```logs <name>```, ```kill <name>```). ```undo``` reverts your last file change (```undo all```: this task's). ```changes``` shows your diff this task. ```diagnose [paths]``` lints + type-checks files on disk. ```open <path|url>``` shows the user a result.
 Browser: ```browse <url|file> [WxH]
 click <css> | type <text> | press <keys> | wait <ms> | eval <js>``` real headless Chromium: JS errors, failed requests, text and a screenshot.
 Ask: ```ask
@@ -6296,6 +6297,24 @@ class ChuckWindow(Adw.ApplicationWindow):
             if r.get("shot"):
                 text += "\n" + self._see(r["shot"], f"{target} in the browser")
             return text
+        return work
+
+    @tool("diagnose", bare=True, cap=1)
+    def _t_diagnose(self, body):
+        """```diagnose [paths]``` — lint and type-check files on disk with the
+        tools installed (LSP-lite). No paths: the whole working folder."""
+        if _diagnose is None:
+            return "[diagnose: the module is missing — reinstall Chuck]"
+        root = self._workroot()
+        if root is None:
+            return "[diagnose: no working folder — pick one first]"
+        paths = (body or "").split()
+        label = " ".join(paths) if paths else "the working folder"
+        self._sys_note(f"\U0001FA7A diagnosing {label}", "dim")
+
+        def work():
+            found, summary, notes = _diagnose.diagnose(str(root), paths)
+            return _diagnose.report(found, summary, notes, label)
         return work
 
     @tool("changes", bare=True, cap=1)

@@ -31,7 +31,7 @@ without a network, and visible to the user as a card.
       Returns a screenshot (seen by the model), JavaScript console errors and
       uncaught exceptions, and the page title and text. Building a web game
       and checking it for errors becomes one step.
-- [ ] **`diagnose`**: LSP-lite. Lint and type-check files on disk with
+- [x] **`diagnose`**: LSP-lite. Lint and type-check files on disk with
       whatever is installed (ruff, pyflakes, mypy, pyright, tsc, eslint,
       shellcheck, cargo check, go vet). Real errors only, with file:line.
 - [x] **`changes`**: every file this task changed, with a compact diff, so

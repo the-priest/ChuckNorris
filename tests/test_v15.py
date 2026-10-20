@@ -277,6 +277,30 @@ else:
     print("  [SKIP] no Chromium here — browser behaviour untested")
 
 # ═══════════════════════════════════════════════════════════════════════════
+print("\n--- diagnose: real problems from real tools ---")
+ws = folder("diag")
+(ws / "pkg").mkdir()
+(ws / "pkg" / "a.py").write_text("def f():\n    return undefined_thing\n")
+(ws / "pkg" / "b.py").write_text("def broken(:\n    pass\n")
+(ws / "ok.py").write_text("print('fine')\n")
+(ws / "conf.json").write_text('{"a": 1,}\n')
+(ws / "node_modules").mkdir()
+(ws / "node_modules" / "junk.py").write_text("this is not python(\n")
+w = agent(["```diagnose```", "```diagnose ok.py```", "Found them."], ws)
+type_and_send(w, "check the project")
+h = hist_text(w)
+check("pkg/a.py:2" in h and "undefined_thing" in h, "an undefined name is found with file:line", h[-800:])
+check("pkg/b.py:1" in h, "a syntax error is found")
+check("conf.json:1:" in h and "trailing comma" in h.lower(), "broken JSON is found with its position")
+check("node_modules" not in h.split("DIAGNOSE")[1], "dependency folders are skipped")
+check("DIAGNOSE ok.py: checked 1 python\nNo problems found." in h, "a clean file is reported clean")
+check_finished(w, "diagnose")
+w = agent(["```diagnose```", "Ok."])
+w.set_workspace(None, announce=False)
+type_and_send(w, "no folder")
+check("no working folder" in hist_text(w), "with no folder it says so")
+
+# ═══════════════════════════════════════════════════════════════════════════
 print(f"\nTOTAL V15 FAILURES: {fails + len(FAILS)}")
 assert fails == 0 and not FAILS, "v15 regressions present"
 print("ALL V15 TESTS PASSED")
