@@ -165,6 +165,51 @@ w.on_send()
 check(w.agent_mode and w.plan_mode, "/plan in Chat mode switches to Agent with planning on")
 
 # ═══════════════════════════════════════════════════════════════════════════
+print("\n--- retry and edit ---")
+import gtkstub
+w = agent(["```bash\necho step-one\n```", "Answer A1.", "Answer A2."])
+type_and_send(w, "question one")
+w.retry_last()
+settle()
+h = hist_text(w)
+check("Answer A2." in h and "Answer A1." not in h and "step-one\n" not in h.split("question one")[-1].split("Answer A2.")[0],
+      "retry re-asks from the question: the old answer and its tool results are gone")
+users = [m for m in w.history if w._is_real_user(m)]
+check(len(users) == 1, "the question itself is kept once", len(users))
+bots = [e["data"]["text"] for e in w._log if e.get("kind") == "bot"]
+check(bots and bots[-1] == "Answer A2." and not any("A1" in b for b in bots),
+      "the transcript shows only the new answer", bots)
+check_finished(w, "retry")
+
+w = agent(["First answer.", "Second answer.", "Edited answer."])
+type_and_send(w, "first question")
+type_and_send(w, "second question with a typo")
+check(w.edit_last() and w._get_entry() == "second question with a typo",
+      "edit brings the last message back into the composer")
+w.entry.get_buffer().set_text("second question, fixed")
+w.on_send()
+settle()
+contents = [m["content"] for m in w.history[1:]]
+check(contents == ["first question", "First answer.", "second question, fixed", "Edited answer."],
+      "sending the edit replaces the original and everything after it", contents)
+w._on_key(None, gtkstub.GdkNS.KEY_Up, 0, 0)
+check(w._get_entry() == "second question, fixed", "↑ in an empty composer starts editing")
+w._on_key(None, gtkstub.GdkNS.KEY_Escape, 0, 0)
+check(w._get_entry() == "" and w._edit_at is None, "Esc cancels the edit")
+w.backend.replies = ["Another."]
+type_and_send(w, "third")
+check(w.history[-2]["content"] == "third" and len(w.history) == 7, "a normal send after that is unaffected")
+
+w = agent(["Hi."])
+type_and_send(w, "msg with a note")
+w._compact = {"upto": 2, "text": "S" * 50}
+w.retry_last()
+settle()
+check(w._compact is None, "rewinding past a summary drops it (it described turns that are gone)")
+w2 = agent([])
+check(w2.retry_last() is False and w2.edit_last() is False, "nothing to retry or edit in an empty chat")
+
+# ═══════════════════════════════════════════════════════════════════════════
 print(f"\nTOTAL V16 FAILURES: {fails + len(FAILS)}")
 assert fails == 0 and not FAILS, "v16 regressions present"
 print("ALL V16 TESTS PASSED")

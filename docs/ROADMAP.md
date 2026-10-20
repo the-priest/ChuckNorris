@@ -81,7 +81,7 @@ there's nothing to look at.
 - [x] **Plan mode.** A toggle in the composer (and `/plan`): the agent
       investigates read-only and proposes a plan card with Approve and Revise.
       Nothing is changed until you approve; approving runs it.
-- [ ] **Retry and edit.** Ctrl+R retries the last answer. ↑ in an empty
+- [x] **Retry and edit.** Ctrl+R retries the last answer. ↑ in an empty
       composer edits your last message and resends from there.
 
 ### Phase 6 — the workflow around the code

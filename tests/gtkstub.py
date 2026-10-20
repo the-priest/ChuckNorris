@@ -322,3 +322,5 @@ Buffer.place_cursor = lambda self, *a: None
 GdkNS.KEY_Tab = 65289
 GdkNS.KEY_Escape = 65307
 Buffer.connect = lambda self, *a, **k: 0
+GdkNS.KEY_Up = 65362
+GdkNS.KEY_r = 114

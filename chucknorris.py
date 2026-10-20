@@ -2783,6 +2783,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         self.plan_mode = False          # investigate read-only, propose, wait for approval
         self._carry_plan = None         # an approved plan card the next turn ticks off
         self._quiet_send = False
+        self._edit_at = None            # editing the user message at this history index
         self._jobs = {}                 # background jobs: name -> {proc, log, cmd, card}
         # MCP servers from ~/.config/chucknorris/mcp.json, started in the
         # background; when their tool lists arrive the system prompt is rebuilt
@@ -4408,24 +4409,92 @@ class ChuckWindow(Adw.ApplicationWindow):
                     self._usage[k] = u[k]
             self._paint_meter()
         self._clear_msgs()
+        self._rebuild_transcript()
+        self._refresh_sidebar()
+
+    _INTERNAL = ("TOOL RESULTS", "RESEARCH BUDGET", "STEP BUDGET", "CONTINUE:", "I ran ",
+                 "FILE ", "CONVERSATION SUMMARY", "[MESSAGE FROM THE USER")
+
+    def _is_real_user(self, m):
+        """A message the USER wrote (not tool results or other scaffolding)."""
+        c = m.get("content")
+        return (m.get("role") == "user" and
+                not (isinstance(c, str) and c.startswith(self._INTERNAL)))
+
+    @staticmethod
+    def _typed_text(c):
+        """What the user actually typed, from a stored user message."""
+        if not isinstance(c, str):
+            c = " ".join(x.get("text", "") for x in c if isinstance(x, dict))
+        if c.startswith("[Since your last reply:"):
+            c = c.split("]\n\n", 1)[-1]
+        for cut in ("\n\n--- attached file:", "\n\n[attached file:", "\n[image attached:"):
+            c = c.split(cut, 1)[0]
+        return c
+
+    def _rebuild_transcript(self):
+        """The visible transcript, from history (after a load, retry or edit)."""
+        self._clear_msgs()
         for m in self.history:
             if m["role"] == "system":
                 continue
-            c = m.get("content")
-            txt = c if isinstance(c, str) else "[image/attachment]"
-            if txt.startswith(("TOOL RESULTS", "RESEARCH BUDGET", "STEP BUDGET")):
-                continue
             if m["role"] == "user":
-                self._user_bubble(txt)
+                if self._is_real_user(m):
+                    self._user_bubble(self._typed_text(m.get("content")))
             else:
-                shown = self._display_text(txt)
+                shown = self._display_text(m.get("content") if isinstance(m.get("content"), str)
+                                           else "")
                 if shown:
                     self._log_add("bot", {"text": shown, "rich": True})
         if not self._log:
             self._show_empty_hint()
         self._stick = True
         self._scroll_down(force=True)
-        self._refresh_sidebar()
+
+    def _rewind_to(self, n):
+        """Keep history[:n]; anything derived from what's cut goes with it."""
+        del self.history[n:]
+        c = self._compact
+        if c and c["upto"] >= len(self.history) - 1:
+            self._compact = None                 # it summarised turns that no longer exist
+        self._rebuild_transcript()
+
+    def _last_user_index(self):
+        for i in range(len(self.history) - 1, 0, -1):
+            if self._is_real_user(self.history[i]):
+                return i
+        return None
+
+    def retry_last(self):
+        """Ctrl+R / /retry: ask the last question again, from where it was asked.
+        Files that answer changed stay changed — /undo reverts them."""
+        if self._running:
+            return False
+        i = self._last_user_index()
+        if i is None:
+            self._sys_note("Nothing to retry yet.", "dim")
+            return False
+        self._rewind_to(i + 1)
+        self._reset_turn_state()
+        self._sys_note("\u21bb retrying" + (" \u2014 files that answer changed stay as they "
+                                            "are (/undo reverts them)" if any(
+                                                c["turn"] == self._turn_no - 1
+                                                for c in self._changes) else ""), "dim")
+        self._start_run()
+        self._ask_model()
+        return True
+
+    def edit_last(self):
+        """↑ in an empty composer: bring your last message back to edit and resend."""
+        if self._running:
+            return False
+        i = self._last_user_index()
+        if i is None:
+            return False
+        self._edit_at = i
+        self.entry.get_buffer().set_text(self._typed_text(self.history[i].get("content")))
+        self._toast("Editing your last message \u2014 Enter resends from there, Esc cancels")
+        return True
 
     def _on_close(self, *_):
         self._save_chat()
@@ -4468,6 +4537,12 @@ class ChuckWindow(Adw.ApplicationWindow):
                     return True
         except Exception:
             pass
+        if keyval == getattr(Gdk, "KEY_Up", -1) and not self._running and not self._get_entry():
+            return self.edit_last()
+        if keyval == Gdk.KEY_Escape and self._edit_at is not None and not self._running:
+            self._edit_at = None
+            self.entry.get_buffer().set_text("")
+            return True
         if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) and not (state & Gdk.ModifierType.SHIFT_MASK):
             if self._running and not self._get_entry():
                 return False    # busy and nothing typed: Enter is just a newline
@@ -4516,6 +4591,8 @@ class ChuckWindow(Adw.ApplicationWindow):
                 self.side_btn.set_active(not self.side_btn.get_active()); return True
             if k == Gdk.KEY_comma:
                 self.open_settings(); return True
+            if k == getattr(Gdk, "KEY_r", -2):
+                self.retry_last(); return True
         return False
 
     # ── indicators ──
@@ -7393,6 +7470,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         ("/compact", "summarise the conversation so far into one note"),
         ("/model <name>", "switch model (part of the name is enough)"),
         ("/undo", "revert the last file change"),
+        ("/retry", "ask the last question again  (Ctrl+R; \u2191 edits it)"),
         ("/plan", "plan mode on/off: propose first, act after you approve"),
         ("/agent  /chat", "switch mode"),
         ("/folder [path]", "set the working folder (no path: choose one)"),
@@ -7421,6 +7499,8 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._log_pin(card)
         elif cmd == "clear":
             self.new_chat()
+        elif cmd == "retry":
+            self.retry_last()
         elif cmd == "plan":
             if not self.agent_mode:
                 self.set_agent_mode(True)
@@ -7512,20 +7592,12 @@ class ChuckWindow(Adw.ApplicationWindow):
         self.entry.get_buffer().set_text("")
         self._attachments = []
         self._refresh_tray()
-        self._hops = 0
-        self._steps = 0
-        self._step_forced = False
-        self._nudges = 0
-        self._plan_nudges = 0
-        self._verify_nudges = 0
-        self._dirty = set()
-        self._asked = False
-        self._plan_entry, self._carry_plan = self._carry_plan, None
-        self._reset_continuation()
-        self._turn_no += 1
-        self._refresh_system()                  # instruction files edited since?
-        self._seen_queries = []; self._seen_urls = set(); self._dead_urls = set()
-        self._forced_answer = False
+        if self._edit_at is not None:
+            # an edited message replaces the original and everything after it
+            at, self._edit_at = self._edit_at, None
+            if at < len(self.history):
+                self._rewind_to(at)
+        self._reset_turn_state()
         self._scroll_down(force=True)       # you asked: you see the answer
         self._start_run()
 
@@ -7610,6 +7682,23 @@ class ChuckWindow(Adw.ApplicationWindow):
         stop.connect("clicked", halt)
         self._log_pin(card)
         self._end_run()
+
+    def _reset_turn_state(self):
+        """Everything a new turn starts without."""
+        self._hops = 0
+        self._steps = 0
+        self._step_forced = False
+        self._nudges = 0
+        self._plan_nudges = 0
+        self._verify_nudges = 0
+        self._dirty = set()
+        self._asked = False
+        self._plan_entry, self._carry_plan = self._carry_plan, None
+        self._reset_continuation()
+        self._turn_no += 1
+        self._refresh_system()                  # instruction files edited since?
+        self._seen_queries = []; self._seen_urls = set(); self._dead_urls = set()
+        self._forced_answer = False
 
     def _queue_steer(self, text):
         """You typed while it works: show it now, deliver it at the next step."""
