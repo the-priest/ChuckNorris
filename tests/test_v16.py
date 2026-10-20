@@ -210,6 +210,49 @@ w2 = agent([])
 check(w2.retry_last() is False and w2.edit_last() is False, "nothing to retry or edit in an empty chat")
 
 # ═══════════════════════════════════════════════════════════════════════════
+print("\n--- git: /diff, /commit, /review ---")
+import subprocess
+ws = folder("gitrepo")
+g = lambda *a: subprocess.run(["git", *a], cwd=ws, capture_output=True, text=True)
+g("init", "-q"); g("config", "user.email", "t@example.com"); g("config", "user.name", "Test")
+(ws / "app.py").write_text("print('v1')\n")
+g("add", "-A"); g("commit", "-qm", "init")
+(ws / "app.py").write_text("print('v2')\n")
+(ws / "new.txt").write_text("fresh\n")
+w = agent([], ws)
+calls = len(w.backend.calls)
+w.entry.get_buffer().set_text("/diff")
+w.on_send()
+card = [x for x in w.msgbox.walk() if x.get_text() == "WORKING TREE"]
+check(card, "/diff shows a WORKING TREE card")
+texts = [x.get_text() for x in w.msgbox.walk() if isinstance(x.get_text(), str)]
+check(any(t == "2 changed" for t in texts), "with the number of changed files", [t for t in texts if "changed" in t])
+check(any(" M app.py" in t for t in texts) and any("?? new.txt" in t for t in texts),
+      "listing modified and untracked files")
+check(len(w.backend.calls) == calls, "without calling the model")
+w.backend.replies = ["```bash\ngit add app.py && git commit -qm 'Bump the greeting to v2' && git log -1 --stat\n```",
+                     "Committed app.py; left new.txt out."]
+w.entry.get_buffer().set_text("/commit")
+w.on_send()
+settle()
+first_user = [m["content"] for m in w.history if w._is_real_user(m)][-1]
+check(first_user.startswith("Commit the work:"), "/commit asks the agent to commit properly")
+check("Bump the greeting to v2" in g("log", "-1", "--format=%s").stdout, "and the commit is made")
+check("?? new.txt" in g("status", "--short").stdout, "an unrelated file was left out")
+w.backend.replies = ["No bugs found in the diff."]
+w.entry.get_buffer().set_text("/review")
+w.on_send()
+settle()
+check([m["content"] for m in w.history if w._is_real_user(m)][-1].startswith("Review the uncommitted"),
+      "/review asks for a review that changes nothing")
+w2 = agent([], folder("notgit"))
+w2.entry.get_buffer().set_text("/diff")
+w2.on_send()
+notes = [x.get_text() for x in w2.msgbox.walk() if isinstance(x.get_text(), str)]
+check(any("isn't a git repository" in t for t in notes), "outside a repo, /diff says so")
+check_finished(w, "git")
+
+# ═══════════════════════════════════════════════════════════════════════════
 print(f"\nTOTAL V16 FAILURES: {fails + len(FAILS)}")
 assert fails == 0 and not FAILS, "v16 regressions present"
 print("ALL V16 TESTS PASSED")

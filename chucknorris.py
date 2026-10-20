@@ -6913,46 +6913,107 @@ class ChuckWindow(Adw.ApplicationWindow):
         btn.set_tooltip_text("Put the file back the way it was before this change")
         head.append(btn)
         if diff and len(diff) > 2:
-            exp = Gtk.Expander(label=f"Diff \u00b7 {len(diff) - 2} lines")
-            exp.add_css_class("think")
-            exp.set_expanded(len(diff) <= 40)
-            dl = Gtk.Label(xalign=0, selectable=True, wrap=False)
-            dl.add_css_class("term-body")
-            dl.set_valign(Gtk.Align.START)
-            esc = lambda t: _html.escape(t, quote=False)   # noqa: E731
-            parts = []
-            for ln in diff[2:]:
-                colour = ("#4ADE9A" if ln.startswith("+") else "#F87171" if ln.startswith("-")
-                          else "#8F80C9" if ln.startswith("@@") else None)
-                parts.append(f'<span foreground="{colour}">{esc(ln)}</span>' if colour
-                             else esc(ln))
-            mk = "\n".join(parts)
-            try:
-                if _markup_ok(mk):
-                    dl.set_markup(mk)
-                else:
-                    dl.set_text("\n".join(diff[2:]))
-            except Exception:
-                dl.set_text("\n".join(diff[2:]))
-            sw = Gtk.ScrolledWindow()
-            sw.add_css_class("term-scroll")
-            try:
-                sw.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-                sw.set_max_content_height(320)
-                sw.set_propagate_natural_height(True)
-            except Exception:
-                pass
-            sw.set_child(dl)
-            self._chain_scroll(sw, vertical=True)
-            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-            box.add_css_class("term-card"); box.set_margin_top(6)
-            box.append(sw)
-            exp.set_child(box)
-            foot.append(exp)
+            foot.append(self._diff_view(diff[2:], expanded=len(diff) <= 40))
         info = {"btn": btn, "pill": pill}
         btn.connect("clicked", lambda _b, c=ch: self._revert(c, by_user=True))
         self._log_pin(card)
         return info
+
+    def _diff_view(self, lines, expanded=True, label=None, height=320):
+        """Coloured unified-diff lines in a scrolling panel, folded in an expander."""
+        exp = Gtk.Expander(label=label or f"Diff \u00b7 {len(lines)} lines")
+        exp.add_css_class("think")
+        exp.set_expanded(expanded)
+        dl = Gtk.Label(xalign=0, selectable=True, wrap=False)
+        dl.add_css_class("term-body")
+        dl.set_valign(Gtk.Align.START)
+        esc = lambda t: _html.escape(t, quote=False)   # noqa: E731
+        parts = []
+        for ln in lines:
+            colour = ("#4ADE9A" if ln.startswith("+") and not ln.startswith("+++") else
+                      "#F87171" if ln.startswith("-") and not ln.startswith("---") else
+                      "#8F80C9" if ln.startswith(("@@", "diff --git")) else None)
+            parts.append(f'<span foreground="{colour}">{esc(ln)}</span>' if colour else esc(ln))
+        mk = "\n".join(parts)
+        try:
+            if _markup_ok(mk):
+                dl.set_markup(mk)
+            else:
+                dl.set_text("\n".join(lines))
+        except Exception:
+            dl.set_text("\n".join(lines))
+        sw = Gtk.ScrolledWindow()
+        sw.add_css_class("term-scroll")
+        try:
+            sw.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+            sw.set_max_content_height(height)
+            sw.set_propagate_natural_height(True)
+        except Exception:
+            pass
+        sw.set_child(dl)
+        self._chain_scroll(sw, vertical=True)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        box.add_css_class("term-card"); box.set_margin_top(6)
+        box.append(sw)
+        exp.set_child(box)
+        return exp
+
+    # ── git ──
+    def _git(self, *args, timeout=15):
+        root = self._workroot()
+        if root is None:
+            return 128, "no working folder"
+        try:
+            p = subprocess.run(["git", *args], cwd=str(root), capture_output=True, text=True,
+                               errors="replace", timeout=timeout, stdin=subprocess.DEVNULL,
+                               env=dict(os.environ, **_RUN_ENV))
+            return p.returncode, (p.stdout or "") + (p.stderr or "")
+        except (OSError, subprocess.TimeoutExpired) as ex:
+            return 127, str(ex)
+
+    def show_git_diff(self):
+        """/diff: the working tree against HEAD, as a card. No model call."""
+        if not shutil.which("git"):
+            self._sys_note("git isn't installed.", "danger"); return False
+        rc, top = self._git("rev-parse", "--show-toplevel")
+        if rc != 0:
+            self._sys_note("The working folder isn't a git repository"
+                           + ("" if self._workroot() else " (no folder chosen)") + ".", "dim")
+            return False
+        _rc, status = self._git("status", "--short", "--branch")
+        _rc, diff = self._git("diff", "HEAD", "--no-color", "--stat=100")
+        _rc, full = self._git("diff", "HEAD", "--no-color")
+        if _rc != 0:                                  # no commits yet
+            _rc, full = self._git("diff", "--no-color", "--cached")
+        lines = [ln for ln in status.splitlines() if ln.strip()]
+        branch = lines[0][3:] if lines and lines[0].startswith("##") else ""
+        files = [ln for ln in lines if not ln.startswith("##")]
+        card, head, body, foot = self._card_shell("WORKING TREE", lambda: full or status)
+        head.insert_child_after(self._pill(f"{len(files)} changed" if files else "clean",
+                                           "run" if files else "ok"), head.get_first_child())
+        if branch:
+            bl = Gtk.Label(label=branch, xalign=0); bl.add_css_class("cmd-text")
+            body.append(bl)
+        for ln in files[:40]:
+            fl = Gtk.Label(label=ln, xalign=0, selectable=True); fl.add_css_class("browse-step")
+            body.append(fl)
+        if len(files) > 40:
+            more = Gtk.Label(label=f"\u2026 {len(files) - 40} more", xalign=0)
+            more.add_css_class("dim"); body.append(more)
+        if full.strip():
+            dl = full.splitlines()
+            foot.append(self._diff_view(dl[:4000], expanded=len(dl) <= 60))
+        self._log_pin(card)
+        return True
+
+    COMMIT_ASK = ("Commit the work: read `git status` and `git diff`, stage only the changes "
+                  "that belong (never secrets, build output or unrelated files), and commit "
+                  "with a concise message that says why, not just what. Then show "
+                  "`git log -1 --stat`.")
+    REVIEW_ASK = ("Review the uncommitted changes (`git diff HEAD` and any untracked files) as "
+                  "a careful senior reviewer: bugs, broken edge cases, security problems, "
+                  "missing tests. Report each finding with file:line and severity, most "
+                  "severe first. Change nothing.")
 
     def _do_write(self, rel, content):
         """Write one complete file into the working folder — checkpointed, shown
@@ -7469,6 +7530,9 @@ class ChuckWindow(Adw.ApplicationWindow):
         ("/clear", "start a new chat"),
         ("/compact", "summarise the conversation so far into one note"),
         ("/model <name>", "switch model (part of the name is enough)"),
+        ("/diff", "the working tree as a diff (git)"),
+        ("/commit [msg]", "Chuck stages the right changes and commits"),
+        ("/review", "Chuck reviews the uncommitted changes for bugs"),
         ("/undo", "revert the last file change"),
         ("/retry", "ask the last question again  (Ctrl+R; \u2191 edits it)"),
         ("/plan", "plan mode on/off: propose first, act after you approve"),
@@ -7501,6 +7565,18 @@ class ChuckWindow(Adw.ApplicationWindow):
             self.new_chat()
         elif cmd == "retry":
             self.retry_last()
+        elif cmd == "diff":
+            self.show_git_diff()
+        elif cmd in ("commit", "review"):
+            if not self.workspace:
+                self._sys_note("Pick a working folder first (/folder).", "danger")
+                return True
+            self.set_agent_mode(True, announce=False)
+            ask = self.COMMIT_ASK if cmd == "commit" else self.REVIEW_ASK
+            if cmd == "commit" and arg:
+                ask += f" Use exactly this commit message: {arg}"
+            self.entry.get_buffer().set_text(ask)
+            self.on_send()
         elif cmd == "plan":
             if not self.agent_mode:
                 self.set_agent_mode(True)

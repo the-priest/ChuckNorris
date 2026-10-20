@@ -86,7 +86,7 @@ there's nothing to look at.
 
 ### Phase 6 — the workflow around the code
 
-- [ ] **Git.** `/diff` shows the working tree as a diff card; `/commit` has the
+- [x] **Git.** `/diff` shows the working tree as a diff card; `/commit` has the
       agent write the message from the diff and commit; `/review` has it review
       the diff for bugs before you push.
 - [ ] **Hooks.** Settings: a command after every file write (a formatter,
