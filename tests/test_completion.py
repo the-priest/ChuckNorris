@@ -92,9 +92,15 @@ check_finished(w, "plan carried through")
 w = agent(["```plan\n- [ ] a\n- [ ] b\n```"] + ["Okay."] * 20)
 type_and_send(w, "stubborn plan")
 nudges = hist_text(w).count("unfinished step(s)")
-check(nudges == 3, "plan nudges are bounded at three, never a loop", f"{nudges}")
-check(len(w.backend.calls) <= 5, "so a stubborn model still ends the run",
-      f"{len(w.backend.calls)}")
+check(nudges == 1, "a bare 'Okay.' after a plan nudge ends it: one nudge, not three paid ones",
+      f"{nudges}")
+check(len(w.backend.calls) == 3, "so the run ends promptly", f"{len(w.backend.calls)}")
+
+w = agent(["```plan\n- [ ] a\n- [ ] b\n- [ ] c\n```", "Did a.", "```bash\necho b\n```",
+           "Did b.", "Okay.", "Okay."])
+type_and_send(w, "three steps")
+check(hist_text(w).count("unfinished step(s)") == 2,
+      "but an agent that acts after a nudge can be nudged again", hist_text(w).count("unfinished step(s)"))
 check_finished(w, "plan nudge cap")
 
 # ═══════════════════════════════════════════════════════════════════════════

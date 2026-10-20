@@ -292,7 +292,11 @@ headerbar { background-color: @bg; border-bottom: 1px solid @line; box-shadow: n
 .headerbtn { background: transparent; border-radius: 8px; min-width: 32px; min-height: 32px;
              color: @mute; box-shadow: none; border: none; }
 .headerbtn:hover { background-color: @surface2; color: @ink; }
-.headerbtn:checked { background-color: @surface2; color: @ink; }
+.headerbtn:checked { background: transparent; color: @accent_hi; }   /* "on": a lit icon, not a stuck press */
+.headerbtn:checked:hover { background-color: @surface2; }
+/* reply actions: there when you point at a reply, always on the latest one */
+.msg-tools { opacity: 0; transition: opacity 140ms ease-out; }
+.turn-row:hover .msg-tools, .msg-tools.latest, .msg-tools:focus-within { opacity: 1; }
 .meter > button { background-color: @surface; border: 1px solid @line; border-radius: 999px;
              padding: 3px 12px; min-height: 0; color: @body; font-size: 11.5px;
              font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace; box-shadow: none; }
@@ -320,8 +324,6 @@ headerbar { background-color: @bg; border-bottom: 1px solid @line; box-shadow: n
 .byline-meta { color: @faint; font-size: 11px; }
 .avatar      { background-color: #17151F; border: 1px solid alpha(@accent, 0.5); border-radius: 7px;
                color: @accent_hi; font-size: 11px; font-weight: 800; min-width: 20px; min-height: 20px; }
-.msg-tools   { opacity: 0.45; }
-.msg-tools:hover { opacity: 1; }
 .playbtn     { background: transparent; border: none; box-shadow: none; padding: 3px 6px;
                min-width: 0; min-height: 0; color: @mute; border-radius: 7px; }
 .playbtn:hover { color: @ink; background-color: @surface2; }
@@ -349,6 +351,7 @@ expander title:hover { color: @mute; }
 .cmd-card  { background-color: @surface; border: 1px solid @line; border-radius: 12px; }
 .term-live .term-label { color: @accent_hi; }
 .plan-card.plan-proposed { border-color: alpha(@accent, 0.45); }
+.suggest-flow > flowboxchild { padding: 0; background: none; }
 .slash-cmd   { color: @accent_hi; font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace; font-size: 12.5px; }
 .browse-err  { color: #F87171; font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace; font-size: 12px; }
 .browse-warn { color: #FBBF24; font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace; font-size: 12px; }
@@ -2786,6 +2789,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._edit_at = None            # editing the user message at this history index
         self._hook_runs = 0
         self._hook_passed_turn = None
+        self._acted_since_nudge = False
         self._jobs = {}                 # background jobs: name -> {proc, log, cmd, card}
         # MCP servers from ~/.config/chucknorris/mcp.json, started in the
         # background; when their tool lists arrive the system prompt is rebuilt
@@ -2901,6 +2905,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         memb.add_css_class("headerbtn"); memb.set_tooltip_text("Memory & skills")
         memb.connect("clicked", self.open_memory)
         header.pack_end(memb)
+        self.mem_btn = memb
         # the meter: what this chat has cost, one click for the breakdown
         self._meter_lbl = Gtk.Label(label="$0.00")
         self.meter_btn = Gtk.MenuButton()
@@ -3071,6 +3076,7 @@ class ChuckWindow(Adw.ApplicationWindow):
                                               "applets-screenshooter-symbolic"))
         cam.add_css_class("icon-btn"); cam.set_valign(Gtk.Align.CENTER)
         cam.set_tooltip_text("Attach a screenshot of your screen")
+        self.cam_btn = cam
         cam.connect("clicked", self.on_screenshot)
         bar.append(att); bar.append(cam)
         spacer = Gtk.Box(hexpand=True); bar.append(spacer)
@@ -3179,6 +3185,8 @@ class ChuckWindow(Adw.ApplicationWindow):
         self.toasts.set_child(outer)
         tv = Adw.ToolbarView(); tv.add_top_bar(header); tv.set_content(self.toasts)
         self.set_content(tv)
+        self._narrow = False
+        self._add_breakpoints()
 
         # window-wide shortcuts. Tab flips Agent/Chat from anywhere in the main
         # window — captured before GTK's focus navigation can eat it.
@@ -3416,6 +3424,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             sub = "Chat mode · answers only — nothing runs on your machine"
         sl = Gtk.Label(label=sub, xalign=0.5, wrap=True, justify=Gtk.Justification.CENTER)
         sl.add_css_class("empty-sub"); sl.set_margin_top(8)
+        sl.set_max_width_chars(64)
         box.append(sl)
 
         if not self.backend.key():
@@ -3429,10 +3438,16 @@ class ChuckWindow(Adw.ApplicationWindow):
             kr.append(kl); kr.append(kb)
             box.append(kr)
 
-        grid = Gtk.Grid(column_spacing=10, row_spacing=10)
+        # a FlowBox, not a fixed 2-column grid: in a narrow window the cards
+        # wrap to one column instead of being clipped
+        grid = Gtk.FlowBox()
+        grid.add_css_class("suggest-flow")
         grid.set_margin_top(28); grid.set_halign(Gtk.Align.CENTER)
         try:
-            grid.set_column_homogeneous(True)
+            grid.set_selection_mode(Gtk.SelectionMode.NONE)
+            grid.set_max_children_per_line(2); grid.set_min_children_per_line(1)
+            grid.set_column_spacing(10); grid.set_row_spacing(10)
+            grid.set_homogeneous(True)
         except Exception:
             pass
         items = self.AGENT_SUGGEST if self.agent_mode else self.CHAT_SUGGEST
@@ -3453,15 +3468,25 @@ class ChuckWindow(Adw.ApplicationWindow):
                 b.connect("clicked", self.open_workspace)
             else:
                 b.connect("clicked", lambda _b, p=prompt: self._prefill(p))
-            grid.attach(b, i % 2, i // 2, 1, 1)
+            grid.append(b)
         box.append(grid)
         keys = Gtk.Label(label="Tab  switch Agent / Chat     Ctrl+O  working folder     "
                                "Enter  send     Shift+Enter  new line", xalign=0.5)
         keys.add_css_class("empty-keys"); keys.set_margin_top(26)
         keys.set_wrap(True); keys.set_justify(Gtk.Justification.CENTER)
         box.append(keys)
-        holder.add_overlay(box)
-        self._hint_widget = box
+        for m in ("top", "bottom"):
+            getattr(box, f"set_margin_{m}")(24)
+        # in a scroller: a short window scrolls the welcome instead of cutting
+        # off its top and sliding the shortcut line under the composer
+        sw = Gtk.ScrolledWindow()
+        try:
+            sw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        except Exception:
+            pass
+        sw.set_child(box)
+        holder.add_overlay(sw)
+        self._hint_widget = sw
         self._hint = box
         try:
             self.view_stack.set_visible_child_name("empty")
@@ -3628,6 +3653,16 @@ class ChuckWindow(Adw.ApplicationWindow):
         copy.add_css_class("playbtn")
         row.append(copy)
         w.append(row)
+        last = next((x for x in reversed(self._log) if x.get("kind") == "bot"), None)
+        if last is e:
+            prev = getattr(self, "_latest_tools", None)
+            if prev is not None and prev is not row:
+                try:
+                    prev.remove_css_class("latest")
+                except Exception:
+                    pass
+            row.add_css_class("latest")
+            self._latest_tools = row
         return w
 
     def _render_bot(self, e):
@@ -4274,11 +4309,41 @@ class ChuckWindow(Adw.ApplicationWindow):
         self.settings["tts"] = on
         save_settings(self.settings)
 
+    def _add_breakpoints(self):
+        """Responsive layout: below 900px the chat list folds away so the
+        conversation and the composer keep their width (the toggle still opens
+        it), and your saved preference is left alone."""
+        if not (hasattr(Adw, "Breakpoint") and hasattr(self, "add_breakpoint")):
+            return
+        try:
+            bp = Adw.Breakpoint.new(Adw.BreakpointCondition.parse("max-width: 900sp"))
+            bp.add_setter(self.side_btn, "active", False)
+            bp.add_setter(self.sidebar, "reveal-child", False)
+
+            def narrow(on):
+                self._narrow = on
+            bp.connect("apply", lambda *_a: narrow(True))
+            bp.connect("unapply", lambda *_a: narrow(False))
+            self.add_breakpoint(bp)
+            # very narrow: secondary controls step aside (memory: /memory,
+            # voice: Settings, screen capture: Ctrl+V a screenshot)
+            tiny = Adw.Breakpoint.new(Adw.BreakpointCondition.parse("max-width: 680sp"))
+            tiny.add_setter(self.side_btn, "active", False)
+            tiny.add_setter(self.sidebar, "reveal-child", False)
+            for wdg in (self.mem_btn, self.tts_btn, self.cam_btn):
+                tiny.add_setter(wdg, "visible", False)
+            tiny.connect("apply", lambda *_a: narrow(True))
+            tiny.connect("unapply", lambda *_a: narrow(self.get_width() <= 900))
+            self.add_breakpoint(tiny)
+        except Exception:
+            pass
+
     def _toggle_sidebar(self, btn):
         on = btn.get_active()
         self.sidebar.set_reveal_child(on)
-        self.settings["sidebar_open"] = on
-        save_settings(self.settings)
+        if not getattr(self, "_narrow", False):   # a narrow window's auto-collapse isn't a choice
+            self.settings["sidebar_open"] = on
+            save_settings(self.settings)
         if on:
             self._refresh_sidebar()
 
@@ -6908,13 +6973,19 @@ class ChuckWindow(Adw.ApplicationWindow):
                             f'<span foreground="#F87171">\u2212{rem}</span>')
         except Exception:
             stat.set_text(f"+{add} -{rem}")
+        same = ch["before"] == ch["after"]
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        row.append(name); row.append(stat)
+        row.append(name)
+        if not same:
+            row.append(stat)
         body.append(row)
-        pill = self._pill("applied", "ok")
+        # rewriting a file with what it already holds changed nothing: say so,
+        # rather than a "+0 −0" card offering to revert a no-op
+        pill = self._pill("no change" if same else "applied", "wait" if same else "ok")
         head.insert_child_after(pill, head.get_first_child())
         btn = Gtk.Button(label="Revert"); btn.add_css_class("ghost")
         btn.set_tooltip_text("Put the file back the way it was before this change")
+        btn.set_visible(not same)
         head.append(btn)
         if diff and len(diff) > 2:
             foot.append(self._diff_view(diff[2:], expanded=len(diff) <= 40))
@@ -7781,6 +7852,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._forced_answer = False
         self._hook_runs = 0
         self._hook_passed_turn = None
+        self._acted_since_nudge = False
 
     # ── hooks: the user's own commands around the agent's work ──
     def _after_write_hook(self, ch):
@@ -8750,10 +8822,15 @@ class ChuckWindow(Adw.ApplicationWindow):
         if (disp or "").strip().endswith("?"):
             return None                 # it asked the user something: waiting is right
         e = self._plan_entry
-        if self._in_log(e) and self._plan_nudges < 3:
+        # Another nudge only if the agent DID something since the last one: a
+        # bare "Done." twice in a row means it is done (and just didn't tick
+        # its card), and every extra nudge is a paid model call.
+        if (self._in_log(e) and self._plan_nudges < 3
+                and (self._plan_nudges == 0 or self._acted_since_nudge)):
             left = [t for st, t in (e["data"].get("items") or []) if st != "x"]
             if left:
                 self._plan_nudges += 1
+                self._acted_since_nudge = False
                 return ("the plan isn't finished \u2014 continuing",
                         f"Your plan still has {len(left)} unfinished step(s): "
                         + "; ".join(left[:5]) + ". Do the next one now. If a step is done or no "
@@ -8888,6 +8965,8 @@ class ChuckWindow(Adw.ApplicationWindow):
         # mid-way with no summary — an agent that quits on step five is not an
         # agent. Steps are cheap to allow and the watchdog still guards hangs.
         step_cap = self.cfg('agent_steps', 60, 4, 200)
+        if feedback:
+            self._acted_since_nudge = True
         if feedback and self._steps < step_cap:
             self._steps += 1
             self.history.append({"role": "user",
