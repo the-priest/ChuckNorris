@@ -196,6 +196,10 @@ w.backend.replies = ["```bash\npwd\n```", "Ok."]
 type_and_send(w, "reset")
 check(hist_text(w).rstrip().split("pwd")[-1].count(str(ws.resolve())) >= 1,
       "setting the working folder resets the shell to it")
+w2 = agent(["```bash\necho hi\n```", "Ok."])
+w2.set_workspace(None, announce=False)
+type_and_send(w2, "no folder, no cd")
+check("The shell is now in" not in hist_text(w2), "no cd, no 'shell moved' note (even with no folder)")
 w.backend.replies = ["```bash\necho one\nbogus_command_qq\n```", "Ok."]
 type_and_send(w, "where is the error")
 check("line 2: bogus_command_qq" in hist_text(w),

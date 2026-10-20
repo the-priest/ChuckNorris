@@ -84,9 +84,14 @@ if "CRITICAL" not in h:
 
 print("--- installs are still forced through -Syu when auto-running ---")
 w = new_win(["```bash\nsudo pacman -S cowsay\n```", "done"], tmp)
+_ran = []
+_real_exec = w._execute_shell
+w._execute_shell = lambda body, fn: (_ran.append(body), (0, "ok"))[1]
 type_and_send(w, "install cowsay")
-if "-Syu" not in hist(w):
-    fail("a bare -S was auto-run without being corrected")
+w._execute_shell = _real_exec
+# what EXECUTED, not what the prompt or the model's text says
+if not _ran or "-Syu" not in _ran[0] or "pacman -S " in _ran[0]:
+    fail(f"a bare -S was auto-run without being corrected: {_ran}")
 print("  bare -S rewritten before it executed")
 
 print("--- one command per reply still holds ---")

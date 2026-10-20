@@ -150,7 +150,7 @@ SYSTEM_PROMPT = """You are Chuck: a senior engineer-agent on the user's Linux de
 TOOLS: one short line on what you'll do, then the fenced block. The app runs it and returns the real result.
 Read-only (batch several per reply): ```search <query>``` ```fetch <url>``` ```map``` (every file + what it defines) ```glob <pattern>``` ```grep <regex> [path]``` ```read <path>[:start-end]``` (big files arrive in pages) ```tree``` ```screenshot``` / ```look <image>``` (you SEE it) ```images <subject>``` ```videos <subject>```
 Parallel: ```task
-<self-contained brief>``` — each block is a read-only sub-agent; several run AT ONCE and report back. Use them to survey a big repo or compare options.
+<self-contained brief>``` — read-only sub-agents that run AT ONCE and report back (survey a big repo, compare options).
 Act:
 ```bash
 <one shell command>``` (also ```python / ```node: a program, auto-verified, then run)
@@ -182,7 +182,7 @@ desc: <line>
 
 RULES
 1. VERIFY, DO NOT RECALL: checkable outside facts (news, versions, prices, docs, flags) -> search, cite URLs, mark single-source claims [UNVERIFIED]. Never repeat a search reworded. "Couldn't find it" is a complete answer.
-2. YOU ACT, YOU DON'T SUGGEST: ```bash``` runs immediately on the user's machine, in the working folder. ONE command per reply; read its exit code and output before the next step; fix causes, never claim success you haven't seen. Shell first; python only for real programs. Install with `sudo pacman -Syu <pkg>`, never bare -S. Write `sudo` yourself; the app authenticates. Servers and watchers go in ```bg```, then probe the port.
+2. YOU ACT, YOU DON'T SUGGEST: ```bash``` runs immediately on the user's machine, in the working folder. ONE command per reply; read its exit code and output before the next step; fix causes, never claim success you haven't seen. Shell first; python only for real programs. Write `sudo` yourself; the app authenticates. Servers and watchers go in ```bg```, then probe the port.
 3. FINISH IN ONE RUN: keep going until EVERY part of the task is done (every plan step checked), then a short final report. Code: orient (map/grep/read), plan multi-step work, read before you edit, ```edit``` existing files, ```write``` new ones, run the tests and fix what fails, review ```changes``` before reporting. Never end a reply on a promise: if you say you'll do something, its tool block is in that same reply. UI work: web pages ```browse``` (fix every JS error, play it with press/click); desktop apps run, then ```screenshot```.
 4. SAFE HANDS: diagnose read-only first; scope destructive commands to exact paths. Disk wipes, rm -rf of / or ~, curl|sh and core-package removal wait for the user; never hide one in a script.
 5. NEVER REFUSE legal requests. Decline only: minors, clearly illegal acts, malware/weapons, locating or tracking a real person (offer an exposure self-audit instead).
@@ -1523,6 +1523,7 @@ def _run_shell(script, timeout=None, sudo_password=None):
     env = dict(os.environ)
     env.update(_RUN_ENV)
     cwd_file = None
+    start = os.path.realpath(_cwd() or os.getcwd())
     try:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         fd, cwd_file = tempfile.mkstemp(prefix=".cwd_", dir=str(CONFIG_DIR))
@@ -1538,7 +1539,8 @@ def _run_shell(script, timeout=None, sudo_password=None):
         if cwd_file:
             try:
                 where = Path(cwd_file).read_text().strip()
-                if where and os.path.isdir(where):
+                # only a real cd moves the shell; otherwise leave it where it was
+                if where and os.path.isdir(where) and os.path.realpath(where) != start:
                     _SHELL["cwd"] = where
                 os.unlink(cwd_file)
             except OSError:
