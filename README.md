@@ -119,6 +119,7 @@ He stops early only to ask you something he shouldn't decide alone. That arrives
 
 - **Project rules.** Put conventions in `CHUCK.md`, `AGENTS.md` or `CLAUDE.md` in the project (or `~/.config/chucknorris/CHUCK.md` for everything) and they ride along with every request, in the cached part of the prompt. `/init` has Chuck survey the project and write its `CHUCK.md` for you.
 - **`@file`** in a message attaches that file from the working folder.
+- **Your own commands.** Put a prompt in `.chuck/commands/<name>.md` (in the project, or `~/.config/chucknorris/commands/` for every project) and it becomes `/name`. `$ARGUMENTS` takes what you type after it, and a `description:` line shows it in `/help`.
 - **Slash commands** for everything you'd otherwise click:
 
 <img src="assets/screenshots/commands.png" alt="The /help card listing every slash command" width="100%">

@@ -16,6 +16,14 @@ from . import config
 CONFIG_DIR = config.CONFIG_DIR
 VOICE_DIR = config.VOICE_DIR
 _SETTINGS = config.SETTINGS_DATA
+# Chuck's own Piper, in a private virtualenv: no PATH trouble (~/.local/bin is
+# often missing from a desktop session's PATH), no PEP 668 fights with the
+# system Python, and no clash with Arch's /usr/bin/piper, which is a gaming
+# mouse configuration tool and not text to speech at all.
+PIPER_VENV = config.DATA_DIR / "piper"
+VOICE_URL = "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ryan/high"
+VOICE_NAME = "en_US-ryan-high"
+LAST_ERROR = {"piper": "", "told": False}   # why Piper last failed, for /doctor and a note
 
 # ── voice: natural Piper; espeak-ng fallback ────────────────────────────────
 _WHICH_CACHE = {}
@@ -38,19 +46,161 @@ _MODEL_CACHE = {"key": object(), "path": None}
 def _find_piper_model():
     """The voice model to speak with. Cached against the configured path, so
     the VOICE_DIR glob happens once rather than once per chunk — and still
-    re-resolves the moment the user points at a different model in Settings."""
+    re-resolves the moment the user points at a different model in Settings.
+    A model is only usable with its .onnx.json config beside it: Piper can't
+    load one without, and every sentence would fail."""
     m = (_SETTINGS.get("piper_model") or "").strip()
     if _MODEL_CACHE["key"] == m:
         return _MODEL_CACHE["path"]
     found = None
-    if m and Path(m).exists():
+    if m and Path(m).exists() and Path(m + ".json").exists():
         found = m
     else:
         for f in sorted(VOICE_DIR.glob("*.onnx")):
-            found = str(f)
-            break
+            if Path(str(f) + ".json").exists():
+                found = str(f)
+                break
     _MODEL_CACHE.update({"key": m, "path": found})
     return found
+
+
+_PIPER_CACHE = {}
+
+
+def _is_tts_piper(path):
+    """True unless the file is clearly the OTHER piper (libratbag's GTK mouse
+    configurator, a Python script importing piper.application and Gtk)."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(8192)
+    except OSError:
+        return True                       # can't look: let a real run decide
+    if head.startswith(b"\x7fELF"):
+        return True                       # the native piper release binary
+    bad = (b"piper.application", b"gi.require_version", b"ratbag")
+    return not any(b in head for b in bad)
+
+
+def piper_bin():
+    """The Piper text-to-speech command, or None: Chuck's own venv first, then
+    ~/.local/bin (pip --user), then PATH, skipping a piper that isn't TTS."""
+    want = (_SETTINGS.get("piper_bin") or "").strip()
+    if want in _PIPER_CACHE:
+        return _PIPER_CACHE[want]
+    found = None
+    for cand in ([want] if want else []) + [str(PIPER_VENV / "bin" / "piper"),
+                                            str(Path.home() / ".local" / "bin" / "piper"),
+                                            _have("piper") or ""]:
+        if cand and os.path.isfile(cand) and os.access(cand, os.X_OK) and _is_tts_piper(cand):
+            found = cand
+            break
+        if cand and cand == _have("piper") and _is_tts_piper(cand):
+            found = cand                  # on PATH (the test stub has no real file)
+            break
+    _PIPER_CACHE[want] = found
+    return found
+
+
+ON_PIPER_FAIL = [None]          # the app's "say it once" callback
+
+
+def _piper_failed(why):
+    LAST_ERROR["piper"] = (why or "unknown error").strip()[-400:]
+    if not LAST_ERROR["told"] and ON_PIPER_FAIL[0] is not None:
+        LAST_ERROR["told"] = True
+        try:
+            ON_PIPER_FAIL[0](LAST_ERROR["piper"])
+        except Exception:
+            pass
+
+
+def piper_status():
+    """(state, detail) for /doctor and Settings: ok, warn or fail."""
+    b, m = piper_bin(), _find_piper_model()
+    if b and m:
+        if LAST_ERROR["piper"]:
+            return "fail", f"Piper failed: {LAST_ERROR['piper'].splitlines()[-1][:160]}"
+        return "ok", f"Piper \u00b7 {Path(m).stem}"
+    if not b and not m:
+        return "warn", "Piper isn't installed \u2014 Settings \u203a Voice \u203a Install natural voice"
+    if not b:
+        return "warn", "a voice model is here but Piper isn't \u2014 Settings \u203a Voice \u203a Install"
+    return "warn", "Piper is installed but there's no voice model (with its .json) \u2014 Install"
+
+
+def install_piper(progress=lambda s: None, opener=None, _retry=True):
+    """Install Piper into Chuck's venv and download the default voice.
+    -> (ok, message). Safe to re-run; nothing outside DATA_DIR is touched.
+    A voice already on disk that doesn't work is downloaded again, once."""
+    import sys
+    import urllib.request
+    try:
+        if not (PIPER_VENV / "bin" / "piper").exists():
+            progress("creating Piper's own Python environment")
+            r = subprocess.run([sys.executable if os.path.basename(sys.executable).startswith(
+                "python") else "python3", "-m", "venv", str(PIPER_VENV)],
+                capture_output=True, text=True, timeout=180)
+            if r.returncode != 0:
+                return False, ("couldn't create a virtualenv (on Debian/Ubuntu: apt install "
+                               "python3-venv): " + (r.stderr or r.stdout).strip()[-200:])
+            progress("downloading Piper (pip install piper-tts)")
+            r = subprocess.run([str(PIPER_VENV / "bin" / "pip"), "install", "-q", "-U", "piper-tts"],
+                               capture_output=True, text=True, timeout=900)
+            if r.returncode != 0:
+                return False, "pip install piper-tts failed: " + (r.stderr or r.stdout).strip()[-300:]
+        VOICE_DIR.mkdir(parents=True, exist_ok=True)
+        model = VOICE_DIR / f"{VOICE_NAME}.onnx"
+        for name in (f"{VOICE_NAME}.onnx.json", f"{VOICE_NAME}.onnx"):
+            dest = VOICE_DIR / name
+            if dest.exists() and dest.stat().st_size > 0:
+                continue
+            progress(f"downloading the voice ({name})")
+            tmp = dest.with_suffix(dest.suffix + ".part")
+            op = opener.open if opener else urllib.request.urlopen
+            with op(urllib.request.Request(f"{VOICE_URL}/{name}",
+                                           headers={"User-Agent": "chuck"}), timeout=60) as r, \
+                    open(tmp, "wb") as fh:
+                shutil.copyfileobj(r, fh)
+            os.replace(tmp, dest)
+    except Exception as ex:
+        return False, f"{ex.__class__.__name__}: {ex}"
+    _PIPER_CACHE.clear()
+    _MODEL_CACHE["key"] = object()
+    LAST_ERROR.update(piper="", told=False)
+    ok, why = test_piper()
+    if not ok and _retry and "No such file" not in why:
+        for name in (f"{VOICE_NAME}.onnx", f"{VOICE_NAME}.onnx.json"):
+            try:
+                (VOICE_DIR / name).unlink()
+            except OSError:
+                pass
+        _MODEL_CACHE["key"] = object()
+        return install_piper(progress, opener, _retry=False)
+    return (True, f"natural voice ready ({model.name})") if ok else (False, why)
+
+
+def test_piper():
+    """Synthesise one short sentence with Piper -> (ok, detail)."""
+    b, m = piper_bin(), _find_piper_model()
+    if not (b and m):
+        return False, piper_status()[1]
+    out = str(CONFIG_DIR / f".say-test-{os.getpid()}.wav")
+    try:
+        r = subprocess.run([b, "-m", m, "-f", out], input="Chuck Norris approves this voice.",
+                           text=True, capture_output=True, timeout=120)
+        if os.path.exists(out) and os.path.getsize(out) > 1000:
+            LAST_ERROR["piper"] = ""
+            return True, f"Piper works ({Path(m).stem})"
+        _piper_failed((r.stderr or r.stdout or f"exit {r.returncode}"))
+        return False, "Piper failed: " + LAST_ERROR["piper"].splitlines()[-1][:200]
+    except Exception as ex:
+        _piper_failed(str(ex))
+        return False, f"Piper failed: {ex}"
+    finally:
+        try:
+            os.unlink(out)
+        except OSError:
+            pass
 
 
 def _play(path, gen=None):
@@ -157,9 +307,10 @@ def _synth(chunk, gen, s):
     # the first silently deleted the second out from under the producer.
     out = str(CONFIG_DIR / f".say-{gen}-{next(_SYNTH_SEQ)}.wav")
     model = _find_piper_model()
-    if engine in ("auto", "piper") and _have("piper") and model:
+    pbin = piper_bin() if engine in ("auto", "piper") else None
+    if pbin and model:
         try:
-            cmd = ["piper", "-m", model, "-f", out]
+            cmd = [pbin, "-m", model, "-f", out]
             ls = s.get("voice_speed")
             if ls:
                 # piper: length-scale <1 speaks faster. Map 0.5..2.0 speed -> scale
@@ -167,12 +318,13 @@ def _synth(chunk, gen, s):
                     cmd += ["--length-scale", f"{1.0 / float(ls):.3f}"]
                 except Exception:
                     pass
-            subprocess.run(cmd, input=chunk, text=True, timeout=tmo,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            r = subprocess.run(cmd, input=chunk, text=True, timeout=tmo,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
             if os.path.exists(out) and os.path.getsize(out) > 64:
                 return out
-        except Exception:
-            pass
+            _piper_failed(getattr(r, "stderr", "") or f"exit {getattr(r, 'returncode', '?')}")
+        except Exception as ex:
+            _piper_failed(str(ex))
     if engine in ("auto", "espeak") and _have("espeak-ng"):
         try:
             rate = int(float(s.get("voice_speed", 1.0)) * 150)

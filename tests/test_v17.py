@@ -352,6 +352,113 @@ shutil.rmtree(outside, ignore_errors=True)
 settle()
 
 # ═══════════════════════════════════════════════════════════════════════════
+print("\n--- custom commands ---")
+ws = tmp / "cmds"
+(ws / ".chuck" / "commands").mkdir(parents=True)
+(ws / ".chuck" / "commands" / "fixlint.md").write_text(
+    "---\ndescription: fix every lint error in a path\n---\nRun the linter on $ARGUMENTS and fix "
+    "every error it reports. Re-run until clean.\n")
+(ws / ".chuck" / "commands" / "standup.md").write_text("# Summarise today's commits\nList what changed today.\n")
+(ws / ".chuck" / "commands" / "diff.md").write_text("I should not replace a built-in.\n")
+(ws / ".chuck" / "commands" / "loop.md").write_text("/loop\n")
+gl = cn.CONFIG_DIR / "commands"
+gl.mkdir(parents=True, exist_ok=True)
+(gl / "standup.md").write_text("Global version.\n")
+(gl / "everywhere.md").write_text("Say hello from everywhere.\n")
+w = agent(["Linted.", "Standup.", "Hello."], ws)
+cc = w.custom_commands()
+check(set(cc) == {"fixlint", "standup", "everywhere", "loop"}, "project and global commands are found; built-ins can't be replaced", sorted(cc))
+check(cc["fixlint"][1] == "fix every lint error in a path" and cc["standup"][1] == "Summarise today's commits",
+      "the description comes from front matter, else the first line")
+check("Summarise" in cc["standup"][1], "the project's version wins over the global one")
+type_and_send(w, "/fixlint src/app.py")
+users = [m["content"] for m in w.history if w._is_real_user(m)]
+check(users and users[-1].startswith("Run the linter on src/app.py and fix") and "description:" not in users[-1],
+      "/fixlint src/app.py sends the prompt with $ARGUMENTS filled in", users[-1:])
+type_and_send(w, "/standup for the team")
+users = [m["content"] for m in w.history if w._is_real_user(m)]
+check(users[-1].endswith("for the team") and "List what changed today." in users[-1],
+      "without $ARGUMENTS, the arguments are appended")
+type_and_send(w, "/everywhere")
+check("Say hello from everywhere." in [m["content"] for m in w.history if w._is_real_user(m)][-1],
+      "a command from the config folder works in any project")
+n = len(w.history)
+w.entry.get_buffer().set_text("/loop")
+w.on_send()
+check(len(w.history) == n, "a command that expands to another command is refused")
+w.entry.get_buffer().set_text("/help")
+w.on_send()
+texts = [x.get_text() for x in w.msgbox.walk() if isinstance(x.get_text(), str)]
+check("/fixlint" in texts and "fix every lint error in a path" in texts, "/help lists them")
+settle()
+
+# ═══════════════════════════════════════════════════════════════════════════
+print("\n--- Piper: found, installed, and never silently broken ---")
+import io
+v = cn.voice
+real = (v.PIPER_VENV, v.VOICE_DIR, v._have)
+vt = tmp / "voice"
+(vt / "bin").mkdir(parents=True)
+rat = vt / "bin" / "piper"
+rat.write_text("#!/usr/bin/python3\nimport gi\ngi.require_version('Gtk', '3.0')\n"
+               "from piper.application import Application\n")
+rat.chmod(0o755)
+v.PIPER_VENV, v.VOICE_DIR = vt / "venv", vt / "voices"
+v._PIPER_CACHE.clear(); v._MODEL_CACHE["key"] = object()
+v._have = lambda n: str(rat) if n == "piper" else real[2](n)
+try:
+    check(v.piper_bin() is None, "Arch's piper (the gaming-mouse tool) is not mistaken for TTS")
+    check(v.piper_status()[0] == "warn" and "Install" in v.piper_status()[1],
+          "/doctor says Piper isn't installed and how to fix it", v.piper_status())
+    # a stand-in for the venv's piper: writes a wav, or fails like a broken model
+    (v.PIPER_VENV / "bin").mkdir(parents=True)
+    fake = v.PIPER_VENV / "bin" / "piper"
+    fake.write_text("#!/bin/sh\nm=$2; out=$4; cat >/dev/null\n"
+                    "if grep -q good \"$m\"; then head -c 4000 /dev/zero > \"$out\"; "
+                    "else echo \"KeyError: 'num_symbols'\" >&2; exit 1; fi\n")
+    fake.chmod(0o755)
+    v._PIPER_CACHE.clear()
+    check(v.piper_bin() == str(fake), "Chuck's own Piper (in its venv) is found first")
+    served = []
+
+    class Op:
+        def __init__(self, model):
+            self.model = model
+
+        def open(self, req, timeout=None):
+            served.append(req.full_url.rsplit("/", 1)[-1])
+            return io.BytesIO(b"{}" if req.full_url.endswith(".json") else self.model)
+    v.VOICE_DIR.mkdir(parents=True)
+    (v.VOICE_DIR / "en_US-ryan-high.onnx").write_bytes(b"corrupt")
+    (v.VOICE_DIR / "en_US-ryan-high.onnx.json").write_text("{}")
+    steps = []
+    ok, msg = v.install_piper(steps.append, opener=Op(b"good model"))
+    check(ok and "ready" in msg, "Install finishes with a working voice", msg)
+    check(served == ["en_US-ryan-high.onnx.json", "en_US-ryan-high.onnx"],
+          "a corrupt voice already on disk is downloaded again", served)
+    check(v.test_piper()[0] and v.piper_status() == ("ok", "Piper \u00b7 en_US-ryan-high"),
+          "and the test and /doctor agree it works")
+    (v.VOICE_DIR / "en_US-ryan-high.onnx").write_bytes(b"broken again")
+    told = []
+    v.ON_PIPER_FAIL[0] = told.append
+    v.LAST_ERROR.update(piper="", told=False)
+    for _ in range(3):
+        v._synth("Hello there.", 0, {"voice_engine": "piper"})
+    check(len(told) == 1 and "num_symbols" in told[0],
+          "when Piper fails mid-use, the real reason is reported, once", told)
+    check(v.piper_status()[0] == "fail" and "num_symbols" in v.piper_status()[1],
+          "and /doctor shows it")
+    (v.VOICE_DIR / "solo.onnx").write_bytes(b"good")
+    (v.VOICE_DIR / "en_US-ryan-high.onnx").unlink()
+    v._MODEL_CACHE["key"] = object()
+    check(v._find_piper_model() is None, "a model without its .json config is not used")
+finally:
+    v.PIPER_VENV, v.VOICE_DIR, v._have = real
+    v._PIPER_CACHE.clear(); v._MODEL_CACHE["key"] = object()
+    v.ON_PIPER_FAIL[0] = None
+    v.LAST_ERROR.update(piper="", told=False)
+
+# ═══════════════════════════════════════════════════════════════════════════
 print(f"\nTOTAL V17 FAILURES: {fails + len(FAILS)}")
 shutil.rmtree(tmp, ignore_errors=True)
 assert fails == 0 and not FAILS, "v17 regressions present"

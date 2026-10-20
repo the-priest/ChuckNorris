@@ -43,7 +43,7 @@ if command -v pacman >/dev/null; then
   sudo pkgfile --update 2>/dev/null || true
 elif command -v apt-get >/dev/null; then
   sudo apt-get update
-  PKGS="python3-gi python3-gi-cairo gir1.2-gtk-4.0 gir1.2-adw-1 adwaita-icon-theme libgtk-4-1 libadwaita-1-0 policykit-1 pciutils espeak-ng yt-dlp whois dnsutils traceroute wget netcat-openbsd bubblewrap"
+  PKGS="python3-venv python3-gi python3-gi-cairo gir1.2-gtk-4.0 gir1.2-adw-1 adwaita-icon-theme libgtk-4-1 libadwaita-1-0 policykit-1 pciutils espeak-ng yt-dlp whois dnsutils traceroute wget netcat-openbsd bubblewrap"
   if [ "$SESS" = "wayland" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then PKGS="$PKGS grim"; else PKGS="$PKGS scrot"; fi
   # shellcheck disable=SC2086
   sudo apt-get install -y $PKGS || die "apt install failed"
@@ -58,10 +58,17 @@ fi
 ok "dependencies ready"
 
 step "setting up the voice (Piper — natural deep voice; espeak-ng is the fallback)"
-if ! command -v piper >/dev/null; then
-  pip install --user --break-system-packages piper-tts >/dev/null 2>&1 \
-    || pip install --user piper-tts >/dev/null 2>&1 \
-    || info "piper install skipped — espeak-ng will be used instead"
+# Piper lives in Chuck's own virtualenv: a menu-launched app often has no
+# ~/.local/bin on PATH, pip --user fights PEP 668, and on Arch /usr/bin/piper is
+# a gaming-mouse tool, not TTS. The app looks here first.
+PIPER_VENV="${DATA_DIR}/piper"
+if [ ! -x "${PIPER_VENV}/bin/piper" ]; then
+  if python3 -m venv "$PIPER_VENV" >/dev/null 2>&1 \
+     && "${PIPER_VENV}/bin/pip" install -q -U piper-tts >/dev/null 2>&1; then
+    ok "Piper installed (natural voice)"
+  else
+    info "Piper install failed — espeak-ng will speak; retry in Settings › Voice › Install"
+  fi
 fi
 
 # code verifier linters (best-effort — the verifier degrades gracefully without them)

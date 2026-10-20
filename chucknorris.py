@@ -3168,6 +3168,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         GLib.timeout_add_seconds(600, self._sweep_chats)
         self._apply_mode(announce=False)
         self._apply_access()                    # this window's folder policy, not a stale one
+        voice.ON_PIPER_FAIL[0] = lambda why: GLib.idle_add(self._piper_note, why)
         self._show_empty_hint()
         GLib.timeout_add_seconds(20, self._update_check)   # once a day, after startup settles
 
@@ -7697,8 +7698,10 @@ class ChuckWindow(Adw.ApplicationWindow):
             shutil.which("node") or "none \u2014 JavaScript can't be checked or run")
         shot = next((t for t in ("grim", "spectacle", "scrot", "gnome-screenshot") if shutil.which(t)), None)
         add("ok" if shot else "warn", "Screenshots", shot or "no capture tool \u2014 install grim (Wayland) or scrot (X11)")
-        voice = shutil.which("piper") or shutil.which("espeak-ng")
-        add("ok" if voice else "warn", "Voice", voice or "no piper or espeak-ng \u2014 replies can't be read aloud")
+        pst, pdet = voice.piper_status()        # run_doctor then tries a real synthesis
+        if pst != "ok" and shutil.which("espeak-ng"):
+            pdet += " (espeak-ng speaks meanwhile)"
+        add(pst if pst == "ok" or shutil.which("espeak-ng") else "fail", "Voice", pdet)
         if self._mcp is not None:
             st = self._mcp.status()
             bad = [(n, d) for n, state, d in st if state in ("failed", "error")]
@@ -7731,6 +7734,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         grid = Gtk.Grid(column_spacing=12, row_spacing=6)
         icon = {"ok": ("\u2713", "plan-tick"), "warn": ("!", "doctor-warn"), "fail": ("\u2717", "doctor-fail")}
         api_detail = None
+        voice_row = None
         for i, (st, name, detail) in enumerate(rows + [("warn", "API", "checking\u2026")]):
             ic, css = icon[st]
             il = Gtk.Label(label=ic); il.add_css_class(css)
@@ -7740,6 +7744,8 @@ class ChuckWindow(Adw.ApplicationWindow):
             grid.attach(il, 0, i, 1, 1); grid.attach(nl, 1, i, 1, 1); grid.attach(dl, 2, i, 1, 1)
             if name == "API":
                 api_detail, api_icon = dl, il
+            if name == "Voice" and st == "ok":
+                voice_row = (dl, il)
         body.append(grid)
         self._log_pin(card)
         key, base = self.backend.key(), self.backend.base()
@@ -7766,7 +7772,32 @@ class ChuckWindow(Adw.ApplicationWindow):
                 pass
             return False
         threading.Thread(target=lambda: GLib.idle_add(done, work()), daemon=True).start()
+        if voice_row is not None:
+            vdl, vil = voice_row
+            vdl.set_text(vdl.get_text() + " \u2014 testing\u2026")
+
+            def voice_done(res):
+                ok, text = res
+                try:
+                    vdl.set_text(text)
+                    vil.set_text(icon["ok" if ok else "fail"][0])
+                    for c in ("plan-tick", "doctor-warn", "doctor-fail"):
+                        vil.remove_css_class(c)
+                    vil.add_css_class(icon["ok" if ok else "fail"][1])
+                except Exception:
+                    pass
+                return False
+            threading.Thread(target=lambda: GLib.idle_add(voice_done, voice.test_piper()),
+                             daemon=True).start()
         return rows
+
+    def _piper_note(self, why):
+        last = (why or "").strip().splitlines()[-1][:180] if why else "unknown error"
+        self._sys_note(f"\U0001F50A Piper failed, so the robotic fallback voice is speaking: {last} "
+                       "\u2014 /doctor or Settings \u203a Voice to fix it.", "danger")
+        if _crashlog is not None:
+            _crashlog.record("piper", why or "")
+        return False
 
     # ── folder access: full / sandboxed / read-only ──
     ACCESS = [("full", "Full access", "commands run as you, anywhere you can"),
@@ -8668,8 +8699,11 @@ class ChuckWindow(Adw.ApplicationWindow):
         if cmd == "help":
             card, head, body, foot = self._card_shell("COMMANDS")
             grid = Gtk.Grid(column_spacing=18, row_spacing=6)
-            for i, (c, d) in enumerate(self.SLASH_HELP + [("@path", "attach a file from the working folder"),
-                                                          ("Tab", "switch Agent / Chat")]):
+            custom = [(f"/{n}", d or "your command") for n, (_p, d) in
+                      sorted(self.custom_commands().items())]
+            for i, (c, d) in enumerate(self.SLASH_HELP + custom
+                                       + [("@path", "attach a file from the working folder"),
+                                          ("Tab", "switch Agent / Chat")]):
                 cl = Gtk.Label(label=c, xalign=0); cl.add_css_class("slash-cmd")
                 dl = Gtk.Label(label=d, xalign=0, wrap=True, hexpand=True); dl.add_css_class("dim")
                 grid.attach(cl, 0, i, 1, 1); grid.attach(dl, 1, i, 1, 1)
@@ -8761,9 +8795,65 @@ class ChuckWindow(Adw.ApplicationWindow):
             self.compact_now()
         elif cmd == "export" and hasattr(self, "export_chat"):
             self.export_chat()
+        elif cmd in self.custom_commands():
+            self.run_custom_command(cmd, arg)
         else:
             return False
         return True
+
+    # ── custom commands: .chuck/commands/<name>.md -> /name ──
+    def custom_commands(self):
+        """{name: (path, description)}: the project's .chuck/commands/*.md
+        over the config folder's commands/*.md. Built-ins can't be replaced."""
+        out = {}
+        builtin = {part[1:] for c, _d in self.SLASH_HELP for part in c.split()
+                   if part.startswith("/")}
+        dirs = [CONFIG_DIR / "commands"]
+        if self.workspace:
+            dirs.append(Path(self.workspace) / ".chuck" / "commands")
+        for d in dirs:                                   # later (the project's) wins
+            try:
+                files = sorted(d.glob("*.md"))
+            except OSError:
+                continue
+            for f in files:
+                name = f.stem.lower()
+                if not re.fullmatch(r"[a-z][a-z0-9_-]{0,30}", name) or name in builtin:
+                    continue
+                desc = ""
+                try:
+                    head = f.read_text(encoding="utf-8", errors="replace")[:600]
+                    m = re.match(r"---\s*\n(.*?)\n---", head, re.S)
+                    dm = re.search(r"(?m)^description:\s*(.+)$", m.group(1)) if m else None
+                    desc = dm.group(1).strip() if dm else next(
+                        (ln.strip("# ").strip() for ln in head.splitlines()
+                         if ln.strip() and not ln.startswith("---")), "")
+                except OSError:
+                    continue
+                out[name] = (f, desc[:80])
+        return out
+
+    def run_custom_command(self, name, arg):
+        path, _desc = self.custom_commands()[name]
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as ex:
+            self._sys_note(f"/{name}: couldn't read {path}: {ex}", "danger")
+            return
+        text = re.sub(r"\A---\s*\n.*?\n---\s*\n", "", text, flags=re.S).strip()
+        if "$ARGUMENTS" in text:
+            text = text.replace("$ARGUMENTS", arg)
+        elif arg:
+            text += "\n\n" + arg
+        if not text:
+            self._sys_note(f"/{name} is empty ({_short_path(path)}).", "danger")
+            return
+        if text.startswith("/"):
+            self._sys_note(f"/{name} expands to another command; write the prompt itself in "
+                           f"{_short_path(path)}.", "danger")
+            return
+        self.entry.get_buffer().set_text(text)
+        self.on_send()
 
     def on_send(self, *_):
         text = self._get_entry()
@@ -10694,6 +10784,40 @@ class ChuckWindow(Adw.ApplicationWindow):
         spin(g, "Pitch (espeak-ng)", "voice_pitch", 0, 99, 1, 28)
         spin(g, "Max characters read per reply", "voice_max_chars", 2000, 40000, 1000, 20000)
         entry(g, "Piper voice model (blank = installed voice)", "piper_model")
+        nv = Adw.ActionRow(); nv.set_title("Natural voice (Piper)")
+        nv.set_subtitle(_html.escape(voice.piper_status()[1]))
+        ib = Gtk.Button(label="Install"); ib.add_css_class("quick"); ib.set_valign(Gtk.Align.CENTER)
+        vt = Gtk.Button(label="Test"); vt.add_css_class("quick"); vt.set_valign(Gtk.Align.CENTER)
+
+        def piper_install(*_a):
+            ib.set_sensitive(False); vt.set_sensitive(False)
+
+            def prog(msg):
+                GLib.idle_add(lambda: (nv.set_subtitle(_html.escape(msg + "\u2026")), False)[1])
+
+            def work():
+                ok, msg = voice.install_piper(prog)
+
+                def fin():
+                    nv.set_subtitle(_html.escape(msg))
+                    ib.set_sensitive(True); vt.set_sensitive(True)
+                    if ok:
+                        speak("Natural voice ready.", S)
+                    return False
+                GLib.idle_add(fin)
+            threading.Thread(target=work, daemon=True).start()
+
+        def piper_test(*_a):
+            vt.set_sensitive(False)
+            nv.set_subtitle("testing\u2026")
+
+            def work():
+                ok, msg = voice.test_piper()
+                GLib.idle_add(lambda: (nv.set_subtitle(_html.escape(msg)), vt.set_sensitive(True),
+                                       False)[2])
+            threading.Thread(target=work, daemon=True).start()
+        ib.connect("clicked", piper_install); vt.connect("clicked", piper_test)
+        nv.add_suffix(ib); nv.add_suffix(vt); g.add(nv)
         tr = Adw.ActionRow(); tr.set_title("Test the voice")
         tb = Gtk.Button(label="Play"); tb.add_css_class("quick"); tb.set_valign(Gtk.Align.CENTER)
         tb.connect("clicked", lambda *_a: speak(

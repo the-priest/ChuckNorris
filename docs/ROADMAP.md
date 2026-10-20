@@ -174,7 +174,7 @@ reaches only local servers.
 
 - [ ] **Remote MCP.** Streamable-HTTP MCP servers (with OAuth), MCP resources
       and prompts, alongside the stdio servers.
-- [ ] **Custom commands.** `.chuck/commands/<name>.md` in a project (or the
+- [x] **Custom commands.** `.chuck/commands/<name>.md` in a project (or the
       config folder) becomes `/name`, with `$ARGUMENTS`.
 
 ### Phase 15 — proof
