@@ -1,5 +1,77 @@
 # Changelog
 
+## 15.0.0 — a modern harness
+
+The plan is in `docs/ROADMAP.md`, ticked item by item as it shipped. Every
+item has tests in `tests/test_v15.py` (new) and is exercised end to end in
+`tests/test_deep.py`.
+
+### The model always has the right context
+
+- **Project rules.** `CHUCK.md`, `AGENTS.md` or `CLAUDE.md` in the working
+  folder, plus `~/.config/chucknorris/CHUCK.md` for everything, ride in the
+  cached system prompt. They reload when edited, when the folder changes, and
+  the moment the agent writes one. `/init` has the agent survey the project
+  and write its `CHUCK.md`.
+- **`@file` mentions** attach files from the working folder (images as
+  images).
+- **The shell remembers `cd`** between commands, like a terminal. The model is
+  told when the shell has left the working folder. Error line numbers are
+  unchanged.
+- **Slash commands:** `/help /init /clear /compact /model /undo /agent /chat
+  /folder /cost /memory /export /mcp`.
+
+### New tools
+
+- **`browse`** — a real headless Chromium, driven over the DevTools protocol
+  with no dependencies. It loads a URL or file at any size, and can click,
+  type, press keys, scroll and evaluate JS. It reports uncaught exceptions and
+  console errors with file and line, failed requests, the page text and a
+  screenshot, in a BROWSER card you see too. Building a web game and finding
+  its bugs is one step.
+- **`diagnose`** — LSP-lite. Lints and type-checks files on disk with the
+  tools installed: ruff/pyflakes plus mypy/pyright, tsc, eslint, node, and
+  shellcheck. In a Cargo or Go project it also runs `cargo check` / `go vet`;
+  JSON and TOML are parsed. Missing tools are named, so "no problems" never
+  means "nothing checked".
+- **`patch`** — multi-file unified diffs, all-or-nothing. Hunks are located by
+  context, so wrong line numbers don't matter. A hunk that doesn't match
+  changes nothing anywhere.
+- **`changes`** — the net diff of everything this task changed, for
+  self-review before reporting.
+- **MCP client** — Model Context Protocol servers from `mcp.json` (Claude
+  Desktop's format). Their tools are listed to the model and called with
+  ```mcp server.tool```. Text, images, errors, roots and pagination are
+  handled, and a server that fails to start says why. There's a Settings
+  section and `/mcp`.
+- **Live command output** — long commands stream into a LIVE panel in their
+  card with a running clock. Finished logs open on their end, where the
+  errors are.
+
+### Reliability and cost
+
+- **Model fallback** — a model that is down past its retries, or no longer
+  exists, hands that request to a fallback model, with a note in the chat. A
+  dead network or a bad request never triggers it.
+- **Spending cap** — an optional per-chat cap pauses the task and asks before
+  spending more.
+- **Auto-compaction** — long sessions are summarised by the model instead of
+  silently losing their oldest turns. The transcript stays complete.
+  `/compact` runs it on demand.
+- **`/export`** — a chat as readable Markdown.
+
+### Foundations and fixes
+
+- A **tool registry**: a new tool is one handler. Parsing, caps, Chat-mode
+  gating, holding a look until an action has run, and step-budget filtering
+  are shared.
+- Fixed: with no working folder, every command claimed "the shell is now
+  in …".
+- Fixed: `test_autonomy`'s `-Syu` check only passed because the prompt
+  contained "-Syu". It now checks the executed command.
+- The prompt stays under 4,000 characters with the new tools documented.
+  The MCP tool list costs nothing unless servers are configured.
+
 ## 14.1.0 — it finishes the job
 
 The headline bug: asked to write a game, Chuck said *"I'll write the game now"*

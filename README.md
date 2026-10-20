@@ -3,12 +3,12 @@
 # Chuck
 
 **A desktop coding and system agent for Linux, on SiliconFlow models.**
-Runs commands, edits real code, reads whole repos, sees screenshots, runs sub-agents in parallel, and tells you what it all cost.
+Runs commands, edits real code, plays its own web apps in a real browser, reads whole repos, speaks MCP, runs sub-agents in parallel, and tells you what it all cost.
 
-![version](https://img.shields.io/badge/version-14.1.0-8b5cf6?style=flat-square&labelColor=0c0c10)
+![version](https://img.shields.io/badge/version-15.0.0-8b5cf6?style=flat-square&labelColor=0c0c10)
 ![gtk](https://img.shields.io/badge/GTK4-libadwaita-8b5cf6?style=flat-square&labelColor=0c0c10)
 ![python](https://img.shields.io/badge/Python-3.11_·_3.12_·_3.13-8b5cf6?style=flat-square&labelColor=0c0c10)
-![suites](https://img.shields.io/badge/test_suites-20-2ea043?style=flat-square&labelColor=0c0c10)
+![suites](https://img.shields.io/badge/test_suites-21-2ea043?style=flat-square&labelColor=0c0c10)
 ![deps](https://img.shields.io/badge/runtime_deps-stdlib_+_GTK-2ea043?style=flat-square&labelColor=0c0c10)
 ![licence](https://img.shields.io/badge/licence-MIT-8b5cf6?style=flat-square&labelColor=0c0c10)
 
@@ -52,7 +52,11 @@ Click the folder chip (or **Ctrl+O**) to point the session at a project. Command
 | `read path:120-400` | Reads any size of file in **pages**. Each page ends with the exact `read` for the next one. Nothing is silently cut. |
 | `edit` | Aider-style `SEARCH/REPLACE` blocks. Only the changed lines are sent, so it's cheap on output tokens. All-or-nothing, whitespace-tolerant, re-verified after the edit. |
 | `write` | New files of any length. A reply that hits the output limit is **continued automatically** and stitched (repeated overlap trimmed) before the file is written. |
-| `bash` · `python` · `node` | One step at a time, auto-verified (syntax, lint, security scan) before it runs, real exit code back. |
+| `bash` · `python` · `node` | One step at a time, auto-verified before it runs (real defects only, never style), real exit code back. Output streams live into the card. `cd` carries to the next command, like a terminal. |
+| `patch` | A multi-file unified diff, applied all-or-nothing. Hunks are found by their context, so wrong line numbers don't matter. |
+| `browse` | A real headless Chromium. Load a page or file, click, type, press keys, run JS. Back come uncaught errors with file and line, failed requests, the page text and a screenshot. |
+| `diagnose` | LSP-lite: lint and type-check files on disk with whatever is installed (ruff, mypy, pyright, tsc, eslint, shellcheck, cargo, go vet). |
+| `changes` | The net diff of everything this task changed, for self-review before it reports. |
 | `plan` | A live checklist card that ticks itself off as the work proceeds. |
 | `undo` | Every write and edit is a checkpoint with its diff and a **Revert** button. `undo` reverts the last one; `undo all` reverts the whole task. |
 | `bg` · `logs` · `kill` | Dev servers and watchers run in the background with a live card. Chuck reads their logs and stops them, and they stop when the window closes. |
@@ -63,10 +67,21 @@ Click the folder chip (or **Ctrl+O**) to point the session at a project. Command
 | `task` | **Parallel sub-agents.** Each `task` block is a read-only sub-agent with its own model loop. Several run at once and report back; only their summaries enter the main context. |
 | `search` · `fetch` | Live web research across SearXNG instances, with sources cited. |
 | `remember` · `forget` | Long-term memory (below). |
+| `mcp` | Any Model Context Protocol server's tools (below). |
 
 <img src="assets/screenshots/agent-subagents.png" alt="Three sub-agents running in parallel, each with a done badge and a folded report" width="100%">
 
 **Sub-agents are read-only by design.** Parallel writers would trample each other's edits and race each other's sudo prompts. Parallel readers can't. They survey, research and report; the main agent acts, one verified step at a time.
+
+## It plays what it builds
+
+Web pages and games get opened in a real browser and *played*: arrow keys pressed, buttons clicked, state read back with JavaScript. The BROWSER card shows you what it found, so a typo that throws on every frame never ships as "done".
+
+<img src="assets/screenshots/browse.png" alt="A BROWSER card: one uncaught ReferenceError with its line, the key presses and JS result, and a screenshot of the game" width="100%">
+
+Long builds stream into their card while they run, with a clock, and a finished log opens on its last lines, where the errors are.
+
+<img src="assets/screenshots/live-output.png" alt="A command card with a LIVE output panel streaming build lines" width="100%">
 
 ## It finishes the job
 
@@ -77,6 +92,27 @@ Ask for a game and you get a game, not *"I'll write the game now"* and silence. 
 - **Did I run what I changed?** Code written since the last run gets run, tested or screenshotted before the final report.
 
 He stops early only to ask you something he shouldn't decide alone. That arrives as a question card with one-click answers. All of it is bounded by the step budget (60 by default) and none of it happens in Chat mode.
+
+## Context it always has
+
+- **Project rules.** Put conventions in `CHUCK.md`, `AGENTS.md` or `CLAUDE.md` in the project (or `~/.config/chucknorris/CHUCK.md` for everything) and they ride along with every request, in the cached part of the prompt. `/init` has Chuck survey the project and write its `CHUCK.md` for you.
+- **`@file`** in a message attaches that file from the working folder.
+- **Slash commands** for everything you'd otherwise click:
+
+<img src="assets/screenshots/commands.png" alt="The /help card listing every slash command" width="100%">
+
+## MCP: every tool the ecosystem ships
+
+Chuck is a [Model Context Protocol](https://modelcontextprotocol.io) client. Servers go in `~/.config/chucknorris/mcp.json`, in the same format Claude Desktop uses, so any server's README snippet pastes straight in:
+
+```json
+{"mcpServers": {
+  "github": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"],
+             "env": {"GITHUB_PERSONAL_ACCESS_TOKEN": "..."}}
+}}
+```
+
+They start in the background and their tools are listed to the model, which calls them like any other tool. Settings → Agent shows each server's state; `/mcp reload` picks up edits. With no servers configured it costs nothing.
 
 ## Attach anything
 
@@ -110,10 +146,10 @@ List prices as of October 2026. Switch models from the composer's model menu. **
 
 Every hop of an agent loop re-sends the system prompt, so its size is paid per tool call, not per chat.
 
-- **Prompts:** agent 3.9k characters (v13 was 5.7k while documenting a dozen fewer tools); chat 0.7k.
+- **Prompts:** agent under 4k characters (v13 was 5.7k while documenting far fewer tools); chat 0.7k.
 - **Playbooks** (debugging, TDD, review, git, UI, performance, security, Arch, building…) are injected only when the task triggers them, at most two at a time, and never in Chat mode.
 - **Cache-friendly:** the volatile part (date, memory, folder) is appended *last*, so the long prefix stays cacheable on the API side.
-- **Context control:** older tool output is compressed extractively (head, tail and every error line kept) and the context budget is a setting.
+- **Context control:** older tool output is compressed extractively (head, tail and every error line kept). A long session is summarised by the model instead of forgetting its oldest turns, and `/compact` does it on demand. The context budget is a setting.
 - **Batching:** read-only tools batch into one round trip, and four of them cost one model call, not four.
 
 ## Memory you can trust
@@ -124,6 +160,12 @@ Durable facts persist across chats and only the few relevant ones are sent with 
 - **Project scope.** Facts saved as `project:` belong to the working folder and are recalled only there, so one repo's conventions never leak into another's answers.
 
 All of it is visible, searchable, addable and deletable in the Memory panel.
+
+## When things go wrong
+
+- **A model is down?** After its retries, that request is answered by a fallback model (automatic, or your choice in Settings), and the chat says so.
+- **Watching spend?** Set a per-chat spending cap. When a chat reaches it, the task pauses and asks before spending more.
+- **Esc** stops the turn *and* the command it was running, whole process tree included.
 
 ## Safety that doesn't get in your way
 
@@ -138,7 +180,8 @@ Commands run on their own; that's the point of an agent. **CRITICAL** ones (disk
 | **Ctrl+V** | paste text, an image, or copied files |
 | **Ctrl+O** | working folder |
 | **Ctrl+N** · **Ctrl+B** · **Ctrl+,** | new chat · chats sidebar · settings |
-| **Esc** | stop the current run |
+| **Esc** | stop the current run (and its command) |
+| **/** · **@** | commands · attach a file |
 
 ## The window
 
@@ -166,7 +209,7 @@ Arch / CachyOS first-class; apt and dnf supported. The installer handles GTK4 + 
 ./run_tests.sh
 ```
 
-Twenty suites run headless against a stubbed toolkit and drive the real window end to end. They cover whole conversations, both modes, edits in a real folder, paged reads of a 12,000-line file, a file written across two cut-off replies, parallel sub-agents, images reaching the model as images, cache-hit pricing, memory updates and scopes, an agent that stops early or never stops, late streams from a stopped turn, undo and background jobs, a README whose example must not run, the critical gate, sudo storms, orphaned processes, and the ledger chain. `test_deep.py` runs whole sessions with real processes and ports, plus 180 seeded random model replies that must never hang the app, run something they shouldn't, or write outside the folder. The UI itself was checked by rendering every screen on real GTK 4.14 / libadwaita 1.5. The screenshots above are those renders.
+Twenty-one suites run headless against a stubbed toolkit and drive the real window end to end. They cover whole conversations, both modes, edits in a real folder, paged reads of a 12,000-line file, a file written across two cut-off replies, parallel sub-agents, images reaching the model as images, cache-hit pricing, memory updates and scopes, an agent that stops early or never stops, late streams from a stopped turn, undo and background jobs, a README whose example must not run, the critical gate, sudo storms, orphaned processes, and the ledger chain. `test_deep.py` runs whole sessions with real processes and ports, plus 180 seeded random model replies that must never hang the app, run something they shouldn't, or write outside the folder. The UI itself was checked by rendering every screen on real GTK 4.14 / libadwaita 1.5. The screenshots above are those renders.
 
 ## Being straight with you
 

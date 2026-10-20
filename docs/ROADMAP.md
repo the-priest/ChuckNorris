@@ -58,6 +58,6 @@ without a network, and visible to the user as a card.
 ## Phase 4 — polish and proof
 
 - [x] **Export** a chat as Markdown.
-- [ ] Deep tests for every item above, in `tests/test_deep.py` or a new suite.
-- [ ] README, CHANGELOG, screenshots of the new cards on real GTK.
-- [ ] Prompt budget re-checked: every new tool costs characters on every hop.
+- [x] Deep tests for every item above, in `tests/test_deep.py` or a new suite.
+- [x] README, CHANGELOG, screenshots of the new cards on real GTK.
+- [x] Prompt budget re-checked: every new tool costs characters on every hop.

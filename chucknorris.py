@@ -348,6 +348,10 @@ expander title:hover { color: @mute; }
 /* ── tool cards ──────────────────────────────────────────────────────── */
 .cmd-card  { background-color: @surface; border: 1px solid @line; border-radius: 12px; }
 .term-live .term-label { color: @accent_hi; }
+.slash-cmd   { color: @accent_hi; font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace; font-size: 12.5px; }
+.browse-err  { color: #F87171; font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace; font-size: 12px; }
+.browse-warn { color: #FBBF24; font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace; font-size: 12px; }
+.browse-step { color: @mute; font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace; font-size: 12px; }
 .card-head { padding: 6px 8px 6px 12px; border-bottom: 1px solid @line; }
 /* the one card that waits on YOU: an accent edge, nothing louder */
 .ask-card  { border-color: alpha(@accent, 0.45); }
@@ -3261,9 +3265,10 @@ class ChuckWindow(Adw.ApplicationWindow):
             ph.set_label("Say what to do with the attachment\u2026")
         elif self.agent_mode:
             ph.set_label("Ask Chuck to do something\u2026" + (
-                f"  (in {self.workspace.name})" if self.workspace else ""))
+                f"  (in {self.workspace.name})" if self.workspace else "")
+                + "   \u00b7  / commands  \u00b7  @ files")
         else:
-            ph.set_label("Ask anything…")
+            ph.set_label("Ask anything\u2026   \u00b7  / commands")
         try:
             b = self.entry.get_buffer()
             ph.set_visible(b.get_char_count() == 0)
@@ -6602,10 +6607,47 @@ class ChuckWindow(Adw.ApplicationWindow):
             except Exception as ex:
                 return f"[browse failed: {ex}]"
             text = _browser.report(r)
-            if r.get("shot"):
-                text += "\n" + self._see(r["shot"], f"{target} in the browser")
+            pay = image_payload(r["shot"]) if r.get("shot") else None
+            if pay:
+                self._tool_images.append(pay)
+                text += (f"\n[IMAGE of {target} in the browser is attached to this message — "
+                         "look at it carefully and say what you see before deciding the next step]")
+            GLib.idle_add(self._browse_card, target, r)
             return text
         return work
+
+    def _browse_card(self, target, r):
+        """What the browser saw, for the USER too: errors first, then failed
+        requests, what each action did, and the page itself."""
+        card, head, body, foot = self._card_shell("BROWSER", lambda: _browser.report(r))
+        n = len(r["errors"])
+        head.insert_child_after(self._pill(f"{n} JS error{'' if n == 1 else 's'}" if n
+                                           else "no errors", "fail" if n else "ok"),
+                                head.get_first_child())
+        w, h = r["size"]
+        top = Gtk.Label(label=f"{target}  \u00b7  {w}\u00d7{h}  \u00b7  {r['ms'] / 1000:.1f}s"
+                        + (f"  \u00b7  {r['title']}" if r.get("title") else ""), xalign=0)
+        top.add_css_class("cmd-text"); _wrap_anywhere(top)
+        body.append(top)
+
+        def rows(items, css, cap):
+            for it in items[:cap]:
+                l = Gtk.Label(label=it, xalign=0, wrap=True, selectable=True)
+                l.add_css_class(css); _wrap_anywhere(l)
+                body.append(l)
+            if len(items) > cap:
+                more = Gtk.Label(label=f"\u2026 {len(items) - cap} more", xalign=0)
+                more.add_css_class("dim"); body.append(more)
+        rows(r["errors"], "browse-err", 8)
+        rows([f"\u2717 {x}" for x in r["failed"]], "browse-warn", 5)
+        rows([f"\u203a {x}" for x in r["steps"]], "browse-step", 12)
+        if r.get("shot"):
+            try:
+                body.append(self._build_image_widget(r["shot"], None))
+            except Exception:
+                pass
+        self._log_pin(card)
+        return False
 
     @tool("diagnose", bare=True, cap=1)
     def _t_diagnose(self, body):
@@ -7271,8 +7313,15 @@ class ChuckWindow(Adw.ApplicationWindow):
             return False
         cmd, arg = m.group(1), (m.group(2) or "").strip()
         if cmd == "help":
-            self._sys_note("Commands:\n" + "\n".join(f"{c:<16} {d}" for c, d in self.SLASH_HELP),
-                           "dim")
+            card, head, body, foot = self._card_shell("COMMANDS")
+            grid = Gtk.Grid(column_spacing=18, row_spacing=6)
+            for i, (c, d) in enumerate(self.SLASH_HELP + [("@path", "attach a file from the working folder"),
+                                                          ("Tab", "switch Agent / Chat")]):
+                cl = Gtk.Label(label=c, xalign=0); cl.add_css_class("slash-cmd")
+                dl = Gtk.Label(label=d, xalign=0, wrap=True, hexpand=True); dl.add_css_class("dim")
+                grid.attach(cl, 0, i, 1, 1); grid.attach(dl, 1, i, 1, 1)
+            body.append(grid)
+            self._log_pin(card)
         elif cmd == "clear":
             self.new_chat()
         elif cmd in ("agent", "chat"):
