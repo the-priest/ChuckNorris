@@ -74,6 +74,7 @@ from chucknorris_ext.web import (               # noqa: E402
     _domain,
     _searx_search,      # noqa: F401  (re-export)
     _is_image_path,
+    last_failure as _fetch_failure,
 )
 from chucknorris_ext.chats import chat_expires_in  # noqa: E402
 
@@ -6217,7 +6218,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             return "\n".join(f"- {t}  {u}\n  {sn[:240]}" for t, u, sn in rows) or "no results"
 
         def fetch(u):
-            return web_fetch(u.split()[0], timeout=f_timeout) or "(empty or unreachable)"
+            return self._fetch_text(u.split()[0], f_timeout)[0] or "(empty or unreachable)"
 
         def read(spec):
             spec = spec.strip().strip("'\"")
@@ -9318,6 +9319,34 @@ class ChuckWindow(Adw.ApplicationWindow):
                 return True
         return False
 
+    _BROWSER_SLOTS = threading.BoundedSemaphore(2)     # browsers open at once
+
+    def _fetch_text(self, url, timeout, cancelled=lambda: False):
+        """A page's readable text -> (text, how). A plain fetch first; a page
+        that walls it off or is empty without JavaScript is read through the
+        browser (Settings > Agent > Browser), which waits out the bot check."""
+        body = web_fetch(url, timeout=timeout)
+        if body:
+            return body, ""
+        why = _fetch_failure(url)
+        if (why not in ("blocked", "js") or _browser is None
+                or not self.settings.get("stealth_fetch", True) or cancelled()):
+            return "", ("blocked" if why == "blocked" else "")
+        with self._BROWSER_SLOTS:
+            if cancelled():
+                return "", ""
+            try:
+                text, eng, still = _browser.read_page(
+                    url, engine=self.settings.get("browser") or "auto", timeout=45)
+            except Exception as ex:                       # no browser, or it failed
+                return "", f"blocked; browser: {str(ex)[:80]}"
+        name = {"brave": "Brave", "brave-browser": "Brave", "chromium": "Chromium",
+                "chromium-browser": "Chromium", "google-chrome": "Chrome",
+                "google-chrome-stable": "Chrome"}.get(eng, eng or "browser")
+        if still or not text.strip():
+            return "", f"blocked even in {name}"
+        return text, f"via {name}"
+
     def _run_web_tools(self, searches, fetches, extra_feedback=None):
         self._busy(True)
         self._activity_start("Researching")
@@ -9412,9 +9441,11 @@ class ChuckWindow(Adw.ApplicationWindow):
                 dom = _domain(url)
                 label = f"{dom}" + (f" — {title[:60]}" if title and title != dom else "")
                 si = self._activity_step(f"reading  {label}")
-                body = web_fetch(url, timeout=f_timeout) or snip
+                body, how = self._fetch_text(url, f_timeout, cancelled=lambda: self._cancelled)
+                body = body or snip
                 self._note_progress()
-                self._activity_done(si, f"read  {label}", ok=bool(body))
+                self._activity_done(si, f"read  {label}" + (f"  ({how})" if how else ""),
+                                    ok=bool(body))
                 if body:
                     self._seen_urls.add(url)
                     return f"[{title or dom}] {url}\n{body}"
@@ -9751,6 +9782,9 @@ class ChuckWindow(Adw.ApplicationWindow):
             br.connect("notify::selected", on_pick)
             g.add(br); g.add(status)
             show_engine()
+            switch(g, "Read blocked pages through the browser", "stealth_fetch", True,
+                   sub="When a site refuses a plain fetch (a bot check, or a page that is "
+                       "empty without JavaScript), research reads it in the browser above.")
 
         if self._mcp is not None:
             g = group(pg, "MCP servers",

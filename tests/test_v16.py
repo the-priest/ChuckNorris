@@ -557,6 +557,63 @@ check(shown and shown[0].chat_id == w.chat_id
       "and the restarted Chuck reopens that chat", shown and shown[0].chat_id)
 
 # ═══════════════════════════════════════════════════════════════════════════
+print("\n--- stealth fetch: pages that refuse a plain fetch ---")
+import stealth_server
+srv, site = stealth_server.start()
+web = cn._web if hasattr(cn, "_web") else __import__("chucknorris_ext.web", fromlist=["web"])
+for path, why in [("/plain", ""), ("/wall", "blocked"), ("/stuck", "blocked"), ("/shell", "js"),
+                  ("/browsers-only", "blocked"), ("/missing", "error")]:
+    text, got = web.fetch_page(site + path)
+    check(got == why and bool(text) == (why == ""), f"a plain fetch of {path} reads as {why or 'ok'}", (got, len(text)))
+check(web.last_failure(site + "/wall") == "blocked" and web.last_failure(site + "/plain") == "",
+      "and remembers why, per URL")
+have_browser = True
+try:
+    cn._browser.resolve_engine("auto")
+except RuntimeError:
+    have_browser = False
+if not have_browser:
+    print("  [SKIP] no browser on this machine: the fallback itself isn't exercised")
+else:
+    w = agent([])
+    for path in ("/wall", "/shell", "/browsers-only"):
+        text, how = w._fetch_text(site + path, 6)
+        check("forty-two" in text and how.startswith("via "), f"{path}: read through the browser ({how})", how)
+    t0 = time.time()
+    text, how = w._fetch_text(site + "/stuck", 6)
+    check(text == "" and how.startswith("blocked even in"), "a wall that never clears is reported, not invented", how)
+    check(time.time() - t0 < 20, "and gives up within the time limit", round(time.time() - t0, 1))
+    text, how = w._fetch_text(site + "/missing", 6)
+    check(text == "" and how == "", "a 404 is not retried in the browser")
+    w.settings["stealth_fetch"] = False
+    text, how = w._fetch_text(site + "/wall", 6)
+    check(text == "" and how == "blocked", "the fallback can be turned off in Settings")
+    w.settings["stealth_fetch"] = True
+    w = agent(["```fetch\n" + site + "/wall\n```", "It says forty-two."])
+    type_and_send(w, "what does the page say?")
+    check("forty-two" in hist_text(w), "research reads a walled page through the browser")
+    check_finished(w, "stealth")
+    try:
+        from contextlib import contextmanager
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        sync_playwright = None
+    if sync_playwright:
+        @contextmanager
+        def real_pw():
+            with sync_playwright() as p:
+                b = p.chromium.launch(executable_path=cn._browser.find_chrome(), headless=True)
+                try:
+                    yield b
+                finally:
+                    b.close()
+        r = cn._browser.browse_playwright(site + "/wall", ["unblock 10000"], (1280, 800), None, None,
+                                          0.5, 40, real_pw, text_js=cn._browser.READER_JS)
+        check("forty-two" in r["text"] and not cn._browser.challenged(r["title"]),
+              "the Playwright path (Camoufox) waits out the wall too", r["title"])
+srv.shutdown()
+
+# ═══════════════════════════════════════════════════════════════════════════
 print(f"\nTOTAL V16 FAILURES: {fails + len(FAILS)}")
 assert fails == 0 and not FAILS, "v16 regressions present"
 print("ALL V16 TESTS PASSED")

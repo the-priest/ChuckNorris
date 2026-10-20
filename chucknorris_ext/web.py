@@ -6,6 +6,7 @@ import html as _html
 import json
 import random
 import re
+import urllib.error
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -172,15 +173,60 @@ _ARTICLE_TAGS = re.compile(r"(?is)<(script|style|nav|footer|header|form|aside|no
 _BLOCK = re.compile(r"(?is)</(p|div|li|h[1-6]|br|tr|section|article)>")
 
 
+# A bot wall or a page that is nothing until its JavaScript runs. Either way
+# a plain fetch reads nothing useful, and a real browser can (see
+# browser.read_page, which the app falls back to).
+_WALL = re.compile(
+    r"(?i)<title>\s*(?:just a moment\.\.\.|attention required|access denied|"
+    r"are you a robot|security check|please wait)|cf-browser-verification|challenge-platform|"
+    r"cf_chl_opt|captcha-delivery\.com|px-captcha|_incapsula_resource|"
+    r"enable javascript and cookies to continue")
+_JS_SHELL = re.compile(r'(?i)<div id="(?:root|app|__next|__nuxt|svelte)"\s*>\s*</div>|'
+                       r"<noscript>[^<]{0,200}(?:enable|requires?) javascript")
+_BLOCK_CODES = {401, 403, 406, 429, 451, 503}
+_WHY = {}                       # url -> why its last fetch read nothing
+
+
+def last_failure(url):
+    """Why the last fetch of url came back empty: "blocked", "js", "error" or ""."""
+    return _WHY.get(url, "")
+
+
+def fetch_page(url, limit=4000, timeout=6):
+    """-> (text, why). why is "" when text was read, else "blocked" (a bot
+    wall or a refusal status), "js" (the page is empty until its scripts
+    run) or "error" (unreachable, 404, not a page)."""
+    text, why = _fetch_page(url, limit, timeout)
+    if len(_WHY) > 500:
+        _WHY.clear()
+    _WHY[url] = why
+    return text, why
+
+
+def _fetch_page(url, limit, timeout):
+    try:
+        raw = _get(url, timeout=timeout, cache=True,
+                   max_bytes=MAX_PAGE_BYTES).read().decode("utf-8", "ignore")
+    except urllib.error.HTTPError as ex:
+        return "", "blocked" if ex.code in _BLOCK_CODES else "error"
+    except Exception:
+        return "", "error"
+    text = _readable(raw, limit)
+    if _WALL.search(raw[:200_000]) and len(text) < 1500:
+        return "", "blocked"
+    if len(text) < 200 and (_JS_SHELL.search(raw) or raw.count("<script") >= 3):
+        return "", "js"
+    return text, ""
+
+
 def web_fetch(url, limit=4000, timeout=6):
     """Fetch a page and pull readable body text (keeps paragraph breaks).
     Returns the body text only; titles for the activity feed come from the
     search results, so no extra request is made."""
-    try:
-        raw = _get(url, timeout=timeout, cache=True,
-                   max_bytes=MAX_PAGE_BYTES).read().decode("utf-8", "ignore")
-    except Exception:
-        return ""
+    return fetch_page(url, limit, timeout)[0]
+
+
+def _readable(raw, limit):
     if len(raw) > MAX_PAGE_BYTES:
         # A 40MB "page" is a download, not an article. Truncating before the
         # regex passes matters: _ARTICLE_TAGS over tens of megabytes is where a

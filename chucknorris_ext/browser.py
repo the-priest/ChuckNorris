@@ -397,7 +397,7 @@ def to_url(target, root=None):
 
 
 def browse(target, actions=(), size=(1280, 800), root=None, shot_path=None,
-           settle=0.6, chrome=None, timeout=60, engine="auto"):
+           settle=0.6, chrome=None, timeout=60, engine="auto", text_js=None):
     """Load target, run actions, report. -> dict(url, title, text, errors,
     warnings, logs, failed, steps, shot, ms, engine). Raises RuntimeError when
     no browser is available or it can't start.
@@ -408,16 +408,47 @@ def browse(target, actions=(), size=(1280, 800), root=None, shot_path=None,
         kind, exe = resolve_engine(engine)
         if kind == "camoufox":
             r = browse_playwright(target, actions, size, root, shot_path, settle, timeout,
-                                  launcher=_camoufox_launcher(exe))
+                                  launcher=_camoufox_launcher(exe), text_js=text_js)
             r["engine"] = "Camoufox"
             return r
         chrome = exe
-    r = _browse_cdp(target, actions, size, root, shot_path, settle, chrome, timeout)
+    r = _browse_cdp(target, actions, size, root, shot_path, settle, chrome, timeout, text_js)
     r["engine"] = os.path.basename(chrome)
     return r
 
 
-def _browse_cdp(target, actions, size, root, shot_path, settle, chrome, timeout):
+# ── reading a page that refused a plain fetch ───────────────────────────────
+# Bot walls ("Just a moment…", "Checking your browser") clear themselves in a
+# real browser after a few seconds; JavaScript-only sites need their scripts
+# run before there is any text at all. read_page() does both.
+CHALLENGE = re.compile(
+    r"(?i)just a moment\.\.\.|checking (?:if the site connection is secure|your browser)"
+    r"|attention required! \| cloudflare|cf-browser-verification|challenge-platform"
+    r"|enable javascript and cookies to continue|please enable js and disable any ad blocker"
+    r"|captcha-delivery|px-captcha|verify (?:that )?you are (?:a )?human|are you a robot")
+_CHALLENGE_PROBE = ("document.title + '\\n' + "
+                    "(document.body ? document.body.innerText.slice(0, 3000) : '')")
+# The readable part: an <article> or <main> when the page has one.
+READER_JS = ("(document.querySelector('article') || document.querySelector('main') "
+             "|| document.querySelector('[role=main]') || document.body || {innerText: ''}).innerText")
+
+
+def challenged(text):
+    return bool(CHALLENGE.search(text or ""))
+
+
+def read_page(url, engine="auto", timeout=45, limit=4000):
+    """Load url in a real browser, wait out a bot check, return
+    (text, engine name, still_blocked). Raises RuntimeError when no browser
+    can run."""
+    r = browse(url, actions=("unblock 10000",), settle=1.2, timeout=timeout,
+               engine=engine, text_js=READER_JS)
+    text = re.sub(r"\n\s*\n+", "\n\n", re.sub(r"[ \t]+", " ", r.get("text") or "")).strip()
+    blocked = challenged((r.get("title") or "") + "\n" + text[:3000])
+    return text[:limit], r.get("engine", ""), blocked
+
+
+def _browse_cdp(target, actions, size, root, shot_path, settle, chrome, timeout, text_js=None):
     url = to_url(target, root)
     t0 = time.time()
     profile = tempfile.mkdtemp(prefix="chuck_browse_")
@@ -427,6 +458,16 @@ def _browse_cdp(target, actions, size, root, shot_path, settle, chrome, timeout)
         cdp = _CDP(_page_ws(bws))
         for dom in ("Runtime", "Log", "Page", "Network"):
             cdp.call(f"{dom}.enable")
+        try:
+            # headless Chrome announces itself as "HeadlessChrome" and some
+            # sites refuse that outright; present the ordinary browser it is
+            ua = cdp.call("Browser.getVersion").get("userAgent", "")
+            if "Headless" in ua:
+                cdp.call("Network.setUserAgentOverride",
+                         {"userAgent": ua.replace("HeadlessChrome", "Chrome"),
+                          "acceptLanguage": "en-US,en;q=0.9"})
+        except Exception:
+            pass
         w, h = size
         cdp.call("Emulation.setDeviceMetricsOverride",
                  {"width": w, "height": h, "deviceScaleFactor": 1, "mobile": False})
@@ -451,6 +492,11 @@ def _browse_cdp(target, actions, size, root, shot_path, settle, chrome, timeout)
                     res = "ok"
                 elif verb == "wait":
                     cdp.pump(min(10.0, float(arg or 500) / 1000.0)); res = "ok"
+                elif verb == "unblock":                      # read_page: outwait a bot check
+                    end = time.time() + min(20.0, float(arg or 10000) / 1000.0)
+                    while time.time() < end and challenged(cdp.evaluate(_CHALLENGE_PROBE) or ""):
+                        cdp.pump(0.5)
+                    res = "ok"
                 elif verb == "scroll":
                     cdp.evaluate(f"window.scrollBy(0, {int(float(arg or 600))})"); res = "ok"
                 elif verb in ("eval", "js"):
@@ -475,7 +521,7 @@ def _browse_cdp(target, actions, size, root, shot_path, settle, chrome, timeout)
             steps.append(f"{raw.strip()}: {res}")
         cdp.pump(0.2)
         title = cdp.evaluate("document.title") or ""
-        text = cdp.evaluate("document.body ? document.body.innerText : ''") or ""
+        text = cdp.evaluate(text_js or "document.body ? document.body.innerText : ''") or ""
         shot = None
         if shot_path:
             data = cdp.call("Page.captureScreenshot", {"format": "png"}, timeout=30)["data"]
@@ -534,7 +580,8 @@ def _pw_where(url, line):
     return f" ({name}:{line})" if name and line else (f" ({name})" if name else "")
 
 
-def browse_playwright(target, actions, size, root, shot_path, settle, timeout, launcher):
+def browse_playwright(target, actions, size, root, shot_path, settle, timeout, launcher,
+                      text_js=None):
     url = to_url(target, root)
     t0 = time.time()
     errors, warnings, logs, failed, steps = [], [], [], [], []
@@ -604,6 +651,11 @@ def browse_playwright(target, actions, size, root, shot_path, settle, timeout, l
                     res = "ok"
                 elif verb == "wait":
                     page.wait_for_timeout(min(10000, int(float(arg or 500)))); res = "ok"
+                elif verb == "unblock":                      # read_page: outwait a bot check
+                    end = time.time() + min(20.0, float(arg or 10000) / 1000.0)
+                    while time.time() < end and challenged(page.evaluate(_CHALLENGE_PROBE) or ""):
+                        page.wait_for_timeout(500)
+                    res = "ok"
                 elif verb == "scroll":
                     page.mouse.wheel(0, int(float(arg or 600))); res = "ok"
                 elif verb in ("eval", "js"):
@@ -626,7 +678,7 @@ def browse_playwright(target, actions, size, root, shot_path, settle, timeout, l
             steps.append(f"{raw.strip()}: {res}")
         page.wait_for_timeout(200)
         title = page.title() or ""
-        text = page.evaluate("document.body ? document.body.innerText : ''") or ""
+        text = page.evaluate(text_js or "document.body ? document.body.innerText : ''") or ""
         shot = None
         if shot_path:
             page.screenshot(path=shot_path)

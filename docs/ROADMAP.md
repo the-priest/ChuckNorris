@@ -97,7 +97,7 @@ there's nothing to look at.
 
 ### Phase 7 — the web as it really is
 
-- [ ] **Stealth fetch.** When a page refuses a plain fetch (403/429, a bot
+- [x] **Stealth fetch.** When a page refuses a plain fetch (403/429, a bot
       challenge, an empty JavaScript shell), it's fetched again through the
       chosen browser (Brave or Camoufox) and its readable text extracted.
 
