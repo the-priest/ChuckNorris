@@ -302,6 +302,25 @@ w.settings["hook_before_done"] = ""
 w.settings["hook_after_write"] = ""
 
 # ═══════════════════════════════════════════════════════════════════════════
+print("\n--- reopening a chat keeps what the machine did ---")
+w = agent(["```bash\necho reopened-output\n```", "It printed."])
+type_and_send(w, "print something")
+w._save_chat()
+path = cn.CHATS_DIR / f"{w.chat_id}.json"
+w2 = new_win([], tmp)
+w2._load_chat(path)
+folds = [e for e in w2._log if e.get("kind") == "fold"]
+check(folds and "reopened-output" in folds[0]["data"]["text"],
+      "a reopened chat shows its tool results, folded", [e.get("kind") for e in w2._log])
+check([e.get("kind") for e in w2._log if e.get("kind") != "note"][:3] == ["user", "fold", "bot"],
+      "in order: your message, what ran, the answer", [e.get("kind") for e in w2._log])
+w.backend.replies = ["Again."]
+w.retry_last()
+settle()
+check(not any(e.get("kind") == "fold" and "reopened-output" in e["data"]["text"] for e in w._log),
+      "a retry rewinds that turn's results too (they belonged to the old answer)")
+
+# ═══════════════════════════════════════════════════════════════════════════
 print(f"\nTOTAL V16 FAILURES: {fails + len(FAILS)}")
 assert fails == 0 and not FAILS, "v16 regressions present"
 print("ALL V16 TESTS PASSED")

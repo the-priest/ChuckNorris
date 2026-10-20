@@ -3593,7 +3593,19 @@ class ChuckWindow(Adw.ApplicationWindow):
             return _lane(self._build_plan(d.get("items") or [], e))
         if k == "image":
             return _lane(self._build_image_widget(d.get("path"), d.get("src")))
+        if k == "fold":
+            return _lane(self._build_fold(d))
         return Gtk.Label(label="")
+
+    def _build_fold(self, d):
+        """Tool results from a reopened chat: folded, one click to read them.
+        (The live cards aren't kept, but what the machine did is.)"""
+        text = d.get("text", "")
+        n = text.count("\n") + 1
+        exp = Gtk.Expander(label=f"{d.get('title', 'Tool results')} \u00b7 {n} line{'' if n == 1 else 's'}")
+        exp.add_css_class("think")
+        exp.set_child(self._term_panel(text, None, title="RESULTS"))
+        return exp
 
     def _build_note(self, d):
         # A system aside ("added --noconfirm"). Small and muted so it reads
@@ -4517,6 +4529,14 @@ class ChuckWindow(Adw.ApplicationWindow):
             if m["role"] == "user":
                 if self._is_real_user(m):
                     self._user_bubble(self._typed_text(m.get("content")))
+                elif isinstance(m.get("content"), str):
+                    c = m["content"]
+                    if c.startswith("CONVERSATION SUMMARY") or c.startswith("CONTINUE:"):
+                        continue
+                    body = c.split("\n\n", 1)[1] if c.startswith("TOOL RESULTS") and "\n\n" in c else c
+                    if body.strip():
+                        self._log_add("fold", {"text": clip_output(body.strip(), 12000),
+                                               "title": "Tool results"})
             else:
                 shown = self._display_text(m.get("content") if isinstance(m.get("content"), str)
                                            else "")
