@@ -57,20 +57,6 @@ else
 fi
 ok "dependencies ready"
 
-step "setting up the voice (Piper — natural deep voice; espeak-ng is the fallback)"
-# Piper lives in Chuck's own virtualenv: a menu-launched app often has no
-# ~/.local/bin on PATH, pip --user fights PEP 668, and on Arch /usr/bin/piper is
-# a gaming-mouse tool, not TTS. The app looks here first.
-PIPER_VENV="${DATA_DIR}/piper"
-if [ ! -x "${PIPER_VENV}/bin/piper" ]; then
-  if python3 -m venv "$PIPER_VENV" >/dev/null 2>&1 \
-     && "${PIPER_VENV}/bin/pip" install -q -U piper-tts >/dev/null 2>&1; then
-    ok "Piper installed (natural voice)"
-  else
-    info "Piper install failed — espeak-ng will speak; retry in Settings › Voice › Install"
-  fi
-fi
-
 # code verifier linters (best-effort — the verifier degrades gracefully without them)
 if ! command -v ruff >/dev/null; then
   pip install --user --break-system-packages ruff >/dev/null 2>&1 \
@@ -79,16 +65,6 @@ if ! command -v ruff >/dev/null; then
 fi
 command -v shellcheck >/dev/null || info "shellcheck not found — shell lint falls back to 'bash -n' (syntax only)"
 mkdir -p "${DATA_DIR}/voices"
-VOICE="${DATA_DIR}/voices/en_US-ryan-high.onnx"
-if [ ! -f "$VOICE" ]; then
-  VBASE="https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ryan/high"
-  if curl -fsSL "${VBASE}/en_US-ryan-high.onnx" -o "$VOICE" 2>/dev/null \
-     && curl -fsSL "${VBASE}/en_US-ryan-high.onnx.json" -o "${VOICE}.json" 2>/dev/null; then
-    ok "natural voice model installed"
-  else
-    rm -f "$VOICE" "${VOICE}.json"; info "voice model download skipped — espeak-ng fallback in use"
-  fi
-fi
 
 # Optional: Camoufox, a Firefox build sites can't fingerprint, for ```browse```.
 # CHUCK_CAMOUFOX=1 ./install.sh   (then pick Camoufox in Settings > Agent > Browser)
@@ -145,7 +121,7 @@ else
   # HERE as well — the check below exists because that is easy to forget.
   for f in __init__ config net safety web voice chats pricing \
            skills specs memory codecheck skill_library builder \
-           ledger compress agents browser diagnose mcp crashlog update pysession lsp codesearch checkpoint; do
+           ledger compress agents browser diagnose mcp crashlog update pysession lsp codesearch checkpoint listen kokoro_server stt_server; do
     curl -fsSL "https://raw.githubusercontent.com/${REPO}/${BRANCH}/chucknorris_ext/${f}.py" \
       -o "${APP_DIR}/chucknorris_ext/${f}.py" \
       || case "$f" in
@@ -172,6 +148,32 @@ done
 python3 -m py_compile "${APP_DIR}/chucknorris.py" "${APP_DIR}"/chucknorris_ext/*.py \
   || die "a downloaded file is corrupt (did not compile). Re-run the installer."
 ok "app installed"
+
+# The natural voice (Kokoro) and voice input (Moonshine): both run on this
+# machine. Installed by the app's own, tested code, in a private venv.
+if [ "${CHUCK_VOICE:-1}" = "1" ]; then
+  step "setting up the natural voice + voice input (Kokoro + Moonshine, about 600 MB, all local)"
+  info "this is the big download; CHUCK_VOICE=0 skips it (then: /voice in the app)"
+  ( cd "${APP_DIR}" && python3 - <<'PYEOF'
+import sys
+from chucknorris_ext import voice, listen
+def say(m):
+    end = "\r" if m.startswith("downloading") else "\n"
+    sys.stdout.write("\r\033[K  " + m + end)
+    sys.stdout.flush()
+try:
+    ok1, m1 = voice.install_kokoro(say)
+    say(("✓ " if ok1 else "✗ ") + m1)
+    ok2, m2 = listen.install(say)
+    say(("✓ " if ok2 else "✗ ") + m2)
+finally:
+    voice.KOKORO.stop()
+    listen.EARS.stop()
+PYEOF
+  ) || info "voice setup didn't finish — run /voice in the app to retry"
+else
+  info "voice setup skipped (CHUCK_VOICE=0) — /voice in the app installs it"
+fi
 
 cat > "$LAUNCH" <<EOF
 #!/usr/bin/env bash

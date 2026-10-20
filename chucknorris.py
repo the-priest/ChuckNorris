@@ -117,6 +117,7 @@ _update = _optional("update")
 _pysession = _optional("pysession")
 _lsp = _optional("lsp")
 _checkpoint = _optional("checkpoint")
+_listen = _optional("listen")
 _codesearch = _optional("codesearch")
 if _pricing is None:
     class _pricing:                     # noqa: N801  — the meter, minus prices
@@ -456,6 +457,11 @@ expander title:hover { color: @mute; }
 .icon-btn { background: transparent; border: none; box-shadow: none; border-radius: 9px;
             min-width: 32px; min-height: 32px; color: @mute; padding: 0; }
 .icon-btn:hover { background-color: @surface3; color: @ink; }
+.icon-btn.mic-wait { color: @accent_hi; }
+.icon-btn.mic-on { color: #F87171; background-color: alpha(#F87171, 0.10);
+                   box-shadow: 0 0 0 1px alpha(#F87171, 0.45); }
+.icon-btn.mic-speech { background-color: alpha(#F87171, 0.22);
+                       box-shadow: 0 0 0 2px alpha(#F87171, 0.55), 0 0 14px alpha(#F87171, 0.35); }
 .send-fab { background-color: #1D1A2A; background-image: none; border-radius: 10px;
             border: 1px solid alpha(@accent, 0.6); min-width: 34px; min-height: 34px; padding: 0;
             color: @accent_hi; box-shadow: none; }
@@ -3170,6 +3176,11 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._apply_access()                    # this window's folder policy, not a stale one
         self._interrupted = self._find_interrupted()
         voice.ON_PIPER_FAIL[0] = lambda why: GLib.idle_add(self._piper_note, why)
+        self._listening = False
+        if self.settings.get("tts", True):
+            voice.warm_up(self.settings)          # the natural voice loads in the background
+        if _listen is not None and self.settings.get("mic_used"):
+            _listen.warm_up()
         self._show_empty_hint()
         GLib.timeout_add_seconds(20, self._update_check)   # once a day, after startup settles
 
@@ -3403,7 +3414,14 @@ class ChuckWindow(Adw.ApplicationWindow):
         cam.set_tooltip_text("Attach a screenshot of your screen")
         self.cam_btn = cam
         cam.connect("clicked", self.on_screenshot)
-        bar.append(att); bar.append(cam)
+        mic = Gtk.Button(icon_name=_pick_icon("audio-input-microphone-symbolic",
+                                              "microphone-sensitivity-high-symbolic",
+                                              "audio-input-microphone"))
+        mic.add_css_class("icon-btn"); mic.set_valign(Gtk.Align.CENTER)
+        mic.set_tooltip_text("Talk to Chuck  (Ctrl+M) \u2014 heard on this machine, never uploaded")
+        mic.connect("clicked", lambda *_a: self.toggle_listen())
+        self.mic_btn = mic
+        bar.append(att); bar.append(cam); bar.append(mic)
         spacer = Gtk.Box(hexpand=True); bar.append(spacer)
         self._model_lbl = Gtk.Label(label="")
         try:
@@ -5102,6 +5120,8 @@ class ChuckWindow(Adw.ApplicationWindow):
                 self.open_settings(); return True
             if k == getattr(Gdk, "KEY_r", -2):
                 self.retry_last(); return True
+            if k == getattr(Gdk, "KEY_m", -3):
+                self.toggle_listen(); return True
         return False
 
     # ── indicators ──
@@ -7726,10 +7746,11 @@ class ChuckWindow(Adw.ApplicationWindow):
             shutil.which("node") or "none \u2014 JavaScript can't be checked or run")
         shot = next((t for t in ("grim", "spectacle", "scrot", "gnome-screenshot") if shutil.which(t)), None)
         add("ok" if shot else "warn", "Screenshots", shot or "no capture tool \u2014 install grim (Wayland) or scrot (X11)")
-        pst, pdet = voice.piper_status()        # run_doctor then tries a real synthesis
-        if pst != "ok" and shutil.which("espeak-ng"):
-            pdet += " (espeak-ng speaks meanwhile)"
-        add(pst if pst == "ok" or shutil.which("espeak-ng") else "fail", "Voice", pdet)
+        pst, pdet = voice.voice_status(S)       # run_doctor then tries a real synthesis
+        add(pst, "Voice", pdet)
+        if _listen is not None:
+            lst, ldet = _listen.status()
+            add(lst, "Voice input", ldet)
         if self._mcp is not None:
             st = self._mcp.status()
             bad = [(n, d) for n, state, d in st if state in ("failed", "error")]
@@ -7815,9 +7836,159 @@ class ChuckWindow(Adw.ApplicationWindow):
                 except Exception:
                     pass
                 return False
-            threading.Thread(target=lambda: GLib.idle_add(voice_done, voice.test_piper()),
-                             daemon=True).start()
+            eng_now = voice.engine_for(self.settings)
+            kvoice = self.settings.get("kokoro_voice")
+            threading.Thread(target=lambda: GLib.idle_add(voice_done, voice.test_kokoro(
+                kvoice) if eng_now == "kokoro" else voice.test_piper()),
+                daemon=True).start()
         return rows
+
+    # ── voice input: talk to Chuck ──
+    def toggle_listen(self):
+        if _listen is None:
+            self._sys_note("Voice input is unavailable (module missing) \u2014 reinstall Chuck.", "danger")
+            return False
+        if self._listening:
+            _listen.EARS.cancel()
+            return True
+        if not _listen.ready():
+            self.offer_voice_install("input")
+            return False
+        stop_speaking()                          # talking over Chuck interrupts him
+        self._listening = True
+        self._mic_state("starting")
+        if not self.settings.get("mic_used"):
+            self.settings["mic_used"] = True
+            save_settings(self.settings)
+
+        def on_event(ev):
+            GLib.idle_add(self._on_hear, ev)
+
+        def go():
+            try:
+                _listen.EARS.listen(on_event, max_wait=float(self.settings.get("mic_wait", 8)))
+            except Exception as ex:
+                GLib.idle_add(self._on_hear, {"event": "error", "error": str(ex)})
+        threading.Thread(target=go, daemon=True, name="listen").start()
+        return True
+
+    def _mic_state(self, state, level=0.0):
+        b = getattr(self, "mic_btn", None)
+        if b is None:
+            return
+        for c in ("mic-on", "mic-speech", "mic-wait"):
+            b.remove_css_class(c)
+        tips = {"starting": "Getting ready to listen\u2026", "listening": "Listening \u2014 talk; "
+                "it stops when you pause (Ctrl+M cancels)", "speech": "Hearing you\u2026",
+                "transcribing": "Writing down what you said\u2026"}
+        if state in ("starting", "transcribing"):
+            b.add_css_class("mic-wait")
+        elif state == "listening":
+            b.add_css_class("mic-on")
+        elif state == "speech":
+            b.add_css_class("mic-on"); b.add_css_class("mic-speech")
+        b.set_tooltip_text(tips.get(state, "Talk to Chuck  (Ctrl+M) \u2014 heard on this machine, "
+                                           "never uploaded"))
+        try:
+            b.set_opacity(1.0 if state != "speech" else 0.75 + min(0.25, level * 4))
+        except Exception:
+            pass
+
+    def _on_hear(self, ev):
+        kind = ev.get("event")
+        if kind == "listening":
+            self._mic_state("listening")
+        elif kind == "speech":
+            self._heard_speech = True
+            self._mic_state("speech")
+        elif kind == "level":
+            if getattr(self, "_heard_speech", False):
+                self._mic_state("speech", ev.get("rms", 0.0))
+        elif kind in ("final", "nothing", "cancelled", "error"):
+            self._listening = False
+            self._heard_speech = False
+            self._mic_state("idle")
+            if kind == "final":
+                text = (ev.get("text") or "").strip()
+                if not text:
+                    self._toast("Didn't catch that \u2014 try again (Ctrl+M)")
+                    return False
+                cur = self._get_entry().rstrip()
+                self.entry.get_buffer().set_text((cur + " " if cur else "") + text)
+                try:
+                    self.entry.grab_focus()
+                except Exception:
+                    pass
+                if self.settings.get("voice_autosend", False) and not self._running:
+                    self.on_send()
+            elif kind == "nothing":
+                self._toast("Didn't hear anything \u2014 is the right microphone selected?")
+            elif kind == "error":
+                self._sys_note(f"\U0001F399 voice input: {ev.get('error')}", "danger")
+                if _crashlog is not None:
+                    _crashlog.record("voice input", str(ev.get("error")))
+        return False
+
+    def offer_voice_install(self, what="both"):
+        """A card that installs the natural voice and/or voice input, with
+        progress, without leaving the chat."""
+        if getattr(self, "_voice_installing", False):
+            return
+        need_voice = what in ("voice", "both") and not voice.kokoro_ready()
+        need_input = what in ("input", "both") and _listen is not None and not _listen.ready()
+        if not (need_voice or need_input):
+            self._sys_note("The natural voice and voice input are already installed.", "ok")
+            return
+        card, head, body, foot = self._card_shell("VOICE")
+        parts = (["the natural voice (Kokoro, about 350 MB)"] if need_voice else []) + \
+                (["voice input (Moonshine, about 250 MB)"] if need_input else [])
+        lab = Gtk.Label(label="Install " + " and ".join(parts) + "? " + (
+            "Both run" if len(parts) > 1 else "It runs") + " entirely on this machine: nothing "
+            "you say or hear is uploaded.", xalign=0, wrap=True)
+        lab.add_css_class("dim"); _wrap_anywhere(lab)
+        body.append(lab)
+        prog = Gtk.Label(label="", xalign=0, wrap=True); prog.add_css_class("cmd-text")
+        prog.set_visible(False)                  # until there's progress to show
+        body.append(prog)
+        go = Gtk.Button(label="Install"); go.add_css_class("accent-btn"); go.set_halign(Gtk.Align.START)
+        foot.append(go)
+
+        def start(*_a):
+            go.set_sensitive(False)
+            self._voice_installing = True
+
+            def say(m):
+                GLib.idle_add(lambda: (prog.set_visible(True), prog.set_text(m + "\u2026"),
+                                       False)[2])
+
+            def work():
+                msgs, ok_all = [], True
+                if need_voice:
+                    ok, m = voice.install_kokoro(say)
+                    msgs.append(m); ok_all &= ok
+                    if ok and (self.settings.get("voice_engine") or "auto") in ("auto", "piper"):
+                        self.settings["voice_engine"] = "auto"
+                        save_settings(self.settings)
+                if need_input:
+                    ok, m = _listen.install(say)
+                    msgs.append(m); ok_all &= ok
+
+                def fin():
+                    self._voice_installing = False
+                    prog.set_text("\n".join(msgs))
+                    head.insert_child_after(self._pill("ready" if ok_all else "failed",
+                                                       "ok" if ok_all else "fail"),
+                                            head.get_first_child())
+                    go.set_visible(False)
+                    if ok_all and need_voice:
+                        speak("Natural voice ready. This is how I sound now.", self.settings)
+                    if not ok_all and _crashlog is not None:
+                        _crashlog.record("voice install", "\n".join(msgs))
+                    return False
+                GLib.idle_add(fin)
+            threading.Thread(target=work, daemon=True, name="voice-install").start()
+        go.connect("clicked", start)
+        self._log_pin(card)
 
     # ── resume after a crash ──
     @staticmethod
@@ -8769,6 +8940,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         ("/undo", "revert the last file change"),
         ("/rewind", "put the folder AND the chat back to before any step"),
         ("/access", "this folder: full access, sandboxed, or read-only"),
+        ("/voice", "install the natural voice and voice input (all local)"),
         ("/retry", "ask the last question again  (Ctrl+R; \u2191 edits it)"),
         ("/plan", "plan mode on/off: propose first, act after you approve"),
         ("/agent  /chat", "switch mode"),
@@ -8813,6 +8985,8 @@ class ChuckWindow(Adw.ApplicationWindow):
             self.show_rewind()
         elif cmd == "access":
             self.show_access()
+        elif cmd == "voice":
+            self.offer_voice_install("both")
         elif cmd == "update":
             self.run_update()
         elif cmd in ("commit", "review"):
@@ -10867,51 +11041,99 @@ class ChuckWindow(Adw.ApplicationWindow):
                after=lambda v: (self.tts_btn.set_active(v), None if v else stop_speaking()))
         eng = Adw.ComboRow()
         eng.set_title("Engine")
-        eng.set_model(Gtk.StringList.new(["Auto (Piper, else espeak-ng)", "Piper only",
-                                          "espeak-ng only"]))
-        eng.set_selected({"auto": 0, "piper": 1, "espeak": 2}.get(
-            (S.get("voice_engine") or "auto").lower(), 0))
+        eng_keys = ["auto", "kokoro", "piper", "espeak"]
+        eng.set_model(Gtk.StringList.new(["Best installed (Kokoro, then Piper, then espeak-ng)",
+                                          "Kokoro \u2014 natural", "Piper", "espeak-ng (robotic)"]))
+        eng.set_selected(eng_keys.index((S.get("voice_engine") or "auto").lower())
+                         if (S.get("voice_engine") or "auto").lower() in eng_keys else 0)
         eng.connect("notify::selected", lambda *_a: changed(
-            "voice_engine", ["auto", "piper", "espeak"][int(eng.get_selected() or 0)]))
+            "voice_engine", eng_keys[int(eng.get_selected() or 0)]))
         g.add(eng)
+        kv = Adw.ComboRow(); kv.set_title("Voice (Kokoro)")
+        kv_keys = [k for k, _l in voice.KOKORO_CHOICES]
+        kv.set_model(Gtk.StringList.new([lbl for _k, lbl in voice.KOKORO_CHOICES]))
+        cur_v = S.get("kokoro_voice") or voice.DEFAULT_KOKORO_VOICE
+        kv.set_selected(kv_keys.index(cur_v) if cur_v in kv_keys else 0)
+
+        def pick_voice(*_a):
+            changed("kokoro_voice", kv_keys[int(kv.get_selected() or 0)])
+            if voice.kokoro_ready():
+                speak("Here's how I sound. Ready when you are.", dict(S, voice_engine="kokoro"))
+        kv.connect("notify::selected", pick_voice)
+        g.add(kv)
         spin(g, "Speed", "voice_speed", 0.5, 2.0, 0.05, 1.0, digits=2)
         spin(g, "Pitch (espeak-ng)", "voice_pitch", 0, 99, 1, 28)
         spin(g, "Max characters read per reply", "voice_max_chars", 2000, 40000, 1000, 20000)
         entry(g, "Piper voice model (blank = installed voice)", "piper_model")
-        nv = Adw.ActionRow(); nv.set_title("Natural voice (Piper)")
-        nv.set_subtitle(_html.escape(voice.piper_status()[1]))
-        ib = Gtk.Button(label="Install"); ib.add_css_class("quick"); ib.set_valign(Gtk.Align.CENTER)
+        nv = Adw.ActionRow(); nv.set_title("Natural voice")
+        nv.set_subtitle(_html.escape(voice.voice_status(S)[1]))
+        ib = Gtk.Button(label="Install" if not voice.kokoro_ready() else "Reinstall")
+        ib.add_css_class("quick"); ib.set_valign(Gtk.Align.CENTER)
         vt = Gtk.Button(label="Test"); vt.add_css_class("quick"); vt.set_valign(Gtk.Align.CENTER)
 
-        def piper_install(*_a):
+        def voice_install(*_a):
             ib.set_sensitive(False); vt.set_sensitive(False)
 
             def prog(msg):
                 GLib.idle_add(lambda: (nv.set_subtitle(_html.escape(msg + "\u2026")), False)[1])
 
             def work():
-                ok, msg = voice.install_piper(prog)
+                ok, msg = voice.install_kokoro(prog)
 
                 def fin():
                     nv.set_subtitle(_html.escape(msg))
                     ib.set_sensitive(True); vt.set_sensitive(True)
                     if ok:
-                        speak("Natural voice ready.", S)
+                        speak("Natural voice ready. This is how I sound now.", S)
                     return False
                 GLib.idle_add(fin)
             threading.Thread(target=work, daemon=True).start()
 
-        def piper_test(*_a):
+        def voice_test(*_a):
             vt.set_sensitive(False)
             nv.set_subtitle("testing\u2026")
 
             def work():
-                ok, msg = voice.test_piper()
-                GLib.idle_add(lambda: (nv.set_subtitle(_html.escape(msg)), vt.set_sensitive(True),
-                                       False)[2])
+                eng_now = voice.engine_for(S)
+                ok, msg = (voice.test_kokoro(S.get("kokoro_voice")) if eng_now == "kokoro"
+                           else voice.test_piper() if eng_now == "piper"
+                           else (bool(eng_now), voice.voice_status(S)[1]))
+
+                def fin():
+                    nv.set_subtitle(_html.escape(msg))
+                    vt.set_sensitive(True)
+                    if ok:
+                        speak("Chuck Norris does not adjust settings. Settings adjust to "
+                              "Chuck Norris.", S)
+                    return False
+                GLib.idle_add(fin)
             threading.Thread(target=work, daemon=True).start()
-        ib.connect("clicked", piper_install); vt.connect("clicked", piper_test)
+        ib.connect("clicked", voice_install); vt.connect("clicked", voice_test)
         nv.add_suffix(ib); nv.add_suffix(vt); g.add(nv)
+        if _listen is not None:
+            g2 = group(pg, "Voice input", "Talk to Chuck with the mic button or Ctrl+M. Speech is "
+                       "recognised on this machine (Moonshine); nothing is uploaded.")
+            li = Adw.ActionRow(); li.set_title("Speech recognition")
+            li.set_subtitle(_html.escape(_listen.status()[1]))
+            lb = Gtk.Button(label="Install" if not _listen.ready() else "Reinstall")
+            lb.add_css_class("quick"); lb.set_valign(Gtk.Align.CENTER)
+
+            def input_install(*_a):
+                lb.set_sensitive(False)
+
+                def prog(msg):
+                    GLib.idle_add(lambda: (li.set_subtitle(_html.escape(msg + "\u2026")), False)[1])
+
+                def work():
+                    ok, msg = _listen.install(prog)
+                    GLib.idle_add(lambda: (li.set_subtitle(_html.escape(msg)),
+                                           lb.set_sensitive(True), False)[2])
+                threading.Thread(target=work, daemon=True).start()
+            lb.connect("clicked", input_install)
+            li.add_suffix(lb); g2.add(li)
+            switch(g2, "Send what I say right away", "voice_autosend", False,
+                   sub="Off: what you said lands in the composer for a look first.")
+            spin(g2, "Give up if nothing is said within (s)", "mic_wait", 3, 30, 1, 8)
         tr = Adw.ActionRow(); tr.set_title("Test the voice")
         tb = Gtk.Button(label="Play"); tb.add_css_class("quick"); tb.set_valign(Gtk.Align.CENTER)
         tb.connect("clicked", lambda *_a: speak(

@@ -115,6 +115,18 @@ Ask for a game and you get a game, not *"I'll write the game now"* and silence. 
 
 He stops early only to ask you something he shouldn't decide alone. That arrives as a question card with one-click answers. All of it is bounded by the step budget (60 by default) and none of it happens in Chat mode.
 
+## It talks, and it listens
+
+**A natural voice.** Chuck speaks with [Kokoro](https://github.com/thewh1teagle/kokoro-onnx), the most natural of the open local text-to-speech models. It runs on your CPU, faster than real time, and nothing is uploaded.
+- Speech starts about half a second after a reply arrives: the first sentence is spoken while the rest is still being rendered.
+- The whole reply streams through one player, so there are no gaps or clicks between sentences.
+- What people write but never say is spoken the way a person would. `e.g.` becomes "for example", `->` becomes "then", and `v16.0.0` becomes "version 16.0.0". Paths are read by name, code and tables are skipped, and bullets and headings get real pauses.
+- Pick a voice in Settings → Voice and hear it at once. The default is a blend of Kokoro's two clearest male voices; *Heart* is rated its most natural overall.
+
+**Talk to it.** Click the mic, or press **Ctrl+M**, and just talk. It stops when you pause and puts what you said in the composer, or sends it straight away if you turn on hands-free. Recognition is [Moonshine](https://github.com/usefulsensors/moonshine) with a voice-activity detector, all on your machine. Talking over Chuck interrupts him.
+
+The installer sets both up, about 600 MB. `/voice` installs them later if you skipped it (`CHUCK_VOICE=0`). `/doctor` checks both with a real test.
+
 ## Context it always has
 
 - **Project rules.** Put conventions in `CHUCK.md`, `AGENTS.md` or `CLAUDE.md` in the project (or `~/.config/chucknorris/CHUCK.md` for everything) and they ride along with every request, in the cached part of the prompt. `/init` has Chuck survey the project and write its `CHUCK.md` for you.
@@ -209,6 +221,7 @@ Commands run on their own; that's the point of an agent. **CRITICAL** ones (disk
 | **Tab** | switch Agent / Chat |
 | **Enter** · **Shift+Enter** | send (or, while it works, steer) · new line |
 | **Ctrl+R** · **↑** | retry the last answer · edit your last message |
+| **Ctrl+M** | talk to Chuck (local speech recognition) |
 | **Ctrl+V** | paste text, an image, or copied files |
 | **Ctrl+O** | working folder |
 | **Ctrl+N** · **Ctrl+B** · **Ctrl+,** | new chat · chats sidebar · settings |

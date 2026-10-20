@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import itertools
+import json
 import subprocess
 import threading
 import time
@@ -24,6 +25,264 @@ PIPER_VENV = config.DATA_DIR / "piper"
 VOICE_URL = "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ryan/high"
 VOICE_NAME = "en_US-ryan-high"
 LAST_ERROR = {"piper": "", "told": False}   # why Piper last failed, for /doctor and a note
+
+# ── Kokoro: the natural voice ───────────────────────────────────────────────
+# Kokoro-82M (Apache 2.0) through kokoro-onnx, in its own venv. It is the most
+# natural of the open local voices, and with the full-precision model it runs
+# well ahead of real time on a 4-core CPU, so speech streams sentence by
+# sentence. The model stays loaded in kokoro_server.py: loading costs seconds.
+VOICE_VENV = config.DATA_DIR / "voice"         # shared by the voice and voice input
+KOKORO_DIR = VOICE_DIR / "kokoro"
+KOKORO_MODEL = KOKORO_DIR / "kokoro-v1.0.onnx"
+KOKORO_VOICES = KOKORO_DIR / "voices-v1.0.bin"
+KOKORO_URLS = {
+    KOKORO_MODEL.name: "https://github.com/thewh1teagle/kokoro-onnx/releases/download/"
+                       "model-files-v1.1/kokoro-v1.0.onnx",
+    KOKORO_VOICES.name: "https://github.com/thewh1teagle/kokoro-onnx/releases/download/"
+                        "model-files-v1.1/voices-v1.0.bin",
+}
+KOKORO_RATE = 24000
+# Chuck's voice: Kokoro's two clearest American male voices, blended. Kokoro's
+# own grades put af_heart (A) and af_bella (A-) highest of all.
+DEFAULT_KOKORO_VOICE = "am_michael:0.6,am_fenrir:0.4"
+KOKORO_CHOICES = [
+    (DEFAULT_KOKORO_VOICE, "Chuck \u2014 deep, steady (Michael + Fenrir)"),
+    ("af_heart", "Heart \u2014 warm, the most natural"),
+    ("af_bella", "Bella \u2014 bright, expressive"),
+    ("am_michael", "Michael \u2014 calm American"),
+    ("am_fenrir", "Fenrir \u2014 deeper American"),
+    ("am_puck", "Puck \u2014 lively American"),
+    ("am_onyx", "Onyx \u2014 low American"),
+    ("af_nicole", "Nicole \u2014 soft, close"),
+    ("af_sarah", "Sarah \u2014 clear American"),
+    ("bm_george", "George \u2014 British"),
+    ("bm_fable", "Fable \u2014 British storyteller"),
+    ("bf_emma", "Emma \u2014 British"),
+]
+_KOKORO_SERVER = Path(__file__).with_name("kokoro_server.py")
+
+
+def voice_python():
+    p = VOICE_VENV / "bin" / "python"
+    return str(p) if p.exists() else None
+
+
+kokoro_python = voice_python
+
+
+def kokoro_ready():
+    return bool(voice_python() and KOKORO_MODEL.exists() and KOKORO_VOICES.exists())
+
+
+def ensure_venv(packages, module, progress=lambda s: None):
+    """The voice venv with `packages` installed (checked by importing
+    `module`). -> (ok, message)."""
+    import sys
+    py = voice_python()
+    if py and subprocess.run([py, "-c", f"import {module}"], capture_output=True,
+                             timeout=120).returncode == 0:
+        return True, "already installed"
+    if not py:
+        progress("creating the voice's own Python environment")
+        base = sys.executable if os.path.basename(sys.executable or "").startswith("python") else "python3"
+        r = subprocess.run([base, "-m", "venv", str(VOICE_VENV)], capture_output=True, text=True,
+                           timeout=180)
+        if r.returncode != 0:
+            return False, ("couldn't create a virtualenv (on Debian/Ubuntu: apt install "
+                           "python3-venv): " + (r.stderr or r.stdout).strip()[-200:])
+    progress(f"installing {', '.join(packages)} (pip)")
+    r = subprocess.run([str(VOICE_VENV / "bin" / "pip"), "install", "-q", "-U", *packages],
+                       capture_output=True, text=True, timeout=1800)
+    if r.returncode != 0:
+        return False, f"pip install {' '.join(packages)} failed: " + (r.stderr or r.stdout).strip()[-300:]
+    return True, "installed"
+
+
+class _KokoroEngine:
+    """The warm Kokoro process: started on first use, restarted if it dies."""
+
+    def __init__(self):
+        self.proc = None
+        self.lines = None
+        self.lock = threading.Lock()
+        self.error = ""
+        self.seq = 0
+
+    def alive(self):
+        return self.proc is not None and self.proc.poll() is None
+
+    def _start(self, timeout=90):
+        import queue
+        py = kokoro_python()
+        if not py:
+            raise RuntimeError("Kokoro isn't installed")
+        self.proc = subprocess.Popen([py, "-u", str(_KOKORO_SERVER), str(KOKORO_MODEL),
+                                      str(KOKORO_VOICES)], stdin=subprocess.PIPE,
+                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                     text=True, start_new_session=True)
+        q = self.lines = queue.Queue()
+        out = self.proc.stdout
+
+        def read():
+            for ln in out:
+                q.put(ln)
+            q.put(None)
+        threading.Thread(target=read, daemon=True, name="kokoro-reader").start()
+        msg = self._reply(timeout)
+        if not msg.get("ready"):
+            self.stop()
+            raise RuntimeError(msg.get("error") or "Kokoro didn't start")
+
+    def _reply(self, timeout):
+        import queue
+        try:
+            ln = self.lines.get(timeout=timeout)
+        except queue.Empty:
+            raise RuntimeError(f"Kokoro didn't answer within {timeout}s")
+        if ln is None:
+            raise RuntimeError("Kokoro stopped")
+        return json.loads(ln)
+
+    def warm(self):
+        with self.lock:
+            if not self.alive():
+                self._start()
+
+    def synth(self, text, voice, speed, out, timeout=120):
+        """Render text to raw 24 kHz 16-bit PCM at `out`."""
+        with self.lock:
+            if not self.alive():
+                self._start()
+            self.seq += 1
+            rid = str(self.seq)
+            self.proc.stdin.write(json.dumps({"id": rid, "text": text, "voice": voice,
+                                              "speed": speed, "out": out}) + "\n")
+            self.proc.stdin.flush()
+            while True:
+                msg = self._reply(timeout)
+                if msg.get("id") == rid:
+                    break
+            if not msg.get("ok"):
+                raise RuntimeError(msg.get("error") or "synthesis failed")
+            return msg.get("samples", 0)
+
+    def stop(self):
+        if self.proc is not None:
+            try:
+                self.proc.kill()
+                self.proc.wait(timeout=3)
+            except Exception:
+                pass
+        self.proc = None
+
+
+KOKORO = _KokoroEngine()
+
+
+def engine_for(s):
+    """Which engine will speak: kokoro, piper or espeak (None if none can)."""
+    want = (s.get("voice_engine") or "auto").lower()
+    if want in ("auto", "kokoro") and kokoro_ready():
+        return "kokoro"
+    if want in ("auto", "piper") and piper_bin() and _find_piper_model():
+        return "piper"
+    if want in ("auto", "espeak") and _have("espeak-ng"):
+        return "espeak"
+    if want == "kokoro" and piper_bin() and _find_piper_model():
+        return "piper"                      # asked for Kokoro but it isn't installed
+    return "espeak" if _have("espeak-ng") else None
+
+
+def warm_up(s):
+    """Start Kokoro in the background so the first reply speaks at once."""
+    if engine_for(s) == "kokoro":
+        threading.Thread(target=lambda: _safe(KOKORO.warm), daemon=True,
+                         name="kokoro-warm").start()
+
+
+def _safe(fn):
+    try:
+        fn()
+    except Exception as ex:
+        LAST_ERROR["kokoro"] = str(ex)
+
+
+def _download(url, dest, progress, opener=None, label=""):
+    import urllib.request
+    op = opener.open if opener else urllib.request.urlopen
+    tmp = Path(str(dest) + ".part")
+    with op(urllib.request.Request(url, headers={"User-Agent": "chuck"}), timeout=60) as r, \
+            open(tmp, "wb") as fh:
+        total = int(getattr(r, "headers", {}).get("Content-Length") or 0) if hasattr(r, "headers") else 0
+        got, last = 0, 0.0
+        while True:
+            buf = r.read(1 << 20)
+            if not buf:
+                break
+            fh.write(buf)
+            got += len(buf)
+            if time.time() - last > 0.5:
+                last = time.time()
+                size = (lambda n: f"{n >> 20} MB" if n >= 1 << 20 else f"{n >> 10} KB")
+                progress(f"downloading {label} \u2014 {size(got)}"
+                         + (f" of {size(total)}" if total else ""))
+    os.replace(tmp, dest)
+
+
+def install_kokoro(progress=lambda s: None, opener=None):
+    """Install the natural voice: a venv with kokoro-onnx plus the model and
+    voices (about 350 MB). -> (ok, message). Safe to re-run."""
+    try:
+        ok, msg = ensure_venv(["kokoro-onnx"], "kokoro_onnx", progress)
+        if not ok:
+            return False, msg
+        KOKORO_DIR.mkdir(parents=True, exist_ok=True)
+        for dest, label in ((KOKORO_VOICES, "the voices"), (KOKORO_MODEL, "the voice model")):
+            if dest.exists() and dest.stat().st_size > 1_000_000:
+                continue
+            _download(KOKORO_URLS[dest.name], dest, progress, opener, label)
+    except Exception as ex:
+        return False, f"{ex.__class__.__name__}: {ex}"
+    KOKORO.stop()
+    progress("testing the voice")
+    ok, why = test_kokoro()
+    return (True, "natural voice ready (Kokoro)") if ok else (False, why)
+
+
+def test_kokoro(voice=None):
+    if not kokoro_ready():
+        return False, "Kokoro isn't installed \u2014 Settings \u203a Voice \u203a Install natural voice"
+    out = str(CONFIG_DIR / f".say-test-{os.getpid()}.pcm")
+    try:
+        n = KOKORO.synth("Chuck Norris approves this voice.", voice or DEFAULT_KOKORO_VOICE,
+                         1.0, out, timeout=120)
+        LAST_ERROR["kokoro"] = ""
+        return (True, "Kokoro works") if n > KOKORO_RATE // 2 else (False, "Kokoro made no audio")
+    except Exception as ex:
+        LAST_ERROR["kokoro"] = str(ex)
+        return False, f"Kokoro failed: {ex}"
+    finally:
+        try:
+            os.unlink(out)
+        except OSError:
+            pass
+
+
+def voice_status(s=None):
+    """(state, detail) of the voice that will actually speak."""
+    s = s or _SETTINGS
+    eng = engine_for(s)
+    if eng == "kokoro":
+        if LAST_ERROR.get("kokoro"):
+            return "fail", f"Kokoro failed: {LAST_ERROR['kokoro'][:160]}"
+        return "ok", "Kokoro (natural) \u00b7 " + dict(KOKORO_CHOICES).get(
+            s.get("kokoro_voice") or DEFAULT_KOKORO_VOICE, s.get("kokoro_voice") or "").split(" \u2014")[0]
+    if eng == "piper":
+        st, det = piper_status()
+        return ("warn" if st == "ok" else st), det + " \u2014 Install natural voice for Kokoro"
+    if eng == "espeak":
+        return "warn", "espeak-ng (robotic) \u2014 Settings \u203a Voice \u203a Install natural voice"
+    return "fail", "no voice engine \u2014 Settings \u203a Voice \u203a Install natural voice"
 
 # ── voice: natural Piper; espeak-ng fallback ────────────────────────────────
 _WHICH_CACHE = {}
@@ -227,6 +486,75 @@ def _play(path, gen=None):
     return False
 
 
+_RAW_PLAYERS = (
+    ["pw-play", "--rate", str(KOKORO_RATE), "--channels", "1", "--format", "s16", "-"],
+    ["paplay", "--raw", f"--rate={KOKORO_RATE}", "--channels=1", "--format=s16le"],
+    ["aplay", "-q", "-t", "raw", "-f", "S16_LE", "-r", str(KOKORO_RATE), "-c", "1"],
+    ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", "-f", "s16le", "-ar",
+     str(KOKORO_RATE), "-ac", "1", "-i", "-"],
+)
+_ACTIVE_PLAYER = [None]
+
+
+def _raw_player_argv():
+    want = (_SETTINGS.get("voice_player") or "").strip()
+    if want:
+        return want.split()
+    for argv in _RAW_PLAYERS:
+        if _have(argv[0]):
+            return argv
+    return None
+
+
+class _Stream:
+    """ONE player process for a whole reply: chunks are written into it back
+    to back, so there are no gaps or clicks between sentences."""
+
+    def __init__(self, gen):
+        self.gen = gen
+        self.proc = None
+
+    def write(self, pcm):
+        if self.proc is None:
+            argv = _raw_player_argv()
+            if not argv:
+                return False
+            self.proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                                         stderr=subprocess.DEVNULL)
+            _ACTIVE_PLAYER[0] = self.proc
+        step = KOKORO_RATE // 5 * 2               # 0.2 s at a time: Stop is never far off
+        try:
+            for i in range(0, len(pcm), step):
+                if self.gen != _TTS_GEN[0]:
+                    self.kill()
+                    return False
+                self.proc.stdin.write(pcm[i:i + step])
+            self.proc.stdin.flush()
+            return True
+        except (BrokenPipeError, OSError, ValueError):
+            return False
+
+    def finish(self):
+        if self.proc is None:
+            return
+        try:
+            self.proc.stdin.close()
+        except Exception:
+            pass
+        while self.proc.poll() is None:            # let the tail play out
+            if self.gen != _TTS_GEN[0]:
+                self.kill()
+                return
+            time.sleep(0.05)
+
+    def kill(self):
+        if self.proc is not None and self.proc.poll() is None:
+            try:
+                self.proc.kill()
+            except Exception:
+                pass
+
+
 # ── voice ───────────────────────────────────────────────────────────────────
 # Speech used to be one subprocess call on text truncated to 800 chars, which
 # meant any longer reply was cut off mid-sentence and never resumed. Now the
@@ -244,27 +572,69 @@ _URL_RE = re.compile(r"https?://\S+|www\.\S+")
 def stop_speaking():
     """Cancel any in-flight speech immediately."""
     _TTS_GEN[0] += 1
+    p = _ACTIVE_PLAYER[0]
+    if p is not None and p.poll() is None:
+        try:
+            p.kill()
+        except Exception:
+            pass
+
+
+_ABBR = [(r"\be\.g\.", "for example"), (r"\bi\.e\.", "that is"), (r"\betc\.", "et cetera"),
+         (r"\bvs\.?(?=\s)", "versus"), (r"\bapprox\.", "approximately"), (r"\bw/o\b", "without"),
+         (r"\bw/(?=\s)", "with"), (r"\bfyi\b", "for your information"), (r"\bimo\b", "in my opinion"),
+         (r"\btl;dr\b", "in short")]
+_EMOJI = re.compile("[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U0000FE0F\U0000200D\u2190-\u21FF"
+                    "\u2300-\u23FF\u2B00-\u2BFF\u2713\u2714\u2717\u2718]")
+
+
+def _say_code(m):
+    """Short inline code is part of the sentence ("run `make test` first"):
+    keep its words, drop the symbols nobody says aloud."""
+    code = m.group(1).strip()
+    if not code or len(code) > 32 or "\n" in code:
+        return " "
+    code = re.sub(r"^.*/", "", code) if "/" in code and " " not in code else code
+    return " " + re.sub(r"[-_=<>{}()\[\];$`\\|]+", " ", code).strip() + " "
 
 
 def tts_clean(text):
-    """Turn a chat reply into something worth listening to."""
+    """Turn a chat reply into something worth listening to: no code, tables or
+    markup, and the things people write but never say spelled out, so the
+    voice reads it like a person would."""
     if not isinstance(text, str):
         return ""
     s = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)     # code blocks
-    s = re.sub(r"`[^`]*`", " ", s)                            # inline code
+    s = re.sub(r"(?m)^\s*\|?\s*:?-{3,}.*$", "", s)             # table rules
+    s = re.sub(r"(?m)^.*\|.*\|.*$", "", s)                    # table rows
+    s = re.sub(r"`([^`]*)`", _say_code, s)                     # inline code
     s = re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", s)               # images
     s = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", s)            # links -> label
     s = _URL_RE.sub(" link ", s)                              # bare URLs
-    s = re.sub(r"^\s*[-*+]\s+", "", s, flags=re.M)            # bullets
-    s = re.sub(r"^\s*#{1,6}\s*", "", s, flags=re.M)           # headings
+    s = re.sub(r"(?<![\w.])(?:~|\.{1,2})?(?:/[\w.+-]+){2,}/?", lambda m: " " + (
+        m.group(0).rstrip("/").rsplit("/", 1)[-1]) + " ", s)  # paths: just the name
+    # headings and bullets end in a pause, not run into the next line
+    s = re.sub(r"(?m)^\s*#{1,6}\s*(.+?)\s*$", lambda m: m.group(1).rstrip(".:") + ".", s)
+    s = re.sub(r"(?m)^\s*(?:[-*+]|\d+[.)])\s+(.+?)\s*$",
+               lambda m: m.group(1) + ("" if m.group(1)[-1:] in ".!?:;" else "."), s)
+    for pat, rep_ in _ABBR:
+        s = re.sub(pat, rep_, s, flags=re.I)
+    s = re.sub(r"\s*(?:->|=>|\u2192)\s*", ", then ", s)
+    s = re.sub(r"\s+&\s+", " and ", s)
+    s = re.sub(r"(?<=\s)~(?=\d)", "about ", s)
+    s = re.sub(r"\bv(\d+(?:\.\d+)+)\b", r"version \1", s)
+    s = _EMOJI.sub(" ", s)
     s = re.sub(r"[*_~>#|]", "", s)                            # leftover marks
+    s = re.sub(r"\s+([.,!?;:)])", r"\1", s)
+    s = re.sub(r"\(\s+", "(", s)
     s = re.sub(r"[ \t]+", " ", s)
     s = re.sub(r"\n{2,}", "\n", s)
     return s.strip()
 
 
-def tts_chunks(text, size=_TTS_CHUNK):
-    """Split into speakable chunks on sentence boundaries where possible."""
+def tts_chunks(text, size=_TTS_CHUNK, first=None):
+    """Split into speakable chunks on sentence boundaries where possible.
+    `first` caps the first chunk smaller, so speech starts sooner."""
     text = (text or "").strip()
     if not text:
         return []
@@ -290,7 +660,11 @@ def tts_chunks(text, size=_TTS_CHUNK):
             cur = p
     if cur:
         chunks.append(cur.strip())
-    return [c for c in chunks if c]
+    chunks = [c for c in chunks if c]
+    if first and chunks and len(chunks[0]) > first:
+        head = tts_chunks(chunks[0], first)
+        chunks = head[:1] + ([" ".join(head[1:])] if head[1:] else []) + chunks[1:]
+    return chunks
 
 
 _SYNTH_SEQ = itertools.count()
@@ -354,6 +728,11 @@ def speak(text, settings=None):
     with _TTS_START:
         _TTS_GEN[0] += 1
         gen = _TTS_GEN[0]
+
+    if engine_for(s) == "kokoro":
+        threading.Thread(target=_speak_kokoro, args=(clean, gen, s), daemon=True,
+                         name="speak").start()
+        return
 
     def worker():
         chunks = tts_chunks(clean)
@@ -430,4 +809,73 @@ def speak(text, settings=None):
             pass
 
     threading.Thread(target=worker, daemon=True).start()
+
+
+def _speak_kokoro(clean, gen, s):
+    """Synthesise one chunk ahead and stream every chunk into ONE player:
+    the first chunk is a single short sentence so speech starts quickly,
+    later ones are longer so the intonation carries across sentences."""
+    import queue as _q
+    chunks = tts_chunks(clean, 420, first=60)
+    voice = s.get("kokoro_voice") or DEFAULT_KOKORO_VOICE
+    try:
+        speed = max(0.5, min(2.0, float(s.get("voice_speed") or 1.0)))
+    except (TypeError, ValueError):
+        speed = 1.0
+    pipe = _q.Queue(maxsize=2)
+    gap = b"\0\0" * int(KOKORO_RATE * 0.16)       # a breath between chunks
+
+    def producer():
+        for n, ch in enumerate(chunks):
+            if gen != _TTS_GEN[0]:
+                break
+            out = str(CONFIG_DIR / f".say-{gen}-{n}.pcm")
+            try:
+                KOKORO.synth(ch, voice, speed, out)
+                with open(out, "rb") as fh:
+                    pcm = fh.read()
+            except Exception as ex:
+                LAST_ERROR["kokoro"] = str(ex)
+                pcm = None
+            finally:
+                try:
+                    os.unlink(out)
+                except OSError:
+                    pass
+            while gen == _TTS_GEN[0]:
+                try:
+                    pipe.put(pcm, timeout=0.2)
+                    break
+                except _q.Full:
+                    continue
+        try:
+            pipe.put(_TTS_END, timeout=5)
+        except Exception:
+            pass
+
+    threading.Thread(target=producer, daemon=True, name="kokoro-synth").start()
+    stream = _Stream(gen)
+    failed = 0
+    while gen == _TTS_GEN[0]:
+        try:
+            pcm = pipe.get(timeout=180)
+        except Exception:
+            break
+        if pcm is _TTS_END:
+            break
+        if not pcm:
+            failed += 1
+            continue
+        if not stream.write(pcm + gap):
+            break
+    stream.finish()
+    if failed and failed == len(chunks) and gen == _TTS_GEN[0]:
+        # Kokoro is broken right now: say so once, and fall back for this reply
+        if ON_PIPER_FAIL[0] is not None and not LAST_ERROR.get("kokoro_told"):
+            LAST_ERROR["kokoro_told"] = True
+            try:
+                ON_PIPER_FAIL[0]("Kokoro: " + LAST_ERROR.get("kokoro", "failed"))
+            except Exception:
+                pass
+        speak(clean, dict(s, voice_engine="piper" if piper_bin() else "espeak"))
 

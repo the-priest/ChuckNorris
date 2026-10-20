@@ -520,6 +520,147 @@ w5.stop_run()
 settle()
 
 # ═══════════════════════════════════════════════════════════════════════════
+print("\n--- a natural voice: what it reads, how it streams ---")
+v = cn.voice
+c = v.tts_clean("## Disk cleanup\nYour disk was ~92% full (e.g. caches in /var/cache/pacman/pkg). "
+                "Ran `paccache -rk2` -> freed 4 GB \U0001F389.\n- Removed orphans\n- Trimmed logs\n"
+                "| a | b |\n|---|---|\n| 1 | 2 |\nUpgrade to v16.0.0 & restart, i.e. now.")
+check("Disk cleanup." in c and "about 92%" in c and "for example" in c and "that is" in c,
+      "abbreviations and symbols are said the way a person says them", c)
+check("pkg" in c and "/var/cache" not in c and "paccache rk2" in c and ", then freed" in c,
+      "paths become their name, short inline code is kept as words, arrows become 'then'", c)
+check("Removed orphans." in c and "Trimmed logs." in c, "bullets end in a pause instead of running on", c)
+check("| " not in c and "---" not in c and "\U0001F389" not in c and "version 16.0.0" in c and " and restart" in c,
+      "tables and emoji aren't read out; versions are", c)
+ch = v.tts_chunks("Done. Your disk was full of caches and old logs. I cleared them. " * 6, 420, first=60)
+check(len(ch[0]) <= 60 and all(len(x) <= 420 for x in ch), "the first chunk is short, so speech starts quickly",
+      [len(x) for x in ch])
+real = (v.kokoro_ready, v.KOKORO.synth, v._SETTINGS.get("voice_player"))
+cap = tmp / "spoken.pcm"
+try:
+    v.kokoro_ready = lambda: True
+    check(v.engine_for({}) == "kokoro" and v.engine_for({"voice_engine": "espeak"}) in ("espeak", None),
+          "Kokoro is chosen whenever it's installed")
+    calls = []
+
+    def fake_synth(text, voice_, speed, out, timeout=120):
+        calls.append((text, voice_, speed))
+        open(out, "wb").write(b"\x10\x00" * 2400)        # 0.1 s of audio per chunk
+        return 2400
+    v.KOKORO.synth = fake_synth
+    v._SETTINGS["voice_player"] = f"tee {cap}"
+    pops = []
+    real_popen = v.subprocess.Popen
+
+    def counting_popen(argv, *a, **k):
+        pops.append(argv[0])
+        return real_popen(argv, *a, **k)
+    v.subprocess.Popen = counting_popen
+    v.speak("First sentence here. " + "Then a longer stretch of the reply follows on. " * 12,
+            {"kokoro_voice": "af_heart", "voice_speed": 1.2})
+    time.sleep(1.5)
+    v.subprocess.Popen = real_popen
+    data = cap.read_bytes() if cap.exists() else b""
+    gap = int(v.KOKORO_RATE * 0.16) * 2
+    check(len(calls) >= 3 and pops.count("tee") == 1, "every chunk streams into ONE player: no gaps between files",
+          (len(calls), pops))
+    check(len(data) == len(calls) * (4800 + gap), "all the audio arrives, with a breath between chunks",
+          (len(data), len(calls)))
+    check(all(x[1] == "af_heart" and abs(x[2] - 1.2) < 1e-9 for x in calls), "the chosen voice and speed are used")
+    calls.clear()
+
+    def slow_synth(text, voice_, speed, out, timeout=120):
+        calls.append(text)
+        open(out, "wb").write(b"\x10\x00" * 240000)       # 10 s per chunk
+        return 240000
+    v.KOKORO.synth = slow_synth
+    v._SETTINGS["voice_player"] = "sleep 30"
+    v.speak("One. Two. Three. Four. Five.", {})
+    time.sleep(0.6)
+    t0 = time.time()
+    v.stop_speaking()
+    time.sleep(0.5)
+    p = v._ACTIVE_PLAYER[0]
+    check(p is not None and p.poll() is not None and len(calls) <= 3,
+          "Stop silences it at once and stops synthesising", (p and p.poll(), len(calls)))
+
+    def broken(*a, **k):
+        raise RuntimeError("onnxruntime: bad model")
+    v.KOKORO.synth = broken
+    told = []
+    v.ON_PIPER_FAIL[0] = told.append
+    v.LAST_ERROR["kokoro_told"] = False
+    fell = []
+    real_speak = v.speak
+    v.speak = lambda text, s=None: fell.append((s or {}).get("voice_engine"))
+    v._speak_kokoro("Hello there. How are you?", v._TTS_GEN[0], {})
+    v.speak = real_speak
+    check(told and "bad model" in told[0] and fell and fell[0] in ("piper", "espeak"),
+          "if Kokoro breaks, the reason is shown once and another voice reads the reply", (told, fell))
+finally:
+    v.kokoro_ready, v.KOKORO.synth = real[0], real[1]
+    v._SETTINGS["voice_player"] = real[2] or ""
+    v.ON_PIPER_FAIL[0] = None
+
+print("\n--- talking to Chuck: local speech to text ---")
+L = cn._listen
+real = (L.ready, L.EARS.listen, L.EARS.cancel)
+try:
+    L.ready = lambda: True
+    script = []
+
+    def fake_listen(on_event, max_wait=8, max_len=30):
+        for ev in script:
+            on_event(ev)
+        return True
+    L.EARS.listen = fake_listen
+    cancelled = []
+    L.EARS.cancel = lambda: cancelled.append(1)
+    w = agent(["Sure, cleaning it."], tmp / "resume")
+    script[:] = [{"event": "listening"}, {"event": "speech"}, {"event": "level", "rms": 0.1},
+                 {"event": "final", "text": "clean up my disk please"}]
+    w.mic_btn.emit("clicked")
+    settle()
+    check(w._get_entry() == "clean up my disk please" and not w._listening and not w.backend.calls,
+          "what you said lands in the composer, ready to send", w._get_entry())
+    check(w.settings.get("mic_used") is True, "and the ears warm up at the next start")
+    w.entry.get_buffer().set_text("")
+    w.settings["voice_autosend"] = True
+    script[:] = [{"event": "listening"}, {"event": "final", "text": "what time is it"}]
+    w.toggle_listen()
+    settle()
+    users = [m["content"] for m in w.history if w._is_real_user(m)]
+    check(users and users[-1] == "what time is it", "hands-free: it's sent as you finish speaking", users[-1:])
+    w.settings["voice_autosend"] = False
+    script[:] = [{"event": "listening"}]
+    w.toggle_listen()
+    check(w._listening and "mic-on" in w.mic_btn.classes, "the mic button shows it's listening",
+          w.mic_btn.classes)
+    w.toggle_listen()
+    check(cancelled, "pressing it again stops listening")
+    w._on_hear({"event": "cancelled"})
+    script[:] = [{"event": "nothing"}]
+    w.toggle_listen()
+    settle()
+    check(not w._listening and "mic-on" not in w.mic_btn.classes, "silence ends it cleanly")
+    script[:] = [{"event": "error", "error": "the microphone stopped: no such device"}]
+    w.toggle_listen()
+    settle()
+    notes = [x.get_text() for x in w.msgbox.walk() if isinstance(x.get_text(), str)]
+    check(any("no such device" in t for t in notes), "a microphone problem is shown, not swallowed")
+    L.ready = lambda: False
+    w.toggle_listen()
+    texts = [x.get_text() for x in w.msgbox.walk() if isinstance(x.get_text(), str)]
+    check("VOICE" in texts and any("Moonshine" in t for t in texts),
+          "without voice input installed, the mic offers to install it", [t for t in texts if "Moonshine" in t])
+    rows = w.doctor_checks()
+    check(any(n == "Voice input" for _st, n, _d in rows) and any(n == "Voice" for _st, n, _d in rows),
+          "/doctor reports the voice and voice input")
+finally:
+    L.ready, L.EARS.listen, L.EARS.cancel = real
+settle()
+
+# ═══════════════════════════════════════════════════════════════════════════
 print(f"\nTOTAL V17 FAILURES: {fails + len(FAILS)}")
 shutil.rmtree(tmp, ignore_errors=True)
 assert fails == 0 and not FAILS, "v17 regressions present"
