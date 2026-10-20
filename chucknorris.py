@@ -2349,45 +2349,67 @@ class _LiveFeed:
 
 
 class GlyphField:
-    """The welcome screen's background: a hidden net of tiny code glyphs that
-    lights up in waves wherever you click — like a disturbed water surface
-    catching the light.
+    """The welcome screen's background: the fabric Chuck is woven from.
 
-    At rest the net is INVISIBLE and nothing is drawn: zero idle cost. A click
-    starts a ripple; the glyphs it reaches glow up (neutral at the edge of the
-    wave, violet at its crest), shift outward and flip to other characters,
-    then fade back to nothing as the wave passes.
+    A hidden net of tiny code glyphs. At rest nothing is drawn (zero idle
+    cost). Move the pointer and a soft lens of the fabric surfaces under it,
+    bulging gently and settling when you stop. Click and the fabric is struck:
 
-    Built to stay at 60 fps with ~18,000 glyphs:
-      * no per-click work — for each row of the net, the ring crosses at most
-        two column spans, computed exactly from the circle equation, so a frame
-        visits only the glyphs inside the ring;
-      * the wave falloff is a lookup table, not exp() per glyph;
-      * lit glyphs are bucketed into 8 brightness levels and each level is one
-        cairo show_glyphs() call (glyph ids resolved once), instead of one
-        text-shaping show_text() call per glyph.
-    Honours the desktop's reduce-animation setting. Not a subclass (the
-    headless test stub can't be subclassed): it owns a DrawingArea instead.
+      * the wavefront is not a compass circle: each strike gets its own
+        lobed shape from smooth angular noise that drifts as it travels, so
+        it rolls out unevenly, the way a disturbance runs through cloth;
+      * it is a real wave: glyphs ahead of the front are pushed out, those
+        behind it pulled back, with a sideways weave, so the net undulates
+        rather than merely lighting up;
+      * neighbours on the crest are joined by faint threads: the mesh is
+        visible exactly where it flexes;
+      * colour travels with it: a cool white leading edge, a violet crest,
+        and an indigo wake where characters keep decoding as it fades.
+
+    Built to stay smooth with ~18,000 glyphs: a frame visits only the glyphs
+    in each front's annulus (row spans from the circle equation, padded for
+    the lobes), the front shape is a per-frame angle table rather than noise
+    per glyph, falloffs are lookup tables, and glyphs are drawn in batched
+    show_glyphs() calls per colour band and brightness level. Honours the
+    desktop's reduce-animation setting. Not a subclass (the headless test
+    stub can't be subclassed): it owns a DrawingArea instead.
     """
     CHARS = "{}[]()<>=;:+-*/#&|~$%01λ0123456789abcdef"
     CELL_W, CELL_H, FONT = 7, 9, 6.0
-    SPEED, BAND, LIFE, PUSH = 340.0, 16.0, 2.3, 4.0
-    LEVELS = 8
-    MAX_WAVES = 3
+    SPEED, LIFE = 300.0, 2.6
+    LEAD, WAKE = 7.0, 58.0           # px ahead of the front / length of the wake
+    LOBE = 0.24                      # how far the front strays from a circle
+    PUSH, WEAVE = 6.0, 3.0
+    # each strike sends a main front and a slower, fainter echo that trails
+    # it: (speed, strength, shape seed offset, wake length)
+    FRONTS = ((1.0, 1.0, 0, 58.0), (0.6, 0.5, 17, 16.0))
+    BLOOM_R, BLOOM_T = 46.0, 0.45    # the flash where the click lands
+    LEVELS = 6
+    MAX_WAVES = 4
+    ANGLES = 128
+    LENS_R, LENS_FADE = 120.0, 0.9
     STEP = 320                       # the net grows in these steps
+    # (lead, crest, wake) colours: cool white, violet, indigo
+    BANDS = ((0.86, 0.90, 1.00), (0.70, 0.55, 1.00), (0.42, 0.36, 0.86))
 
     def __init__(self):
         self.area = Gtk.DrawingArea()
         self.area.set_hexpand(True)
         self.area.set_vexpand(True)
         self.area.set_can_target(False)
-        self.ripples = []            # [x, y, t0]
+        self.ripples = []            # [x, y, t0, seed]
+        self.pointer = None          # (x, y, t) of the last motion, for the lens
+        self._lens_since = 0.0
         self._tick = 0
         self._size = (0, 0)
         self._rows = []              # rows[r][c] = (x, y, char_idx, bright, seed) | None
         self._gids = None            # glyph id per CHARS entry, for show_glyphs
-        reach = int(2 * self.BAND) + 2
-        self._falloff = [math.exp(-(o * o) / (self.BAND * self.BAND)) for o in range(reach)]
+        self._lead = [math.exp(-(o / self.LEAD) ** 2) for o in range(int(self.LEAD * 3) + 1)]
+        self._wake = [math.exp(-o / (self.WAKE * 0.38)) for o in range(int(self.WAKE) + 1)]
+        self._lens_shape = None
+        self._strikes = 0
+        self._thin = 0                   # 0-3: how much of the wake to skip when frames run slow
+        self._frame_ms = 0.0
         self.enabled = self._cairo_ok()
         if self.enabled:
             try:
@@ -2414,13 +2436,22 @@ class GlyphField:
             return True
 
     def listen(self, widget):
-        """Ripple on clicks anywhere over `widget`, without stealing them from
-        the buttons on top (capture phase, never claims the sequence)."""
+        """Strike on clicks and follow the pointer anywhere over `widget`,
+        without stealing either from the buttons on top (capture phase,
+        never claims the sequence)."""
         try:
             g = Gtk.GestureClick()
             g.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
             g.connect("pressed", lambda _g, _n, x, y: self.poke(x, y))
             widget.add_controller(g)
+        except Exception:
+            pass
+        try:
+            m = Gtk.EventControllerMotion()
+            m.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+            m.connect("motion", lambda _m, x, y: self.hover(x, y))
+            m.connect("leave", lambda _m: self.hover(None, None))
+            widget.add_controller(m)
         except Exception:
             pass
 
@@ -2445,16 +2476,13 @@ class GlyphField:
                 y = r * self.CELL_H + 7
                 d = math.hypot(x - cx, y - cy) / maxd
                 # dimmer behind the content in the middle, brighter toward the edges
-                bright = (0.55 + rnd.random() * 0.45) * (0.45 + 0.55 * min(1.0, d * 1.25))
+                bright = (0.55 + rnd.random() * 0.45) * (0.5 + 0.5 * min(1.0, d * 1.25))
                 row.append((x, y, rnd.randrange(n), bright, rnd.randrange(997)))
             rows.append(row)
         self._rows = rows
         self._size = (W, H)
 
-    def poke(self, x, y):
-        if not self.enabled or not self._animations_on():
-            return
-        self.ripples = (self.ripples + [(float(x), float(y), time.monotonic())])[-self.MAX_WAVES:]
+    def _run(self):
         if not self._tick:
             try:
                 self._tick = self.area.add_tick_callback(self._on_tick)
@@ -2462,11 +2490,42 @@ class GlyphField:
                 self._tick = 0
         self.area.queue_draw()
 
+    def poke(self, x, y):
+        if not self.enabled or not self._animations_on():
+            return
+        self._strikes += 1
+        seed = (self._strikes * 7919 + int(x) * 31 + int(y)) % 100003
+        self.ripples = (self.ripples + [(float(x), float(y), time.monotonic(), seed)]
+                        )[-self.MAX_WAVES:]
+        self._run()
+
+    def hover(self, x, y):
+        if not self.enabled or not self._animations_on():
+            return
+        now = time.monotonic()
+        if x is None:
+            if self.pointer is not None:
+                self.pointer = (self.pointer[0], self.pointer[1], now - 0.35)   # fade out
+        else:
+            if self.pointer is None or now - self.pointer[2] > self.LENS_FADE:
+                self._lens_since = now
+            self.pointer = (float(x), float(y), now)
+        self._run()
+
+    def _lens_strength(self, now):
+        if self.pointer is None:
+            return 0.0
+        idle = now - self.pointer[2]
+        rise = min(1.0, (now - self._lens_since) / 0.25)
+        return rise * max(0.0, 1.0 - max(0.0, idle - 0.35) / self.LENS_FADE)
+
     def _on_tick(self, _w, _clock):
         now = time.monotonic()
         self.ripples = [r for r in self.ripples if now - r[2] < self.LIFE]
+        if self.pointer is not None and self._lens_strength(now) <= 0.0:
+            self.pointer = None
         self.area.queue_draw()
-        if not self.ripples:
+        if not self.ripples and self.pointer is None:
             self._tick = 0
             return False
         return True
@@ -2481,22 +2540,64 @@ class GlyphField:
             self._gids = ids
         return self._gids
 
+    def _front(self, seed, age):
+        """This strike's radius multiplier per angle bin: smooth, lobed, and
+        drifting with time, so no two strikes spread alike."""
+        rnd = (seed * 2654435761) & 0xFFFFFFFF
+        terms = []
+        for k in (2, 3, 5, 7):
+            rnd = (rnd * 1103515245 + 12345) & 0x7FFFFFFF
+            ph = rnd / 0x7FFFFFFF * 2 * math.pi
+            rnd = (rnd * 1103515245 + 12345) & 0x7FFFFFFF
+            amp = (0.35 + rnd / 0x7FFFFFFF * 0.65) / k ** 0.7
+            terms.append((k, ph, amp, (1 if k % 2 else -1) * 0.5 / k))
+        norm = sum(a for _k, _p, a, _s in terms) or 1.0
+        out = []
+        for i in range(self.ANGLES):
+            th = i / self.ANGLES * 2 * math.pi
+            v = sum(a * math.sin(k * th + p + s * age * 2 * math.pi) for k, p, a, s in terms)
+            out.append(1.0 + self.LOBE * v / norm)
+        return out
+
     def _lit(self, w, h, now):
-        """{(row, col): [intensity, dx, dy, age]} for every glyph a wave is on."""
+        """{(row, col): [intensity, dx, dy, age, band]} for every glyph a
+        strike (or the pointer's lens) is on. band 0 lead, 1 crest, 2 wake."""
         hit = {}
         cw, ch = self.CELL_W, self.CELL_H
-        fall, reach = self._falloff, len(self._falloff) - 1
+        lead, wake = self._lead, self._wake
+        nlead, nwake = len(lead) - 1, len(wake) - 1
+        sqrt, atan2, sin, pi = math.sqrt, math.atan2, math.sin, math.pi
+        PUSH, WEAVE = self.PUSH, self.WEAVE
+        sparse = 5 + 3 * self._thin
         nrows = len(self._rows)
-        for (rx, ry, t0) in self.ripples:
+        A = self.ANGLES
+        a_k = A / (2 * math.pi)
+        fronts = [(rx, ry, t0, seed, fsp, fam, fso, fwk)
+                  for (rx, ry, t0, seed) in self.ripples
+                  for (fsp, fam, fso, fwk) in self.FRONTS]
+        for (rx, ry, t0, seed, fsp, fam, fso, fwk) in fronts:
             age = now - t0
-            rad = age * self.SPEED
-            amp = (1.0 - age / self.LIFE) ** 1.5
+            # the front decelerates a little as it spreads, like a real wave
+            rad = fsp * self.SPEED * age * (1.0 - 0.18 * age / self.LIFE)
+            amp = fam * (1.0 - age / self.LIFE) ** 1.6
             if amp <= 0.02:
                 continue
-            r1, r2 = max(0.0, rad - reach), rad + reach
+            nwake = min(int(fwk), len(wake) - 1)
+            shape = self._front(seed + fso, age)
+            lo, hi = min(shape), max(shape)
+            # the shape's local extremes around each angle, so a row only
+            # scans the band where the front actually is near it
+            win = 9
+            ext = shape[-win:] + shape + shape[:win]
+            lo_w = [min(ext[b:b + 2 * win + 1]) for b in range(A)]
+            hi_w = [max(ext[b:b + 2 * win + 1]) for b in range(A)]
+            tick = int(age * 18)
+            r1 = max(0.0, rad * lo - nwake)
+            r2 = rad * hi + nlead
             r1s, r2s = r1 * r1, r2 * r2
             row_lo = max(0, int((ry - r2 - 7) // ch))
             row_hi = min(nrows - 1, int((ry + r2 - 7) // ch) + 1)
+            cap2 = (rad * lo * 0.8) ** 2
             for r in range(row_lo, row_hi + 1):
                 row = self._rows[r]
                 y = r * ch + 7
@@ -2504,10 +2605,29 @@ class GlyphField:
                 dy2 = dy * dy
                 if dy2 > r2s:
                     continue
-                outer = math.sqrt(r2s - dy2)
-                inner = math.sqrt(r1s - dy2) if dy2 < r1s else 0.0
                 shift = 1 + (r % 2) * (cw / 2)
-                for xa, xb in ((rx - outer, rx - inner), (rx + inner, rx + outer)):
+                deep = -1.0                     # |dx| below this is surely deep in the wake
+                if dy2 < cap2:
+                    # the row crosses the front twice: bound each crossing locally
+                    cx = sqrt(rad * rad - dy2)
+                    spans, deeps = [], []
+                    for side in (-1.0, 1.0):
+                        b = int((atan2(dy, side * cx) + pi) * a_k) % A
+                        ri = max(0.0, rad * lo_w[b] - nwake)
+                        ro = rad * hi_w[b] + nlead
+                        xi = sqrt(ri * ri - dy2) if ri * ri > dy2 else 0.0
+                        xo = sqrt(ro * ro - dy2)
+                        rd = rad * lo_w[b] - 12
+                        deeps.append(sqrt(rd * rd - dy2) if rd > 0 and rd * rd > dy2 else -1.0)
+                        spans.append((rx - xo, rx - xi) if side < 0 else (rx + xi, rx + xo))
+                    deep = min(deeps)               # inside the wake on BOTH sides, or nowhere
+                else:
+                    outer = sqrt(r2s - dy2)
+                    inner = sqrt(r1s - dy2) if dy2 < r1s else 0.0
+                    # a row through the ring's cap is one span, else one each side
+                    spans = (((rx - outer, rx + outer),) if inner == 0.0 else
+                             ((rx - outer, rx - inner), (rx + inner, rx + outer)))
+                for xa, xb in spans:
                     c0 = max(0, int((xa - shift) // cw))
                     c1 = min(len(row) - 1, int((xb - shift) // cw) + 1)
                     for c in range(c0, c1 + 1):
@@ -2515,33 +2635,139 @@ class GlyphField:
                         if g is None:
                             continue
                         dx = g[0] - rx
-                        d = math.sqrt(dx * dx + dy2)
-                        o = abs(d - rad)
-                        if o >= reach:
+                        if -deep < dx < deep and ((g[4] + tick) % sparse) > 1:
+                            continue            # deep wake, and not its turn to decode
+                        d = sqrt(dx * dx + dy2)
+                        th = atan2(dy, dx)
+                        o = d - rad * shape[int((th + pi) * a_k) % A]
+                        if o >= 0:
+                            if o >= nlead:
+                                continue
+                            k = amp * lead[int(o)]
+                            band, wave = 0, 1.0
+                        else:
+                            o = -o
+                            if o >= nwake:
+                                continue
+                            band = 1 if o < 12 else 2
+                            # the wake decodes: a shifting few glyphs at a time
+                            if band == 2 and ((g[4] + tick) % sparse) > 1:
+                                continue
+                            k = amp * wake[int(o)]
+                            wave = 1.0 - o / 14.0 if o < 28 else -1.0   # out, then back
+                        if k < 0.04:
                             continue
-                        k = amp * fall[int(o)]
-                        if k < 0.05:
-                            continue
-                        key = (r, c)
+                        key = r * 4096 + c
                         e = hit.get(key)
                         if e is None:
-                            e = hit[key] = [0.0, 0.0, 0.0, age]
+                            e = hit[key] = [0.0, 0.0, 0.0, age, band]
                         e[0] += k
+                        if band < e[4]:
+                            e[4] = band
                         if d > 0.5:
-                            e[1] += dx / d * k * self.PUSH
-                            e[2] += dy / d * k * self.PUSH
-                    if inner == 0.0:
-                        break                           # one span covered the row
+                            ux, uy = dx / d, dy / d
+                            push = k * PUSH * wave
+                            weave = k * WEAVE * sin(th * 6 + age * 7 + g[4])
+                            e[1] += ux * push - uy * weave
+                            e[2] += uy * push + ux * weave
+        for (rx, ry, t0, seed) in self.ripples:          # the bloom where it landed
+            age = now - t0
+            if age >= self.BLOOM_T:
+                continue
+            fade = (1.0 - age / self.BLOOM_T) ** 2
+            R = self.BLOOM_R * (0.6 + 0.8 * age / self.BLOOM_T)
+            for r in range(max(0, int((ry - R - 7) // ch)), min(nrows - 1, int((ry + R - 7) // ch) + 1) + 1):
+                row = self._rows[r]
+                dy = r * ch + 7 - ry
+                if abs(dy) >= R:
+                    continue
+                span = sqrt(R * R - dy * dy)
+                shift = 1 + (r % 2) * (cw / 2)
+                for c in range(max(0, int((rx - span - shift) // cw)),
+                               min(len(row) - 1, int((rx + span - shift) // cw) + 1) + 1):
+                    g = row[c]
+                    if g is None:
+                        continue
+                    f = 1.0 - sqrt((g[0] - rx) ** 2 + dy * dy) / R
+                    if f <= 0 or (g[4] % 100) / 100.0 > f * 1.6:     # a soft, grainy edge
+                        continue
+                    key = r * 4096 + c
+                    e = hit.get(key)
+                    if e is None:
+                        e = hit[key] = [0.0, 0.0, 0.0, age, 0]
+                    e[0] += fade * f * 1.2
+                    e[4] = 0
+        lens = self._lens_strength(now)
+        if lens > 0 and self.pointer is not None:
+            px, py, _t = self.pointer
+            if self._lens_shape is None or now - self._lens_shape[0] > 0.05:
+                self._lens_shape = (now, self._front(4243, now * 0.25))  # slowly breathing outline
+            lshape = self._lens_shape[1]
+            R = self.LENS_R * max(lshape)
+            row_lo = max(0, int((py - R - 7) // ch))
+            row_hi = min(nrows - 1, int((py + R - 7) // ch) + 1)
+            breathe = 0.85 + 0.15 * math.sin(now * 2.4)
+            for r in range(row_lo, row_hi + 1):
+                row = self._rows[r]
+                y = r * ch + 7
+                dy = y - py
+                if abs(dy) > R:
+                    continue
+                span = math.sqrt(R * R - dy * dy)
+                shift = 1 + (r % 2) * (cw / 2)
+                c0 = max(0, int((px - span - shift) // cw))
+                c1 = min(len(row) - 1, int((px + span - shift) // cw) + 1)
+                for c in range(c0, c1 + 1):
+                    g = row[c]
+                    if g is None:
+                        continue
+                    dx = g[0] - px
+                    d = math.sqrt(dx * dx + dy * dy)
+                    edge = self.LENS_R * lshape[int((math.atan2(dy, dx) + math.pi) * a_k) % A]
+                    if d >= edge:
+                        continue
+                    f = 1.0 - d / edge
+                    # the edge dissolves glyph by glyph instead of stopping at a line
+                    if (g[4] % 97) / 97.0 > f * 2.2:
+                        continue
+                    k = lens * 0.5 * f * breathe
+                    if k < 0.03:
+                        continue
+                    key = r * 4096 + c
+                    e = hit.get(key)
+                    if e is None:
+                        e = hit[key] = [0.0, 0.0, 0.0, now - self._lens_since, 2]
+                    e[0] += k
+                    if d > 0.5:                         # a lens: bulge outward, gently
+                        b = lens * 3.2 * f * (1 - f)
+                        e[1] += dx / d * b
+                        e[2] += dy / d * b
         return hit
 
     def _draw(self, _area, cr, w, h):
-        if not self.ripples:
+        if not self.ripples and self.pointer is None:
             return                                      # invisible at rest
         try:
             import cairo
         except Exception:
             return
         self._ensure(w, h)
+        t_start = time.perf_counter()
+        try:
+            self._paint(cr, w, h)
+        finally:
+            # keep the frame inside budget on slower machines: when frames run
+            # long, the decoding wake thins out (the crest always stays whole)
+            ms = (time.perf_counter() - t_start) * 1000
+            self._frame_ms = 0.7 * self._frame_ms + 0.3 * ms
+            if self._frame_ms > 11 and self._thin < 3:
+                self._thin += 1
+                self._frame_ms = 8.0
+            elif self._frame_ms < 5 and self._thin > 0:
+                self._thin -= 1
+
+    def _paint(self, cr, w, h):
+        import cairo
         hit = self._lit(w, h, time.monotonic())
         if not hit:
             return
@@ -2558,25 +2784,55 @@ class GlyphField:
             pass
         gids = self._glyph_ids(cr)
         n, L = len(self.CHARS), self.LEVELS
-        buckets = [[] for _ in range(L)]
-        for (r, c), (inten, dx, dy, age) in hit.items():
-            x, y, ci, bright, seed = self._rows[r][c]
-            inten = min(1.0, inten)
-            v = inten * bright
+        buckets = [[[] for _ in range(L)] for _ in self.BANDS]
+        pos = {}
+        rows = self._rows
+        for key, (inten, dx, dy, age, band) in hit.items():
+            x, y, ci, bright, seed = rows[key >> 12][key & 4095]
+            inten = min(1.0, inten * 1.6)
+            v = inten * (0.35 + 0.65 * bright)
+            if v < 0.05:
+                continue
             lvl = min(L - 1, int(v * L))
-            if lvl <= 0 and v < 0.06:
+            if inten > 0.4 or band == 2:                # decoding: characters flip
+                ci = (seed + int(age * (26 if band < 2 else 9))) % n
+            gx, gy = x + dx, y + dy
+            if v >= 0.42:
+                pos[key] = (gx + 1.5, gy - 2, v)
+            buckets[band][lvl].append((gids[ci], gx, gy))
+        # threads: the woven mesh, only where the fabric flexes hardest
+        lines = [[], []]
+        budget = 700 // (1 + self._thin)
+        for key, (x1, y1, v1) in pos.items():
+            r = key >> 12
+            for nb in (key + 1, key + 4096 + (0 if r % 2 else -1)):
+                q = pos.get(nb)
+                if q is None:
+                    continue
+                lines[1 if min(v1, q[2]) > 0.7 else 0].append((x1, y1, q[0], q[1]))
+                budget -= 1
+            if budget <= 0:
+                break
+        cr.set_line_width(0.6)
+        for i, segs in enumerate(lines):
+            if not segs:
                 continue
-            if inten > 0.45:                            # flips while the crest passes
-                ci = (seed + int(age * 26)) % n
-            buckets[lvl].append((gids[ci], x + dx, y + dy))
-        for lvl, glyphs in enumerate(buckets):
-            if not glyphs:
-                continue
-            t = (lvl + 0.5) / L
-            # neutral at the edge of the wave, violet at the crest
-            cr.set_source_rgba(0.74 + 0.02 * t, 0.72 - 0.14 * t, 0.86 + 0.12 * t,
-                               min(0.9, 0.08 + t * 0.85))
-            cr.show_glyphs(glyphs)
+            for x1, y1, x2, y2 in segs:
+                cr.move_to(x1, y1)
+                cr.line_to(x2, y2)
+            cr.set_source_rgba(0.62, 0.52, 1.0, 0.10 + 0.12 * i)
+            cr.stroke()
+        for band, levels in enumerate(buckets):
+            br, bg, bb = self.BANDS[band]
+            for lvl, glyphs in enumerate(levels):
+                if not glyphs:
+                    continue
+                t = (lvl + 0.5) / L
+                # dim glyphs lean neutral; bright ones take the band's colour
+                mix = 0.35 + 0.65 * t
+                cr.set_source_rgba(0.72 + (br - 0.72) * mix, 0.72 + (bg - 0.72) * mix,
+                                   0.80 + (bb - 0.80) * mix, min(0.95, 0.14 + t * 0.85))
+                cr.show_glyphs(glyphs)
 
 
 _FILE_FENCE = re.compile(r"^[ \t]*(`{3,4})(write|edit|patch)(?![A-Za-z])[ \t]*(.*)$")
