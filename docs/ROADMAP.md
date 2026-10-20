@@ -156,7 +156,7 @@ reaches only local servers.
 - [ ] **Background tasks.** Send a task to the background and keep chatting;
       it runs in its own chat with its own folder, and a notification says when
       it's done or needs an answer.
-- [ ] **Resume after a crash.** An in-flight turn's state is saved as it goes;
+- [x] **Resume after a crash.** An in-flight turn's state is saved as it goes;
       reopening Chuck after a crash or power cut offers to continue it.
 - [ ] **Scheduled tasks.** "Every morning, update the system and tell me what
       changed": a schedule in Settings, results waiting as a chat.

@@ -15,7 +15,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from sim import cn, new_win, type_and_send, settle, check_finished, FAILS
+from sim import cn, new_win, type_and_send, settle, check_finished, FAILS, ScriptedBackend
 
 fails = 0
 
@@ -457,6 +457,67 @@ finally:
     v._PIPER_CACHE.clear(); v._MODEL_CACHE["key"] = object()
     v.ON_PIPER_FAIL[0] = None
     v.LAST_ERROR.update(piper="", told=False)
+
+# ═══════════════════════════════════════════════════════════════════════════
+print("\n--- resume after a crash ---")
+import json as _json
+ws = tmp / "resume"
+ws.mkdir()
+
+
+class Slow(ScriptedBackend):
+    def stream(self, *a, **k):
+        time.sleep(0.5)
+        return super().stream(*a, **k)
+
+
+w = agent([], ws)
+w.backend = Slow(["```bash\nsleep 1; echo step-one\n```", "Finished."])
+w.entry.get_buffer().set_text("do a long task")
+w.on_send()
+time.sleep(0.2)
+path = cn.CHATS_DIR / f"{w.chat_id}.json"
+check(path.exists() and _json.loads(path.read_text()).get("running") is True,
+      "while a task runs, the saved chat says so")
+settle()
+check(_json.loads(path.read_text()).get("running") is False, "when it finishes, the flag is cleared")
+# a Chuck that died mid-task: its last word was a tool call, its process is gone
+meta = _json.loads(path.read_text())
+meta["history"].append({"role": "user", "content": "now the next part"})
+meta["history"].append({"role": "assistant", "content": "```bash\necho half-done\n```"})
+meta.update(running=True, pid=999999, title="do the next part")
+path.write_text(_json.dumps(meta))
+w2 = agent(["I checked: the next part still needs doing. Done now."], ws)
+check(w2._interrupted and w2._interrupted[0] == path, "at startup the interrupted task is found")
+texts = [x.get_text() for x in w2._empty_holder.walk() if isinstance(x.get_text(), str)]
+check(any("Chuck closed in the middle of" in t for t in texts) and "Resume" in texts,
+      "and offered on the welcome screen", [t for t in texts if "closed" in t])
+[b for b in w2._empty_holder.walk() if isinstance(b, cn.Gtk.Button) and b.get_label() == "Resume"][0].emit("clicked")
+settle()
+h = [m["content"] for m in w2.history]
+check(any(str(c).startswith("CONTINUE: Chuck closed unexpectedly") for c in h)
+      and "Done now." in str(h[-1]), "Resume reopens it and the agent carries on, told to check first", h[-3:])
+check(_json.loads(path.read_text()).get("running") is False and w2.chat_id == meta["ts"],
+      "and it's no longer marked interrupted")
+w3 = agent([], ws)
+check(not w3._interrupted, "a finished chat isn't offered again")
+meta = _json.loads(path.read_text()); meta.update(running=True, pid=999999); path.write_text(_json.dumps(meta))
+w4 = agent([], ws)
+w4.dismiss_interrupted()
+check(not w4._interrupted and _json.loads(path.read_text()).get("running") is False, "Dismiss forgets it")
+meta.update(running=True, pid=os.getpid()); path.write_text(_json.dumps(meta))
+check(not agent([], ws)._interrupted, "a chat a living Chuck is working on is not 'interrupted'")
+meta.update(running=False); path.write_text(_json.dumps(meta))
+w5 = agent([], ws)
+w5.backend = Slow(["```bash\nsleep 3\n```", "x"])
+w5.entry.get_buffer().set_text("close me mid-task")
+w5.on_send()
+time.sleep(0.3)
+w5._on_close()
+check(_json.loads((cn.CHATS_DIR / f"{w5.chat_id}.json").read_text()).get("running") is False,
+      "closing the window mid-task is a choice, not a crash")
+w5.stop_run()
+settle()
 
 # ═══════════════════════════════════════════════════════════════════════════
 print(f"\nTOTAL V17 FAILURES: {fails + len(FAILS)}")

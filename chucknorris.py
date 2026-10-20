@@ -3168,6 +3168,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         GLib.timeout_add_seconds(600, self._sweep_chats)
         self._apply_mode(announce=False)
         self._apply_access()                    # this window's folder policy, not a stale one
+        self._interrupted = self._find_interrupted()
         voice.ON_PIPER_FAIL[0] = lambda why: GLib.idle_add(self._piper_note, why)
         self._show_empty_hint()
         GLib.timeout_add_seconds(20, self._update_check)   # once a day, after startup settles
@@ -3775,6 +3776,24 @@ class ChuckWindow(Adw.ApplicationWindow):
             kb.connect("clicked", self.open_settings)
             kr.append(kl); kr.append(kb)
             box.append(kr)
+
+        hit = getattr(self, "_interrupted", None)
+        if hit:
+            rr = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+            rr.add_css_class("ws-current")
+            rr.set_margin_top(22); rr.set_halign(Gtk.Align.CENTER)
+            rl = Gtk.Label(label=f"Chuck closed in the middle of \u201c{hit[1][:48]}\u201d.", xalign=0)
+            rl.add_css_class("dlg-sub")
+            try:
+                rl.set_ellipsize(Pango.EllipsizeMode.END); rl.set_max_width_chars(46)
+            except Exception:
+                pass
+            rb = Gtk.Button(label="Resume"); rb.add_css_class("accent-btn")
+            rb.connect("clicked", lambda *_a: self.resume_interrupted())
+            db = Gtk.Button(label="Dismiss"); db.add_css_class("ghost")
+            db.connect("clicked", lambda *_a: self.dismiss_interrupted())
+            rr.append(rl); rr.append(rb); rr.append(db)
+            box.append(rr)
 
         # a FlowBox, not a fixed 2-column grid: in a narrow window the cards
         # wrap to one column instead of being clipped
@@ -4656,7 +4675,12 @@ class ChuckWindow(Adw.ApplicationWindow):
         box.append(sl)
         dlg.present()
 
-    def _save_chat(self):
+    def _save_chat(self, running=None):
+        """Write this chat to disk. `running` marks a task in progress, so a
+        crash mid-task can be offered for resume at the next start."""
+        if running is None:
+            running = bool(self._running)
+        self._last_autosave = time.time()
         msgs = [m for m in self.history if m["role"] != "system" and isinstance(m.get("content"), str)]
         if not msgs:
             return
@@ -4666,7 +4690,8 @@ class ChuckWindow(Adw.ApplicationWindow):
                 {"title": title, "ts": self.chat_id, "history": self.history,
                  "workspace": str(self.workspace) if self.workspace else "",
                  "usage": self._usage, "compact": self._compact,
-                 "checkpoints": self._checkpoints[-200:]}, indent=2))
+                 "checkpoints": self._checkpoints[-200:],
+                 "running": running, "pid": os.getpid()}, indent=2))
         except Exception:
             pass
         self._refresh_sidebar()
@@ -4978,7 +5003,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         return True
 
     def _on_close(self, *_):
-        self._save_chat()
+        self._save_chat(running=False)          # closing mid-task is a choice, not a crash
         self._py_close()
         if getattr(self, "_lsp_m", None) is not None:
             threading.Thread(target=self._lsp_m.stop_all, daemon=True).start()
@@ -5150,8 +5175,11 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._heartbeat_id = GLib.timeout_add(1000, self._heartbeat)
 
     def _end_run(self):
+        was = self._running
         self._running = False
         self._thinking = False
+        if was:
+            self._save_chat(running=False)
         self._sync_placeholder()
         self.send_btn.set_icon_name(_pick_icon("go-up-symbolic", "pan-up-symbolic", "up-symbolic"))
         self.send_btn.remove_css_class("stop-fab"); self.send_btn.add_css_class("send-fab")
@@ -7791,6 +7819,70 @@ class ChuckWindow(Adw.ApplicationWindow):
                              daemon=True).start()
         return rows
 
+    # ── resume after a crash ──
+    @staticmethod
+    def _pid_alive(pid):
+        try:
+            os.kill(int(pid), 0)
+            return True
+        except (OSError, ValueError, TypeError):
+            return False
+
+    def _find_interrupted(self):
+        """The newest saved chat that was mid-task when its Chuck died."""
+        best = None
+        try:
+            files = sorted(CHATS_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+        except OSError:
+            return None
+        for f in files[:40]:
+            try:
+                meta = json.loads(f.read_text())
+            except Exception:
+                continue
+            if meta.get("running") and meta.get("pid") != os.getpid() and not self._pid_alive(
+                    meta.get("pid")):
+                best = (f, meta.get("title") or "a task")
+                break
+        return best
+
+    def _set_interrupted_flag(self, path, value):
+        try:
+            meta = json.loads(Path(path).read_text())
+            meta["running"] = value
+            Path(path).write_text(json.dumps(meta, indent=2))
+        except Exception:
+            pass
+
+    RESUME_NOTE = ("CONTINUE: Chuck closed unexpectedly in the middle of this task (a crash or "
+                   "power loss); anything that was running was stopped. Check the current state "
+                   "first (files, running processes, the plan), then finish the task.")
+
+    def resume_interrupted(self):
+        hit = self._interrupted
+        if not hit:
+            return False
+        path, _title = hit
+        self._interrupted = None
+        self._set_interrupted_flag(path, False)
+        self._load_chat(path)
+        last = self.history[-1] if len(self.history) > 1 else None
+        if last is None:
+            return False
+        if last.get("role") == "assistant":
+            self.history.append({"role": "user", "content": self.RESUME_NOTE})
+        self._sys_note("\u21bb resuming the interrupted task", "dim")
+        self._reset_turn_state()
+        self._start_run()
+        self._ask_model()
+        return True
+
+    def dismiss_interrupted(self):
+        if self._interrupted:
+            self._set_interrupted_flag(self._interrupted[0], False)
+        self._interrupted = None
+        self._show_empty_hint()
+
     def _piper_note(self, why):
         last = (why or "").strip().splitlines()[-1][:180] if why else "unknown error"
         self._sys_note(f"\U0001F50A Piper failed, so the robotic fallback voice is speaking: {last} "
@@ -9090,6 +9182,8 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._sys_note("\u21b3 delivered", "dim")
 
     def _ask_model(self, vision=False):
+        if time.time() - getattr(self, "_last_autosave", 0) > 2:
+            self._save_chat(running=True)       # a crash from here on can be resumed
         self._deliver_steer()
         cap = self._over_cap()
         if cap:

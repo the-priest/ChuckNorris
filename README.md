@@ -189,6 +189,7 @@ All of it is visible, searchable, addable and deletable in the Memory panel.
 - **A model is down?** After its retries, that request is answered by a fallback model (automatic, or your choice in Settings), and the chat says so.
 - **Watching spend?** Set a per-chat spending cap. When a chat reaches it, the task pauses and asks before spending more.
 - **Esc** stops the turn *and* the command it was running, whole process tree included.
+- **Crashed or lost power mid-task?** The chat is saved as each step starts. The next time Chuck opens, the welcome screen offers to **Resume** it, and the agent checks the current state before carrying on.
 - **`/doctor`** checks your setup in one card: key and balance, model, browser, linters, screenshots, voice, MCP servers, disk, and recent errors, each with the fix.
 - **A crash log.** Errors on the UI thread, in worker threads and in tools are written to `~/.local/state/chucknorris/chuck.log` with their tracebacks (never keys or chats), so a bug report has something in it. Settings opens it.
 - **Updates.** Once a day Chuck checks GitHub for a newer version and offers it. `/update` installs it without sudo. A git clone gets a fast-forward pull, and an installed copy is downloaded, checked and swapped in whole. **Restart now** reopens your chat.
