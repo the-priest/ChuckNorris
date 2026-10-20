@@ -188,7 +188,12 @@ def _launch(chrome, profile):
             f"--user-data-dir={profile}", "--no-first-run", "--no-default-browser-check",
             "--disable-gpu", "--hide-scrollbars", "--mute-audio",
             "--disable-background-timer-throttling", "--disable-renderer-backgrounding",
-            "--allow-file-access-from-files", "about:blank"]
+            "--allow-file-access-from-files",
+            # no phoning home: component updates, metrics, safe-browsing pings
+            "--disable-background-networking", "--disable-component-update",
+            "--disable-sync", "--disable-default-apps", "--disable-domain-reliability",
+            "--disable-client-side-phishing-detection", "--metrics-recording-only",
+            "--no-pings", "about:blank"]
     if hasattr(os, "geteuid") and os.geteuid() == 0:
         args.insert(1, "--no-sandbox")            # Chromium refuses to run as root otherwise
     proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,

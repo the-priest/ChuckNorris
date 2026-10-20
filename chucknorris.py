@@ -109,6 +109,7 @@ _agents = _optional("agents")
 _pricing = _optional("pricing")
 _browser = _optional("browser")
 _diagnose = _optional("diagnose")
+_mcp = _optional("mcp")
 if _pricing is None:
     class _pricing:                     # noqa: N801  — the meter, minus prices
         """Stand-in so a partial install still launches: tokens are counted,
@@ -2715,6 +2716,17 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._turn_no = 0               # which task a change belongs to (for "undo all")
         self._user_notes = []           # things the user did that the model must hear about
         self._jobs = {}                 # background jobs: name -> {proc, log, cmd, card}
+        # MCP servers from ~/.config/chucknorris/mcp.json, started in the
+        # background; when their tool lists arrive the system prompt is rebuilt
+        self.MCP_CONFIG = CONFIG_DIR / "mcp.json"
+        self._mcp = None
+        if _mcp is not None:
+            self._mcp = _mcp.Manager(
+                str(self.MCP_CONFIG), _config.VERSION,
+                roots=lambda: [str(self.workspace)] if self.workspace else [],
+                on_change=lambda: GLib.idle_add(lambda: (self._refresh_system(), False)[1]))
+            if self.MCP_CONFIG.exists():
+                self._mcp.start_all()
         self._jobs_timer = 0
         self._tool_images = []          # images the NEXT request carries (base64, mime)
         self._reset_continuation()
@@ -3122,13 +3134,17 @@ class ChuckWindow(Adw.ApplicationWindow):
         # In the system message, not the per-hop note: rules change rarely, so
         # they belong in the cached prefix rather than re-billed on every hop.
         rules = project_instructions(self.workspace)
+        if self.agent_mode and getattr(self, "_mcp", None) is not None:
+            tools = self._mcp.index()          # costs nothing when no server is set up
+            if tools:
+                text += "\n\n" + tools
         return text + ("\n\n" + rules if rules else "")
 
     def _refresh_system(self):
         """Rebuild history[0] (mode, machine, instructions). Only a real change
         rewrites it, so the API's prompt cache survives an unchanged prefix."""
-        h = getattr(self, "history", None)
-        if h and h[0].get("role") == "system":
+        h = self.__dict__.get("history")       # may run before __init__ built it (MCP boot)
+        if isinstance(h, list) and h and h[0].get("role") == "system":
             new = self._system_text()
             if h[0].get("content") != new:
                 h[0]["content"] = new
@@ -4325,6 +4341,11 @@ class ChuckWindow(Adw.ApplicationWindow):
         # holding a port after the window that started it is gone
         try:
             self._stop_all_jobs()
+        except Exception:
+            pass
+        try:
+            if self._mcp is not None:
+                self._mcp.stop_all()
         except Exception:
             pass
         # Speech outlives the window otherwise — the process keeps a daemon
@@ -6573,6 +6594,48 @@ class ChuckWindow(Adw.ApplicationWindow):
         return (f"[patch applied to {len(done)} file(s): {', '.join(done)}]"
                 + ("\n[" + "\n".join(bad) + "]" if bad else ""))
 
+    @tool("mcp", acts=True, cap=4)
+    def _t_mcp(self, body):
+        """```mcp server.tool``` + JSON arguments: call a tool on a connected MCP
+        server. Text comes back as the result; images are shown and seen."""
+        if self._mcp is None:
+            return "[mcp: the MCP module is missing — reinstall Chuck]"
+        first, _, rest = (body or "").strip().partition("\n")
+        target = first.strip()
+        if "." not in target:
+            return "[mcp: name the tool as server.tool on the first line]"
+        rest = rest.strip()
+        if not rest and target.endswith("}"):
+            target, _, rest = target.partition(" ")      # all on one line
+        try:
+            args = json.loads(rest) if rest else {}
+            if not isinstance(args, dict):
+                raise ValueError("arguments must be a JSON object")
+        except ValueError as ex:
+            return f"[mcp {target}: arguments aren't valid JSON ({ex})]"
+        self._sys_note(f"\U0001F50C {target}", "dim")
+
+        def work():
+            ok, text, images = self._mcp.call(target, args)
+            seen = []
+            for i, (mime, b64) in enumerate(images[:4]):
+                path = _scratch_png(".mcp_")
+                try:
+                    with open(path, "wb") as fh:
+                        fh.write(base64.b64decode(b64))
+                    seen.append(self._see(path, f"{target} image {i + 1}"))
+                except Exception:
+                    pass
+            head = f"[mcp {target} {'OK' if ok else 'FAILED'}]"
+            return head + "\n" + clip_output(text or "(no text)", 20000) + (
+                "\n" + "\n".join(seen) if seen else "")
+        return work
+
+    def mcp_reload(self):
+        if self._mcp is not None:
+            self._mcp.start_all()
+            self._sys_note("\U0001F50C reloading MCP servers\u2026", "dim")
+
     @tool("changes", bare=True, cap=1)
     def _t_changes(self, body):
         """```changes``` — every file this task changed, net of reverts, as one
@@ -7129,6 +7192,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         ("/cost", "what this chat has cost"),
         ("/memory", "open the memory panel"),
         ("/export", "save this chat as Markdown"),
+        ("/mcp [reload]", "MCP servers and their tools"),
     ]
 
     def _slash(self, text):
@@ -7174,6 +7238,18 @@ class ChuckWindow(Adw.ApplicationWindow):
                            f"Session: {_pricing.fmt_usd(ss['cost'])}.", "dim")
         elif cmd == "memory":
             self.open_memory()
+        elif cmd == "mcp":
+            if arg == "reload":
+                self.mcp_reload()
+            elif self._mcp is None:
+                self._sys_note("MCP is unavailable (module missing).", "danger")
+            else:
+                st = self._mcp.status()
+                self._sys_note(("MCP servers (" + str(self.MCP_CONFIG) + "):\n"
+                                + "\n".join(f"{n:<14} {state:<9} {d}" for n, state, d in st))
+                               if st else f"No MCP servers. Add them to {self.MCP_CONFIG} "
+                               "(Claude Desktop format: {\"mcpServers\": {...}}), then /mcp reload.",
+                               "dim")
         elif cmd == "init":
             if not self.workspace:
                 self._sys_note("Pick a working folder first (/folder).", "danger")
@@ -8565,6 +8641,43 @@ class ChuckWindow(Adw.ApplicationWindow):
              10000, SEND_CHAR_BUDGET,
              sub="How much conversation and file content rides along. More sees more "
                  "of a big repo at once; less is cheaper. ~4 characters per token.")
+
+        if self._mcp is not None:
+            g = group(pg, "MCP servers",
+                      "Tools from Model Context Protocol servers, configured in mcp.json "
+                      "(the same format Claude Desktop uses).")
+            rows = []
+
+            def fill_mcp(*_a):
+                for r in rows:
+                    g.remove(r)
+                rows.clear()
+                st = self._mcp.status()
+                for name, state, detail in st or [("No servers yet", "", "Edit mcp.json to add one")]:
+                    r = Adw.ActionRow(); r.set_title(_html.escape(name))
+                    r.set_subtitle(_html.escape(" \u00b7 ".join(x for x in (state, detail) if x)))
+                    g.add(r); rows.append(r)
+
+            def edit_mcp(*_a):
+                if not self.MCP_CONFIG.exists():
+                    self.MCP_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+                    self.MCP_CONFIG.write_text(json.dumps({"mcpServers": {
+                        "example-disabled": {"command": "npx", "args": [
+                            "-y", "@modelcontextprotocol/server-filesystem", str(Path.home())],
+                            "disabled": True}}}, indent=2) + "\n")
+                _open_path(str(self.MCP_CONFIG))
+
+            def reload_mcp(*_a):
+                self.mcp_reload()
+                GLib.timeout_add(1500, lambda: (fill_mcp(), False)[1])
+            bar = Adw.ActionRow(); bar.set_title("mcp.json")
+            bar.set_subtitle(_html.escape(str(self.MCP_CONFIG)))
+            eb = Gtk.Button(label="Edit"); eb.add_css_class("quick"); eb.set_valign(Gtk.Align.CENTER)
+            rb = Gtk.Button(label="Reload"); rb.add_css_class("quick"); rb.set_valign(Gtk.Align.CENTER)
+            eb.connect("clicked", edit_mcp); rb.connect("clicked", reload_mcp)
+            bar.add_suffix(eb); bar.add_suffix(rb)
+            g.add(bar)
+            fill_mcp()
 
         g = group(pg, "Code verifier")
         if _codecheck:

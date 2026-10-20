@@ -411,6 +411,59 @@ check(not [x for x in w.msgbox.walk() if "term-live" in x.classes], "no LIVE pan
 check("n5" in hist_text(w), "the model still gets the full output")
 
 # ═══════════════════════════════════════════════════════════════════════════
+print("\n--- MCP: every tool the ecosystem ships ---")
+fake = Path(__file__).with_name("fake_mcp_server.py")
+cn.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+(cn.CONFIG_DIR / "mcp.json").write_text(json.dumps({"mcpServers": {
+    "fake": {"command": sys.executable, "args": [str(fake)]},
+    "ghost": {"command": "no-such-binary-xyz"}}}))
+ws = folder("mcpws")
+w = agent([], ws)
+for _ in range(100):
+    if not w._mcp.loading and any(st == "running" for _, st, _ in w._mcp.status()):
+        break
+    time.sleep(0.1)
+w._refresh_system()
+sysmsg = w.history[0]["content"]
+check("MCP TOOLS" in sysmsg and "- fake.add(a, b): Add two numbers." in sysmsg,
+      "a configured server's tools are listed in the system prompt", sysmsg[-600:])
+check("fake.slow(seconds?)" in sysmsg, "optional arguments are marked")
+w.backend.replies = ['```mcp fake.add\n{"a": 20, "b": 22}\n```\n```mcp fake.pixel```\n'
+                     '```mcp fake.where```', "```mcp fake.fail```\n```mcp fake.add\n{\"a\": 1}\n```\n"
+                     '```mcp fake.echo {"text": "same line"}```', "Done."]
+type_and_send(w, "use the tools")
+h = hist_text(w)
+check("[mcp fake.add OK]\n42" in h, "a tool call returns its result")
+check("one pixel" in h and "IMAGE of fake.pixel image 1 is attached" in h, "an image result is shown and seen")
+check(str(ws.resolve()) in h.split("fake.where OK]")[1][:300] if "fake.where OK]" in h else False,
+      "a server asking for roots gets the working folder")
+check("[mcp fake.fail FAILED]\nit broke on purpose" in h, "a tool error is reported as a failure")
+check("is missing: b" in h, "missing required arguments are caught before the call")
+check("ECHO: same line" in h, "arguments on the tool's own line work too")
+check_finished(w, "mcp")
+w.backend.replies = ["```mcp ghost.x```", "```mcp fake.add\nnot json\n```", "Ok."]
+type_and_send(w, "bad calls")
+h = hist_text(w)
+check("failed to start: command not found: no-such-binary-xyz" in h, "a server that failed to start says why")
+check("arguments aren't valid JSON" in h, "bad JSON is a clear result")
+w.entry.get_buffer().set_text("/mcp")
+w.on_send()
+notes = [x.get_text() for x in w.msgbox.walk() if isinstance(x.get_text(), str) and "MCP servers" in x.get_text()]
+check(notes and "fake" in notes[-1] and "running" in notes[-1] and "ghost" in notes[-1],
+      "/mcp shows each server's state", notes[-1:] if notes else None)
+w.set_agent_mode(False, announce=False)
+check("MCP TOOLS" not in w.history[0]["content"], "Chat mode lists no MCP tools")
+w.backend.replies = ['```mcp fake.add\n{"a": 1, "b": 1}\n```', "Ok."]
+calls_before = hist_text(w).count("[mcp fake.add OK]")
+type_and_send(w, "chat call")
+check(hist_text(w).count("[mcp fake.add OK]") == calls_before, "and can't call them")
+procs = [s.proc for s in w._mcp.servers.values()]
+w._on_close()
+time.sleep(0.5)
+check(procs and all(p.poll() is not None for p in procs), "closing the window stops the servers")
+(cn.CONFIG_DIR / "mcp.json").unlink()
+
+# ═══════════════════════════════════════════════════════════════════════════
 print(f"\nTOTAL V15 FAILURES: {fails + len(FAILS)}")
 assert fails == 0 and not FAILS, "v15 regressions present"
 print("ALL V15 TESTS PASSED")

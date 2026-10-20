@@ -40,7 +40,7 @@ without a network, and visible to the user as a card.
       checkpoints. Big refactors in one block.
 - [x] **Live command output.** Long builds stream into their card as they
       run, instead of appearing at the end.
-- [ ] **MCP client.** Connect Model Context Protocol servers (stdio) from
+- [x] **MCP client.** Connect Model Context Protocol servers (stdio) from
       Settings. Their tools are listed to the model and called with
       ```mcp server.tool {json}```. Every tool the ecosystem builds becomes
       Chuck's.

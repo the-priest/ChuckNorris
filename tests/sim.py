@@ -69,7 +69,8 @@ def settle(limit=60):
     """Let every worker thread finish (the app is heavily threaded)."""
     for _ in range(limit):
         alive = [t for t in threading.enumerate()
-                 if t is not threading.current_thread() and t.is_alive()]
+                 if t is not threading.current_thread() and t.is_alive()
+                 and not t.name.startswith("mcp-")]      # server readers live forever
         if not alive:
             return True
         for t in alive:
