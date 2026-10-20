@@ -3615,7 +3615,14 @@ class ChuckWindow(Adw.ApplicationWindow):
         (The live cards aren't kept, but what the machine did is.)"""
         text = d.get("text", "")
         n = text.count("\n") + 1
-        exp = Gtk.Expander(label=f"{d.get('title', 'Tool results')} \u00b7 {n} line{'' if n == 1 else 's'}")
+        exp = Gtk.Expander()
+        title = Gtk.Label(label=f"{d.get('title', 'Tool results')} \u00b7 {n} line{'' if n == 1 else 's'}",
+                          xalign=0)
+        try:
+            title.set_ellipsize(Pango.EllipsizeMode.END)   # a long title never widens the page
+        except Exception:
+            pass
+        exp.set_label_widget(title)
         exp.add_css_class("think")
         exp.set_child(self._term_panel(text, None, title="RESULTS"))
         return exp
@@ -3684,6 +3691,8 @@ class ChuckWindow(Adw.ApplicationWindow):
         copy.add_css_class("playbtn")
         row.append(copy)
         w.append(row)
+        e["tools_w"] = row
+        row.set_visible(bool((d.get("text") or "").strip()))
         last = next((x for x in reversed(self._log) if x.get("kind") == "bot"), None)
         if last is e:
             prev = getattr(self, "_latest_tools", None)
@@ -3709,6 +3718,8 @@ class ChuckWindow(Adw.ApplicationWindow):
         txt = d.get("text", "") or ""
         try:
             content.set_visible(bool(txt.strip()))   # no empty prose box leaving a gap
+            if e.get("tools_w") is not None:          # nothing to read aloud or copy
+                e["tools_w"].set_visible(bool(txt.strip()))
         except Exception:
             pass
         segs = md_segments(txt) if d.get("rich") else [("plain", txt)]
@@ -4535,14 +4546,35 @@ class ChuckWindow(Adw.ApplicationWindow):
             c = c.split(cut, 1)[0]
         return c
 
+    _ACTION_RE = re.compile(r"`{3,}([a-z]+)[ \t]*([^\n`]*)\n?([^\n`]*)")
+    _CODE_TAGS = ("bash", "sh", "py", "python", "node", "js", "javascript")
+
+    @classmethod
+    def _actions_of(cls, text):
+        """'plan · write app.py · bash: python3 app.py' for a reply's tool blocks."""
+        acts = []
+        for tag, arg, first in cls._ACTION_RE.findall(text or ""):
+            if tag in cls._CODE_TAGS:
+                acts.append(f"{tag}: {(arg or first).strip()[:60]}".rstrip(": "))
+            elif tag in ("plan", "ask"):
+                acts.append(tag)
+            else:
+                acts.append(f"{tag} {arg.strip()[:60]}".strip())
+        if len(acts) > 4:
+            acts = acts[:4] + [f"+{len(acts) - 4} more"]
+        return " \u00b7 ".join(acts)
+
     def _rebuild_transcript(self):
         """The visible transcript, from history (after a load, retry or edit)."""
         self._clear_msgs()
+        did = ""                                 # what the last reply asked the machine to do
+        spoke = False                            # Chuck has a byline in this turn already
         for m in self.history:
             if m["role"] == "system":
                 continue
             if m["role"] == "user":
                 if self._is_real_user(m):
+                    spoke = False
                     self._user_bubble(self._typed_text(m.get("content")))
                 elif isinstance(m.get("content"), str):
                     c = m["content"]
@@ -4551,12 +4583,23 @@ class ChuckWindow(Adw.ApplicationWindow):
                     body = c.split("\n\n", 1)[1] if c.startswith("TOOL RESULTS") and "\n\n" in c else c
                     if body.strip():
                         self._log_add("fold", {"text": clip_output(body.strip(), 12000),
-                                               "title": "Tool results"})
+                                               "title": did or "Tool results"})
+                    did = ""
             else:
-                shown = self._display_text(m.get("content") if isinstance(m.get("content"), str)
-                                           else "")
-                if shown:
-                    self._log_add("bot", {"text": shown, "rich": True})
+                raw = m.get("content") if isinstance(m.get("content"), str) else ""
+                shown = self._display_text(raw)
+                did = self._actions_of(raw)
+                q = re.search(r"```ask[ \t]*\n(.*?)```", raw, re.S)
+                if q:                            # the question you answered, not a blank
+                    ask = "\n".join(ln for ln in q.group(1).strip().splitlines()
+                                    if not re.match(r"\s*[-*]\s", ln)).strip()
+                    shown = (shown + "\n\n" if shown else "") + ask
+                if shown or (did and not spoke):
+                    # an action-only reply still gets its byline, so what it ran
+                    # hangs off Chuck rather than off your message; later hops of
+                    # the same turn get none, as they don't live
+                    self._log_add("bot", {"text": shown, "rich": True, "cont": spoke})
+                    spoke = True
         if not self._log:
             self._show_empty_hint()
         self._stick = True
@@ -5967,6 +6010,8 @@ class ChuckWindow(Adw.ApplicationWindow):
                    "from earlier blocks are gone)\n" + out)
         if r["timed_out"]:
             out += f"\n(stopped after {timeout}s)"
+        if r["interrupted"] and self._cancelled and not r["timed_out"]:
+            return -2, out, r["plots"]           # Stop, not a failure: the card says "stopped"
         rc = 0 if r["ok"] else (124 if r["timed_out"] else
                                 (r["exit"] if isinstance(r["exit"], int) and r["exit"] > 0 else 1))
         return rc, out, r["plots"]

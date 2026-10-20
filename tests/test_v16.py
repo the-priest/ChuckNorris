@@ -312,8 +312,14 @@ w2._load_chat(path)
 folds = [e for e in w2._log if e.get("kind") == "fold"]
 check(folds and "reopened-output" in folds[0]["data"]["text"],
       "a reopened chat shows its tool results, folded", [e.get("kind") for e in w2._log])
-check([e.get("kind") for e in w2._log if e.get("kind") != "note"][:3] == ["user", "fold", "bot"],
-      "in order: your message, what ran, the answer", [e.get("kind") for e in w2._log])
+check([e.get("kind") for e in w2._log if e.get("kind") != "note"][:4] == ["user", "bot", "fold", "bot"],
+      "in order: your message, Chuck, what he ran, the answer", [e.get("kind") for e in w2._log])
+check(folds[0]["data"]["title"] == "bash: echo reopened-output",
+      "the fold is titled with what ran", folds[0]["data"].get("title"))
+check(cn.ChuckWindow._actions_of("```plan\n- [ ] a\n```\n```write app.py\nx\n```\n```python\nprint(1)\n```"
+                                  "\n```read a.py```\n```grep foo```\n```browse index.html```")
+      == "plan \u00b7 write app.py \u00b7 python: print(1) \u00b7 read a.py \u00b7 +2 more",
+      "several actions are summarised, the rest counted")
 w.backend.replies = ["Again."]
 w.retry_last()
 settle()
@@ -647,6 +653,8 @@ w.stop_run()
 settle()
 check(w._py is not None and w._py.alive() and w._py.proc.pid == pid,
       "Stop interrupts a py block without killing the session")
+pills = [x.get_text() for x in w.msgbox.walk() if "pill" in getattr(x, "classes", set())]
+check(pills and pills[-1] == "stopped", "and its card says stopped, not failed", pills[-3:])
 w.backend.replies = ["```py\nlen(rows)\n```", "Still 3."]
 type_and_send(w, "still there?")
 check("\n3\n" in hist_text(w).split("still there?")[-1], "and its variables survive the Stop")
@@ -681,6 +689,16 @@ check(w._py is None and (old_pid is None or not os.path.exists(f"/proc/{old_pid}
                          or "zombie" in open(f"/proc/{old_pid}/status").read().lower()),
       "a new chat ends the session")
 check_finished(w, "pysession")
+
+# ═══════════════════════════════════════════════════════════════════════════
+print("\n--- visual details ---")
+w = agent(["```bash\necho hi\n```", "Done."])
+type_and_send(w, "say hi")
+bots = [e for e in w._log if e.get("kind") == "bot" and e.get("tools_w") is not None]
+check(len(bots) == 2 and not bots[0]["tools_w"].get_visible() and bots[1]["tools_w"].get_visible(),
+      "a reply with no text has no read-aloud / copy row; one with text does",
+      [(e["data"].get("text"), e["tools_w"].get_visible()) for e in bots])
+check_finished(w, "visual")
 
 # ═══════════════════════════════════════════════════════════════════════════
 print(f"\nTOTAL V16 FAILURES: {fails + len(FAILS)}")
