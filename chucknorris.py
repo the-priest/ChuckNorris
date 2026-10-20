@@ -307,7 +307,7 @@ headerbar { background-color: @bg; border-bottom: 1px solid @line; box-shadow: n
 /* ── transcript ──────────────────────────────────────────────────────── */
 .chat-scroll, .chat-scroll > viewport { background-color: @bg; }
 .turn-row    { padding: 0; }
-.user-row    { margin-top: 26px; }
+.user-row    { margin-top: 12px; }   /* the reply above already reserves its action row */
 .bot-row     { margin-top: 18px; }
 .bot-cont    { margin-top: 14px; }
 /* the WORK LANE: everything the machine did hangs off Chuck's avatar on one
@@ -3637,6 +3637,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         meta = Gtk.Label(label=d.get("meta", ""), xalign=0)
         meta.add_css_class("byline-meta")
         by.append(meta)
+        e["meta_w"] = meta
         if not cont:
             w.append(by)
         # reasoning, folded away: there if you want it, never in the way
@@ -7946,6 +7947,19 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._tool_thread(work, "before-finish hook")
         return True
 
+    def _fallback_note(self, bad, fb, why):
+        """A fallback model is answering: say so, and put ITS name on the byline."""
+        self._sys_note(f"\u21c4 {bad.split('/')[-1]} failed ({why}) \u2014 "
+                       f"{fb.split('/')[-1]} is answering this one", "dim")
+        e = self._bot_entry
+        if e is not None:
+            e["data"]["meta"] = fb.split("/")[-1]
+            try:
+                e["meta_w"].set_text(e["data"]["meta"])
+            except (KeyError, AttributeError):
+                pass
+        return False
+
     def _queue_steer(self, text):
         """You typed while it works: show it now, deliver it at the next step."""
         self.entry.get_buffer().set_text("")
@@ -8303,8 +8317,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         try:
             self.backend.on_think = on_think
             self.backend.on_fallback = lambda bad, fb, why: GLib.idle_add(
-                self._sys_note, f"\u21c4 {bad.split('/')[-1]} failed ({why}) \u2014 "
-                f"{fb.split('/')[-1]} is answering this one", "dim")
+                self._fallback_note, bad, fb, why)
         except Exception:
             pass
 
