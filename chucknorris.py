@@ -1911,15 +1911,38 @@ def _explain(ex):
     return f"backend error: {ex}"
 
 
+def _err_body(ex):
+    """An HTTPError's body, read ONCE (a second read() returns nothing)."""
+    if "_chuck_body" not in ex.__dict__:
+        try:
+            ex.__dict__["_chuck_body"] = ex.read(4096).decode("utf-8", "ignore").lower()
+        except Exception:
+            ex.__dict__["_chuck_body"] = ""
+    return ex.__dict__["_chuck_body"]
+
+
 def _mentions_stream_options(ex):
     """Did this 400 complain about stream_options specifically? Anything else
     (a bad model id, a malformed message) is a real error and is not retried —
     and must not switch usage reporting off for the rest of the session."""
-    try:
-        body = ex.read(4096).decode("utf-8", "ignore").lower()
-    except Exception:
-        return False
+    body = _err_body(ex)
     return "stream_options" in body or "include_usage" in body
+
+
+def _model_unavailable(ex):
+    """This MODEL can't serve the request (retired, renamed, not on this
+    account) — as opposed to the request itself being bad."""
+    if not isinstance(ex, urllib.error.HTTPError):
+        return False
+    if ex.code == 404:
+        return True
+    if ex.code in (400, 403, 422):
+        b = _err_body(ex)
+        return "model" in b and any(w in b for w in (
+            "not exist", "not found", "does not exist", "invalid model", "unsupported",
+            "disabled", "not available", "unavailable", "not authorized", "no access",
+            "permission"))
+    return False
 
 
 class Backend:
@@ -1935,7 +1958,9 @@ class Backend:
         # them simply reports nothing instead of breaking the call.
         self.last_usage = None       # {prompt, completion, cached, reasoning}
         self.last_finish = None      # "stop" | "length" | ...
+        self.last_model = None       # the model that actually answered (fallback-aware)
         self.on_think = None         # callable(chunk) for reasoning deltas
+        self.on_fallback = None      # callable(failed_model, fallback, why)
 
     def key(self):
         return (self.s.get("siliconflow_api_key") or "").strip()
@@ -1951,6 +1976,20 @@ class Backend:
         if vision and not _pricing.sees_images(chat):
             return (self.s.get("vision_model") or DEFAULT_VISION).strip()
         return chat
+
+    def fallback_for(self, model, vision=False):
+        """The model to try when `model` fails: Settings' choice, or the first
+        suggested model that isn't this one (and can see, if images ride
+        along). 'none' turns fallback off."""
+        want = (self.s.get("fallback_model") or "").strip()
+        if want.lower() == "none":
+            return None
+        if want and want != model:
+            return want
+        for cand in _pricing.SUGGESTED:
+            if cand != model and (not vision or _pricing.sees_images(cand)):
+                return cand
+        return None
 
     def warm_up(self):
         """Open a throwaway connection to the API host in the background.
@@ -2005,9 +2044,11 @@ class Backend:
         think = self.on_think
 
         attempt = 0
+        switched = False
         while attempt < attempts:
             if should_stop and should_stop():
                 return
+            self.last_model = model
             got_any = False             # visible content reached the screen
             try:
                 req = urllib.request.Request(url, data=json.dumps(payload).encode(),
@@ -2079,6 +2120,24 @@ class Backend:
                     on_done()
                     return
                 attempt += 1
+                # This model is down, rate-limited past our retries, or gone:
+                # answer THIS request with the fallback model once, and say so,
+                # rather than stop the user's task dead.
+                # Only when the API ANSWERED (an HTTP status): a dead network or
+                # DNS failure is no model's fault, and another model can't help.
+                exhausted = (attempt >= attempts and _is_transient(ex)
+                             and isinstance(ex, urllib.error.HTTPError))
+                fb = None if switched else self.fallback_for(model, vision)
+                if fb and (exhausted or _model_unavailable(ex)):
+                    switched = True
+                    if self.on_fallback:
+                        try:
+                            self.on_fallback(model, fb, _explain(ex))
+                        except Exception:
+                            pass
+                    model = payload["model"] = fb
+                    attempt = 0
+                    continue
                 if attempt >= attempts or not _is_transient(ex):
                     on_error(_explain(ex))
                     return
@@ -7537,6 +7596,9 @@ class ChuckWindow(Adw.ApplicationWindow):
 
         try:
             self.backend.on_think = on_think
+            self.backend.on_fallback = lambda bad, fb, why: GLib.idle_add(
+                self._sys_note, f"\u21c4 {bad.split('/')[-1]} failed ({why}) \u2014 "
+                f"{fb.split('/')[-1]} is answering this one", "dim")
         except Exception:
             pass
 
@@ -7564,7 +7626,8 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._busy(False)
             recv = len(self._bot_text or "") + len(self._think_text or "")
             # the tokens were billed whether or not the turn still wants them
-            GLib.idle_add(lambda: (self._account(sent_chars, recv, vision), False)[1])
+            used = getattr(self.backend, "last_model", None)     # a fallback bills as itself
+            GLib.idle_add(lambda: (self._account(sent_chars, recv, vision, model=used), False)[1])
             if stale():
                 return
             GLib.idle_add(lambda: (self._finalise() if not stale() else False, False)[1])
@@ -8536,6 +8599,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         model_row = entry(g, "Chat model", "model", DEFAULT_MODEL,
                           after=lambda _v: (self._update_subtitle(), refresh_marks()))
         entry(g, "Vision model (screenshots)", "vision_model", DEFAULT_VISION)
+        entry(g, "Fallback model (blank: automatic · none: off)", "fallback_model", "")
 
         g = group(pg, "Models & pricing",
                   "SiliconFlow list prices per 1M tokens, October 2026 — input / output "

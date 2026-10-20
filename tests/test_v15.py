@@ -464,6 +464,86 @@ check(procs and all(p.poll() is not None for p in procs), "closing the window st
 (cn.CONFIG_DIR / "mcp.json").unlink()
 
 # ═══════════════════════════════════════════════════════════════════════════
+print("\n--- model fallback: one model down never stops the task ---")
+import http.server
+import socketserver
+seen_models = []
+
+
+class API(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        m = body["model"]
+        seen_models.append(m)
+        if m == "busy/model":
+            self.send_response(503); self.end_headers(); self.wfile.write(b'{"error":"overloaded"}')
+            return
+        if m == "gone/model":
+            self.send_response(400); self.end_headers()
+            self.wfile.write(b'{"code":20012,"message":"Model does not exist. Please check it."}')
+            return
+        if m == "bad/request":
+            self.send_response(400); self.end_headers()
+            self.wfile.write(b'{"message":"messages must not be empty"}')
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream"); self.end_headers()
+        for chunk in ({"choices": [{"delta": {"content": f"answer from {m}"}}]},
+                      {"choices": [{"delta": {}, "finish_reason": "stop"}],
+                       "usage": {"prompt_tokens": 10, "completion_tokens": 5}}):
+            self.wfile.write(b"data: " + json.dumps(chunk).encode() + b"\n\n")
+        self.wfile.write(b"data: [DONE]\n\n")
+
+
+srv = socketserver.ThreadingTCPServer(("127.0.0.1", 0), API)
+threading.Thread(target=srv.serve_forever, daemon=True).start()
+base = f"http://127.0.0.1:{srv.server_address[1]}/v1"
+
+
+def run_backend(settings):
+    b = cn.Backend(dict({"siliconflow_api_key": "k", "siliconflow_base_url": base}, **settings))
+    out, err, sw = [], [], []
+    b.on_fallback = lambda bad, fb, why: sw.append((bad, fb, why))
+    b.stream([{"role": "user", "content": "hi"}], out.append, lambda: None, err.append,
+             attempts=2)
+    return b, "".join(out), err, sw
+
+
+seen_models.clear()
+b, out, err, sw = run_backend({"model": "busy/model", "fallback_model": "good/model"})
+check(out == "answer from good/model" and not err, "an overloaded model falls back after its retries", (out, err))
+check(seen_models == ["busy/model", "busy/model", "good/model"], "retries first, then falls back once", seen_models)
+check(sw and sw[0][0] == "busy/model" and "trouble" in sw[0][2], "the switch is reported with the reason", sw)
+check(b.last_model == "good/model", "the answering model is recorded (for billing)")
+seen_models.clear()
+b, out, err, sw = run_backend({"model": "gone/model", "fallback_model": "good/model"})
+check(out == "answer from good/model" and seen_models == ["gone/model", "good/model"],
+      "a model that no longer exists falls back at once, no pointless retries", seen_models)
+seen_models.clear()
+b, out, err, sw = run_backend({"model": "bad/request", "fallback_model": "good/model"})
+check(err and not out and seen_models == ["bad/request"], "a bad REQUEST is not blamed on the model", seen_models)
+seen_models.clear()
+b, out, err, sw = run_backend({"model": "busy/model", "fallback_model": "none"})
+check(err and seen_models == ["busy/model", "busy/model"], "'none' turns fallback off", seen_models)
+seen_models.clear()
+b, out, err, sw = run_backend({"model": "busy/model", "fallback_model": "busy/model"})
+check(sw and sw[0][1] == cn._pricing.SUGGESTED[0] and out.startswith("answer from"),
+      "a configured fallback that IS the failing model is skipped for the automatic one", sw)
+bdead = cn.Backend({"siliconflow_api_key": "k", "siliconflow_base_url": "http://127.0.0.1:9/v1",
+                    "model": "busy/model", "fallback_model": "good/model"})
+fsw, ferr = [], []
+bdead.on_fallback = lambda *a: fsw.append(a)
+bdead.stream([{"role": "user", "content": "hi"}], lambda c: None, lambda: None, ferr.append, attempts=2)
+check(ferr and not fsw, "a dead network doesn't trigger a fallback (no model can help)")
+b = cn.Backend({"model": cn._pricing.SUGGESTED[0]})
+check(b.fallback_for(cn._pricing.SUGGESTED[0]) == cn._pricing.SUGGESTED[1],
+      "automatic fallback: the next suggested model")
+srv.shutdown()
+
+# ═══════════════════════════════════════════════════════════════════════════
 print(f"\nTOTAL V15 FAILURES: {fails + len(FAILS)}")
 assert fails == 0 and not FAILS, "v15 regressions present"
 print("ALL V15 TESTS PASSED")
