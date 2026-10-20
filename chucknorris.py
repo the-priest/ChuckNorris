@@ -2778,6 +2778,8 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._changes = []              # file checkpoints: what every write/edit replaced
         self._turn_no = 0               # which task a change belongs to (for "undo all")
         self._user_notes = []           # things the user did that the model must hear about
+        self._steer = []                # messages typed while a task runs, for its next step
+        self._quiet_send = False
         self._jobs = {}                 # background jobs: name -> {proc, log, cmd, card}
         # MCP servers from ~/.config/chucknorris/mcp.json, started in the
         # background; when their tool lists arrive the system prompt is rebuilt
@@ -3263,6 +3265,8 @@ class ChuckWindow(Adw.ApplicationWindow):
             return
         if getattr(self, "_attachments", None):
             ph.set_label("Say what to do with the attachment\u2026")
+        elif getattr(self, "_running", False):
+            ph.set_label("Type to steer \u2014 Chuck reads it at his next step  \u00b7  Esc stops")
         elif self.agent_mode:
             ph.set_label("Ask Chuck to do something\u2026" + (
                 f"  (in {self.workspace.name})" if self.workspace else "")
@@ -4449,9 +4453,9 @@ class ChuckWindow(Adw.ApplicationWindow):
         except Exception:
             pass
         if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) and not (state & Gdk.ModifierType.SHIFT_MASK):
-            if self._running:
-                return False    # busy: let Enter insert a newline rather than vanish
-            self.on_send()
+            if self._running and not self._get_entry():
+                return False    # busy and nothing typed: Enter is just a newline
+            self.on_send()      # while busy, this queues the message for the next step
             return True
         return False
 
@@ -4550,6 +4554,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._running = True
         self._cancelled = False
         self._gen += 1
+        self._sync_placeholder()
         self._run_started = time.time()
         self._last_progress = time.time()
         # flip Send → Stop
@@ -4570,6 +4575,7 @@ class ChuckWindow(Adw.ApplicationWindow):
     def _end_run(self):
         self._running = False
         self._thinking = False
+        self._sync_placeholder()
         self.send_btn.set_icon_name(_pick_icon("go-up-symbolic", "pan-up-symbolic", "up-symbolic"))
         self.send_btn.remove_css_class("stop-fab"); self.send_btn.add_css_class("send-fab")
         self.send_btn.set_tooltip_text("Send  (Enter)")
@@ -4658,6 +4664,11 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._sudo_denied = True    # stop asking; the turn is over
             self._sudo_cv.notify_all()
         kill_live_commands()            # Stop means the COMMAND stops too
+        if self._steer:
+            # undelivered messages go back in the composer, not into the void
+            if not self._get_entry():
+                self.entry.get_buffer().set_text("\n\n".join(self._steer))
+            self._steer = []
         # drain the busy counter
         self._busy_n = 0
         self.spinner.stop(); self.spinner.set_visible(False)
@@ -7396,6 +7407,9 @@ class ChuckWindow(Adw.ApplicationWindow):
         if text and not self._attachments and self._slash(text):
             self.entry.get_buffer().set_text("")
             return
+        if self._running and text:
+            self._queue_steer(text)
+            return
         self._attach_mentions(text)
         # legacy single-slot attachments (kept for anything that still sets them)
         if self.pending_file:
@@ -7450,8 +7464,9 @@ class ChuckWindow(Adw.ApplicationWindow):
                          "work with it by path]")
             else:
                 body += f"\n[image attached: {a['name']}]"
-        self._user_bubble(text, files=[a["name"] for a in atts if a["kind"] != "image"],
-                          images=[a["path"] for a in images if a.get("path")])
+        if not self._quiet_send:        # a queued message already has its bubble
+            self._user_bubble(text, files=[a["name"] for a in atts if a["kind"] != "image"],
+                              images=[a["path"] for a in images if a.get("path")])
         self.history.append({"role": "user", "content": body})
         # Images ride with THIS request only; history keeps the text, so a
         # picture is paid for once instead of on every later hop.
@@ -7511,7 +7526,30 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._log_pin(card)
         self._end_run()
 
+    def _queue_steer(self, text):
+        """You typed while it works: show it now, deliver it at the next step."""
+        self.entry.get_buffer().set_text("")
+        self._steer.append(text)
+        self._user_bubble(text)
+        self._sys_note("\u21b3 queued \u2014 Chuck reads it at his next step", "dim")
+
+    def _deliver_steer(self):
+        """Fold queued messages into the request about to be sent. Never into
+        a reply that's being continued (it would corrupt the stitch)."""
+        if not self._steer or getattr(self, "_cont_prefix", None) is not None:
+            return
+        msg = ("[MESSAGE FROM THE USER, sent while you were working \u2014 read it first; "
+               "it may change what you do next]:\n" + "\n\n".join(self._steer))
+        self._steer = []
+        last = self.history[-1] if self.history else None
+        if last and last.get("role") == "user" and isinstance(last.get("content"), str):
+            last["content"] += "\n\n" + msg
+        else:
+            self.history.append({"role": "user", "content": msg})
+        self._sys_note("\u21b3 delivered", "dim")
+
     def _ask_model(self, vision=False):
+        self._deliver_steer()
         cap = self._over_cap()
         if cap:
             self._cost_pause(cap, vision)
@@ -8539,6 +8577,16 @@ class ChuckWindow(Adw.ApplicationWindow):
             speak(disp, self.settings)
         self._save_chat()
         self._end_run()
+        if self._steer:
+            # it finished before reaching a step that could take your message:
+            # the message becomes the next turn instead of being lost
+            text, self._steer = "\n\n".join(self._steer), []
+            self._quiet_send = True
+            try:
+                self.entry.get_buffer().set_text(text)
+                self.on_send()
+            finally:
+                self._quiet_send = False
 
     @staticmethod
     def _qnorm(q):
