@@ -89,7 +89,7 @@ there's nothing to look at.
 - [x] **Git.** `/diff` shows the working tree as a diff card; `/commit` has the
       agent write the message from the diff and commit; `/review` has it review
       the diff for bugs before you push.
-- [ ] **Hooks.** Settings: a command after every file write (a formatter,
+- [x] **Hooks.** Settings: a command after every file write (a formatter,
       with `{path}`) and one before the agent may finish (tests, lint). Their
       results go to the model, so it fixes what they find.
 - [ ] **Python session.** ```py``` blocks run in one persistent interpreter

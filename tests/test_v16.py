@@ -253,6 +253,55 @@ check(any("isn't a git repository" in t for t in notes), "outside a repo, /diff 
 check_finished(w, "git")
 
 # ═══════════════════════════════════════════════════════════════════════════
+print("\n--- hooks: your commands around the agent's work ---")
+ws = folder("hooks")
+upper = sys.executable + " -c \"import sys;p=sys.argv[1];t=open(p).read();open(p,'w').write(t.upper())\" {path}"
+w = agent(["```write a.py\nprint('hi')\n```\n```write notes.md\nlower case notes\n```",
+           "```changes```", "Done."], ws)
+w.settings["hook_after_write"] = upper
+w.settings["hook_after_write_glob"] = "*.py"
+type_and_send(w, "write files")
+h = hist_text(w)
+check((ws / "a.py").read_text() == "PRINT('HI')\n", "the after-write hook ran on the matching file")
+check((ws / "notes.md").read_text() == "lower case notes\n", "and not on files outside its pattern")
+check("it changed the file; re-read it" in h, "the model is told the hook changed the file")
+check("+PRINT('HI')" in h, "and the checkpoint follows disk (changes shows the formatted file)")
+check_finished(w, "after-write hook")
+
+w = agent(["```write b.py\nprint(1)\n```", "Done."], ws)
+w.settings["hook_after_write"] = "false {path}"
+type_and_send(w, "write b")
+check("after-write hook on b.py: FAILED (exit 1)" in hist_text(w), "a failing after-write hook is reported")
+
+ws2 = folder("hooks2")
+w = agent(["```write a.py\nprint(1)\n```", "All done.",            # verify nudge: run it
+           "```bash\npython3 a.py\n```", "All done.",              # hook fails: no flag
+           "```bash\ntouch done.flag\n```", "Now it's done."], ws2)
+w.settings["hook_after_write"] = ""
+w.settings["hook_before_done"] = "test -f done.flag || { echo 'missing done.flag'; exit 1; }"
+type_and_send(w, "make it so")
+h = hist_text(w)
+check("before-finish hook `test -f done.flag" in h and "missing done.flag" in h,
+      "the before-finish hook catches an unfinished task and tells the model")
+check((ws2 / "done.flag").exists() and len(w.backend.calls) == 6,
+      "the agent fixes it; the hook passes and the turn ends", len(w.backend.calls))
+check_finished(w, "before-done hook")
+
+w = agent(["Just answering, no files."], ws2)
+w.settings["hook_before_done"] = "false"
+type_and_send(w, "a question")
+check(len(w.backend.calls) == 1 and "before-finish" not in hist_text(w),
+      "no file changes: the before-finish hook doesn't run")
+
+w = agent(["```write c.py\nprint(1)\n```"] + ["Done."] * 10, ws2)
+w.settings["hook_before_done"] = "false"
+type_and_send(w, "stubborn")
+check(hist_text(w).count("before-finish hook `false` FAILED") == 3 and not w._running,
+      "a hook that never passes stops after three rounds", hist_text(w).count("FAILED"))
+w.settings["hook_before_done"] = ""
+w.settings["hook_after_write"] = ""
+
+# ═══════════════════════════════════════════════════════════════════════════
 print(f"\nTOTAL V16 FAILURES: {fails + len(FAILS)}")
 assert fails == 0 and not FAILS, "v16 regressions present"
 print("ALL V16 TESTS PASSED")

@@ -2784,6 +2784,8 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._carry_plan = None         # an approved plan card the next turn ticks off
         self._quiet_send = False
         self._edit_at = None            # editing the user message at this history index
+        self._hook_runs = 0
+        self._hook_passed_turn = None
         self._jobs = {}                 # background jobs: name -> {proc, log, cmd, card}
         # MCP servers from ~/.config/chucknorris/mcp.json, started in the
         # background; when their tool lists arrive the system prompt is rebuilt
@@ -6636,6 +6638,8 @@ class ChuckWindow(Adw.ApplicationWindow):
         del self._changes[:-200]                    # bounded history
         if rel.strip().lstrip("./") in _INSTRUCTION_FILES:
             self._refresh_system()                  # rules it just wrote apply now
+        if kind != "rm":
+            self._after_write_hook(ch)
         ch["card"] = self._file_card(ch)
         return ch
 
@@ -7775,6 +7779,71 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._refresh_system()                  # instruction files edited since?
         self._seen_queries = []; self._seen_urls = set(); self._dead_urls = set()
         self._forced_answer = False
+        self._hook_runs = 0
+        self._hook_passed_turn = None
+
+    # ── hooks: the user's own commands around the agent's work ──
+    def _after_write_hook(self, ch):
+        """Settings > Agent > Hooks: run a command (a formatter, say) on every
+        file the agent writes. A file the hook changed is re-read into the
+        checkpoint, and the model is told, so its next edit matches disk."""
+        hook = (self.settings.get("hook_after_write") or "").strip()
+        if not hook or not self.agent_mode:
+            return
+        import fnmatch
+        rel = ch["rel"].strip()
+        pats = [x.strip() for x in (self.settings.get("hook_after_write_glob") or "*").split(",")
+                if x.strip()] or ["*"]
+        if not any(fnmatch.fnmatch(rel, p) or fnmatch.fnmatch(os.path.basename(rel), p)
+                   for p in pats):
+            return
+        cmd = hook.replace("{path}", shlex.quote(ch["path"]))
+        self._busy(True)
+        self._pending_tools += 1                     # released by _tool_thread
+
+        def work():
+            rc, out = run_command(cmd, timeout=120)
+            try:
+                now = Path(ch["path"]).read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                now = ch["after"]
+            changed = now != ch["after"]
+            if changed:
+                ch["after"] = now                    # the checkpoint matches disk
+            if rc == 0 and not changed:
+                return ""                            # nothing to tell the model
+            return (f"[after-write hook on {rel}: " + ("ok" if rc == 0 else f"FAILED (exit {rc})")
+                    + (" \u2014 it changed the file; re-read it before editing it again"
+                       if changed else "") + "]"
+                    + (f"\n{clip_output(out, 4000)}" if rc != 0 else ""))
+        self._tool_thread(work, "hook")
+
+    def _before_done_hook(self):
+        """The 'before finishing' hook: run once the agent wants to stop, if it
+        changed files. A failure goes back to the model to fix (at most three
+        rounds); a pass lets the turn end. -> True if it started."""
+        hook = (self.settings.get("hook_before_done") or "").strip()
+        if (not hook or not self.agent_mode or self.plan_mode or self._cancelled
+                or self._hook_runs >= 3 or self._hook_passed_turn == self._turn_no
+                or not any(c["turn"] == self._turn_no and not c["reverted"]
+                           for c in self._changes)):
+            return False
+        self._hook_runs += 1
+        turn = self._turn_no
+        self._sys_note(f"\u2691 before-finish hook: {hook}", "dim")
+        self._busy(True)
+        self._pending_tools += 1
+
+        def work():
+            rc, out = run_command(hook, timeout=900)
+            if rc == 0:
+                self._hook_passed_turn = turn
+                GLib.idle_add(self._sys_note, "\u2713 before-finish hook passed", "ok")
+                return ""
+            return (f"[before-finish hook `{hook}` FAILED (exit {rc}) \u2014 fix what it "
+                    f"reports, then finish:\n{clip_output(out, 8000)}]")
+        self._tool_thread(work, "before-finish hook")
+        return True
 
     def _queue_steer(self, text):
         """You typed while it works: show it now, deliver it at the next step."""
@@ -8850,6 +8919,9 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._ask_soon()
             return
 
+        if self._steps < step_cap and self._before_done_hook():
+            return                                   # its result decides what happens next
+
         # the turn is truly finished
         self._hops = 0
         self._notify_done(disp)
@@ -9288,6 +9360,12 @@ class ChuckWindow(Adw.ApplicationWindow):
              10000, SEND_CHAR_BUDGET,
              sub="How much conversation and file content rides along. More sees more "
                  "of a big repo at once; less is cheaper. ~4 characters per token.")
+
+        g = group(pg, "Hooks",
+                  "Your own commands around Chuck's work. Their failures go back to him to fix.")
+        entry(g, "After each file write  ({path} = the file)", "hook_after_write", "")
+        entry(g, "  \u2026only for files matching (e.g. *.py, *.ts)", "hook_after_write_glob", "*")
+        entry(g, "Before he may finish  (e.g. pytest -q)", "hook_before_done", "")
 
         if _browser is not None:
             g = group(pg, "Browser",
