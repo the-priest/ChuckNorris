@@ -203,7 +203,14 @@ def apply(app_dir, asset_dir=None, opener=None, timeout=60, log=lambda s: None):
         if not shutil.which("git"):
             return False, "this is a git clone but git isn't installed", None
         log("git pull --ff-only")
+
+        def head():
+            r = subprocess.run(["git", "-C", str(app_dir), "rev-parse", "HEAD"],
+                               capture_output=True, text=True, timeout=15,
+                               stdin=subprocess.DEVNULL)
+            return r.stdout.strip()
         try:
+            before = head()
             p = subprocess.run(["git", "-C", str(app_dir), "pull", "--ff-only", "--quiet"],
                                capture_output=True, text=True, timeout=timeout,
                                stdin=subprocess.DEVNULL)
@@ -214,8 +221,14 @@ def apply(app_dir, asset_dir=None, opener=None, timeout=60, log=lambda s: None):
                            "branch) — nothing was changed:\n" + (p.stderr or p.stdout).strip()), None
         try:
             v = verify_tree(app_dir)
-        except UpdateError as ex:
+            moved = head() != before
+        except (UpdateError, OSError, subprocess.TimeoutExpired) as ex:
             return False, f"pulled, but {ex}", None
+        if not moved:
+            # tracking another branch or a fork, or local commits ahead: the
+            # pull was a no-op, and saying "updated" would be a lie
+            return False, (f"the clone is at v{v} and git pull brought nothing new (it may "
+                           "track another branch or have local commits)"), None
         return True, f"updated the clone to v{v}", v
     with tempfile.TemporaryDirectory(prefix="chuck-update-") as tmp:
         archive = Path(tmp) / "src.tar.gz"
@@ -235,4 +248,7 @@ def apply(app_dir, asset_dir=None, opener=None, timeout=60, log=lambda s: None):
             return False, f"{ex} — nothing was changed", None
         except OSError as ex:
             return False, f"couldn't write the new files: {ex}", None
+        except Exception as ex:                  # a truncated gzip (EOFError), bad zlib data
+            return False, (f"the download is damaged ({ex.__class__.__name__}) — nothing was "
+                           "changed"), None
     return True, f"installed v{v}", v

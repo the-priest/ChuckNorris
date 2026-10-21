@@ -10,6 +10,7 @@ os.environ.setdefault("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))
 """v17 — the next gaps (docs/ROADMAP.md, phases 10-15). One section per
 item, through the REAL window on the stub toolkit, against real language
 servers where they're installed."""
+import ast
 import shutil
 import subprocess
 import tempfile
@@ -1400,6 +1401,96 @@ w._collapse_window = lambda *a, **k: (calls.append(1), real_ca(*a, **k))[1]
 w._rebuild_transcript()
 check(len(calls) == 1, "reopening a 500-message chat windows the transcript once, not per message",
       len(calls))
+
+print("\n--- sub-agents, tests, the verifier, the ledger and the updater ---")
+w = agent([], tmp / "steer_ws")
+w.set_access("readonly")
+tools_ = w._sub_tools()
+check("refused" in tools_["read"]("~/.ssh/id_test") and "SECRET-KEY" not in tools_["read"]("~/.ssh/id_test"),
+      "a sub-agent can't read credentials in a restricted folder either")
+w.set_access("full")
+rt = tmp / "rt"
+(rt / "tests" / "unit").mkdir(parents=True)
+(rt / "pkg").mkdir()
+(rt / "pkg" / "__init__.py").write_text("")
+(rt / "pkg" / "calc.py").write_text("def add(a, b):\n    return a + b\n")
+(rt / "tests" / "test_add.py").write_text("from pkg.calc import add\n\ndef test_add():\n    assert add(1, 2) == 3\n\n"
+                                          "def test_bad():\n    assert add(1, 1) == 3\n")
+(rt / "tests" / "unit" / "test_u.py").write_text("import unittest\n\nclass TestX(unittest.TestCase):\n"
+                                                 "    def test_ok(self):\n        self.assertTrue(True)\n")
+rc_, out_ = cn._builder.run_tests(rt, 120)
+check(rc_ != 0 and "test_bad" in out_ and "ModuleNotFoundError" not in out_ and "test_u" in out_,
+      "pytest-style tests are really run (a failing one fails), from the root, subfolders included",
+      out_[-600:])
+(rt / "tests" / "test_add.py").write_text("from pkg.calc import add\n\ndef test_add():\n    assert add(1, 2) == 3\n")
+rc_, out_ = cn._builder.run_tests(rt, 120)
+check(rc_ == 0, "and passing ones pass", out_[-400:])
+(rt / "tests" / "test_slow.py").write_text("import subprocess, time\nsubprocess.Popen(['sleep', '600'])\ntime.sleep(600)\n")
+mark_t = time.time()
+rc_, out_ = cn._builder.run_tests(rt, 4)
+time.sleep(0.5)
+stray = subprocess.run(["pgrep", "-f", "sleep 600"], capture_output=True, text=True).stdout.strip()
+check(rc_ == 124 and time.time() - mark_t < 15 and not stray,
+      "a suite over its time budget stops, with every process it started", (rc_, stray))
+(rt / "tests" / "test_slow.py").unlink()
+cc = cn._codecheck
+check(all(not cc._syntax_python(c)[0] for c in ("return 1", "await x()", "def f(a, a): pass", "nonlocal x")),
+      "the verifier catches code that parses but can't compile")
+b_ = cc._Bindings()
+b_.visit(ast.parse("def f[T](x: T) -> T:\n    return x\nclass Box[K]:\n    pass\ntype P[V] = dict[V, int]\n"))
+check({"T", "K", "V", "P"} <= b_.bound and "__qualname__" in cc._ALWAYS_DEFINED,
+      "and knows Python 3.12 type parameters")
+check("NOT verified" in cc.report(cc.check("rust", "fn main() {}")),
+      "a language it can't check isn't reported as verified")
+L = cn._ledger
+real_ledger = (L.LEDGER, L.ANCHOR)
+L.LEDGER, L.ANCHOR, L._LAST[0] = tmp / "ledger.jsonl", tmp / "ledger.anchor", None
+L.record("echo a", 0, "a")
+with open(L.LEDGER, "a") as fh:
+    fh.write('{"ts": "half a line')                # the app was killed mid-write
+L.record("echo c", 0, "c")
+L.record("curl -H 'Authorization: Bearer abcdef123'", 0, "API_KEY=sk-abcdefghijklmnopqrstu")
+ents = L.read_all()
+check([e["command"] for e in ents][:2] == ["echo a", "echo c"] and L.verify()[0],
+      "a half-written ledger line doesn't swallow the next entry or break the chain", L.verify())
+check("abcdef123" not in ents[-1]["command"] and "sk-abc" not in ents[-1]["output_head"],
+      "the ledger keeps no tokens or keys")
+L.LEDGER, L.ANCHOR = real_ledger
+L._LAST[0] = None
+U = cn._update
+import io as _io
+
+
+import tarfile as _tarf
+_buf = _io.BytesIO()
+with _tarf.open(fileobj=_buf, mode="w:gz") as _tf:
+    _data = os.urandom(300000)
+    _ti = _tarf.TarInfo("ChuckNorris-main/chucknorris.py"); _ti.size = len(_data)
+    _tf.addfile(_ti, _io.BytesIO(_data))
+_cut = _buf.getvalue()[:len(_buf.getvalue()) * 2 // 3]
+
+
+class _Trunc:
+    def open(self, req, timeout=None):
+        return _io.BytesIO(_cut)
+try:
+    ok_u, msg_u, _v = U.apply(tmp / "upd_app2", opener=_Trunc())
+    crashed = False
+except Exception as ex:
+    crashed, msg_u, ok_u = True, repr(ex), None
+check(not crashed and ok_u is False and "damaged" in msg_u, "a truncated update download fails cleanly", msg_u)
+origin, clone = tmp / "origin", tmp / "clone"
+origin.mkdir()
+subprocess.run(["git", "-C", str(origin), "init", "-q"])
+shutil.copytree(_ROOT + "/chucknorris_ext", origin / "chucknorris_ext",
+                ignore=shutil.ignore_patterns("__pycache__"))
+shutil.copy(_ROOT + "/chucknorris.py", origin / "chucknorris.py")
+subprocess.run(["git", "-C", str(origin), "add", "-A"])
+subprocess.run(["git", "-C", str(origin), "-c", "user.email=t@e", "-c", "user.name=T", "commit", "-qm", "v"])
+subprocess.run(["git", "clone", "-q", str(origin), str(clone)])
+ok_u, msg_u, v_u = U.apply(clone)
+check(ok_u is False and v_u is None and "nothing new" in msg_u,
+      "a git pull that brings nothing isn't reported as an update", msg_u)
 
 print("\n--- installer: a stale clone in the current folder isn't installed ---")
 inst = Path(_ROOT, "install.sh").read_text()

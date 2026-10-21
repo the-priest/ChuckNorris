@@ -14,6 +14,7 @@ import json
 import shutil
 import zipfile
 import subprocess
+import time
 from pathlib import Path
 from datetime import datetime
 
@@ -212,17 +213,92 @@ def test_command(project):
     root = Path(project)
     if (root / "run_tests.sh").is_file():
         return [["bash", "run_tests.sh"]]
-    tests = sorted(root.glob("tests/test_*.py")) + sorted(root.glob("test_*.py"))
+    tests = sorted(t for t in root.glob("tests/**/test_*.py")
+                   if not any(p.startswith(".") or p in SKIP_DIRS for p in t.parts[len(root.parts):-1]))
+    tests += sorted(root.glob("test_*.py"))
     if tests:
-        # Run each test file individually with python3 rather than using pytest.
-        # pytest collection can fail on files that call sys.exit() during import,
-        # and individual runs give clearer output per file.
-        return [["python3", str(t.relative_to(root))] for t in tests]
+        # A script-style test file (top-level checks, sys.exit) runs on its
+        # own; a pytest-style one only DEFINES test functions, and running it
+        # as a script "passes" without testing anything — those are collected
+        # by pytest, or by a small runner when pytest isn't installed.
+        scripts = [t for t in tests if not _collect_style(t)]
+        collected = [t for t in tests if _collect_style(t)]
+        cmds = [["python3", str(t.relative_to(root))] for t in scripts]
+        if collected:
+            rels = [str(t.relative_to(root)) for t in collected]
+            if _has_module("pytest"):
+                cmds.append(["python3", "-m", "pytest", "-q", "-p", "no:cacheprovider"] + rels)
+            elif shutil.which("pytest"):
+                cmds.append(["pytest", "-q", "-p", "no:cacheprovider"] + rels)
+            else:
+                cmds.append(["python3", "-c", _MINI_RUNNER] + rels)
+        return cmds
     if (root / "package.json").is_file():
         return [["npm", "test", "--silent"]]
     if (root / "Makefile").is_file():
         return [["make", "test"]]
     return None
+
+
+def _collect_style(path):
+    """True for a pytest/unittest-style file: only imports, definitions and
+    assignments at the top, with test functions or Test classes to collect."""
+    import ast as _ast
+    try:
+        tree = _ast.parse(Path(path).read_text(encoding="utf-8", errors="replace"))
+    except (SyntaxError, ValueError, OSError):
+        return False
+    has_tests = False
+    for n in tree.body:
+        if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+            has_tests = has_tests or n.name.startswith("test")
+        elif isinstance(n, _ast.ClassDef):
+            has_tests = has_tests or n.name.startswith("Test")
+        elif isinstance(n, (_ast.Import, _ast.ImportFrom, _ast.Assign, _ast.AnnAssign)):
+            continue
+        elif isinstance(n, _ast.Expr) and isinstance(getattr(n, "value", None), _ast.Constant):
+            continue                             # a docstring
+        elif (isinstance(n, _ast.If) and isinstance(n.test, _ast.Compare)
+              and "__name__" in _ast.dump(n.test)):
+            continue                             # if __name__ == "__main__": unittest.main()
+        else:
+            return False                         # top-level code: it's a script
+    return has_tests
+
+
+def _has_module(name):
+    try:
+        r = subprocess.run(["python3", "-c", f"import {name}"], capture_output=True, timeout=20)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+# Collects test_* functions and unittest TestCases from the files given, runs
+# them, prints a pytest-like summary and exits non-zero on any failure.
+_MINI_RUNNER = r"""
+import runpy, sys, traceback, unittest, inspect
+fails = ran = 0
+for path in sys.argv[1:]:
+    try:
+        ns = runpy.run_path(path, run_name="__test__")
+    except Exception:
+        print(f"ERROR collecting {path}"); traceback.print_exc(); fails += 1; continue
+    for name, obj in list(ns.items()):
+        if name.startswith("test") and inspect.isfunction(obj):
+            ran += 1
+            try:
+                obj()
+                print(f"{path}::{name} PASSED")
+            except Exception:
+                fails += 1; print(f"{path}::{name} FAILED"); traceback.print_exc()
+        elif inspect.isclass(obj) and issubclass(obj, unittest.TestCase):
+            r = unittest.TextTestRunner(verbosity=1).run(
+                unittest.defaultTestLoader.loadTestsFromTestCase(obj))
+            ran += r.testsRun; fails += len(r.failures) + len(r.errors)
+print(f"{ran} tests, {fails} failed")
+sys.exit(1 if fails or not ran else 0)
+"""
 
 
 def test_command_str(project):
@@ -254,23 +330,39 @@ def run_tests(project, timeout=300):
     if not cmds:
         return -1, "no tests found (add tests/test_*.py or run_tests.sh)"
     chunks, worst = [], 0
-    budget = max(30, timeout // max(1, len(cmds)))
+    deadline = time.time() + timeout            # one budget for the whole suite
+    env = dict(os.environ)
+    # tests import the project's own modules: the root is on the path
+    env["PYTHONPATH"] = str(root) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     for cmd in cmds:
-        label = " ".join(cmd)
+        label = " ".join(cmd) if cmd[:2] != ["python3", "-c"] else "python3 (test runner) " + " ".join(cmd[3:])
+        left = deadline - time.time()
+        if left <= 1:
+            chunks.append(f"$ {label}  -> not run: the {timeout}s test budget is spent")
+            worst = worst or 124
+            continue
         try:
             argv = _wrapped(cmd)
             if argv is None:
                 chunks.append(f"$ {label}  -> not run: this folder's access needs bubblewrap")
                 worst = worst or 126
                 continue
-            p = subprocess.run(argv, cwd=str(root), capture_output=True,
-                               text=True, timeout=budget, start_new_session=True)
-            rc, out = p.returncode, (p.stdout or "") + (p.stderr or "")
-        except subprocess.TimeoutExpired:
-            rc, out = 124, f"timed out after {budget}s"
+            p = subprocess.Popen(argv, cwd=str(root), stdout=subprocess.PIPE,
+                                 stderr=subprocess.STDOUT, text=True, errors="replace",
+                                 start_new_session=True, env=env, stdin=subprocess.DEVNULL)
+            try:
+                out, _ = p.communicate(timeout=left)
+                rc = p.returncode
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(p.pid, 9)          # the whole tree: no test left running
+                except OSError:
+                    p.kill()
+                p.communicate()
+                rc, out = 124, f"timed out after {int(left)}s"
         except Exception as ex:
             rc, out = 1, f"couldn't run: {ex}"
-        chunks.append(f"$ {label}  -> exit {rc}\n{out}")
+        chunks.append(f"$ {label}  -> exit {rc}\n{out or ''}")
         if rc != 0 and worst == 0:
             worst = rc
     return worst, ("\n\n".join(chunks))[:32000]

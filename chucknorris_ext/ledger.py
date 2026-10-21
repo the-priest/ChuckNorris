@@ -20,6 +20,7 @@ commands finishing at the same clock tick cannot claim the same predecessor.
 """
 
 import os
+import re
 import json
 import time
 import hashlib
@@ -32,6 +33,24 @@ ANCHOR = config.DATA_DIR / "ledger.anchor"
 GENESIS = "0" * 64
 MAX_OUTPUT_KEPT = 4000
 MAX_LEDGER_BYTES = 8_000_000      # roll over past this; see _rotate()
+KEEP_ROTATED = 3                  # rolled-over files kept
+# what must never be kept: keys, tokens, passwords, private keys. The output's
+# hash is still of the real output, so the record still proves what ran.
+_SECRETS = [
+    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)",
+                re.S), "[private key removed]"),
+    (re.compile(r"(?i)(authorization:\s*(?:bearer|basic|token)\s+)[^\s'\"]+"), r"\1[removed]"),
+    (re.compile(r"(?i)\b([\w.-]*(?:api[_-]?key|token|secret|passw(?:or)?d|pwd|credential)s?"
+                r"[\w.-]*\s*[=:]\s*)(['\"]?)[^\s'\"]{4,}\2"), r"\1\2[removed]\2"),
+    (re.compile(r"\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}"
+                r"|xox[abposr]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{30,})\b"), "[removed]"),
+]
+
+
+def redact(text):
+    for rx, rep_ in _SECRETS:
+        text = rx.sub(rep_, text)
+    return text
 _TAIL_BYTES = 65_536              # enough to hold the last entry, comfortably
 
 _LOCK = threading.RLock()
@@ -124,6 +143,13 @@ def _rotate():
         with os.fdopen(fd, "w") as fh:
             fh.write(head)
         _LAST[0] = (str(LEDGER), _sig(), head)
+        # keep the newest few rolled-over files, not every one forever
+        olds = sorted(LEDGER.parent.glob(LEDGER.name + ".2*"))
+        for f in olds[:-KEEP_ROTATED]:
+            try:
+                f.unlink()
+            except OSError:
+                pass
     except OSError:
         pass
 
@@ -149,19 +175,30 @@ def record(command, rc, output, kind="shell", chat_id=None, started=None):
             "started": started or time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "kind": kind,
             "chat": chat_id or "",
-            "command": (command or "")[:2000],
+            "command": redact((command or "")[:2000]),
             "rc": rc,
             "output_sha256": hashlib.sha256(out_bytes).hexdigest(),
             "output_bytes": len(out_bytes),
-            "output_head": out[:MAX_OUTPUT_KEPT],
+            "output_head": redact(out[:MAX_OUTPUT_KEPT]),
         }
         # Secure the chain under the lock: read prev, sign, write, update cache.
         with _LOCK:
             entry["prev"] = _last_hash()
             entry["hash"] = _digest(entry)
+            # a write cut off mid-line (the app was killed) must not glue this
+            # entry onto it: start on a fresh line
+            lead = ""
+            try:
+                with open(LEDGER, "rb") as rf:
+                    rf.seek(0, 2)
+                    if rf.tell() > 0:
+                        rf.seek(-1, 2)
+                        lead = "" if rf.read(1) == b"\n" else "\n"
+            except OSError:
+                pass
             fd = os.open(str(LEDGER), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
             with os.fdopen(fd, "a", encoding="utf-8") as fh:
-                fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                fh.write(lead + json.dumps(entry, ensure_ascii=False) + "\n")
             _LAST[0] = (str(LEDGER), _sig(), entry["hash"])
         try:
             os.chmod(LEDGER, 0o600)

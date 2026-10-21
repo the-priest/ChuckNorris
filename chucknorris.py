@@ -6811,6 +6811,17 @@ class ChuckWindow(Adw.ApplicationWindow):
                 pass
         return False
 
+    def _beat(self, every=15):
+        """While a long tool runs (a test suite, tsc, cargo), tell the stuck-
+        watchdog it's alive. -> an Event; set it when the work is done."""
+        done = threading.Event()
+
+        def pulse():
+            while not done.wait(every):
+                GLib.idle_add(lambda: (self._note_progress(), False)[1])
+        threading.Thread(target=pulse, daemon=True, name="srv-beat").start()
+        return done
+
     def _tool_thread(self, work, label):
         """Run an async tool worker so it can NEVER strand the tool loop.
 
@@ -6827,6 +6838,7 @@ class ChuckWindow(Adw.ApplicationWindow):
 
         def runner():
             fb = None
+            beat = self._beat()
             try:
                 fb = work()
             except Exception as exc:
@@ -6842,6 +6854,7 @@ class ChuckWindow(Adw.ApplicationWindow):
                     return False
                 GLib.idle_add(note)
             finally:
+                beat.set()
                 self._busy(False)
 
                 def finish(text=fb):
@@ -7115,6 +7128,8 @@ class ChuckWindow(Adw.ApplicationWindow):
         root = self._workroot()
         n_src = self.cfg('research_sources', RESEARCH_MAX_SOURCES, 1, 10)
         f_timeout = self.cfg('fetch_timeout', 6, 3, 30)
+        # the same credential guard as the main agent's read/grep
+        hide = self.agent_mode and self._folder_access() != "full"
 
         def search(q):
             rows = web_search(q, n=max(4, n_src)) or []
@@ -7133,6 +7148,9 @@ class ChuckWindow(Adw.ApplicationWindow):
             full = os.path.expanduser(spec)
             if not os.path.isabs(full) and root is not None:
                 full = str(root / full)
+            if hide and _secret_path(full):
+                return ("refused: that's in a credentials folder, which this folder's access "
+                        "(/access) keeps hidden")
             if os.path.isdir(full):
                 return read_file_safe(full)[1]
             ok, txt, foot = _builder.read_lines(full, start, end, max_chars=24000, label=spec)
@@ -7142,7 +7160,13 @@ class ChuckWindow(Adw.ApplicationWindow):
             r, sub, pat = self._grep_args(body)
             if r is None:
                 return "no working folder"
-            return _builder.grep(r, pat, sub)[1]
+            if hide and _secret_path(r / sub if sub else r):
+                return "refused: that's a credentials folder (/access keeps it hidden)"
+            out = _builder.grep(r, pat, sub)[1]
+            if hide:
+                out = "\n".join(ln for ln in out.split("\n")
+                                if not _secret_path(Path(r, ln.split(":", 1)[0])))
+            return out
 
         def glob(pat):
             return _builder.glob_files(root, pat)[1] if root else "no working folder"
@@ -7179,7 +7203,9 @@ class ChuckWindow(Adw.ApplicationWindow):
                 raise RuntimeError(err[0])
             sent = sum(len(m.get("content") or "") for m in messages
                        if isinstance(m.get("content"), str))
-            u, txt = getattr(b, "last_usage", None), "".join(out)
+            # no usage reported: an ESTIMATE of this call ({}), never the main
+            # loop's last usage (which once billed a 400-char call as 120k tokens)
+            u, txt = getattr(b, "last_usage", None) or {}, "".join(out)
             # the model that ANSWERED: a fallback is priced as itself
             mdl = getattr(b, "last_model", None) or (b.model() if hasattr(b, "model") else None)
             GLib.idle_add(lambda: (self._account(sent, len(txt), usage=u, model=mdl), False)[1])
@@ -8831,8 +8857,13 @@ class ChuckWindow(Adw.ApplicationWindow):
             if st == "fail" and _crashlog is not None:
                 _crashlog.record("update", msg)
             return False
-        threading.Thread(target=lambda: GLib.idle_add(done, work()), daemon=True,
-                         name="update").start()
+        def guarded():
+            try:
+                res = work()
+            except Exception as ex:              # never leave the updater stuck "checking…"
+                res = ("fail", f"the update failed ({ex.__class__.__name__}: {ex})", None)
+            GLib.idle_add(done, res)
+        threading.Thread(target=guarded, daemon=True, name="update").start()
 
     def restart_app(self):
         """Save everything, then replace this process with a fresh Chuck that
@@ -9162,7 +9193,11 @@ class ChuckWindow(Adw.ApplicationWindow):
         gen = self._gen
 
         def worker():
-            rc, out = _builder.run_tests(p)
+            beat = self._beat()                 # a long suite isn't "stuck"
+            try:
+                rc, out = _builder.run_tests(p)
+            finally:
+                beat.set()
 
             def show():
                 self._busy(False)

@@ -159,10 +159,19 @@ def _js(root, files, notes):
                                         if os.path.isfile(os.path.join(root, "node_modules", ".bin", "eslint"))
                                         else None)
     js_files = [f for f in files if f.endswith((".js", ".mjs", ".cjs", ".jsx"))]
+    linted = False
     if eslint and eslint_cfg:
-        rc, out = _run([eslint, "--format", "unix", *files], root, timeout=300)
-        found += _norm(root, out, "eslint")
-    elif shutil.which("node"):
+        # JSON, not "unix": ESLint 9 dropped that formatter, failed with exit
+        # 2, and every project read as "no problems found"
+        rc, out = _run([eslint, "--format", "json", *files], root, timeout=300)
+        rows = _eslint_json(root, out)
+        if rows is not None:
+            found += rows
+            linted = True
+        else:
+            notes.append("eslint failed to run (" + (out.strip().splitlines() or ["?"])[-1][:120]
+                         + ") — falling back to node --check")
+    if not linted and shutil.which("node"):
         for f in js_files[:300]:
             if f.endswith(".jsx"):
                 continue
@@ -171,9 +180,30 @@ def _js(root, files, notes):
                 m = re.search(r":(\d+)\n", out)
                 msg = next((ln for ln in out.splitlines() if "Error" in ln), out.strip()[:200])
                 found.append(f"{_rel(root, f)}:{m.group(1) if m else 1}: {msg.strip()} [node]")
-    elif js_files:
+    elif js_files and not linted:
         notes.append("node not installed — JavaScript unchecked")
     return found
+
+
+def _eslint_json(root, out):
+    """[file:line: message [eslint]] from ESLint's JSON report, or None when
+    the output isn't one (ESLint itself failed)."""
+    import json as _json
+    start = out.find("[")
+    try:
+        data = _json.loads(out[start:]) if start >= 0 else None
+    except ValueError:
+        return None
+    if not isinstance(data, list):
+        return None
+    rows = []
+    for f in data:
+        for m in (f.get("messages") or []) if isinstance(f, dict) else []:
+            sev = "error" if m.get("severity") == 2 else "warning"
+            rows.append(f"{_rel(root, f.get('filePath', '?'))}:{m.get('line') or 1}: "
+                        f"{sev}: {m.get('message', '').strip()}"
+                        + (f" ({m['ruleId']})" if m.get("ruleId") else "") + " [eslint]")
+    return rows
 
 
 def _shell(root, files, notes):

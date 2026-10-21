@@ -140,9 +140,15 @@ def _run(argv, text_in=None, timeout=60):
 def _syntax_python(body):
     try:
         ast.parse(body)
+        # parsing isn't compiling: `return` or `await` outside a function,
+        # duplicate arguments, a module-level nonlocal all parse fine and then
+        # fail the moment the code runs. compile() never executes anything.
+        compile(body, "code.py", "exec", dont_inherit=True)
         return True, ""
     except SyntaxError as e:
         return False, f"SyntaxError line {e.lineno}: {e.msg}"
+    except (ValueError, TypeError) as e:              # e.g. a NUL byte in the source
+        return False, f"invalid source: {e}"
 
 
 def _syntax_via(body, ext, argv_builder):
@@ -179,7 +185,7 @@ def _syntax_via(body, ext, argv_builder):
 _ALWAYS_DEFINED = frozenset(dir(_builtins)) | frozenset((
     "__name__", "__file__", "__doc__", "__package__", "__spec__",
     "__loader__", "__builtins__", "__debug__", "__all__", "__version__",
-    "WindowsError", "reveal_type", "_",
+    "WindowsError", "reveal_type", "_", "__qualname__", "__module__",
 ))
 
 
@@ -261,6 +267,18 @@ class _Bindings(ast.NodeVisitor):
             self.bound.add(local)
             self.imported.setdefault(local, (node.lineno,
                                              f"{node.module or ''}.{a.name}".strip(".")))
+        self.generic_visit(node)
+
+    # PEP 695 (3.12): def f[T](), class Box[T], type P[K] = ... bind T and K
+    def visit_TypeVar(self, node):
+        self.bound.add(node.name)
+        self.generic_visit(node)
+
+    visit_ParamSpec = visit_TypeVarTuple = visit_TypeVar
+
+    def visit_TypeAlias(self, node):
+        if isinstance(node.name, ast.Name):
+            self.bound.add(node.name.id)
         self.generic_visit(node)
 
     def visit_MatchAs(self, node):
@@ -555,6 +573,10 @@ def check(lang, body, tests=None, known_names=()):
         if node:
             ok, err = _syntax_via(body, "js", lambda p: [node, "--check", p])
             res["syntax_ok"], res["syntax_err"] = ok, ("" if ok else err)
+        else:
+            res["unchecked"] = True              # no node: nothing looked at the syntax
+    else:
+        res["unchecked"] = True                  # rust, go, …: no checker here
 
     # 2. lint (only if syntax ok — lint output on broken syntax is noise)
     if res["syntax_ok"]:
@@ -599,7 +621,10 @@ def report(res):
     about something that isn't withholding the card.
     """
     if res.get("ok"):
-        head = f"\u2713 {res['lang']} verified: syntax OK, no blocking issues."
+        head = (f"\u2713 {res['lang']} verified: syntax OK, no blocking issues."
+                if not res.get("unchecked") else
+                f"{res['lang']}: NOT verified \u2014 no syntax checker for it here (only the "
+                "security scan ran); it will be checked by running it.")
         adv = _advisory_lines(res)
         return "\n".join([head] + adv) if adv else head
     lines = [f"Verification of the {res['lang']} code found issues:"]
