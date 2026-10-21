@@ -1342,6 +1342,65 @@ if flash:
     check(P.price_for("zai-org/GLM-5.3-Flash", {"price_in": 9, "model": "deepseek-ai/DeepSeek-V4.1-Flash"})
           == flash, "and applies to the chat model it was set for, not the fallback")
 
+print("\n--- rendering replies: markdown, rebuilt chats, export ---")
+m_ = cn.md_to_pango("[file](https://github.com/a/b/blob/main/pkg/__init__.py) and **bold**")
+check('href="https://github.com/a/b/blob/main/pkg/__init__.py"' in m_ and "<b>bold</b>" in m_,
+      "formatting never runs inside a link's URL", m_)
+check('href="https://en.wikipedia.org/wiki/C_(programming_language)"' in
+      cn.md_to_pango("[x](https://en.wikipedia.org/wiki/C_(programming_language))"),
+      "a URL with parentheses stays whole")
+check("<b>" not in cn.md_to_pango("2 ** 10 = 1024 and 3 ** 2"), "spaced ** is arithmetic, not bold")
+check(cn.md_to_pango("**Important: *read this***") == "<b>Important: <i>read this</i></b>",
+      "bold with italic inside renders")
+check(cn.md_to_pango("~~**a~~**", emphasis=False) == "a", "overlapping spans fall back to clean text")
+segs = cn.md_segments("1. Install:\n   ```bash\n   pip install x\n   # then run\n   ```\nafter")
+check(("code", "bash", "pip install x\n# then run") in segs, "an indented code fence is code", segs)
+check(cn.md_segments("````md\n```py\nx\n```\n````\nafter")[0] == ("code", "md", "```py\nx\n```"),
+      "a 4-backtick fence holds a 3-backtick one")
+check(cn.md_segments("```\n```\nnot code")[-1] == ("md", "\nnot code")
+      and cn.md_segments("```py\r\nx = 1\r\n```\r\nafter")[0] == ("code", "py", "x = 1"),
+      "empty blocks and CRLF replies close where they should")
+check(cn._split_row("| `a|b` | or | x\\|y |") == ["`a|b`", "or", "x|y"],
+      "a | inside code or written \\| doesn't split a table cell")
+check(cn.md_segments("a | b\n---\nmore")[0][0] == "md", "prose with a | above a rule isn't a table")
+long_md = "\n\n".join(f"Paragraph {i}. " + "words " * 80 for i in range(40))
+check(len([x for x in cn.md_segments(long_md) if x[0] == "md"]) > 3,
+      "long prose is split into paragraph labels (only the last one re-renders while streaming)")
+w = agent([], tmp / "resume")
+w.set_agent_mode(False, announce=False)
+w.history = [w.history[0], {"role": "user", "content": "show me hello world"},
+             {"role": "assistant", "content": "Here:\n```python\nprint('hi')\n```\nThat prints hi."},
+             {"role": "user", "content": "now run something"},
+             {"role": "assistant", "content": "```bash\necho ran\n```"},
+             {"role": "user", "content": "TOOL RESULTS (continue):\n\nran\n\n" + cn.ChuckWindow._STEER_HEAD
+              + " — read it first; it may change what you do next]:\nalso add a README"},
+             {"role": "assistant", "content": "Done."}]
+w.set_agent_mode(True, announce=False)
+builds = []
+real_build = w._build_entry
+w._build_entry = lambda e: (builds.append(1), real_build(e))[1]
+w._rebuild_transcript()
+bots = [e["data"]["text"] for e in w._log if e["kind"] == "bot"]
+users = [e for e in w._log if e["kind"] == "user"]
+check(any("print('hi')" in b for b in bots), "a Chat-mode reply keeps its code after reopening in Agent mode",
+      bots)
+check(any("also add a README" in str(e["data"]) for e in users),
+      "a message you typed mid-task comes back as your bubble")
+md = w.export_markdown()
+check("## You\n\nalso add a README" in md, "and export shows it as yours")
+w.history[5]["content"] = "TOOL RESULTS (continue):\n\n````\nREADME fence\n````\nafter"
+md = w.export_markdown()
+check("`````text" in md, "exported tool output gets a fence longer than any inside it")
+w = agent([], tmp / "resume")
+w.history = [w.history[0]] + [{"role": "user" if i % 2 == 0 else "assistant", "content": f"m{i}"}
+                              for i in range(500)]
+calls = []
+real_ca = w._collapse_window
+w._collapse_window = lambda *a, **k: (calls.append(1), real_ca(*a, **k))[1]
+w._rebuild_transcript()
+check(len(calls) == 1, "reopening a 500-message chat windows the transcript once, not per message",
+      len(calls))
+
 print("\n--- installer: a stale clone in the current folder isn't installed ---")
 inst = Path(_ROOT, "install.sh").read_text()
 snip = inst[inst.index('SELF_DIR=""'):]

@@ -734,34 +734,51 @@ INK, BODY, MUTE, FAINT = "#EDEDF3", "#CFCFD9", "#8E8E9E", "#5F5F6E"
 ACCENT, CODE_BG, CODE_FG = "#8F80C9", "#1C1C25", "#DCD8EE"
 
 
-def _md_inline(s):
+def _md_inline(s, emphasis=True):
     """Inline spans, run on already-escaped text: `code`, **bold**, *italic*,
     ~~strike~~ and [links](url). Inline code gets a subtle chip so it reads as
     code without the raw backticks; no padding spaces, which would create ugly
     wrap points. Code is matched FIRST and its content is parked in a
     placeholder, so a snippet like `a * b` can't be re-read as italics."""
     parked = []
+    s = s.replace("\x00", "")                  # NUL is our placeholder mark (and ends a label)
 
-    def park(m):
-        parked.append(m.group(1))
+    def park(markup):
+        parked.append(markup)
         return f"\x00{len(parked) - 1}\x00"
 
-    s = re.sub(r"`([^`]+)`", park, s)
-    # [text](url) — GtkLabel renders <a href> as a real, clickable link.
-    # The text reaching us is ALREADY HTML-escaped, so the href only needs its
-    # quotes neutralised — escaping again would turn &amp; into &amp;amp; and
-    # hand the browser a broken query string.
-    s = re.sub(r"\[([^\]]+)\]\((https?://[^\s)]+)\)",
-               lambda m: f'<a href="{m.group(2).replace(chr(34), "&quot;")}">'
-                         f'{m.group(1)}</a>', s)
-    s = re.sub(r"~~([^~]+)~~", r"<s>\1</s>", s)
-    s = re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", s)
-    s = re.sub(r"__([^_]+)__", r"<b>\1</b>", s)
-    s = re.sub(r"(?<![\w*])\*([^*\n]+)\*(?![\w*])", r"<i>\1</i>", s)
-    return re.sub(
-        r"\x00(\d+)\x00",
-        lambda m: f'<span font_family="monospace" background="{CODE_BG}" '
-                  f'foreground="{CODE_FG}">{parked[int(m.group(1))]}</span>', s)
+    def emph(t):
+        if not emphasis:
+            # the fallback when spans overlap: no markup, and no raw markers
+            for _ in range(3):                  # nested markers come off layer by layer
+                t = re.sub(r"(\*\*|__|~~)(?=\S)(.+?)(?<=\S)\1", r"\2", t)
+            return re.sub(r"(?<![\w*])\*(?=\S)([^*\n]+?)(?<=\S)\*(?![\w*])", r"\1", t)
+        t = re.sub(r"~~(?=\S)([^~]+?)(?<=\S)~~", r"<s>\1</s>", t)
+        # bold and italic together: ***x***, **a *b***, ***a* b**
+        t = re.sub(r"\*\*\*(?=\S)([^*]+?)(?<=\S)\*\*\*", r"<b><i>\1</i></b>", t)
+        t = re.sub(r"\*\*(?=\S)([^*]*?)\*(?=\S)([^*]+?)(?<=\S)\*\*\*", r"<b>\1<i>\2</i></b>", t)
+        t = re.sub(r"\*\*\*(?=\S)([^*]+?)(?<=\S)\*([^*]*?)(?<=\S)\*\*", r"<b><i>\1</i>\2</b>", t)
+        # ** that hugs its words: `2 ** 10 and 3 ** 2` is arithmetic, not bold
+        t = re.sub(r"\*\*(?=\S)([^*]+?)(?<=\S)\*\*", r"<b>\1</b>", t)
+        t = re.sub(r"__(?=\S)([^_]+?)(?<=\S)__", r"<b>\1</b>", t)
+        return re.sub(r"(?<![\w*])\*(?=\S)([^*\n]+?)(?<=\S)\*(?![\w*])", r"<i>\1</i>", t)
+
+    s = re.sub(r"`([^`]+)`", lambda m: park(
+        f'<span font_family="monospace" background="{CODE_BG}" '
+        f'foreground="{CODE_FG}">{m.group(1)}</span>'), s)
+    # [text](url) — GtkLabel renders <a href> as a real, clickable link. Parked
+    # too, so ** or __ inside a URL (pkg/__init__.py) is never formatted. One
+    # level of parentheses is part of a URL (wiki/C_(programming_language)).
+    # The text is ALREADY HTML-escaped: the href only needs its quotes
+    # neutralised — escaping again would break the query string.
+    s = re.sub(r"\[([^\]]+)\]\((https?://(?:[^\s()]|\([^\s()]*\))+)\)",
+               lambda m: park(f'<a href="{m.group(2).replace(chr(34), "&quot;")}">'
+                              f'{emph(m.group(1))}</a>'), s)
+    s = emph(s)
+    for _ in range(2):                          # a link label may hold inline code
+        s = re.sub(r"\x00(\d+)\x00", lambda m: parked[int(m.group(1))]
+                   if int(m.group(1)) < len(parked) else "", s)
+    return s
 
 
 # A blank line between paragraphs, rendered at full body height with 1.4 line
@@ -770,7 +787,7 @@ def _md_inline(s):
 _GAP = '<span size="5000"> </span>'
 
 
-def md_to_pango(text):
+def md_to_pango(text, emphasis=True):
     """Markdown-ish → Pango markup, processed a line at a time so a lone '#' or
     '-' mid-sentence is never mistaken for a heading or a bullet.
 
@@ -799,7 +816,7 @@ def md_to_pango(text):
         if m:
             size, col, wt = hsize.get(len(m.group(1)), ("medium", BODY, "bold"))
             out.append(f'<span size="{size}" foreground="{col}" weight="{wt}">'
-                       f'{_md_inline(esc(m.group(2)))}</span>')
+                       f'{_md_inline(esc(m.group(2)), emphasis)}</span>')
             continue
         if re.match(r"^\s{0,3}([-*_])(\s*\1){2,}\s*$", raw):
             out.append(f'<span foreground="{FAINT}">'
@@ -808,7 +825,7 @@ def md_to_pango(text):
         m = re.match(r"^\s{0,3}>\s?(.*)$", raw)
         if m:
             out.append(f'<span foreground="{MUTE}"><i>▎  '
-                       f'{_md_inline(esc(m.group(1)))}</i></span>')
+                       f'{_md_inline(esc(m.group(1)), emphasis)}</i></span>')
             continue
         m = re.match(r"^(\s*)[-*+]\s+\[([ xX])\]\s+(.*)$", raw)
         if m:
@@ -816,7 +833,7 @@ def md_to_pango(text):
             done = m.group(2).lower() == "x"
             box = ('<span foreground="#4ADE9A">☑</span>' if done
                    else f'<span foreground="{FAINT}">☐</span>')
-            body = _md_inline(esc(m.group(3)))
+            body = _md_inline(esc(m.group(3)), emphasis)
             out.append("    " * depth + box + "  "
                        + (f'<span foreground="{MUTE}">{body}</span>' if done else body))
             continue
@@ -826,32 +843,39 @@ def md_to_pango(text):
             mark = ("•", "◦", "‣", "•")[depth]
             out.append("    " * depth
                        + f'<span foreground="{ACCENT}">{mark}</span>  '
-                       + _md_inline(esc(m.group(2))))
+                       + _md_inline(esc(m.group(2)), emphasis))
             continue
         m = re.match(r"^(\s*)(\d+)[.)]\s+(.*)$", raw)
         if m:
             depth = min(len(m.group(1)) // 2, 3)
             out.append("    " * depth
                        + f'<span foreground="{ACCENT}" weight="bold">{m.group(2)}.</span>  '
-                       + _md_inline(esc(m.group(3))))
+                       + _md_inline(esc(m.group(3)), emphasis))
             continue
-        out.append(_md_inline(esc(raw)))
+        out.append(_md_inline(esc(raw), emphasis))
     while out and out[-1] == _GAP:
         out.pop()
     return "\n".join(out)
 
 
-_FENCE_RE = re.compile(r"^```([\w+#.-]*)[^\n]*\n(.*?)(?:\n```[ \t]*$|\Z)", re.M | re.S)
+# a fence may be indented up to three spaces (code inside a numbered step),
+# be ``` or ~~~ of any length, and closes only on a line of at least as many
+# of the same mark; an empty block closes on the very next line
+_FENCE_RE = re.compile(r"^(?P<ind>[ \t]{0,3})(?P<f>`{3,}|~{3,})(?P<lang>[\w+#.-]*)[^\n]*\n"
+                       r"(?P<body>.*?)(?:^[ \t]{0,3}(?P=f)[`~]*[ \t]*$|\Z)", re.M | re.S)
 _TABLE_SEP = re.compile(r"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$")
 
 
 def _split_row(line):
+    """Cells of a table row. A | inside `code` or written \\| is content."""
     line = line.strip()
     if line.startswith("|"):
         line = line[1:]
-    if line.endswith("|"):
+    if line.endswith("|") and not line.endswith("\\|"):
         line = line[:-1]
-    return [c.strip() for c in line.split("|")]
+    cells = [c.replace("\\|", "|").strip()
+             for c in re.findall(r"(?:`[^`]*`|\\\||[^|`])+|(?<=\|)(?=\|)|^(?=\|)", line)]
+    return cells if cells else [""]
 
 
 def md_segments(text):
@@ -859,17 +883,45 @@ def md_segments(text):
     segments, so code renders as a copyable block that scrolls sideways
     instead of overflowing the column, and tables render as a real grid.
     An unclosed fence (a reply cut off mid-block) still renders as code."""
-    text = text or ""
+    text = (text or "").replace("\r\n", "\n")
     segs = []
     pos = 0
     for m in _FENCE_RE.finditer(text):
         if m.start() > pos:
             segs.extend(_table_split(text[pos:m.start()]))
-        segs.append(("code", m.group(1).lower(), m.group(2).rstrip("\n")))
+        body, ind = m.group("body").rstrip("\n"), m.group("ind")
+        if ind:                                 # the fence's indent isn't part of the code
+            body = "\n".join(ln[len(ind):] if ln.startswith(ind) else ln.lstrip(" \t")
+                             for ln in body.split("\n"))
+        segs.append(("code", m.group("lang").lower(), body))
         pos = m.end()
     if pos < len(text):
         segs.extend(_table_split(text[pos:]))
-    return [sg for sg in segs if not (sg[0] == "md" and not sg[1].strip())]
+    out = []
+    for sg in segs:
+        if sg[0] == "md" and len(sg[1]) > _MD_CHUNK:
+            out.extend(("md", t) for t in _paragraph_chunks(sg[1]))
+        else:
+            out.append(sg)
+    return [sg for sg in out if not (sg[0] == "md" and not sg[1].strip())]
+
+
+_MD_CHUNK = 3000
+
+
+def _paragraph_chunks(text):
+    """Long prose as several labels, cut at paragraph breaks: while a long
+    reply streams, only the last one is re-laid out (one 100k label took
+    0.4 s per repaint)."""
+    parts, cur = [], ""
+    for para in re.split(r"(\n\s*\n)", text):
+        if len(cur) + len(para) > _MD_CHUNK and cur.strip() and not para.strip() == "":
+            parts.append(cur)
+            cur = ""
+        cur += para
+    if cur:
+        parts.append(cur)
+    return parts
 
 
 def _table_split(text):
@@ -877,7 +929,8 @@ def _table_split(text):
     out, buf, i = [], [], 0
     while i < len(lines):
         if (i + 1 < len(lines) and "|" in lines[i] and _TABLE_SEP.match(lines[i + 1])
-                and len(_split_row(lines[i])) >= 2):
+                and len(_split_row(lines[i])) >= 2
+                and len(_split_row(lines[i])) == len(_split_row(lines[i + 1]))):
             if buf:
                 out.append(("md", "\n".join(buf))); buf = []
             rows = [_split_row(lines[i])]
@@ -933,6 +986,10 @@ def _markup_ok(markup):
 def set_rich(label, text):
     try:
         markup = md_to_pango(text)
+        if not _markup_ok(markup):
+            # overlapping spans (~~**a~~**): keep headings, lists and code,
+            # drop the emphasis, rather than show the whole block raw
+            markup = md_to_pango(text, emphasis=False)
         if _markup_ok(markup):
             label.set_markup(markup)
         else:
@@ -3320,6 +3377,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._think_text = ""
         self._think_t0 = 0.0
         self._last_paint = 0.0
+        self._paint_pending = False
         self._activity_box = None
         self._activity_steps = []
         self._activity_lock = threading.Lock()
@@ -4172,7 +4230,8 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._drop_hint()
         entry = {"kind": kind, "data": data, "w": None, "pinned": False}
         self._log.append(entry)
-        self._collapse_window(scroll=True)
+        if not getattr(self, "_batching", False):  # a rebuild windows once, at the end
+            self._collapse_window(scroll=True)
         return entry
 
     def _log_pin(self, widget):
@@ -4181,7 +4240,8 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._drop_hint()
         entry = {"kind": "pinned", "data": None, "w": _lane(widget), "pinned": True}
         self._log.append(entry)
-        self._collapse_window(scroll=True)
+        if not getattr(self, "_batching", False):
+            self._collapse_window(scroll=True)
         return entry
 
     def _build_entry(self, e):
@@ -5217,9 +5277,24 @@ class ChuckWindow(Adw.ApplicationWindow):
     def _rebuild_transcript(self):
         """The visible transcript, from history (after a load, retry or edit)."""
         self._clear_msgs()
+        self._batching = True                    # build the log, then window it once
+        try:
+            self._rebuild_entries()
+        finally:
+            self._batching = False
+        if not self._log:
+            self._show_empty_hint()
+        self._collapse_window(scroll=True)
+        self._stick = True
+        self._scroll_down(force=True)
+
+    _STEER_HEAD = "[MESSAGE FROM THE USER, sent while you were working"
+
+    def _rebuild_entries(self):
         did = ""                                 # what the last reply asked the machine to do
         spoke = False                            # Chuck has a byline in this turn already
-        for m in self.history:
+        hist = self.history
+        for idx, m in enumerate(hist):
             if m["role"] == "system":
                 continue
             if m["role"] == "user":
@@ -5230,14 +5305,30 @@ class ChuckWindow(Adw.ApplicationWindow):
                     c = m["content"]
                     if c.startswith("CONVERSATION SUMMARY") or c.startswith("CONTINUE:"):
                         continue
+                    # a message you typed mid-task rode along with the tool
+                    # results: it's yours, so it shows as your bubble again
+                    steer = ""
+                    at = c.find(self._STEER_HEAD)
+                    if at >= 0:
+                        steer = c[at:].split("]:\n", 1)[-1].strip()
+                        c = c[:at].rstrip()
                     body = c.split("\n\n", 1)[1] if c.startswith("TOOL RESULTS") and "\n\n" in c else c
                     if body.strip():
                         self._log_add("fold", {"text": clip_output(body.strip(), 12000),
                                                "title": did or "Tool results"})
+                    if steer:
+                        self._user_bubble(steer)
+                        spoke = False
                     did = ""
             else:
                 raw = m.get("content") if isinstance(m.get("content"), str) else ""
-                shown = self._display_text(raw)
+                # was it acting? Only then were its code blocks tools (hidden);
+                # a Chat-mode reply's code is the answer, whatever mode is on now
+                nxt = hist[idx + 1] if idx + 1 < len(hist) else None
+                acted = bool(nxt and nxt.get("role") == "user" and not self._is_real_user(nxt)
+                             and str(nxt.get("content", "")).startswith(("TOOL RESULTS",
+                                                                         self._STEER_HEAD)))
+                shown = self._display_text(raw, agent=self.agent_mode and acted)
                 did = self._actions_of(raw)
                 q = re.search(r"```ask[ \t]*\n(.*?)```", raw, re.S)
                 if q:                            # the question you answered, not a blank
@@ -5250,10 +5341,6 @@ class ChuckWindow(Adw.ApplicationWindow):
                     # the same turn get none, as they don't live
                     self._log_add("bot", {"text": shown, "rich": True, "cont": spoke})
                     spoke = True
-        if not self._log:
-            self._show_empty_hint()
-        self._stick = True
-        self._scroll_down(force=True)
 
     def _rewind_to(self, n):
         """Keep history[:n]; anything derived from what's cut goes with it."""
@@ -5719,11 +5806,11 @@ class ChuckWindow(Adw.ApplicationWindow):
     _WEB_TAGS = "search|fetch|images|videos|video|remember|forget|ask"
     _CODE_TAGS = "python|py|node|javascript|js|bash|sh"
 
-    def _tool_tags(self):
+    def _tool_tags(self, agent=None):
         tags = self._WEB_TAGS + "|" + "|".join(_AGENT_TAGS + tuple(_TOOL_REG))
-        return tags + "|" + self._CODE_TAGS if self.agent_mode else tags
+        return tags + "|" + self._CODE_TAGS if (self.agent_mode if agent is None else agent) else tags
 
-    def _display_text(self, text, partial=False):
+    def _display_text(self, text, partial=False, agent=None):
         """A reply with its tool blocks removed: what the user reads. partial=
         True also drops a tool block that is still open (mid-stream, or cut off
         by the output cap) so half a command never flashes up as prose."""
@@ -5731,8 +5818,9 @@ class ChuckWindow(Adw.ApplicationWindow):
             return ""
         if "```" not in text:
             return text.strip()
-        tags = self._tool_tags()
-        if self.agent_mode:
+        agent = self.agent_mode if agent is None else agent
+        tags = self._tool_tags(agent)
+        if agent:
             text = _cut_spans(text, [(b["start"], b["end"]) for b in file_blocks(text)])
         shown = re.sub(r"````(?:" + tags + r")(?![A-Za-z]).*?````", "", text, flags=re.DOTALL)
         shown = re.sub(r"```(?:" + tags + r")(?![A-Za-z]).*?```", "", shown, flags=re.DOTALL)
@@ -5747,6 +5835,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         return self._display_text(self._bot_text, partial=True)
 
     def _paint_stream(self):
+        self._paint_pending = False
         if self._cancelled or self._bot_label is None:
             return False
         txt = self._visible_stream_text()
@@ -9839,10 +9928,12 @@ class ChuckWindow(Adw.ApplicationWindow):
 
     def export_markdown(self):
         """This chat as a readable Markdown document."""
-        title = next((m["content"][:80] for m in self.history
-                      if m.get("role") == "user" and isinstance(m.get("content"), str)
-                      and not m["content"].startswith(("TOOL RESULTS", "I ran ", "CONTINUE:"))),
-                     "Chat")
+        first = next((m for m in self.history if self._is_real_user(m)), None)
+        title = (self._typed_text(first.get("content")) if first else "").strip()
+        if not title and first is not None:    # only a file: name the chat after it
+            att = re.search(r"--- attached file: (.+?)(?: \(| ---)", str(first.get("content")))
+            title = att.group(1) if att else ""
+        title = (title or "Chat")[:80]
         u = self._usage
         lines = [f"# {title.splitlines()[0]}", "",
                  f"*{datetime.now().strftime('%Y-%m-%d %H:%M')} · "
@@ -9856,11 +9947,23 @@ class ChuckWindow(Adw.ApplicationWindow):
                 c = " ".join(x.get("text", "") for x in c if isinstance(x, dict)) + " [image]"
             role = m.get("role")
             internal = c.startswith(("TOOL RESULTS", "I ran ", "STEP BUDGET", "RESEARCH BUDGET",
-                                     "CONTINUE:", "FILE "))
+                                     "CONTINUE:", "FILE ", self._STEER_HEAD))
+            steer = ""
+            if role == "user" and internal and self._STEER_HEAD in c:
+                at = c.find(self._STEER_HEAD)       # your mid-task message is yours
+                steer = c[at:].split("]:\n", 1)[-1].strip()
+                c = c[:at].rstrip()
             if role == "user" and internal:
-                body = clip_output(c, 6000).replace("</details>", "&lt;/details&gt;")
-                lines += ["<details><summary>Tool results</summary>", "", "````text", body,
-                          "````", "", "</details>", ""]
+                if c.strip():
+                    body = clip_output(c, 6000).replace("</details>", "&lt;/details&gt;")
+                    # a fence longer than any backtick run inside, so a README
+                    # in the output can't close it early
+                    fence = "`" * max(4, max((len(r) for r in re.findall(r"`+", body)),
+                                             default=0) + 1)
+                    lines += ["<details><summary>Tool results</summary>", "", fence + "text",
+                              body, fence, "", "</details>", ""]
+                if steer:
+                    lines += ["## You", "", steer, ""]
             elif role == "user":
                 lines += ["## You", "", self._typed_text(c), ""]
             else:
@@ -10192,9 +10295,10 @@ class ChuckWindow(Adw.ApplicationWindow):
             # visible lag on long answers. Coalesce to a steady refresh; the
             # final text is always flushed in _finalise.
             now = time.monotonic()
-            if now - self._last_paint < _STREAM_REPAINT:
-                return
+            if now - self._last_paint < _STREAM_REPAINT or self._paint_pending:
+                return                  # one repaint queued at a time: a slow one can't pile up
             self._last_paint = now
+            self._paint_pending = True
             GLib.idle_add(self._paint_stream)
 
         def on_done():
