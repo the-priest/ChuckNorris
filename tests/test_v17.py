@@ -1202,6 +1202,28 @@ w._running = False
 check(w._steer and "the secret word is plum" in w._steer[-1],
       "a file @mentioned while Chuck works goes with the message", w._steer[-1:])
 
+print("\n--- restricted folders: Chuck's own tools can't read credentials either ---")
+(Path.home() / ".ssh").mkdir(exist_ok=True)
+(Path.home() / ".ssh" / "id_test").write_text("SECRET-KEY\n")
+w = agent(["```read ~/.ssh/id_test```\n```grep SECRET-KEY ~/.ssh```", "ok"], tmp / "steer_ws")
+w.set_access("readonly")
+type_and_send(w, "read the key")
+h = hist_text(w).split("read the key")[-1]
+check("read refused" in h and "grep refused" in h and "SECRET-KEY\n" not in h,
+      "read and grep refuse ~/.ssh when the folder's access is restricted", h[-500:])
+w.set_access("full")
+from chucknorris_ext import browser as _br2
+_br2.FILES_ROOT[0] = str(tmp / "steer_ws")
+_br2.HIDDEN[0] = (os.path.realpath(str(Path.home() / ".ssh")),)
+try:
+    _br2.to_url("file://" + str(Path.home() / ".ssh" / "id_test"))
+    blocked = False
+except FileNotFoundError:
+    blocked = True
+ok_local = _br2.to_url("notes.txt", tmp / "steer_ws").startswith("file://")
+_br2.FILES_ROOT[0] = None
+check(blocked and ok_local, "browse can't open files outside a restricted folder (its own still work)")
+
 print("\n--- installer: a stale clone in the current folder isn't installed ---")
 inst = Path(_ROOT, "install.sh").read_text()
 snip = inst[inst.index('SELF_DIR=""'):]

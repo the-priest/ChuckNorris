@@ -250,12 +250,13 @@ def _launch(chrome, profile, startup=20):
             f"--user-data-dir={profile}", "--no-first-run", "--no-default-browser-check",
             "--disable-gpu", "--hide-scrollbars", "--mute-audio",
             "--disable-background-timer-throttling", "--disable-renderer-backgrounding",
-            "--allow-file-access-from-files",
             # no phoning home: component updates, metrics, safe-browsing pings
             "--disable-background-networking", "--disable-component-update",
             "--disable-sync", "--disable-default-apps", "--disable-domain-reliability",
             "--disable-client-side-phishing-detection", "--metrics-recording-only",
             "--no-pings", "about:blank"]
+    if FILES_ROOT[0] is None:
+        args.insert(-1, "--allow-file-access-from-files")   # a local page's own assets
     if hasattr(os, "geteuid") and os.geteuid() == 0:
         args.insert(1, "--no-sandbox")            # Chromium refuses to run as root otherwise
     proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -398,10 +399,32 @@ def _collect(events):
     return dedup(errors), dedup(warnings), logs, dedup(failed)
 
 
+# Set by the app when the working folder's access is restricted: local files
+# may be opened only inside this folder, never in the hidden credential
+# folders, and pages get no file:// access beyond their own file.
+FILES_ROOT = [None]
+HIDDEN = [()]
+
+
+def _file_allowed(path):
+    root = FILES_ROOT[0]
+    if root is None:
+        return True
+    rp, rr = os.path.realpath(path), os.path.realpath(root)
+    if not (rp == rr or rp.startswith(rr + os.sep)):
+        return False
+    return not any(rp == h or rp.startswith(h + os.sep) for h in HIDDEN[0])
+
+
 def to_url(target, root=None):
     """A URL from what the agent wrote: http(s)/file URLs pass through, a bare
     host:port gets http://, anything else is a file path (relative to root)."""
     t = (target or "").strip().strip("'\"")
+    if t.lower().startswith("file:"):
+        path = urllib.parse.unquote(urllib.parse.urlparse(t).path)
+        if not _file_allowed(path):
+            raise FileNotFoundError(f"{path} is outside this folder (its access is restricted)")
+        return t
     if re.match(r"^[a-z][a-z0-9+.-]*://", t, re.I) or t.startswith(("about:", "data:")):
         return t
     if re.match(r"^(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(:\d+)?(/.*)?$", t):
@@ -413,6 +436,8 @@ def to_url(target, root=None):
         p = os.path.join(p, "index.html")
     if not os.path.isfile(p):
         raise FileNotFoundError(f"no such file: {t}")
+    if not _file_allowed(p):
+        raise FileNotFoundError(f"{t} is outside this folder (its access is restricted)")
     return "file://" + urllib.parse.quote(os.path.abspath(p))
 
 

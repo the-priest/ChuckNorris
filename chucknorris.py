@@ -1713,6 +1713,22 @@ _SANDBOX_HIDE = (".ssh", ".gnupg", ".aws", ".kube", ".docker", ".password-store"
 _SANDBOX_CACHE = DATA_DIR / "sandbox-cache"
 
 
+def _secret_path(p):
+    """Is p inside a credentials folder the sandbox hides (~/.ssh, the API key)?
+    Chuck's own read/grep run outside the sandbox, so in a restricted folder
+    they must refuse these too, or the model reads what commands can't."""
+    try:
+        rp = os.path.realpath(p)
+    except (OSError, ValueError):
+        return False
+    home = str(Path.home())
+    for rel in _SANDBOX_HIDE + (".netrc",):
+        h = os.path.realpath(os.path.join(home, rel))
+        if rp == h or rp.startswith(h + os.sep):
+            return True
+    return False
+
+
 def _bwrap_argv(argv, env=None, write_root=True, net=None, persistent=False):
     """bubblewrap around argv: the system read-only, the working folder
     writable (or read-only, for tools that only look), a private /tmp, /run
@@ -6894,6 +6910,10 @@ class ChuckWindow(Adw.ApplicationWindow):
             # relative: the working folder, or home when there is none — never
             # wherever the app happened to be launched from
             full = str((root if root is not None else Path.home()) / full)
+        if self.agent_mode and self._folder_access() != "full" and _secret_path(full):
+            self._tool_done(f"[read refused: {spec} is in a credentials folder, which this "
+                            "folder's access (/access) keeps hidden]")
+            return
         if _is_image_path(spec) and os.path.isfile(full):
             self._sys_note(f"\U0001F5BC {os.path.basename(full)}")
             self._image_bubble(full)
@@ -8370,6 +8390,10 @@ class ChuckWindow(Adw.ApplicationWindow):
                         root=str(self.workspace) if self.workspace else None,
                         writable=[str(PLOTS_DIR)], mode=mode)
         wrap = None if mode == "full" else _sandboxed_look
+        if _browser is not None and hasattr(_browser, "FILES_ROOT"):
+            _browser.FILES_ROOT[0] = None if mode == "full" or not self.workspace else str(self.workspace)
+            _browser.HIDDEN[0] = tuple(os.path.realpath(os.path.join(str(Path.home()), r))
+                                       for r in _SANDBOX_HIDE + (".netrc",))
         for mod in (_builder, _diagnose, _lsp):  # tests, linters and language servers too
             if mod is not None and hasattr(mod, "RUN_WRAP"):
                 mod.RUN_WRAP[0] = wrap if wrap is None or mod is not _lsp else (
@@ -8821,8 +8845,18 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._sys_note(f"\U0001F50E grep /{pattern}/ in {_short_path(root / sub if sub else root)}")
         self._busy(True)
 
+        hide = self.agent_mode and self._folder_access() != "full"
+        if hide and _secret_path(root / sub if sub else root):
+            self._busy(False)
+            self._tool_done("[grep refused: that's a credentials folder, which this folder's "
+                            "access (/access) keeps hidden]")
+            return
+
         def work():
             ok, out = _builder.grep(root, pattern, sub)
+            if ok and hide:                 # searching ~ in a restricted folder: skip secrets
+                out = "\n".join(ln for ln in out.split("\n")
+                                if not _secret_path(Path(root, ln.split(":", 1)[0])))
             return f"GREP /{pattern}/ {sub or '.'}:\n{out}" if ok else f"[grep failed: {out}]"
         self._tool_thread(work, "grep")
 
