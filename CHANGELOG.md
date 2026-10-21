@@ -1,5 +1,51 @@
 # Changelog
 
+## Unreleased (v17, in progress)
+
+The third roadmap (`docs/ROADMAP.md`, phases 10–15), with tests in
+`tests/test_v17.py`.
+
+### New
+
+- **Code intelligence.** ```` ```def ```` / ```` ```refs ```` / ```` ```rename ```` through
+  real language servers (pyright, TypeScript), falling back to the syntax
+  tree; ```` ```find ```` ranks code by what it does.
+- **Checkpoints and `/rewind`.** The whole folder is snapshotted (in a
+  private git store, never your own `.git`) before every step that acts;
+  `/rewind` puts files and the conversation back, and is itself undoable.
+- **Per-folder access** (`/access`): Full, Sandboxed (bubblewrap: only the
+  folder is writable, credentials hidden, no host sockets), Sandboxed offline,
+  and Read-only.
+- **Custom slash commands** from `.chuck/commands/*.md`.
+- **Resume after a crash**: a task that was running when Chuck closed is
+  offered on the welcome screen.
+- **A natural voice** (Kokoro, local, about half a second to first word) and
+  **voice input** (Moonshine, local; mic button or Ctrl+M, optional
+  hands-free sending).
+
+### Fixed (bug hunts on this cycle)
+
+- Sandbox escapes: switching folders with ```` ```project ````, a repo's own
+  git config (`core.fsmonitor`) run by map/find//diff, `~` as the working
+  folder uncovering `~/.ssh`, orphaned sandboxed Python kernels, and Chuck's
+  own read/grep/browse reaching credentials in restricted folders.
+- Code shown in a ````` ````markdown ````` example or in an edit's REPLACE text
+  could be executed; it never is now.
+- Edits: CRLF files keep their line endings, `=====` underlines no longer
+  split a SEARCH block, `patch` no longer rewrites form feeds or U+2028, and
+  undo restores non-UTF-8 files instead of deleting them.
+- rename could change the wrong symbol (UTF-16 columns), or edit a file the
+  language server had a stale copy of; it refuses now.
+- `/rewind` never deletes files that were git-ignored at the snapshot.
+- Chats: a stale ↑-edit could truncate another chat; two chats started in
+  the same second shared one file.
+- Bounded memory: compressed pages, huge command output.
+- Background jobs that fork can be stopped; MCP servers with malformed
+  metadata or replies no longer break chats.
+- Voice: never silent when the chosen engine is down, never reads code, no
+  fake "Kokoro failed" on close; the mic can't get stuck on.
+- The installer no longer installs a stale clone lying in the current folder.
+
 ## 16.0.0 — steer it, trust it, keep it running
 
 The second roadmap (`docs/ROADMAP.md`, phases 5–9), shipped item by item with

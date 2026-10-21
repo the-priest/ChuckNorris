@@ -2421,7 +2421,7 @@ class _LiveFeed:
             self.scheduled = False
             if self.closed:
                 return False
-            text, lines = self.text, self.lines
+            text = self.text
         try:
             if self.panel is None:
                 self._build()
@@ -2884,7 +2884,7 @@ class GlyphField:
         if not self.ripples and self.pointer is None:
             return                                      # invisible at rest
         try:
-            import cairo
+            import cairo  # noqa: F401  (drawing needs pycairo; without it, skip)
         except Exception:
             return
         self._ensure(w, h)

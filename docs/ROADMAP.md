@@ -167,8 +167,11 @@ reaches only local servers.
       acts on it through AT-SPI: list the controls, click a button by its
       name, type into a field, read a label. Desktop apps get the same
       build–play–fix loop web pages have.
-- [ ] **Voice input.** Push-to-talk with a local whisper.cpp model; nothing
-      leaves the machine.
+- [x] **Voice input.** The mic button or Ctrl+M: Moonshine (via sherpa-onnx)
+      with a voice-activity detector, warm in the background, so what you say
+      lands in the composer (or is sent, hands-free) the moment you pause.
+      Nothing leaves the machine. Replies are read by Kokoro, a natural local
+      voice, streamed so speech starts in about half a second.
 
 ### Phase 14 — ecosystem
 
