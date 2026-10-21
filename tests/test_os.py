@@ -1605,6 +1605,53 @@ check("\U0001F441" in w._tray_lbl.get_label(), "the tray shows it's watching")
 w.set_workspace(mproj, announce=False)
 check(w._watch is None, "switching folders stops watching the old one")
 
+print("\n--- choose which files to merge ---")
+sproj = tmp / "selproj"
+sproj.mkdir()
+(sproj / "keep.txt").write_text("k\n")
+w = new_win([], tmp)
+w.set_agent_mode(True, announce=False)
+w.set_workspace(sproj, announce=False)
+w.backend = TimeBackend([])
+sp3 = w.spawn_background("tt: two files")
+w.kernel.wait(sp3, 20); settle()
+check(w.show_bg_diff(sp3) and set(w._bg[sp3]["_merge_checks"]) == {"a.txt", "b.txt"},
+      "the diff card has a check per changed file")
+w._bg[sp3]["_merge_checks"]["b.txt"].set_active(False)
+w.join_background(sp3, only=[r for r, c in w._bg[sp3]["_merge_checks"].items() if c.get_active()])
+check((sproj / "a.txt").exists() and not (sproj / "b.txt").exists()
+      and "left out as you chose" in " ".join(notes()),
+      "merging only the checked files brings those in and leaves the rest out")
+
+print("\n--- mission estimates that learn; /pr ---")
+w = new_win([], tmp)
+w.set_agent_mode(True, announce=False)
+w.set_workspace(mproj, announce=False)
+w.settings.pop("mission_task_tokens", None)
+w.backend = MissionBackend([])
+w.backend.seen, w.backend.results = [], []
+me = w.start_mission("estimate me")
+settle()
+info = me["_ui"]["info"].get_text()
+tok0, _usd0 = w._mission_estimate(me)
+check(me["state"] == MS.AWAITING and "Estimated: about" in info and tok0 == 180000 * 3 + 60000,
+      "before Start, the card estimates what the plan will cost", info)
+for t_ in me["tasks"]:
+    t_["pid"] = w.kernel.spawn("x", parent=me["pid"]).pid
+    w.kernel.charge(t_["pid"], 9000, 1000)
+    t_["state"] = MS.MERGED if t_["kind"] == "code" else MS.DONE
+w._mission_learn(me)
+w._mission_learn(me)
+tok1, _u = w._mission_estimate(me)
+check(tok1 == 10000 * 4, "after missions run, estimates use what this machine's tasks really spent", tok1)
+w.mission_action(me["id"], "cancel")
+w.backend = ScriptedBackend(["On it."])
+w.entry.get_buffer().set_text("/pr adds the parser tests")
+w.on_send()
+sent = [m["content"] for m in w.history if m.get("role") == "user"]
+check(sent and "gh pr create" in sent[-1] and "adds the parser tests" in sent[-1],
+      "/pr asks the agent for a branch, commit, push and a pull request")
+
 print(f"\nTOTAL OS FAILURES: {fails}")
 assert fails == 0 and not FAILS, "OS regressions present"
 print("ALL OS TESTS PASSED")

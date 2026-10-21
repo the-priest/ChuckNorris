@@ -8960,10 +8960,37 @@ class ChuckWindow(Adw.ApplicationWindow):
         lb = Gtk.Label(label=clip_output(d, 60000) or "(no changes)", xalign=0, selectable=True)
         lb.add_css_class("cmd-text"); _wrap_anywhere(lb)
         body.append(lb)
+        # choose what to take: a check per file, then merge only those
+        ch = e.get("changes") or {}
+        if ch:
+            pick = Gtk.Label(label="Take these into your folder:", xalign=0)
+            pick.add_css_class("dim")
+            foot.append(pick)
+            checks = {}
+            for rel, kind in ch.items():
+                cb = Gtk.CheckButton(label=f"{rel}  ({kind})")
+                cb.set_active(True)
+                checks[rel] = cb
+                foot.append(cb)
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            mb = Gtk.Button(label="Merge the checked files")
+            mb.add_css_class("quick"); mb.add_css_class("accent-btn")
+
+            def merge_checked(*_a):
+                chosen = [r for r, c in checks.items() if c.get_active()]
+                if not chosen:
+                    self._sys_note("Nothing checked: nothing to merge (Discard drops it all).", "dim")
+                    return
+                mb.set_sensitive(False)
+                self.join_background(e["pid"], only=chosen)
+            mb.connect("clicked", merge_checked)
+            row.append(mb)
+            foot.append(row)
+            e["_merge_checks"] = checks
         self._log_pin(card)
         return True
 
-    def join_background(self, pid):
+    def join_background(self, pid, only=None):
         """Merge a finished background agent's work into the folder: three-way,
         checkpointed first (so /rewind undoes it), conflicts set aside."""
         e = self._bg_entry(pid, "join")
@@ -8973,7 +9000,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             return "it changed nothing"
         self._checkpoint(f"merge background agent {e['pid']}")
         try:
-            r = e["ws"].merge()
+            r = e["ws"].merge(only=set(only) if only is not None else None)
         except Exception as ex:
             self._sys_note(f"\u2717 couldn't merge: {ex}", "danger")
             return f"merge failed: {ex}"
@@ -8986,6 +9013,8 @@ class ChuckWindow(Adw.ApplicationWindow):
             parts.append(f"{len(r['applied']) + len(r['merged'])} file(s) merged")
         if r["merged"]:
             parts.append(f"{len(r['merged'])} combined with your own edits")
+        if r.get("skipped"):
+            parts.append(f"{len(r['skipped'])} left out as you chose")
         if r["conflicts"]:
             parts.append(f"{len(r['conflicts'])} CONFLICT(S) not written ({', '.join(r['conflicts'][:5])}"
                          " \u2014 its versions are in .chuck-conflicts/)")
@@ -10155,6 +10184,10 @@ class ChuckWindow(Adw.ApplicationWindow):
                  + (f" ({t['note']})" if t.get("note") else "")
                  + (f" — {t['report'].strip().splitlines()[0][:140]}" if t.get("report", "").strip() else "")
                  for t in m["tasks"]]
+        try:
+            self._mission_learn(m)
+        except Exception:
+            pass
         summary = (f"Mission complete: {m['goal']}\n" + "\n".join(lines)
                    + f"\nSpent {_pricing.fmt_tokens(m['spent_tokens'])} tokens, "
                      f"{_pricing.fmt_usd(m['spent_usd'])}.")
@@ -10180,6 +10213,44 @@ class ChuckWindow(Adw.ApplicationWindow):
 
     _MISSION_ICON = {"pending": "○", "running": "◔", "verifying": "◑", "merged": "✓",
                      "done": "✓", "failed": "✗", "skipped": "–", "conflict": "⚠"}
+
+    _TASK_TOKENS = {"code": 180000, "research": 60000, "check": 80000}    # until it has learned
+
+    def _mission_estimate(self, m):
+        """-> (tokens, usd or None): what the plan will likely cost, from what
+        this machine's past missions' tasks really spent (a default until
+        there are some), at the chat model's price."""
+        learned = self.settings.get("mission_task_tokens") or {}
+        tok = 0
+        for t in m["tasks"]:
+            k = t.get("kind", "code")
+            got = learned.get(k) if isinstance(learned, dict) else None
+            tok += int(got[0]) if isinstance(got, list) and got and got[1] >= 2 else self._TASK_TOKENS.get(k, 150000)
+        price = _pricing.price_for(self.settings.get("model") or DEFAULT_MODEL, self.settings)
+        usd = None
+        if price:
+            usd = _pricing.cost({"prompt": int(tok * 0.9), "completion": int(tok * 0.1), "cached": 0}, price)
+        return tok, usd
+
+    def _mission_estimate_text(self, m):
+        tok, usd = self._mission_estimate(m)
+        cap = self.cfg("mission_tokens", 5000000, 100000, 100000000)
+        return (f"\nEstimated: about {_pricing.fmt_tokens(tok)} tokens"
+                + (f" \u2248 {_pricing.fmt_usd(usd)}" if usd is not None else "")
+                + f" (its budget caps it at {_pricing.fmt_tokens(cap)})")
+
+    def _mission_learn(self, m):
+        """After a mission: what each kind of task really spent, as a running
+        average, so the next estimate is closer to this machine's projects."""
+        learned = dict(self.settings.get("mission_task_tokens") or {})
+        for t in m["tasks"]:
+            p = self.kernel.procs.get(t.get("pid")) if self.kernel and t.get("pid") else None
+            if p is None or t["state"] not in (_missions.MERGED, _missions.DONE):
+                continue
+            avg, n = (learned.get(t["kind"]) or [0, 0])[:2]
+            learned[t["kind"]] = [int((avg * n + p.tokens()) / (n + 1)), min(n + 1, 50)]
+        self.settings["mission_task_tokens"] = learned
+        save_settings(self.settings)
 
     def _mission_card(self, m):
         card, head, body, foot = self._card_shell(
@@ -10224,6 +10295,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         ui["info"].set_text(("planning the tasks…" if st == _missions.PLANNING else
                              f"{done} of {n} tasks finished{spend}")
                             + (f"\n{m['notes']}" if m.get("notes") else "")
+                            + (self._mission_estimate_text(m) if st == _missions.AWAITING else "")
                             + ("\nEach code task runs in its own copy of the folder; its tests must pass "
                                "on that copy before it is merged. Tasks without a dependency between "
                                "them run at once." if st == _missions.AWAITING else ""))
@@ -10419,6 +10491,8 @@ class ChuckWindow(Adw.ApplicationWindow):
         add("Chat", "Cost of this chat", lambda: self._slash("/cost"), hint="/cost")
         add("Code", "Show the diff", self.show_git_diff, hint="/diff", keywords="git changes")
         add("Code", "Commit", lambda: self._slash("/commit"), hint="/commit", keywords="git")
+        add("Code", "Open a pull request", lambda: self._slash("/pr"), hint="/pr",
+            keywords="git github branch push gh")
         add("Code", "Review the uncommitted changes", lambda: self._slash("/review"), hint="/review",
             keywords="bugs")
         add("Code", "Rewind files and chat", self.show_rewind, hint="/rewind", keywords="undo checkpoint")
@@ -11986,6 +12060,14 @@ class ChuckWindow(Adw.ApplicationWindow):
                   "a careful senior reviewer: bugs, broken edge cases, security problems, "
                   "missing tests. Report each finding with file:line and severity, most "
                   "severe first. Change nothing.")
+    PR_ASK = ("Open a pull request for this work. Check `git status`, the current branch and "
+              "`git remote -v`. If on the default branch, create a branch with a short descriptive "
+              "name. Stage only what belongs (never secrets or build output), commit with a "
+              "message that says why, run the project's tests, push with `git push -u origin "
+              "<branch>`, then open the PR with `gh pr create` (title: what it does; body: what "
+              "changed and why, how it was tested, anything the reviewer should look at). If `gh` "
+              "isn't installed or isn't logged in, stop after the push and give the exact "
+              "compare URL. Show the PR URL at the end.")
 
     def _do_write(self, rel, content):
         """Write one complete file into the working folder — checkpointed, shown
@@ -12519,6 +12601,8 @@ class ChuckWindow(Adw.ApplicationWindow):
         ("/model <name>", "switch model (part of the name is enough)"),
         ("/diff", "the working tree as a diff (git)"),
         ("/commit [msg]", "Chuck stages the right changes and commits"),
+        ("/pr [what it's about]", "a branch, a commit, a push and a pull request with a written "
+                                  "description (via gh)"),
         ("/review", "Chuck reviews the uncommitted changes for bugs"),
         ("/undo", "revert the last file change"),
         ("/rewind", "put the folder AND the chat back to before any step"),
@@ -12646,12 +12730,14 @@ class ChuckWindow(Adw.ApplicationWindow):
             self.offer_voice_install("both")
         elif cmd == "update":
             self.run_update()
-        elif cmd in ("commit", "review"):
+        elif cmd in ("commit", "review", "pr"):
             if not self.workspace:
                 self._sys_note("Pick a working folder first (/folder).", "danger")
                 return True
             self.set_agent_mode(True, announce=False)
-            ask = self.COMMIT_ASK if cmd == "commit" else self.REVIEW_ASK
+            ask = {"commit": self.COMMIT_ASK, "review": self.REVIEW_ASK, "pr": self.PR_ASK}[cmd]
+            if cmd == "pr" and arg:
+                ask += f" What this PR is about, in the user's words: {arg}"
             if cmd == "commit" and arg:
                 ask += f" Use exactly this commit message: {arg}"
             self.entry.get_buffer().set_text(ask)

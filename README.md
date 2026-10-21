@@ -74,7 +74,7 @@ An agent loop with a prompt and a few tools is a program. Run ten of them and yo
 /mission make the API return proper 4xx errors everywhere, with tests
 ```
 
-Some jobs are too big for one agent. A mission plans the goal as a small graph of tasks with dependencies, shows you the plan, and once you press **Start** runs it the way `make` runs a build. Every task whose dependencies are finished starts as its own agent, several at once. Each code task works in a fresh copy of your folder that already holds the earlier tasks' work. **Nothing is merged until the project's tests pass on that copy.** If they fail, the same agent is sent back with the failure to fix it. A task that still fails pauses the mission and asks you: Retry or Skip. The whole mission is one process group with one budget (Cancel ends every agent in it), and it survives a restart.
+Some jobs are too big for one agent. A mission plans the goal as a small graph of tasks with dependencies, shows you the plan, and once you press **Start** runs it the way `make` runs a build. Every task whose dependencies are finished starts as its own agent, several at once. Each code task works in a fresh copy of your folder that already holds the earlier tasks' work. **Nothing is merged until the project's tests pass on that copy.** If they fail, the same agent is sent back with the failure to fix it. A task that still fails pauses the mission and asks you: Retry or Skip. The whole mission is one process group with one budget (Cancel ends every agent in it), and it survives a restart. Before you press Start, the card estimates what the plan will cost. The estimate learns from what your past missions' tasks really spent.
 
 <img src="assets/screenshots/os-mission.png" alt="A MISSION card: five tasks with dependencies; three finished (one merged after its tests passed), one running, one waiting, with spend so far and Report / Trace / Replay per task" width="100%">
 
@@ -112,7 +112,7 @@ The chat you are talking to is PID 1. Every sub-agent, background agent, program
 /spawn add tests for the parser and fix what they find
 ```
 
-A full agent that writes, runs and tests code works **in its own copy of your folder** while you keep talking to Chuck. Its commands are jailed to that copy by bubblewrap. Run five at once; none can trample another. When one finishes, its card shows the diff, and **Merge** brings it home three-way: your edits and its edits to the same file are combined; overlapping edits are never forced, but set aside for you. The merge is checkpointed, so `/rewind` undoes it.
+A full agent that writes, runs and tests code works **in its own copy of your folder** while you keep talking to Chuck. Its commands are jailed to that copy by bubblewrap. Run five at once; none can trample another. When one finishes, the project's tests run on its copy and the card says whether they pass. **Show diff** lets you tick exactly which files to take, and **Merge** brings it home three-way: your edits and its edits to the same file are combined; overlapping edits are never forced, but set aside for you. The merge is checkpointed, so `/rewind` undoes it.
 
 <img src="assets/screenshots/os-background.png" alt="A background agent's card: done, two files changed in its copy, its report, and Show diff / Merge into folder / Discard / Trace / Replay" width="100%">
 
@@ -249,7 +249,7 @@ Click the folder chip (or **Ctrl+O**) to point the session at a project. Command
 
 ## The workflow around the code
 
-- **Git.** `/diff` shows the working tree as a card. `/commit` has Chuck stage the right changes and write the message from the diff. `/review` has him review the uncommitted diff for bugs before you push.
+- **Git.** `/diff` shows the working tree as a card. `/commit` has Chuck stage the right changes and write the message from the diff. `/review` has him review the uncommitted diff for bugs before you push. `/pr` goes all the way: a branch, a commit, the tests, a push, and a pull request with a written description (via `gh`).
 - **Hooks.** Settings → Agent takes a command to run after every file write (a formatter, with `{path}`, optionally only for matching files) and one he must pass before he may finish (`pytest -q`, a linter). Their results go back to the model, so he fixes what they find.
 - **A Python session.** ```` ```py ```` blocks share one interpreter per chat. Load a dataset once, then explore it block by block. Stop interrupts a long loop and keeps the variables, and a figure comes back as an image he can look at. ```` ```python ```` stays a fresh one-shot script.
 

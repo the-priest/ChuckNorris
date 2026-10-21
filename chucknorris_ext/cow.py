@@ -135,7 +135,7 @@ class Workspace:
                 break
         return "".join(parts)
 
-    def merge(self, conflict_dir=None):
+    def merge(self, conflict_dir=None, only=None):
         """Bring the agent's changes into the source folder, three-way.
         -> {"applied": [...], "merged": [...], "conflicts": [...], "kept": [...]}.
         A conflicting file is never written: the agent's version goes to
@@ -143,6 +143,9 @@ class Workspace:
         res = {"applied": [], "merged": [], "conflicts": [], "kept": []}
         cdir = Path(conflict_dir) if conflict_dir else self.source / ".chuck-conflicts"
         for rel, kind in self.changes().items():
+            if only is not None and rel not in only:
+                res.setdefault("skipped", []).append(rel)     # you chose to leave it out
+                continue
             mine = self.source / rel
             base, theirs = self.base / rel, self.work / rel
             mine_now = mine.exists()
