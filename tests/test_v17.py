@@ -952,7 +952,7 @@ try:
     L.ready = lambda: True
     script = []
 
-    def fake_listen(on_event, max_wait=8, max_len=30):
+    def fake_listen(on_event, max_wait=8, max_len=30, **_k):
         for ev in script:
             on_event(ev)
         return True
@@ -1115,6 +1115,50 @@ ok, det = L.mic_test()
 check(not ok and "can't write raw audio" in det, "and names why a recorder gave none", det)
 L.RECORDERS, L.EARS.good = real_recs, real_good
 L._SETTINGS["mic_command"] = real_mic or ""
+(bind / "silentrec").write_text("#!/bin/sh\nexec sleep 30\n")
+os.chmod(bind / "silentrec", 0o755)
+if _np is not None:
+    out = []
+    SS.emit = lambda **kw: out.append(kw)
+    real_na = SS.NO_AUDIO_AFTER
+    SS.NO_AUDIO_AFTER = 0.5
+    try:
+        t0 = time.time()
+        SS.listen({"recorders": [[str(bind / "silentrec")], [str(bind / "goodrec")]], "max_wait": 8},
+                  _SO, _np, None, 512, lambda s: "hello", [])
+        ev = [e["event"] for e in out]
+        check("final" in ev and time.time() - t0 < 4,
+              "a recorder that runs but sends nothing is dead, and the next one is tried", out)
+    finally:
+        SS.emit, SS.NO_AUDIO_AFTER = real_emit, real_na
+check("--latency-msec=60" in L.RECORDERS[0] and L.RECORDERS[0][0] == "parecord",
+      "parecord asks for low latency (pipewire-pulse otherwise hands over 2 s at a time)")
+ears4 = L.Ears()
+ears4.prepare()
+ears4.cancel()                                     # the second tap, before the listen thread ran
+got4 = []
+real_ra = L.recorder_argv
+L.recorder_argv = lambda: ["true"]
+ears4.start = lambda timeout=90: None
+check(ears4.listen(got4.append, prepared=True) is False and got4 == [{"event": "cancelled"}]
+      and not ears4.busy, "a quick second tap cancels, instead of being lost", got4)
+L.recorder_argv = real_ra
+L._SERVER, L._voice.voice_python = fake_srv, lambda: sys.executable
+ears5 = L.Ears()
+got5 = []
+real_chain = L.recorder_chain
+L.recorder_chain = lambda: [["true"]]
+L.recorder_argv = lambda: ["true"]
+ears5.listen(got5.append)
+old = ears5.proc
+ears5.proc = subprocess.Popen(["sleep", "5"], stdin=subprocess.PIPE, text=True)   # reinstall swapped it
+old.kill()
+time.sleep(0.5)
+check(got5 == [{"event": "cancelled"}] and not ears5.busy,
+      "reinstalling voice input mid-listen ends that listen, so the mic isn't stuck", got5)
+ears5.stop()
+L.recorder_chain, L.recorder_argv = real_chain, real_ra
+L._SERVER, L._voice.voice_python = real_srv, real_py
 
 # ═══════════════════════════════════════════════════════════════════════════
 print("\n--- updating: a failed swap leaves the working copy ---")

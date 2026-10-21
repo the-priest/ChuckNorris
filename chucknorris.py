@@ -10243,9 +10243,12 @@ class ChuckWindow(Adw.ApplicationWindow):
         def on_event(ev):
             GLib.idle_add(self._on_hear, ev)
 
+        _listen.EARS.prepare()                  # a second tap from here on is a cancel
+
         def go():
             try:
-                _listen.EARS.listen(on_event, max_wait=float(self.settings.get("mic_wait", 8)))
+                _listen.EARS.listen(on_event, max_wait=float(self.settings.get("mic_wait", 8)),
+                                    prepared=True)
             except Exception as ex:
                 GLib.idle_add(self._on_hear, {"event": "error", "error": str(ex)})
         threading.Thread(target=go, daemon=True, name="listen").start()

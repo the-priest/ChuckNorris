@@ -37,7 +37,10 @@ _SETTINGS = config.SETTINGS_DATA
 # without it some versions exit at once (which used to read as "didn't
 # hear anything" the instant the mic was tapped).
 RECORDERS = (
-    ["parecord", "--raw", "--rate=16000", "--channels=1", "--format=s16le"],
+    # --latency-msec: without it pipewire-pulse hands audio over in 2 s
+    # fragments (pulse.default.frag), so the end of a sentence lagged by up
+    # to 2 s and a short mic test saw nothing at all
+    ["parecord", "--raw", "--rate=16000", "--channels=1", "--format=s16le", "--latency-msec=60"],
     ["pw-record", "--rate", "16000", "--channels", "1", "--format", "s16", "--raw", "-"],
     ["pw-record", "--rate", "16000", "--channels", "1", "--format", "s16", "-"],
     ["arecord", "-q", "-t", "raw", "-f", "S16_LE", "-r", "16000", "-c", "1"],
@@ -68,7 +71,7 @@ def recorder_argv():
     return chain[0] if chain else None
 
 
-def mic_test(seconds=1.2):
+def mic_test(seconds=2.5):
     """Record a moment from each recorder until one gives sound.
     -> (ok, detail). For /doctor: proves the mic, not just the software."""
     tried = []
@@ -83,7 +86,7 @@ def mic_test(seconds=1.2):
         fd = p.stdout.fileno()
         os.set_blocking(fd, False)
         try:
-            while time.time() < end and p.poll() is None:
+            while time.time() < end and p.poll() is None and len(data) < 32000:
                 try:
                     chunk = os.read(fd, 6400)
                 except BlockingIOError:
@@ -141,6 +144,7 @@ class Ears:
         self.busy = False
         self.cancel_pending = False
         self.listen_sent = False
+        self.listen_proc = None                  # the server the current listen went to
         self.good = None                         # the recorder that worked last time
 
     def alive(self):
@@ -184,9 +188,18 @@ class Ears:
                         except Exception:
                             pass
                 if self.proc is not me:
-                    if self.proc is None:
-                        self.busy = False           # stopped mid-utterance: the mic is free
-                    return                          # replaced (reinstall, stop): not an error
+                    # replaced (reinstall) or stopped: not an error, but a listen
+                    # that was running on THIS server is over, and the window
+                    # must hear so, or its mic button stays "listening" forever
+                    if self.busy and (self.proc is None or self.listen_proc is me):
+                        self.busy = False
+                        cb = self.on_event
+                        if cb is not None and self.listen_proc is me:
+                            try:
+                                cb({"event": "cancelled"})
+                            except Exception:
+                                pass
+                    return
                 was_busy, self.busy = self.busy, False
                 if not got_ready:
                     first.put({"event": "error", "error": "the speech model didn't load"})
@@ -209,16 +222,23 @@ class Ears:
         self.proc.stdin.write(json.dumps(obj) + "\n")
         self.proc.stdin.flush()
 
-    def listen(self, on_event, max_wait=8, max_len=30):
-        """Start one utterance. Returns False if it can't start."""
-        argv = recorder_argv()
-        if argv is None:
-            on_event({"event": "error", "error": status()[1]})
-            return False
+    def prepare(self):
+        """Claim the mic before the listen thread runs, so a second tap that
+        comes before it does is a cancel, not lost."""
         self.cancel_pending = False
         self.listen_sent = False
+        self.busy = True
+
+    def listen(self, on_event, max_wait=8, max_len=30, prepared=False):
+        """Start one utterance. Returns False if it can't start."""
+        if not prepared:
+            self.prepare()
+        argv = recorder_argv()
+        if argv is None:
+            self.busy = False
+            on_event({"event": "error", "error": status()[1]})
+            return False
         self.on_event = on_event
-        self.busy = True                        # from here a cancel counts, even mid-load
         try:
             self.start()
         except Exception:
@@ -232,6 +252,7 @@ class Ears:
         chain = recorder_chain() or [argv]
         if argv not in chain:
             chain.insert(0, argv)
+        self.listen_proc = self.proc
         self._send({"cmd": "listen", "recorders": chain, "max_wait": max_wait, "max_len": max_len})
         self.listen_sent = True
         if self.cancel_pending:                 # cancelled while the listen was being sent

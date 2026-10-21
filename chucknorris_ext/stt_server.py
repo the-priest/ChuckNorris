@@ -109,6 +109,9 @@ def main():
 
 # a recorder that ends having given less than this much audio never worked
 MIN_AUDIO = RATE * 2 // 5          # 0.2 s of 16-bit samples, in bytes
+# one that runs but sends nothing for this long (no source linked, a
+# suspended device) is dead too: the next one is tried, not "silence"
+NO_AUDIO_AFTER = 3.0
 
 
 def listen(c, so, np, cfg, window, transcribe, cmds):
@@ -162,6 +165,8 @@ def _listen_on(proc, c, so, np, cfg, window, transcribe, cmds, announce=None):
                     emit(event="error", error="the microphone stopped" + (f": {err[-200:]}" if err else ""))
                     result = "error"
                     break
+                if got < MIN_AUDIO and time.time() - t0 > min(NO_AUDIO_AFTER, max_wait):
+                    return ("dead", f"gave no audio in {min(NO_AUDIO_AFTER, max_wait):.0f} s")
                 if not heard and time.time() - t0 > max_wait:
                     result = "nothing"
                     break
