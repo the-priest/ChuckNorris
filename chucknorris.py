@@ -3181,6 +3181,14 @@ class _RawText(str):
         return obj
 
 
+def _msg_key(m):
+    """A short fingerprint of a message, to tell whether history still holds it."""
+    import hashlib
+    c = m.get("content")
+    return hashlib.sha1((str(m.get("role")) + "\0" + (c if isinstance(c, str) else repr(c)))
+                        .encode("utf-8", "replace")).hexdigest()[:16]
+
+
 def _merge_spans(spans):
     """Overlapping or nested spans as one: a write block inside an example."""
     out = []
@@ -3419,6 +3427,9 @@ class ChuckWindow(Adw.ApplicationWindow):
             _listen.warm_up()
         self._show_empty_hint()
         GLib.timeout_add_seconds(20, self._update_check)   # once a day, after startup settles
+        if getattr(_config, "LOAD_PROBLEM", [None])[0]:
+            self._sys_note("\u26a0 " + _config.LOAD_PROBLEM[0], "danger")
+            _config.LOAD_PROBLEM[0] = None
         if _checkpoint is not None:             # old folders' snapshots, in the background
             threading.Thread(target=lambda: _checkpoint.prune(self.CHECKPOINT_STORE), daemon=True,
                              name="srv-cp-prune").start()
@@ -5102,14 +5113,18 @@ class ChuckWindow(Adw.ApplicationWindow):
             self.chat_list.append(empty)
 
     def _delete_chat(self, path):
+        current = Path(path).stem == str(self.chat_id)
+        if current and self._running:
+            # stop FIRST: stopping saves the chat, which would bring the
+            # deleted file straight back
+            self.stop_run(auto=True)
         try:
             Path(path).unlink()
         except OSError:
             pass
-        if Path(path).stem == str(self.chat_id):
+        if current:
             # the open chat is gone: start fresh without re-saving it
-            if self._running:
-                self.stop_run(auto=True)
+            _SHELL["cwd"] = None
             self.chat_id = self._new_chat_id()
             self._new_history()
             self._reset_meter()
@@ -5147,6 +5162,7 @@ class ChuckWindow(Adw.ApplicationWindow):
                          and isinstance(c.get("text"), str) and 1 < c["upto"] <= len(self.history)
                          else None)
         ws = meta.get("workspace") or ""
+        _SHELL["cwd"] = None                    # a `cd` in another chat doesn't carry over
         if ws and os.path.isdir(ws) and (not self.workspace or str(self.workspace) != ws):
             self.set_workspace(ws, announce=False)
         self._reset_meter()
@@ -7075,7 +7091,8 @@ class ChuckWindow(Adw.ApplicationWindow):
             sent = sum(len(m.get("content") or "") for m in messages
                        if isinstance(m.get("content"), str))
             u, txt = getattr(b, "last_usage", None), "".join(out)
-            mdl = b.model() if hasattr(b, "model") else None
+            # the model that ANSWERED: a fallback is priced as itself
+            mdl = getattr(b, "last_model", None) or (b.model() if hasattr(b, "model") else None)
             GLib.idle_add(lambda: (self._account(sent, len(txt), usage=u, model=mdl), False)[1])
             self._note_progress()
             return txt
@@ -9622,8 +9639,21 @@ class ChuckWindow(Adw.ApplicationWindow):
         row.append(go); row.append(stop)
         foot.append(row)
 
+        # only the newest cap card can continue: an older one would start a
+        # second model stream beside the run the newer one started
+        for old_btns in getattr(self, "_cap_btns", ()):
+            for b_ in old_btns:
+                try:
+                    b_.set_sensitive(False)
+                except Exception:
+                    pass
+        self._cap_btns = [(go, stop)]
+        gen_, chat_ = self._gen, self.chat_id
+
         def cont(_b):
             go.set_sensitive(False); stop.set_sensitive(False)
+            if self._running or gen_ != self._gen or chat_ != self.chat_id:
+                return                          # a run is going, or this chat moved on
             # another `cap` from HERE, not from wherever the cap used to be
             self._cap_extra = max(self._cap_extra, self._usage.get("cost", 0) - cap) + cap
             self._start_run()
@@ -9908,6 +9938,10 @@ class ChuckWindow(Adw.ApplicationWindow):
                 {"role": "user", "content": transcript}]
         self._compacting = True
         chat = self.chat_id
+        # the very messages it summarises: a retry, an edit or a rewind cuts
+        # history in place and the run regrows it, so a length check can't
+        # tell that these turns are gone
+        anchor, first = self.history[upto - 1], self.history[start]
         self._sys_note("\U0001F5DC compacting earlier turns\u2026", "dim")
 
         def work():
@@ -9921,15 +9955,17 @@ class ChuckWindow(Adw.ApplicationWindow):
 
             def land():
                 self._compacting = False
-                if chat != self.chat_id or upto > len(self.history) - 1:
+                if not err:                      # it was paid for, whether it lands or not
+                    self._account(len(transcript), len(text), usage=getattr(b, "last_usage", None),
+                                  model=getattr(b, "last_model", None))
+                if (chat != self.chat_id or upto > len(self.history) - 1
+                        or self.history[upto - 1] is not anchor or self.history[start] is not first):
                     return False                 # another chat, or history changed under it
                 if err or len(text) < 40:
                     self._sys_note("\u26a0 couldn't compact: " + (err[0] if err else
                                                                    "empty summary"), "danger")
                     return False
-                self._account(len(transcript), len(text), usage=getattr(b, "last_usage", None),
-                              model=getattr(b, "last_model", None))
-                self._compact = {"upto": upto, "text": text}
+                self._compact = {"upto": upto, "text": text, "anchor": _msg_key(anchor)}
                 self._sys_note(f"\U0001F5DC compacted {upto - start} earlier messages into a "
                                f"{len(text) // 1000 or 1}k summary", "dim")
                 self._save_chat()
@@ -9950,11 +9986,31 @@ class ChuckWindow(Adw.ApplicationWindow):
         if not messages:
             return messages
         c = self._compact
+        if c and c.get("anchor") and not (1 < c["upto"] <= len(self.history)
+                                         and _msg_key(self.history[c["upto"] - 1]) == c["anchor"]):
+            self._compact = c = None             # what it summarised is no longer there
         if c and 1 < c["upto"] < len(messages) - 1:
-            # the summary stands in for every turn it covers
+            # the summary stands in for every turn it covers — but never for
+            # the request being worked on, or its plan: those go verbatim
+            extra = ""
+            li = self._last_user_index()
+            if li is not None and li < c["upto"]:
+                extra += ("\n\nTHE USER'S CURRENT REQUEST (verbatim):\n"
+                          + self._typed_text(self.history[li].get("content")))
+            newer_plan = any(m.get("role") == "assistant" and "```plan" in str(m.get("content"))
+                             for m in self.history[c["upto"]:])
+            for m in ([] if newer_plan else reversed(self.history[:c["upto"]])):
+                mc = m.get("content")
+                if m.get("role") == "assistant" and isinstance(mc, str) and "```plan" in mc:
+                    pm = re.findall(r"```plan[ \t]*\n?(.*?)```", mc, re.DOTALL)
+                    if pm:
+                        extra += "\n\nTHE CURRENT PLAN:\n" + pm[-1].strip()
+                    break
+                if self._is_real_user(m):
+                    break                        # a plan from an earlier request
             messages = (messages[:1] + [{"role": "user", "content":
                         "CONVERSATION SUMMARY (earlier turns, compacted — the work so far):\n"
-                        + c["text"]}] + messages[c["upto"]:])
+                        + c["text"] + extra}] + messages[c["upto"]:])
         self._maybe_auto_compact(messages)
         # Compress BEFORE deciding what fits. The old order dropped whole blobs
         # the moment the budget was tight, which threw away the middle of a
@@ -10119,7 +10175,10 @@ class ChuckWindow(Adw.ApplicationWindow):
         except Exception:
             pass
 
+        got = {"chars": 0, "opened": False, "ended": False}
+
         def on_delta(chunk):
+            got["chars"] += len(chunk or "")
             if stale():
                 return
             self._awaiting_first = False
@@ -10139,6 +10198,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             GLib.idle_add(self._paint_stream)
 
         def on_done():
+            got["ended"] = True
             self._awaiting_first = False
             self._busy(False)
             recv = len(self._bot_text or "") + len(self._think_text or "")
@@ -10150,6 +10210,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             GLib.idle_add(lambda: (self._finalise() if not stale() else False, False)[1])
 
         def on_error(msg):
+            got["ended"] = True
             self._awaiting_first = False
             self._thinking = False
             self._busy(False)
@@ -10168,12 +10229,20 @@ class ChuckWindow(Adw.ApplicationWindow):
                 GLib.idle_add(self._set_bot_text, "\u26a0 " + msg)
             GLib.idle_add(self._end_run)
 
-        threading.Thread(
-            target=self.backend.stream,
-            args=(send_msgs, on_delta, on_done, on_error, vision),
-            kwargs={"should_stop": stale,
-                    "on_open": self._note_progress},
-            daemon=True).start()
+        def opened(*_a):
+            got["opened"] = True
+            self._note_progress()
+
+        def run_stream():
+            self.backend.stream(send_msgs, on_delta, on_done, on_error, vision,
+                                should_stop=stale, on_open=opened)
+            if not got["ended"] and (got["opened"] or got["chars"]):
+                # stopped mid-reply (Stop, the watchdog, another chat): the
+                # request was still billed, so the meter and the cap count it
+                used = getattr(self.backend, "last_model", None)
+                GLib.idle_add(lambda: (self._account(sent_chars, got["chars"], vision,
+                                                     usage={}, model=used), False)[1])
+        threading.Thread(target=run_stream, daemon=True).start()
 
     _CONTINUE_MSG = ("CONTINUE: your previous message was cut off by the output limit. "
                      "Continue EXACTLY from its last character: no repetition, no preamble, "
@@ -11668,7 +11737,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             for k in ("voice_engine", "voice_speed", "voice_pitch", "research_sources",
                       "research_queries", "research_hops", "fetch_timeout", "chat_ttl_hours",
                       "render_keep", "render_page", "font_size", "voice_max_chars",
-                      "piper_model", "siliconflow_base_url", "temperature", "max_tokens",
+                      "piper_model", "temperature", "max_tokens",
                       "web_cache_seconds", "proxy_api", "agent_steps", "price_in", "price_out"):
                 S.pop(k, None)
             save_settings(S)

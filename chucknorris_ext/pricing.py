@@ -91,14 +91,19 @@ def price_for(model, settings=None):
     table has never heard of.
     """
     s = settings or {}
+    table = PRICES.get((model or "").strip().lower())
     try:
         ci = float(s.get("price_in") or 0)
         co = float(s.get("price_out") or 0)
     except (TypeError, ValueError):
         ci = co = 0.0
-    if ci > 0 or co > 0:
-        return (ci, None, co)
-    return PRICES.get((model or "").strip().lower())
+    chat_model = (s.get("model") or "").strip().lower()
+    # a custom price is for the chat model it was set for (not the fallback,
+    # vision or a free model), and a side left at 0 keeps the table's price
+    if (ci > 0 or co > 0) and (not chat_model or (model or "").strip().lower() == chat_model):
+        t_in, t_cached, t_out = table if table else (0.0, None, 0.0)
+        return (ci if ci > 0 else t_in, t_cached if ci <= 0 else None, co if co > 0 else t_out)
+    return table
 
 
 def usage_from_chunk(d):

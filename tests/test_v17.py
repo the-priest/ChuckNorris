@@ -1283,6 +1283,65 @@ check(rc == 0 and log.read_text().count("ran") == 2, "and the next sudo command 
 cn.detect_priv_esc = real_pe
 cn._ASKPASS_FIRST[0] = False
 
+print("\n--- compaction, the spending cap, settings and chats ---")
+w = agent([], tmp / "resume")
+w.history = [w.history[0], {"role": "user", "content": "BUILD THE PARSER IN RUST"},
+             {"role": "assistant", "content": "```plan\n- [ ] lexer\n- [ ] parser\n```"}]
+for i in range(10):
+    w.history += [{"role": "user", "content": f"TOOL RESULTS (continue): step {i}"},
+                  {"role": "assistant", "content": f"did step {i}"}]
+w._compact = {"upto": 12, "text": "Summary: lexer done.", "anchor": cn._msg_key(w.history[11])}
+sent = w._trim_for_send(list(w.history))
+summ = next(m["content"] for m in sent if str(m.get("content")).startswith("CONVERSATION SUMMARY"))
+check("BUILD THE PARSER IN RUST" in summ and "- [ ] parser" in summ,
+      "after compaction the request and its plan are still sent word for word", summ[-200:])
+w.history[11] = {"role": "assistant", "content": "something else now (a retry rewrote this)"}
+w._trim_for_send(list(w.history))
+check(w._compact is None, "a summary of turns that were rewritten (retry, edit, rewind) is dropped")
+w = agent([], tmp / "resume")
+w._usage["cost"] = 5.0
+w._cost_pause(1.0, False)
+w._cost_pause(1.0, False)
+gos = [x for x in w.msgbox.walk() if isinstance(x, cn.Gtk.Button) and str(x.get_label()).startswith("Continue")]
+check(len(gos) == 2 and not gos[0].get_sensitive() and gos[1].get_sensitive(),
+      "only the newest spending-cap card can continue (an old one would start a second stream)")
+sp = cn._config.SETTINGS
+sp.parent.mkdir(parents=True, exist_ok=True)
+saved_settings = sp.read_text() if sp.exists() else None
+sp.write_text('{"siliconflow_api_key": "sk-keep", "folder_access": {"/x": "readonly"},}')
+st = cn._config.load_settings()
+check(st.get("siliconflow_api_key") == "sk-keep" and st.get("folder_access") == {"/x": "readonly"},
+      "a settings.json with a trailing comma is still read")
+sp.write_text('{"siliconflow_api_key": "sk-keep" ### broken')
+cn._config.load_settings()
+backups = list(sp.parent.glob("settings.json.bad-*"))
+check(backups and "sk-keep" in backups[-1].read_text() and cn._config.LOAD_PROBLEM[0],
+      "an unreadable one is backed up before defaults can overwrite it")
+cn._config.LOAD_PROBLEM[0] = None
+for b_ in backups:
+    b_.unlink()
+if saved_settings is None:
+    sp.unlink()
+else:
+    sp.write_text(saved_settings)
+w = agent(["hi"], tmp / "resume")
+type_and_send(w, "a chat to delete")
+w._save_chat()
+cpath = cn.CHATS_DIR / f"{w.chat_id}.json"
+w._running = True
+w._delete_chat(cpath)
+check(not cpath.exists(), "deleting the open chat while it runs doesn't bring it back")
+cn._SHELL["cwd"] = str(tmp)
+w._load_chat(next(iter(cn.chat_files())))
+check(cn._SHELL["cwd"] is None, "a `cd` from one chat doesn't carry into another")
+P = cn._pricing
+flash = P.PRICES.get("zai-org/glm-5.3-flash")
+if flash:
+    check(P.price_for("zai-org/GLM-5.3-Flash", {"price_in": 0.2, "model": "zai-org/GLM-5.3-Flash"})
+          == (0.2, None, flash[2]), "a custom input price keeps the table's output price")
+    check(P.price_for("zai-org/GLM-5.3-Flash", {"price_in": 9, "model": "deepseek-ai/DeepSeek-V4.1-Flash"})
+          == flash, "and applies to the chat model it was set for, not the fallback")
+
 print("\n--- installer: a stale clone in the current folder isn't installed ---")
 inst = Path(_ROOT, "install.sh").read_text()
 snip = inst[inst.index('SELF_DIR=""'):]

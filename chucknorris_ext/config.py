@@ -4,6 +4,8 @@ to look when you want to know where something lives or what a limit is.
 """
 import os
 import json
+import re
+import time
 
 import urllib.parse
 import urllib.request
@@ -54,6 +56,9 @@ UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 
 
+LOAD_PROBLEM = [None]          # a message for the app to show, when settings were unreadable
+
+
 def load_settings():
     """Read settings.json, tolerating anything that isn't a JSON object.
 
@@ -64,10 +69,27 @@ def load_settings():
     s = {}
     if SETTINGS.exists():
         try:
-            s = json.loads(SETTINGS.read_text())
-        except Exception:
-            s = {}
+            raw = SETTINGS.read_text()
+        except OSError:
+            raw = ""
+        try:
+            s = json.loads(raw)
+        except ValueError:
+            # a hand edit's trailing comma is the usual culprit: forgive it
+            try:
+                s = json.loads(re.sub(r",(\s*[}\]])", r"\1", raw))
+            except ValueError:
+                s = None
         if not isinstance(s, dict):
+            # unreadable: keep a copy BEFORE the next save writes defaults
+            # over it (the API key and every folder's access policy are here)
+            try:
+                bad = SETTINGS.with_name(f"settings.json.bad-{int(time.time())}")
+                bad.write_text(raw)
+                LOAD_PROBLEM[0] = (f"settings.json couldn't be read \u2014 a copy is at {bad.name}; "
+                                   "starting from defaults")
+            except OSError:
+                pass
             s = {}
     if not s.get("siliconflow_api_key") and BASILISK_SETTINGS.exists():
         try:
