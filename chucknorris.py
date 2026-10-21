@@ -3239,6 +3239,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._apply_access()                    # this window's folder policy, not a stale one
         self._interrupted = self._find_interrupted()
         voice.ON_PIPER_FAIL[0] = lambda why: GLib.idle_add(self._piper_note, why)
+        voice.ON_VOICE_FAIL[0] = lambda eng, why: GLib.idle_add(self._voice_fail_note, eng, why)
         self._listening = False
         if self.settings.get("tts", True):
             voice.warm_up(self.settings)          # the natural voice loads in the background
@@ -5091,6 +5092,13 @@ class ChuckWindow(Adw.ApplicationWindow):
     def _on_close(self, *_):
         self._save_chat(running=False)          # closing mid-task is a choice, not a crash
         self._py_close()
+        try:                                    # the mic, the ears and the voice go too
+            if _listen is not None:
+                _listen.EARS.cancel()
+                _listen.EARS.stop()
+            voice.KOKORO.stop()
+        except Exception:
+            pass
         if getattr(self, "_lsp_m", None) is not None:
             threading.Thread(target=self._lsp_m.stop_all, daemon=True).start()
         # background jobs belong to this session: don't leave a dev server
@@ -7861,8 +7869,8 @@ class ChuckWindow(Adw.ApplicationWindow):
             grid.attach(il, 0, i, 1, 1); grid.attach(nl, 1, i, 1, 1); grid.attach(dl, 2, i, 1, 1)
             if name == "API":
                 api_detail, api_icon = dl, il
-            if name == "Voice" and st == "ok":
-                voice_row = (dl, il)
+            if name == "Voice" and st in ("ok", "fail"):
+                voice_row = (dl, il)                 # a failed one is re-tested: it may be fine now
         body.append(grid)
         self._log_pin(card)
         key, base = self.backend.key(), self.backend.base()
@@ -7904,10 +7912,11 @@ class ChuckWindow(Adw.ApplicationWindow):
                 except Exception:
                     pass
                 return False
-            eng_now = voice.engine_for(self.settings)
+            use_kokoro = voice.kokoro_ready() and (self.settings.get("voice_engine") or "auto") in (
+                "auto", "kokoro")
             kvoice = self.settings.get("kokoro_voice")
             threading.Thread(target=lambda: GLib.idle_add(voice_done, voice.test_kokoro(
-                kvoice) if eng_now == "kokoro" else voice.test_piper()),
+                kvoice) if use_kokoro else voice.test_piper()),
                 daemon=True).start()
         return rows
 
@@ -8121,6 +8130,14 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._set_interrupted_flag(self._interrupted[0], False)
         self._interrupted = None
         self._show_empty_hint()
+
+    def _voice_fail_note(self, engine, why):
+        last = (why or "").strip().splitlines()[-1][:180] if why else "unknown error"
+        self._sys_note(f"\U0001F50A {engine} failed ({last}), so another voice is reading this "
+                       "for now \u2014 /doctor or Settings \u203a Voice to fix it.", "danger")
+        if _crashlog is not None:
+            _crashlog.record(engine.lower(), why or "")
+        return False
 
     def _piper_note(self, why):
         last = (why or "").strip().splitlines()[-1][:180] if why else "unknown error"

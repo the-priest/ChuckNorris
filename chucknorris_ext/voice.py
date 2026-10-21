@@ -82,11 +82,13 @@ def ensure_venv(packages, module, progress=lambda s: None):
     if py and subprocess.run([py, "-c", f"import {module}"], capture_output=True,
                              timeout=120).returncode == 0:
         return True, "already installed"
-    if not py:
+    if not py or not (VOICE_VENV / "bin" / "pip").exists():
+        # (a venv created without pip, e.g. Debian before python3-venv was
+        # installed, is rebuilt rather than reused forever)
         progress("creating the voice's own Python environment")
         base = sys.executable if os.path.basename(sys.executable or "").startswith("python") else "python3"
-        r = subprocess.run([base, "-m", "venv", str(VOICE_VENV)], capture_output=True, text=True,
-                           timeout=180)
+        r = subprocess.run([base, "-m", "venv", "--clear", str(VOICE_VENV)], capture_output=True,
+                           text=True, timeout=180)
         if r.returncode != 0:
             return False, ("couldn't create a virtualenv (on Debian/Ubuntu: apt install "
                            "python3-venv): " + (r.stderr or r.stdout).strip()[-200:])
@@ -177,19 +179,20 @@ class _KokoroEngine:
 
 
 KOKORO = _KokoroEngine()
+_KOKORO_DOWN = [0.0]          # until when Kokoro is skipped after it broke mid-reply
 
 
 def engine_for(s):
     """Which engine will speak: kokoro, piper or espeak (None if none can)."""
     want = (s.get("voice_engine") or "auto").lower()
-    if want in ("auto", "kokoro") and kokoro_ready():
+    if want in ("auto", "kokoro") and kokoro_ready() and time.time() >= _KOKORO_DOWN[0]:
         return "kokoro"
     if want in ("auto", "piper") and piper_bin() and _find_piper_model():
         return "piper"
     if want in ("auto", "espeak") and _have("espeak-ng"):
         return "espeak"
     if want == "kokoro" and piper_bin() and _find_piper_model():
-        return "piper"                      # asked for Kokoro but it isn't installed
+        return "piper"                      # asked for Kokoro but it isn't available
     return "espeak" if _have("espeak-ng") else None
 
 
@@ -226,12 +229,27 @@ def _download(url, dest, progress, opener=None, label=""):
                 size = (lambda n: f"{n >> 20} MB" if n >= 1 << 20 else f"{n >> 10} KB")
                 progress(f"downloading {label} \u2014 {size(got)}"
                          + (f" of {size(total)}" if total else ""))
+    if total and got != total:                 # the connection dropped: not a finished file
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise RuntimeError(f"download of {label} was cut off ({got >> 20} of {total >> 20} MB) "
+                           "\u2014 try again")
     os.replace(tmp, dest)
+
+
+INSTALL_LOCK = threading.Lock()            # one voice install at a time (shared venv)
 
 
 def install_kokoro(progress=lambda s: None, opener=None):
     """Install the natural voice: a venv with kokoro-onnx plus the model and
     voices (about 350 MB). -> (ok, message). Safe to re-run."""
+    with INSTALL_LOCK:
+        return _install_kokoro(progress, opener)
+
+
+def _install_kokoro(progress, opener):
     try:
         ok, msg = ensure_venv(["kokoro-onnx"], "kokoro_onnx", progress)
         if not ok:
@@ -244,8 +262,16 @@ def install_kokoro(progress=lambda s: None, opener=None):
     except Exception as ex:
         return False, f"{ex.__class__.__name__}: {ex}"
     KOKORO.stop()
+    _KOKORO_DOWN[0] = 0.0
     progress("testing the voice")
     ok, why = test_kokoro()
+    if not ok:
+        # whatever is on disk doesn't work: don't keep it, so a retry downloads afresh
+        for f in (KOKORO_MODEL, KOKORO_VOICES):
+            try:
+                f.unlink()
+            except OSError:
+                pass
     return (True, "natural voice ready (Kokoro)") if ok else (False, why)
 
 
@@ -257,6 +283,8 @@ def test_kokoro(voice=None):
         n = KOKORO.synth("Chuck Norris approves this voice.", voice or DEFAULT_KOKORO_VOICE,
                          1.0, out, timeout=120)
         LAST_ERROR["kokoro"] = ""
+        _KOKORO_DOWN[0] = 0.0                  # it works again: use it again
+        LAST_ERROR["kokoro_told"] = False
         return (True, "Kokoro works") if n > KOKORO_RATE // 2 else (False, "Kokoro made no audio")
     except Exception as ex:
         LAST_ERROR["kokoro"] = str(ex)
@@ -271,6 +299,9 @@ def test_kokoro(voice=None):
 def voice_status(s=None):
     """(state, detail) of the voice that will actually speak."""
     s = s or _SETTINGS
+    if kokoro_ready() and time.time() < _KOKORO_DOWN[0]:
+        return "fail", (f"Kokoro failed: {LAST_ERROR.get('kokoro', '')[:140]} "
+                        "\u2014 another voice speaks meanwhile")
     eng = engine_for(s)
     if eng == "kokoro":
         if LAST_ERROR.get("kokoro"):
@@ -360,7 +391,8 @@ def piper_bin():
     return found
 
 
-ON_PIPER_FAIL = [None]          # the app's "say it once" callback
+ON_PIPER_FAIL = [None]          # the app's "say it once" callback (Piper)
+ON_VOICE_FAIL = [None]          # the same for any engine: (engine, why)
 
 
 def _piper_failed(why):
@@ -580,7 +612,8 @@ def stop_speaking():
             pass
 
 
-_ABBR = [(r"\be\.g\.", "for example"), (r"\bi\.e\.", "that is"), (r"\betc\.", "et cetera"),
+_ABBR = [(r"\be\.g\.", "for example"), (r"\bi\.e\.", "that is"),
+         (r"\betc\.(?=\s+[A-Z]|\s*$)", "et cetera."), (r"\betc\.", "et cetera"),
          (r"\bvs\.?(?=\s)", "versus"), (r"\bapprox\.", "approximately"), (r"\bw/o\b", "without"),
          (r"\bw/(?=\s)", "with"), (r"\bfyi\b", "for your information"), (r"\bimo\b", "in my opinion"),
          (r"\btl;dr\b", "in short")]
@@ -605,12 +638,13 @@ def tts_clean(text):
     if not isinstance(text, str):
         return ""
     s = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)     # code blocks
-    s = re.sub(r"(?m)^\s*\|?\s*:?-{3,}.*$", "", s)             # table rules
-    s = re.sub(r"(?m)^.*\|.*\|.*$", "", s)                    # table rows
-    s = re.sub(r"`([^`]*)`", _say_code, s)                     # inline code
+    s = re.sub(r"`([^`]*)`", _say_code, s)                     # inline code (pipes and all)
+    s = re.sub(r"(?m)^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$", "", s)   # table rules
+    s = re.sub(r"(?m)^\s*\|.*\|\s*$", "", s)                  # table rows: | a | b |
     s = re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", s)               # images
     s = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", s)            # links -> label
-    s = _URL_RE.sub(" link ", s)                              # bare URLs
+    s = _URL_RE.sub(lambda m: " link" + re.search(r"[.,;:!?)\]]*$", m.group(0)).group(0) + " ",
+                    s)                                         # bare URLs (keep the full stop)
     s = re.sub(r"(?<![\w.])(?:~|\.{1,2})?(?:/[\w.+-]+){2,}/?", lambda m: " " + (
         m.group(0).rstrip("/").rsplit("/", 1)[-1]) + " ", s)  # paths: just the name
     # headings and bullets end in a pause, not run into the next line
@@ -624,7 +658,17 @@ def tts_clean(text):
     s = re.sub(r"(?<=\s)~(?=\d)", "about ", s)
     s = re.sub(r"\bv(\d+(?:\.\d+)+)\b", r"version \1", s)
     s = _EMOJI.sub(" ", s)
-    s = re.sub(r"[*_~>#|]", "", s)                            # leftover marks
+    s = re.sub(r"(?<=[\w)])\s+>=\s+(?=[\w(])", " at least ", s)
+    s = re.sub(r"(?<=[\w)])\s+<=\s+(?=[\w(])", " at most ", s)
+    s = re.sub(r"(?<=[\w)])\s+>\s+(?=[\w(])", " greater than ", s)
+    s = re.sub(r"(?<=[\w)])\s+<\s+(?=[\w(])", " less than ", s)
+    s = re.sub(r"(?<=\d)\s*[*\u00d7]\s*(?=\d)", " times ", s)
+    s = re.sub(r"\b([CF])#", r"\1 sharp", s)
+    s = re.sub(r"(\*\*|__|~~)(.+?)\1", r"\2", s)               # bold, strike
+    s = re.sub(r"(?<!\w)[*_](\S(?:.*?\S)?)[*_](?!\w)", r"\1", s)  # italics
+    s = re.sub(r"(?m)^\s*>+\s?", "", s)                        # quote marks
+    s = re.sub(r"[|]", " ", s)
+    s = re.sub(r"(?<!\w)[*#~](?!\w)", " ", s)                   # stray marks
     s = re.sub(r"\s+([.,!?;:)])", r"\1", s)
     s = re.sub(r"\(\s+", "(", s)
     s = re.sub(r"[ \t]+", " ", s)
@@ -639,6 +683,14 @@ def tts_chunks(text, size=_TTS_CHUNK, first=None):
     if not text:
         return []
     parts = re.split(r"(?<=[.!?:;])\s+|\n+", text)
+    # "Dr. Johnson", "the U.S. economy": not sentence ends
+    merged = []
+    for p in parts:
+        if merged and _ABBREV_END.search(merged[-1]):
+            merged[-1] = merged[-1] + " " + p
+        else:
+            merged.append(p)
+    parts = merged
     chunks, cur = [], ""
     for p in parts:
         p = p.strip()
@@ -667,6 +719,9 @@ def tts_chunks(text, size=_TTS_CHUNK, first=None):
     return chunks
 
 
+_ABBREV_END = re.compile(r"(?:\b(?:Mr|Mrs|Ms|Dr|Prof|St|Jr|Sr|vs|Inc|Ltd|Co|No|Fig|approx|"
+                         r"Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\.|"
+                         r"\b(?:[A-Z]\.){1,3})$")
 _SYNTH_SEQ = itertools.count()
 
 
@@ -834,6 +889,7 @@ def _speak_kokoro(clean, gen, s):
                 KOKORO.synth(ch, voice, speed, out)
                 with open(out, "rb") as fh:
                     pcm = fh.read()
+                LAST_ERROR["kokoro"] = ""
             except Exception as ex:
                 LAST_ERROR["kokoro"] = str(ex)
                 pcm = None
@@ -842,6 +898,16 @@ def _speak_kokoro(clean, gen, s):
                     os.unlink(out)
                 except OSError:
                     pass
+            if pcm is None:
+                # broken: stop here rather than restart it for every chunk, and
+                # let the other voices speak for a few minutes
+                _KOKORO_DOWN[0] = time.time() + 300
+                KOKORO.stop()
+                try:
+                    pipe.put(None, timeout=5)
+                except Exception:
+                    pass
+                break
             while gen == _TTS_GEN[0]:
                 try:
                     pipe.put(pcm, timeout=0.2)
@@ -855,7 +921,8 @@ def _speak_kokoro(clean, gen, s):
 
     threading.Thread(target=producer, daemon=True, name="kokoro-synth").start()
     stream = _Stream(gen)
-    failed = 0
+    spoken = 0
+    broke = False
     while gen == _TTS_GEN[0]:
         try:
             pcm = pipe.get(timeout=180)
@@ -864,18 +931,27 @@ def _speak_kokoro(clean, gen, s):
         if pcm is _TTS_END:
             break
         if not pcm:
-            failed += 1
-            continue
+            broke = True
+            break
         if not stream.write(pcm + gap):
             break
+        spoken += 1
     stream.finish()
-    if failed and failed == len(chunks) and gen == _TTS_GEN[0]:
-        # Kokoro is broken right now: say so once, and fall back for this reply
-        if ON_PIPER_FAIL[0] is not None and not LAST_ERROR.get("kokoro_told"):
+    try:                                       # a timed-out synth can still write later
+        for f in Path(CONFIG_DIR).glob(f".say-{gen}-*.pcm"):
+            f.unlink()
+    except OSError:
+        pass
+    if broke and gen == _TTS_GEN[0]:
+        # Kokoro broke: say so once, and let another voice read the rest
+        if ON_VOICE_FAIL[0] is not None and not LAST_ERROR.get("kokoro_told"):
             LAST_ERROR["kokoro_told"] = True
             try:
-                ON_PIPER_FAIL[0]("Kokoro: " + LAST_ERROR.get("kokoro", "failed"))
+                ON_VOICE_FAIL[0]("Kokoro", LAST_ERROR.get("kokoro", "failed"))
             except Exception:
                 pass
-        speak(clean, dict(s, voice_engine="piper" if piper_bin() else "espeak"))
+        rest = " ".join(chunks[spoken:])
+        if rest:
+            speak(rest, dict(s, voice_engine="piper" if (piper_bin() and _find_piper_model())
+                             else "espeak"))
 

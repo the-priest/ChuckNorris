@@ -72,6 +72,7 @@ class Ears:
         self.events = None
         self.on_event = None
         self.busy = False
+        self.cancel_pending = False
 
     def alive(self):
         return self.proc is not None and self.proc.poll() is None
@@ -89,6 +90,7 @@ class Ears:
                                          start_new_session=True)
             first = queue.Queue()
             out = self.proc.stdout
+            me = self.proc
 
             def read():
                 got_ready = False
@@ -109,10 +111,12 @@ class Ears:
                             cb(ev)
                         except Exception:
                             pass
-                self.busy = False
+                if self.proc is not me:
+                    return                          # replaced (reinstall, stop): not an error
+                was_busy, self.busy = self.busy, False
                 if not got_ready:
                     first.put({"event": "error", "error": "the speech model didn't load"})
-                elif self.on_event is not None:
+                elif was_busy and self.on_event is not None:
                     try:
                         self.on_event({"event": "error", "error": "the listener stopped"})
                     except Exception:
@@ -137,13 +141,26 @@ class Ears:
         if argv is None:
             on_event({"event": "error", "error": status()[1]})
             return False
-        self.start()
+        self.cancel_pending = False
         self.on_event = on_event
-        self.busy = True
+        self.busy = True                        # from here a cancel counts, even mid-load
+        try:
+            self.start()
+        except Exception:
+            self.busy = False
+            raise
+        if self.cancel_pending:                 # cancelled while the model was loading
+            self.busy = False
+            self.cancel_pending = False
+            on_event({"event": "cancelled"})
+            return False
         self._send({"cmd": "listen", "recorder": argv, "max_wait": max_wait, "max_len": max_len})
         return True
 
     def cancel(self):
+        if self.busy and not self.alive():
+            self.cancel_pending = True
+            return
         if self.alive() and self.busy:
             try:
                 self._send({"cmd": "cancel"})
@@ -181,6 +198,12 @@ def _quiet(fn):
 def install(progress=lambda s: None, opener=None):
     """Install voice input: sherpa-onnx in the voice venv, the Moonshine model
     (about 250 MB download) and the voice-activity detector. -> (ok, msg)."""
+    with _voice.INSTALL_LOCK:
+        return _install(progress, opener)
+
+
+def _install(progress, opener):
+    arc = STT_DIR / "moonshine.tar.bz2"
     try:
         ok, msg = _voice.ensure_venv(["sherpa-onnx"], "sherpa_onnx", progress)
         if not ok:
@@ -189,7 +212,6 @@ def install(progress=lambda s: None, opener=None):
         if not VAD_PATH.exists():
             _voice._download(VAD_URL, VAD_PATH, progress, opener, "the speech detector")
         if not all((MODEL_DIR / f).exists() for f in MODEL_FILES):
-            arc = STT_DIR / "moonshine.tar.bz2"
             if not arc.exists():
                 _voice._download(MODEL_URL, arc, progress, opener, "the speech model")
             progress("unpacking the speech model")
@@ -213,6 +235,10 @@ def install(progress=lambda s: None, opener=None):
                 return False, "the speech model download was incomplete: " + ", ".join(missing)
             arc.unlink()                                  # only the model files are kept
     except Exception as ex:
+        try:
+            arc.unlink()                        # a bad download must not be reused forever
+        except OSError:
+            pass
         return False, f"{ex.__class__.__name__}: {ex}"
     EARS.stop()
     progress("loading the speech model")

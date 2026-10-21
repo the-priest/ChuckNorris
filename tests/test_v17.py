@@ -652,23 +652,63 @@ try:
     check(p is not None and p.poll() is not None and len(calls) <= 3,
           "Stop silences it at once and stops synthesising", (p and p.poll(), len(calls)))
 
+    tries = []
+
     def broken(*a, **k):
+        tries.append(1)
         raise RuntimeError("onnxruntime: bad model")
     v.KOKORO.synth = broken
     told = []
-    v.ON_PIPER_FAIL[0] = told.append
+    v.ON_VOICE_FAIL[0] = lambda eng, why: told.append((eng, why))
     v.LAST_ERROR["kokoro_told"] = False
     fell = []
     real_speak = v.speak
-    v.speak = lambda text, s=None: fell.append((s or {}).get("voice_engine"))
-    v._speak_kokoro("Hello there. How are you?", v._TTS_GEN[0], {})
+    v.speak = lambda text, s=None: fell.append(((s or {}).get("voice_engine"), text))
+    v._speak_kokoro("Hello there. How are you? " * 6, v._TTS_GEN[0], {})
     v.speak = real_speak
-    check(told and "bad model" in told[0] and fell and fell[0] in ("piper", "espeak"),
+    check(told and told[0][0] == "Kokoro" and "bad model" in told[0][1] and fell
+          and fell[0][0] in ("piper", "espeak") and "How are you" in fell[0][1],
           "if Kokoro breaks, the reason is shown once and another voice reads the reply", (told, fell))
+    check(len(tries) == 1, "it stops at the first failure instead of retrying every chunk", len(tries))
+    check(v.engine_for({}) != "kokoro" and v.voice_status({})[0] == "fail",
+          "and is set aside for a while, with /doctor saying why", v.voice_status({}))
+    v.KOKORO.synth = lambda text, voice_, speed, out, timeout=120: 24000   # a second of audio
+    check(v.test_kokoro()[0] and v.engine_for({}) == "kokoro", "a passing test brings it straight back")
 finally:
     v.kokoro_ready, v.KOKORO.synth = real[0], real[1]
     v._SETTINGS["voice_player"] = real[2] or ""
     v.ON_PIPER_FAIL[0] = None
+    v.ON_VOICE_FAIL[0] = None
+    v._KOKORO_DOWN[0] = 0.0
+c = v.tts_clean("Run `ls -la | grep x | wc` now. Dr. Smith said x > 5 and 5 * 3 = 15 in C#. "
+                "See https://example.com. Then pack shoes, socks, etc. Then go.")
+check("ls la grep x wc" in c and "greater than 5" in c and "5 times 3" in c and "C sharp" in c
+      and "link. Then" in c and "et cetera. Then" in c, "pipelines, comparisons and sentence ends survive", c)
+check(v.tts_chunks("Dr. Smith agrees. The U.S. team too.", 420, first=10)[0].startswith("Dr. Smith"),
+      "no pause after 'Dr.' or 'U.S.'")
+import http.server as _hs
+
+
+class _Short(_hs.BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Length", "5000000")
+        self.end_headers()
+        self.wfile.write(b"x" * 2000000)              # then the connection drops
+srv2 = socketserver.TCPServer(("127.0.0.1", 0), _Short)
+threading.Thread(target=srv2.handle_request, daemon=True, name="srv-short").start()
+dest = tmp / "cut.bin"
+try:
+    v._download(f"http://127.0.0.1:{srv2.server_address[1]}/m", dest, lambda m: None, label="model")
+    ok_cut = False
+except RuntimeError as ex:
+    ok_cut = "cut off" in str(ex)
+check(ok_cut and not dest.exists() and not Path(str(dest) + ".part").exists(),
+      "a download that's cut off is refused, not kept as finished")
+srv2.server_close()
 
 print("\n--- talking to Chuck: local speech to text ---")
 L = cn._listen
@@ -726,6 +766,19 @@ try:
           "/doctor reports the voice and voice input")
 finally:
     L.ready, L.EARS.listen, L.EARS.cancel = real
+ears = L.Ears()
+real_start, real_argv = ears.start, L.recorder_argv
+L.recorder_argv = lambda: ["true"]
+got = []
+
+
+def slow_start(timeout=90):
+    ears.cancel()                                  # the user presses again while it loads
+    time.sleep(0.2)
+ears.start = slow_start
+ears.listen(got.append)
+check(got == [{"event": "cancelled"}] and not ears.busy, "cancelling while the model loads is honoured", got)
+L.recorder_argv = real_argv
 settle()
 
 # ═══════════════════════════════════════════════════════════════════════════
