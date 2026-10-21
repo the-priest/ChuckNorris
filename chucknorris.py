@@ -7235,7 +7235,9 @@ class ChuckWindow(Adw.ApplicationWindow):
                 rep = _agents.run_subagent(
                     brief, call, tools, max_steps=steps, on_event=ev, context=ctx,
                     should_stop=lambda: self._cancelled or gen != self._gen)
-                GLib.idle_add(self._sub_update, rows[i], "done", "", rep)
+                stopped = self._cancelled or gen != self._gen
+                # stopped part-way: what it has is a partial report, not "done"
+                GLib.idle_add(self._sub_update, rows[i], "stopped" if stopped else "done", "", rep)
             except Exception as ex:
                 rep = f"(sub-agent failed: {ex})"
                 GLib.idle_add(self._sub_update, rows[i], "fail", str(ex)[:80], rep)
@@ -7303,6 +7305,9 @@ class ChuckWindow(Adw.ApplicationWindow):
             row["mark"].remove_css_class("plan-cur"); row["mark"].add_css_class("plan-tick")
         elif state == "fail":
             row["mark"].set_label("\u2717"); self._set_status(row["pill"], "failed", "fail")
+        elif state == "stopped":
+            row["mark"].set_label("\u25a0"); self._set_status(row["pill"], "stopped", "wait")
+            row["mark"].remove_css_class("plan-cur")
         row["act"].set_label(activity)
         row["act"].set_visible(bool(activity))
         if report is not None:
