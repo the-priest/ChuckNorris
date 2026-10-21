@@ -1080,6 +1080,77 @@ upd.swap_in(src, app_dir)
 check((app_dir / "chucknorris_ext" / "mod.py").read_text() == "new\n"
       and (app_dir / "chucknorris.py").read_text() == "new\n", "and a normal swap still works")
 
+print("\n--- the agent loop: parsing, file tools, continuation, memory ---")
+ws = tmp / "loop"
+ws.mkdir()
+w = agent(["Put this in your README:\n````markdown\n```bash\ntouch EXAMPLE_RAN\n```\n````\nDone.",
+           "ok"], ws)
+type_and_send(w, "show me a readme snippet")
+check(not (ws / "EXAMPLE_RAN").exists(), "a ```bash inside a ````markdown example is never run")
+(ws / "README.md").write_text("old\n```\nend\n")
+w = agent(["```edit README.md\n<<<<<<< SEARCH\nold\n```\n=======\nnew\n```bash\ntouch PWNED\n```\n"
+           ">>>>>>> REPLACE\n```", "ok"], ws)
+type_and_send(w, "edit with fences")
+check(not (ws / "PWNED").exists() and (ws / "README.md").read_text() == "new\n```bash\ntouch PWNED\n```\nend\n",
+      "fences inside an edit's SEARCH/REPLACE are text, not the end of the block",
+      (ws / "README.md").read_text())
+(ws / "v.py").write_text("v = 1\n")
+w = agent(["```edit v.py\n<<<<<<< SEARCH\nv = 1\n=======\nv = 2\n>>>>>>> REPLACE\n```", "ok",
+           "```undo```\n```edit v.py\n<<<<<<< SEARCH\nv = 1\n=======\nv = 3\n>>>>>>> REPLACE\n```", "ok"], ws)
+type_and_send(w, "make it 2")
+type_and_send(w, "undo that and make it 3")
+check((ws / "v.py").read_text() == "v = 3\n", "undo then edit runs in that order", (ws / "v.py").read_text())
+(ws / "d.md").write_text("intro\n\nTitle\n=====\n\nbody text\n")
+w = agent(["```edit d.md\n<<<<<<< SEARCH\nTitle\n=====\n\nbody text\n=======\nTitle\n=====\n\nnew body\n"
+           ">>>>>>> REPLACE\n```", "ok"], ws)
+type_and_send(w, "edit under an underline")
+check((ws / "d.md").read_text() == "intro\n\nTitle\n=====\n\nnew body\n",
+      "a ===== underline inside SEARCH isn't the divider", (ws / "d.md").read_text())
+(ws / "f.py").write_text("x = 1\n\x0c\ns = 'a\u2028b'\ny = 2\n")
+w = agent(["```patch\n--- a/f.py\n+++ b/f.py\n@@ -4 +4 @@\n-y = 2\n+y = 3\n```", "ok"], ws)
+type_and_send(w, "patch it")
+check((ws / "f.py").read_text() == "x = 1\n\x0c\ns = 'a\u2028b'\ny = 3\n",
+      "patch leaves form feeds and U+2028 alone", (ws / "f.py").read_text())
+(ws / "w.txt").write_bytes(b"one\r\ntwo\r\nthree\r\n")
+w = agent(["```edit w.txt\n<<<<<<< SEARCH\ntwo\n=======\nTWO\n>>>>>>> REPLACE\n```", "ok",
+           "```undo```", "ok"], ws)
+type_and_send(w, "edit a windows file")
+check((ws / "w.txt").read_bytes() == b"one\r\nTWO\r\nthree\r\n", "edit keeps CRLF line endings",
+      (ws / "w.txt").read_bytes())
+type_and_send(w, "undo")
+check((ws / "w.txt").read_bytes() == b"one\r\ntwo\r\nthree\r\n", "and undo restores the exact bytes")
+(ws / "l1.txt").write_bytes("caf\xe9 cr\xe8me".encode("latin-1"))
+w = agent(["```write l1.txt\nnew\n```", "ok", "```undo```", "ok"], ws)
+type_and_send(w, "overwrite latin-1")
+type_and_send(w, "undo")
+check((ws / "l1.txt").exists() and (ws / "l1.txt").read_bytes() == "caf\xe9 cr\xe8me".encode("latin-1"),
+      "undoing an overwrite of a non-UTF-8 file restores it (it used to be deleted)")
+w = agent(["".join(f"```write m{i}.txt\nx\n```\n" for i in range(14)), "ok"], ws)
+type_and_send(w, "many files")
+check(not (ws / "m13.txt").exists() and "NOT applied (over the per-reply limit): write m12.txt, write m13.txt"
+      in hist_text(w), "blocks over the per-reply limit are reported, not silently dropped")
+(ws / "a.txt").write_text("hello\n")
+w = agent(["```read a.txt```\n```ask\nWhich colour?\n```", "never"], ws)
+type_and_send(w, "ask me")
+check(len(w.backend.calls) == 1 and not w._running, "an ask beside other tools waits for the user",
+      len(w.backend.calls))
+w.backend.replies = ["Red it is."]
+type_and_send(w, "red")
+check("results of the tools you ran with your question" in hist_text(w) and "hello" in hist_text(w),
+      "and the tool results arrive with the answer")
+J = cn.ChuckWindow._join_overlap
+check(J("Writing it:\n```", "write app.py\nx\n```") == "Writing it:\n```write app.py\nx\n```",
+      "a cut right after an opening fence joins on the same line")
+rows = "0,0,0,0,0,0\n" * 10
+check(J(rows, rows) == rows * 2, "repeated rows across a cut are kept, not trimmed as overlap")
+mem = cn._memory if hasattr(cn, "_memory") else None
+if mem is not None:
+    mem.remember("my laptop runs CachyOS with KDE Plasma on Wayland and 16GB RAM")
+    st = mem.remember("my laptop runs CachyOS with KDE Plasma on Wayland and 32GB RAM")
+    texts_m = [f["text"] for f in mem._load()]
+    check(any("32GB" in t for t in texts_m) and not any("16GB" in t for t in texts_m),
+          "a corrected fact replaces the old one", (st, [t for t in texts_m if "GB" in t]))
+
 print("\n--- installer: a stale clone in the current folder isn't installed ---")
 inst = Path(_ROOT, "install.sh").read_text()
 snip = inst[inst.index('SELF_DIR=""'):]

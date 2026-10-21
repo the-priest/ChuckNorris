@@ -2262,7 +2262,11 @@ class Backend:
                     continue                     # same attempt, without it
                 if got_any:
                     # Text already reached the screen — replaying the request
-                    # would duplicate it, so keep what we have and carry on.
+                    # would duplicate it, so keep what we have and carry on:
+                    # as a CUT reply, so the continuation logic picks it up (a
+                    # ```write cut by a dropped connection would otherwise be
+                    # silently skipped and the turn end as "done")
+                    self.last_finish = "length"
                     on_done()
                     return
                 attempt += 1
@@ -2913,6 +2917,48 @@ class GlyphField:
 
 _FILE_FENCE = re.compile(r"^[ \t]*(`{3,4})(write|edit|patch)(?![A-Za-z])[ \t]*(.*)$")
 _DOC_EXT = re.compile(r"\.(md|markdown|mdx|rst|txt|adoc|html?|ipynb|org)$", re.IGNORECASE)
+_SR_OPEN = re.compile(r"^<{5,9} ?SEARCH\s*$")
+_SR_CLOSE = re.compile(r"^>{5,9} ?REPLACE\s*$")
+# a fence that only SHOWS something: four or more backticks, tildes, or a
+# document/console language. What's inside is an example, never a tool to run.
+_SHOW_FENCE = re.compile(r"^[ \t]*(?:(`{4,}|~{3,})(?!(?:write|edit|patch)\b)\S*|(```)(?:markdown|md|mdx|"
+                         r"rst|text|txt|console|output|example|log)\b)[ \t]*$", re.IGNORECASE)
+
+
+def display_spans(text, skip=()):
+    """[(start, end)] of fences that only display content (a README example
+    in ````markdown, console output in ```text). Code blocks inside them are
+    part of the example: they must never be picked up and run. An unclosed
+    one runs to the end of the reply."""
+    lines = text.split("\n")
+    offs, pos = [], 0
+    for ln in lines:
+        offs.append(pos)
+        pos += len(ln) + 1
+    out, i = [], 0
+    while i < len(lines):
+        m = _SHOW_FENCE.match(lines[i])
+        if not m or any(a <= offs[i] < b for a, b in skip):   # inside a write/edit block
+            i += 1
+            continue
+        fence = m.group(1) or m.group(2)
+        k, depth = i + 1, 0
+        while k < len(lines):
+            st = lines[k].strip()
+            if len(fence) > 3 or fence[0] == "~":
+                if st and set(st) == {fence[0]} and len(st) >= len(fence):
+                    break
+            elif st == "```":
+                if depth == 0:
+                    break
+                depth -= 1
+            elif st.startswith("```"):
+                depth += 1
+            k += 1
+        end = len(text) if k >= len(lines) else offs[k] + len(lines[k])
+        out.append((offs[i], end))
+        i = k + 1
+    return out
 
 
 def file_blocks(text):
@@ -2964,8 +3010,21 @@ def file_blocks(text):
             head, j = lines[j].strip(), j + 1
         body_start, end_line, end_col, depth, first_bare = j, None, None, 0, None
         k = j
+        in_sr = False                     # inside an edit's SEARCH/REPLACE: text, not fences
         while k < len(lines):
             st = lines[k].strip()
+            if tag == "edit":
+                if _SR_OPEN.match(st):
+                    in_sr = True
+                    k += 1
+                    continue
+                if _SR_CLOSE.match(st):
+                    in_sr = False
+                    k += 1
+                    continue
+                if in_sr:
+                    k += 1
+                    continue
             if len(fence) == 4:
                 if st == "````":
                     end_line = k
@@ -3024,6 +3083,27 @@ def file_blocks(text):
         out.append({"tag": tag, "path": head, "body": body, "ambiguous": ambiguous,
                     "start": offs[i], "end": min(end, len(text))})
         i = end_line + 1
+    return out
+
+
+class _RawText(str):
+    """A non-UTF-8 file's content: shown as text, restored as its exact bytes.
+    (None would mean "the file didn't exist", and undo would DELETE it.)"""
+
+    def __new__(cls, text, raw):
+        obj = super().__new__(cls, text)
+        obj.raw = raw
+        return obj
+
+
+def _merge_spans(spans):
+    """Overlapping or nested spans as one: a write block inside an example."""
+    out = []
+    for a, b in sorted(spans):
+        if out and a <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], b))
+        else:
+            out.append((a, b))
     return out
 
 
@@ -7361,9 +7441,17 @@ class ChuckWindow(Adw.ApplicationWindow):
             path = _builder._safe(root, rel)
         except Exception:
             return None, None
+        if not path.is_file():
+            return path, None
         try:
-            return path, (path.read_text(encoding="utf-8") if path.is_file() else None)
-        except (OSError, UnicodeDecodeError):
+            return path, _builder.read_keep(path)     # CRLF and all, so undo is exact
+        except UnicodeDecodeError:
+            try:                                      # not UTF-8: keep the bytes to restore
+                raw = path.read_bytes()
+                return path, _RawText(raw.decode("latin-1"), raw)
+            except OSError:
+                return path, None
+        except OSError:
             return path, None
 
     def _record_change(self, path, rel, before, after, kind):
@@ -7389,7 +7477,12 @@ class ChuckWindow(Adw.ApplicationWindow):
                     path.unlink()
             else:
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(ch["before"], encoding="utf-8")
+                raw = getattr(ch["before"], "raw", None)
+                if raw is not None:
+                    path.write_bytes(raw)
+                else:
+                    with open(path, "w", encoding="utf-8", newline="") as fh:
+                        fh.write(ch["before"])
         except OSError as ex:
             return f"couldn't revert {ch['rel']}: {ex}"
         ch["reverted"] = True
@@ -9937,12 +10030,22 @@ class ChuckWindow(Adw.ApplicationWindow):
         language called "Written." and the file block would never close."""
         top = min(len(prefix), len(piece), 400)
         for k in range(top, 11, -1):
-            if prefix.endswith(piece[:k]):
-                piece = piece[k:]
+            # a restart repeats whole lines; a short mid-line overlap is
+            # more likely a coincidence than a repeat
+            if prefix.endswith(piece[:k]) and (k >= 40 or piece[k - 1] == "\n"):
+                # a long overlap is a restart; but text that repeats itself
+                # (rows of a CSV, a table) overlaps by nature: keep it
+                ov = piece[:k]
+                if not any(ov[n:] == ov[:-n] for n in range(1, k // 2 + 1)):
+                    piece = piece[k:]
                 break
         last = prefix.rsplit("\n", 1)[-1].strip()
         if piece and not piece.startswith("\n") and re.fullmatch(r"`{3,4}", last or "-"):
-            piece = "\n" + piece
+            # a fence that CLOSES a block ends its line; one that OPENS a
+            # block ("```" + "write app.py") continues on the same line
+            fences = sum(1 for ln in prefix.split("\n") if ln.strip().startswith("```"))
+            if fences % 2 == 0:
+                piece = "\n" + piece
         return prefix + piece
 
     def _continue_if_cut(self, text):
@@ -10010,7 +10113,8 @@ class ChuckWindow(Adw.ApplicationWindow):
 
         # Tools are looked for OUTSIDE ```write/```edit bodies: a README being
         # written may well contain ```bash or ```search examples.
-        outside = _cut_spans(text, [(b["start"], b["end"]) for b in file_blocks(text)])
+        fspans = [(b["start"], b["end"]) for b in file_blocks(text)]
+        outside = _cut_spans(text, _merge_spans(fspans + display_spans(text, fspans)))
 
         def grab(tag):
             # (?![A-Za-z]) stops ```video from also matching ```videos blocks,
@@ -10028,35 +10132,42 @@ class ChuckWindow(Adw.ApplicationWindow):
         # cap how many of each tool one reply can fire, so a malformed/looping
         # model can't spawn dozens of threads or cards in a single turn.
         CAP = 6
-        searches = grab("search")[:CAP]
-        fetches = grab("fetch")[:CAP]
-        images = grab("images")[:CAP]
-        vid_searches = grab("videos")[:CAP]     # search-and-show videos
-        videos = grab("video")[:CAP]            # download by URL
+        over_tools = []
+
+        def capped(tag, n):
+            got = grab(tag)
+            if len(got) > n:
+                over_tools.append(f"{len(got) - n} more ```{tag}```")
+            return got[:n]
+        searches = capped("search", CAP)
+        fetches = capped("fetch", CAP)
+        images = capped("images", CAP)
+        vid_searches = capped("videos", CAP)     # search-and-show videos
+        videos = capped("video", CAP)            # download by URL
         junk = bool(re.search(r"```junk", outside))
-        skill_blocks = grab("skill")[:CAP]      # save a smart file
-        runskills = grab("runskill")[:CAP]      # run a saved smart file
-        reads = grab("read")[:CAP]              # read a file from disk by path
-        greps = grab("grep")[:CAP]              # regex search in the working folder
-        globs = grab("glob")[:CAP]              # find files by pattern
-        asks = grab("ask")[:1]                  # a question only the user can answer
+        skill_blocks = capped("skill", CAP)      # save a smart file
+        runskills = capped("runskill", CAP)      # run a saved smart file
+        reads = capped("read", CAP)              # read a file from disk by path
+        greps = capped("grep", CAP)              # regex search in the working folder
+        globs = capped("glob", CAP)              # find files by pattern
+        asks = capped("ask", 1)                  # a question only the user can answer
         self._asked = bool(asks)
-        briefs = grab("task")[:8]               # parallel read-only sub-agents
-        bgs = grab("bg")[:3]                    # background jobs
-        logss = grab("logs")[:4]
-        kills = grab("kill")[:4]
+        briefs = capped("task", 8)               # parallel read-only sub-agents
+        bgs = capped("bg", 3)                    # background jobs
+        logss = capped("logs", 4)
+        kills = capped("kill", 4)
         undo_req = has("undo")
         undo_arg = (grab("undo") or [""])[0]
-        opens = grab("open")[:3]
+        opens = capped("open", 3)
         shots = has("screenshot")               # see the screen
-        looks = grab("look")[:3]                # see an image file
+        looks = capped("look", 3)                # see an image file
         maps = has("map")                       # the repo map: files + what they define
         plans = grab("plan")[-1:]               # the live checklist (latest wins)
-        remembers = grab("remember")[:CAP]      # store a durable fact
-        forgets = grab("forget")[:CAP]          # prune a fact
-        projects = grab("project")[:2]        # open / switch a build workspace
+        remembers = capped("remember", CAP)      # store a durable fact
+        forgets = capped("forget", CAP)          # prune a fact
+        projects = capped("project", 2)        # open / switch a build workspace
         trees = has("tree")                    # show what's been built
-        rmfiles = grab("rmfile")[:4]           # remove a file from the project
+        rmfiles = capped("rmfile", 4)           # remove a file from the project
         packages = has("package")              # zip the project and hand it over
         runtests = has("runtests")             # run the project's own tests
         ledger_req = has("ledger")             # show the command record + verify it
@@ -10067,12 +10178,19 @@ class ChuckWindow(Adw.ApplicationWindow):
         # backticks; those are parsed first and blanked so the inner fences
         # can't be mistaken for the end of the block.
         fblocks = file_blocks(text)
-        writes = [(b["path"], b["body"]) for b in fblocks if b["tag"] == "write"][:12]
-        edits = [(b["path"], b["body"]) for b in fblocks if b["tag"] == "edit"][:12]
+        writes = [(b["path"], b["body"]) for b in fblocks if b["tag"] == "write"]
+        edits = [(b["path"], b["body"]) for b in fblocks if b["tag"] == "edit"]
+        patches_all = [b for b in fblocks if b["tag"] == "patch"]
+        # what a reply asked for beyond the caps is reported, never silently dropped
+        over_cap = ([f"write {p_}" for p_, _b in writes[12:]] + [f"edit {p_}" for p_, _b in edits[12:]]
+                    + ["patch"] * max(0, len(patches_all) - 4))
+        writes, edits = writes[:12], edits[:12]
+        over_cap += over_tools
         fence_clash = [b["path"] for b in fblocks if b.get("ambiguous")]
         # what's left once file contents are cut out: code INSIDE a file being
         # written is never mistaken for a block to run
-        rest = _cut_spans(text, [(b["start"], b["end"]) for b in fblocks])
+        fspans = [(b["start"], b["end"]) for b in fblocks]
+        rest = _cut_spans(text, _merge_spans(fspans + display_spans(text, fspans)))
         checks = []
         for m in re.finditer(r"```check[ \t]+([a-z0-9+]+)[ \t]*\n(.*?)```", outside,
                              re.DOTALL | re.IGNORECASE):
@@ -10298,14 +10416,30 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._apply_window()
         for nm in projects:
             self._do_project(nm.strip())
-        for rel, body in writes:
-            self._do_write(rel, body)
-        for rel, body in edits:
-            self._do_edit(rel, body)
-        for rel in rmfiles:
-            self._do_rmfile(rel.strip())
+        # file actions in the order the reply wrote them: "undo, then edit"
+        # must not undo the new edit
+        seq = ([(b["start"], "write", b) for b in [x for x in fblocks if x["tag"] == "write"]
+                [:len(writes)]]
+               + [(b["start"], "edit", b) for b in [x for x in fblocks if x["tag"] == "edit"]
+                  [:len(edits)]]
+               + list(zip([m.start() for m in re.finditer(r"```rmfile(?![A-Za-z])", text)],
+                          ["rmfile"] * len(rmfiles), rmfiles)))
         if undo_req:
-            self._do_undo(undo_arg)
+            m_undo = re.search(r"```undo(?![A-Za-z])", text)
+            seq.append((m_undo.start() if m_undo else len(text), "undo", undo_arg))
+        for _pos, kind, arg in sorted(seq, key=lambda t: t[0]):
+            if kind == "write":
+                self._do_write(arg["path"], arg["body"])
+            elif kind == "edit":
+                self._do_edit(arg["path"], arg["body"])
+            elif kind == "rmfile":
+                self._do_rmfile(arg.strip())
+            else:
+                self._do_undo(arg)
+        if over_cap and self.agent_mode:
+            self._tool_feedback.append("[NOT applied (over the per-reply limit): "
+                                       + ", ".join(over_cap[:12]) + " \u2014 send them in the "
+                                       "next reply]")
         for body in bgs:
             self._do_bg(body)
         for nm in logss:
@@ -10574,6 +10708,13 @@ class ChuckWindow(Adw.ApplicationWindow):
         # mid-way with no summary — an agent that quits on step five is not an
         # agent. Steps are cheap to allow and the watchdog still guards hangs.
         step_cap = self.cfg('agent_steps', 60, 4, 200)
+        if feedback and self._asked:
+            # it asked the user something: the turn waits for the answer, and
+            # what the other tools found rides along with it (instead of going
+            # straight back to the model, which then answers its own question)
+            self._user_notes.append("results of the tools you ran with your question:\n"
+                                    + _clip_feedback(feedback, 8000))
+            feedback = []
         if feedback:
             self._acted_since_nudge = True
         if feedback and self._steps < step_cap:

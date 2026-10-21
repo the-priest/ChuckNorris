@@ -103,6 +103,23 @@ def _safe(root, rel):
     return p
 
 
+def read_keep(path):
+    """A text file exactly as it is on disk: CRLF line endings kept."""
+    with open(path, encoding="utf-8", newline="") as fh:
+        return fh.read()
+
+
+def eol_of(text):
+    """'\r\n' for a file whose every line ends in CRLF, else '\n'."""
+    n = (text or "").count("\n")
+    return "\r\n" if n and text.count("\r\n") == n else "\n"
+
+
+def with_eol(text, eol):
+    """text (LF) with eol line endings."""
+    return text if eol == "\n" else text.replace("\r\n", "\n").replace("\n", eol)
+
+
 def write_file(project, rel, content):
     """Write one complete file into the project. Returns (ok, message, path)."""
     try:
@@ -114,7 +131,13 @@ def write_file(project, rel, content):
         if len(data.encode("utf-8", "ignore")) > MAX_FILE_BYTES:
             return False, "file too large (2MB cap)", None
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(data, encoding="utf-8")
+        if "\r" not in data and p.is_file():
+            try:                                    # a Windows file stays a Windows file
+                data = with_eol(data, eol_of(read_keep(p)))
+            except (OSError, UnicodeDecodeError):
+                pass
+        with open(p, "w", encoding="utf-8", newline="") as fh:
+            fh.write(data)
         if p.suffix == ".sh" or data.startswith("#!"):
             try:
                 os.chmod(p, 0o755)
@@ -299,13 +322,18 @@ def manifest(project):
 # tokens — the most expensive tokens there are — and invites the model to drop
 # something on the way through. Aider's SEARCH/REPLACE block is the proven fix:
 # quote the exact lines, give their replacement, nothing else is resent.
+# every marker is a whole line, and the divider is exactly seven '=': an RST
+# or Markdown underline (=====) or a "# =====" banner inside the quoted code
+# must not end the SEARCH part
 _EDIT_RE = re.compile(
-    r"<{5,9} ?SEARCH[ \t]*\n(.*?)\n?={5,9}[ \t]*\n(.*?)\n?>{5,9} ?REPLACE", re.DOTALL)
+    r"^<{5,9} ?SEARCH[ \t]*\n(.*?)\n?^={7}[ \t]*\n(.*?)\n?^>{5,9} ?REPLACE[ \t]*$",
+    re.DOTALL | re.MULTILINE)
 
 
 def parse_edit_blocks(text):
     """[(search, replace), ...] from one or more SEARCH/REPLACE blocks."""
-    return [(m.group(1), m.group(2)) for m in _EDIT_RE.finditer(text or "")]
+    return [(m.group(1), m.group(2))
+            for m in _EDIT_RE.finditer((text or "").replace("\r\n", "\n"))]
 
 
 def _loose_find(hay, needle):
@@ -346,7 +374,9 @@ def edit_file(project, rel, blocks_text):
             if len(blocks) == 1 and not blocks[0][0].strip():
                 return write_file(root, rel, blocks[0][1] + "\n")[:2]
             return False, f"no such file: {rel} (read it first, or write it)"
-        text = p.read_text(encoding="utf-8")
+        raw = read_keep(p)
+        eol = eol_of(raw)
+        text = raw.replace("\r\n", "\n") if eol == "\r\n" else raw
         for n, (search, repl) in enumerate(blocks, 1):
             if not search.strip():
                 return False, f"block {n}: empty SEARCH on an existing file"
@@ -362,7 +392,8 @@ def edit_file(project, rel, blocks_text):
                 return False, (f"block {n}: SEARCH text not found in {rel} — read the "
                                "file and quote the current lines exactly")
             text = text[:span[0]] + repl + text[span[1]:]
-        p.write_text(text, encoding="utf-8")
+        with open(p, "w", encoding="utf-8", newline="") as fh:
+            fh.write(with_eol(text, eol))
         return True, f"edited {rel} ({len(blocks)} change{'s' if len(blocks) != 1 else ''})"
     except Exception as ex:
         return False, f"couldn't edit {rel}: {ex}"
@@ -659,7 +690,11 @@ def parse_unified_diff(text):
     """-> [{'old': path|None, 'new': path|None, 'hunks': [(old_start, [lines])]}].
     Raises ValueError on a diff it can't read."""
     files, cur, hunk = [], None, None
-    lines = (text or "").splitlines()
+    # split on \n only: splitlines() also breaks at \f, \v, \x1c-\x1e, \x85 and
+    # U+2028, which a diff of a file containing them must carry through
+    lines = (text or "").replace("\r\n", "\n").split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()                               # the piece after the final newline
     i = 0
     while i < len(lines):
         ln = lines[i]
@@ -708,7 +743,9 @@ def _find(hay, needle, near, loose):
 def apply_hunks(content, hunks, label):
     """Apply hunks to text. -> new text. Raises ValueError naming the hunk."""
     had_nl = content.endswith("\n") if content else True
-    lines = content.splitlines() if content else []
+    lines = content.split("\n") if content else []
+    if lines and lines[-1] == "" and had_nl:
+        lines.pop()                               # the empty piece after the last \n
     offset = 0
     for k, (start, body) in enumerate(hunks, 1):
         old = [x[1:] for x in body if x[:1] in (" ", "-")]
@@ -736,7 +773,7 @@ def plan_patch(root, text):
     def current(rel, path):
         if rel in pending:
             return pending[rel]
-        return path.read_text(encoding="utf-8") if path.is_file() else None
+        return read_keep(path) if path.is_file() else None
     for f in parse_unified_diff(text):
         rel = f["new"] or f["old"]
         if rel is None:
@@ -752,7 +789,9 @@ def plan_patch(root, text):
         if f["old"] is None and before is not None and f["hunks"]:
             # a "new file" that exists: apply as an edit only if it's a full rewrite
             raise ValueError(f"{rel}: already exists — diff it against its current content")
-        after = apply_hunks(before or "", f["hunks"], rel)
+        eol = eol_of(before or "")
+        after = with_eol(apply_hunks((before or "").replace("\r\n", "\n") if eol == "\r\n"
+                                     else before or "", f["hunks"], rel), eol)
         if f["old"] and f["new"] and f["old"] != f["new"]:     # a rename
             out.append((f["old"], current(f["old"], _safe(root, f["old"])), None))
             pending[f["old"]] = None

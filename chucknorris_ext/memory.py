@@ -206,11 +206,19 @@ def _remember_locked(text, kind, weight, scope=""):
         if not ntok or not ft:
             continue
         overlap = len(ntok & ft) / max(1, len(ntok | ft))
-        if overlap > 0.8 or f["text"].lower() == text.lower():
-            # refresh instead of duplicating
+        if f["text"].lower() == text.lower() or ntok <= ft:
+            # nothing new in it: refresh instead of duplicating
             f["ts"] = time.time(); f["weight"] = max(f.get("weight", 1.0), weight)
             _save_all(facts)
             return True, "already knew that (refreshed)"
+        if overlap > 0.8:
+            # the same fact, corrected ("16GB RAM" -> "32GB RAM"): the new
+            # wording wins, the old one is archived, the fact keeps its place
+            _archive([dict(f)])
+            f["text"] = text
+            f["ts"] = time.time(); f["weight"] = max(f.get("weight", 1.0), weight)
+            _save_all(facts)
+            return True, "updated what I knew"
     old = [f for f in facts if (f.get("scope") or "") == scope
            and f.get("kind") != "core" and _supersedes(text, f["text"])]
     if old:
