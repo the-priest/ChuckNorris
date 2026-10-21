@@ -323,3 +323,29 @@ and an agent is a process. The design is in `docs/OS.md`; tests in
       and report why; daemons don't wake.
 - [x] `/budget`: today, this month, the last two weeks as bars.
 
+### Phase 25 — the OS you can see and reach
+
+- [x] **Ctrl+P**: a command palette of every action, live process, program,
+      mission, chat, folder and model, in groups, fuzzy-ranked
+      (`palette.py`); Enter runs it or fills the composer.
+- [x] **The tray**: a header indicator of questions waiting, agents working,
+      missions and unread reports, lit while an agent waits for you;
+      `/activity` lists it all with a button each.
+- [x] **A shell for the OS**: a second `chucknorris …` launch hands its
+      arguments to the running window (Gio command line) and prints the
+      answer in its terminal: messages, `--here`, `--mission`, `--spawn`,
+      `--run`, `--remind`, `--daemon`, `--top`, `--budget`, `--inbox`.
+- [x] **`/context`**: what the next call sends, by what takes the room (a
+      dry run of the real send path).
+
+### Phase 26 — coding and everyday help
+
+- [x] **`/watch`**: `AI!` comments saved in any editor become a turn (with
+      the code around them); `AI?` asks a question. Free while waiting.
+- [x] **Pick the files to merge** from a background agent; the rest stays
+      in its copy.
+- [x] **`/pr`**: branch, commit, test, push and a pull request via `gh`.
+- [x] **Mission estimates** before Start that learn from past missions.
+- [x] **Reminders** (`/remind`, or just ask): one-time or repeating, a note,
+      a notification and the voice, no agent, no tokens.
+

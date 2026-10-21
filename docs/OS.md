@@ -256,3 +256,37 @@ before its next call (Allow more raises today's or this month's limit by
 the base amount); every agent process is refused its next model call at
 `_sub_call`, so it ends with a report saying why; daemons don't wake.
 
+## The OS you can see and reach (phase 25)
+
+An OS isn't only its kernel; it's also the parts you touch.
+
+- **The command palette** (`palette.py`, Ctrl+P) is the launcher: one
+  ranked list of every action, built fresh each time it opens, so it holds
+  the processes running now, the missions, your programs and chats.
+  Ranking: a title starting with the query, then a word starting with it,
+  then a substring, keywords, all words, then the letters in order.
+- **The tray** is the status bar: `? 1  ▶ 2  ◎ 1  ✉ 1` (a question waiting,
+  agents working, missions, unread reports), lit when an agent waits for
+  you, hidden when nothing is going on; `/activity` is its window.
+- **The shell**: `ChuckApp` handles the command line, so a second
+  `chucknorris …` is forwarded by Gio to the running instance's
+  `remote_command`, and its answer is printed in the caller's terminal.
+  Scripts, cron, git hooks and editor tasks can drive the OS.
+- **`/context`** is `free` for the context window: the real trimming and
+  paging run as a dry run (no compaction, no notes), and the result is
+  broken down by what takes the room.
+
+## Coding and everyday help (phase 26)
+
+- **`/watch`** (`aiwatch.py`) is an editor bridge that needs no plugin:
+  mtimes are polled cheaply; only changed files are read; a comment ending
+  (or starting) with `AI!`/`AI?` in any common comment syntax becomes a
+  turn with the code around it. Each comment fires once (keyed with its
+  surroundings, forgotten when removed); a draft in the composer is never
+  overwritten; long or minified lines are skipped.
+- **Selective merge**: `Workspace.merge(only=…)` takes the files you tick;
+  the rest stays in the copy for later.
+- **Reminders** are daemons of kind `remind` with one-time `{"at": …}` or
+  repeating triggers: when due, a note, the inbox, a notification and the
+  voice, and no process. They fire even past the budget.
+
