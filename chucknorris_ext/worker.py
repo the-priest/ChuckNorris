@@ -41,9 +41,9 @@ def _clip(text, limit):
 
 
 def run_worker(brief, call_model, parse, syscalls, max_steps=60, on_event=None,
-               should_stop=None, wrap_up=None, context=""):
+               should_stop=None, wrap_up=None, context="", prompt=None):
     """Run one background agent to its report. -> (report, steps_used)."""
-    msgs = [{"role": "system", "content": WORKER_PROMPT + ("\n\n" + context if context else "")},
+    msgs = [{"role": "system", "content": (prompt or WORKER_PROMPT) + ("\n\n" + context if context else "")},
             {"role": "user", "content": brief}]
     for step in range(max(1, max_steps)):
         if should_stop and should_stop():

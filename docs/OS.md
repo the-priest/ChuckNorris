@@ -98,10 +98,39 @@ happens when even the page table no longer fits.
 
 ## Daemons (phase 19)
 
-Agent programs that wake on: a schedule (`every day 08:30`), a file or
-folder changing, a systemd unit failing, the disk passing a threshold, a
+Agent programs that wake on: a schedule (`daily 08:30`, `every 2h`), a file
+or folder changing, a systemd unit failing, the disk passing a threshold, a
 command's output changing. Each wake is a process with its own quota; its
 report lands in an inbox with a desktop notification.
+
+The point is what a daemon costs while it sleeps: nothing. An agent that
+polls ("is the disk full yet?") spends tokens on every look. Here the
+trigger is plain code (`chucknorris_ext/daemons.py`, no model): the clock, a
+tree's newest mtime, `systemctl --failed`, `statvfs`, a command's output
+hash, every 30 seconds (a trigger's command every 5 minutes). Watches are
+edge-triggered: the first check records the state, only a change fires, and
+the same failed unit never fires twice. The woken agent is told what fired
+and what the trigger saw, so it doesn't spend a call looking again.
+
+Unattended means it may look, never change. A daemon's syscall table has no
+`write` or `edit`; its commands run in bubblewrap with the whole system
+read-only, its folder included, the journal and the system bus visible (for
+`systemctl status`), and `daemons.read_only_problem` refuses any verb that
+would change something through the bus (`systemctl restart`, `loginctl
+poweroff`, `busctl call`), sudo, `git push`, `pacman -S`. Without bubblewrap
+only commands that are read-only by nature run. What it would change, it
+proposes; the user decides (**Act on it**). A daemon that should change
+code (`/daemon act …`) is a background agent in a copy of the folder,
+merged by the user.
+
+| You write                                  | It wakes                                 |
+| ------------------------------------------ | ---------------------------------------- |
+| `/daemon daily 08:30: summarise the journal` | at 08:30, or at the next start if missed |
+| `/daemon when a service fails: why?`         | when a unit newly fails                  |
+| `/daemon when disk / is above 90%: what?`    | on crossing, then every 6 h while above  |
+| `/daemon when ~/proj/src changes: review`    | when a file there changes                |
+| `/daemon when \`checkupdates\` changes: …`   | when the command prints something new    |
+| `/daemon act every day at 3am: update deps`  | as a background agent in a copy          |
 
 ## Capabilities, programs and the governor (phase 20)
 

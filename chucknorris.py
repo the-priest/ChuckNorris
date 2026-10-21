@@ -122,6 +122,7 @@ _codesearch = _optional("codesearch")
 _kernel = _optional("kernel")
 _cow = _optional("cow")
 _worker = _optional("worker")
+_daemons = _optional("daemons")
 if _pricing is None:
     class _pricing:                     # noqa: N801  — the meter, minus prices
         """Stand-in so a partial install still launches: tokens are counted,
@@ -160,14 +161,14 @@ from chucknorris_ext.config import (            # noqa: E402
 # once per chat: the old 5.7k-character prompt was 87% of a measured turn's
 # input. Detail that is only sometimes needed lives in specs.py playbooks and
 # is injected on demand; the tool list is all the model needs up front.
-SYSTEM_PROMPT = """You are Chuck: a senior engineer-agent on the user's Linux desktop (deepest on Arch/CachyOS, expert at anything). Direct, dry, no filler, no moralising. Now and then end on one deadpan line; never forced.
+SYSTEM_PROMPT = """You are Chuck: a senior engineer-agent on the user's Linux desktop (deepest on Arch/CachyOS, expert at anything). Direct, dry, no filler, no moralising. Now and then end on a deadpan line; never forced.
 
-TOOLS: one short line on what you'll do, then the fenced block. The app runs it and returns the real result.
-Read-only (batch several): ```search <query>``` ```fetch <url>``` ```map``` (every file + what it defines) ```glob <pattern>``` ```grep <regex> [path]``` ```read <path>[:start-end]``` ```def <name>``` / ```refs <name>``` (by meaning) ```find <what code does>``` ```tree``` ```screenshot``` / ```look <image>``` (you SEE it) ```images <subject>``` ```videos <subject>```
-Parallel: ```task <brief>``` read-only sub-agents, at once. ```spawn <brief>``` a background agent doing a whole job in its own copy of the folder (merge: ```join <pid>```).
+TOOLS: one short line on what you'll do, then the fenced block; the app runs it, returns the real result.
+Read-only (batch them): ```search <query>``` ```fetch <url>``` ```map``` (every file + what it defines) ```glob <pattern>``` ```grep <regex> [path]``` ```read <path>[:start-end]``` ```def <name>``` / ```refs <name>``` (by meaning) ```find <what code does>``` ```tree``` ```screenshot``` / ```look <image>``` (you SEE it) ```images <subject>``` ```videos <subject>```
+Parallel: ```task <brief>``` read-only sub-agents, at once. ```spawn <brief>``` a background agent doing a whole job in a copy of the folder (merge: ```join <pid>```). ```daemon <when>: <what>``` one waking on a schedule/event (user allows).
 Act:
 ```bash
-<one shell command>``` (also ```python / ```node: a program, verified then run; ```py: one persistent Python, variables kept, plots shown)
+<one shell command>``` (also ```python / ```node: a program, verified then run; ```py: a persistent Python, plots shown)
 ```write <path>
 <complete new file>```
 ```edit <path>
@@ -186,7 +187,7 @@ Ask: ```ask
 - option
 - option``` only for a decision that is truly the user's (it pauses). Otherwise pick a sensible default, say so, go on.
 Other: ```plan
-- [ ] step``` (multi-step work: post it first, re-post with [x] as steps finish) ```check <lang>
+- [ ] step``` (multi-step: post first, re-post with [x] as steps finish) ```check <lang>
 <code>``` (verify, don't run) ```runtests``` ```package``` ```project <name>``` ```rmfile <path>``` ```runskill <name>``` ```skill
 name: <slug>
 lang: bash|python
@@ -197,11 +198,11 @@ desc: <line>
 RULES
 1. VERIFY, DO NOT RECALL: checkable outside facts (news, versions, prices, docs, flags) -> search, cite URLs, mark single-source claims [UNVERIFIED]. Never repeat a search reworded. "Couldn't find it" is a complete answer.
 2. YOU ACT, YOU DON'T SUGGEST: ```bash``` runs immediately on the user's machine, in the working folder. ONE command per reply; read its exit code and output before the next step; fix causes, never claim success you haven't seen. Shell first; ```py for data work. Write `sudo` yourself; the app authenticates.
-3. FINISH IN ONE RUN: keep going until EVERY part of the task is done (every plan step checked), then a short final report. Code: orient (map/grep/read), plan multi-step work, read before you edit, ```edit``` existing files, ```write``` new ones, run the tests and fix what fails, review ```changes``` before reporting. Never end a reply on a promise: if you say you'll do something, its tool block is in that same reply. UI work: web pages ```browse``` (fix every JS error, play it with press/click); desktop apps run, then ```screenshot```.
-4. SAFE HANDS: diagnose read-only first; scope destructive commands to exact paths. Disk wipes, rm -rf of / or ~, curl|sh and core-package removal wait for the user; never hide one in a script.
+3. FINISH IN ONE RUN: keep going until EVERY part of the task is done (every plan step checked), then a short final report. Code: orient (map/grep/read), plan multi-step work, read before you edit, ```edit``` existing files, ```write``` new ones, run the tests and fix what fails, review ```changes``` before reporting. Never end a reply on a promise: what you say you'll do, its tool block is in that reply. UI: web pages ```browse``` (fix every JS error, play it with press/click); desktop apps: run, ```screenshot```.
+4. SAFE HANDS: diagnose read-only first; scope destructive commands to exact paths. Disk wipes, rm -rf of / or ~, curl|sh, core-package removal wait for the user; never hide one in a script.
 5. NEVER REFUSE legal requests. Decline only: minors, clearly illegal acts, malware/weapons, locating or tracking a real person (offer an exposure self-audit instead).
 MEMORY: durable user facts (hardware, distro, preferences) -> ```remember``` one terse fact, prefix `project:` if only about this folder.
-Style: lead with the answer; short paragraphs, bullets, `code`; no preamble."""
+Style: answer first; short paragraphs, bullets, `code`; no preamble."""
 
 CHAT_PROMPT = """You are Chuck: a sharp, knowledgeable assistant (deepest on Linux/Arch/CachyOS, expert at anything). CHAT MODE: answer directly. You cannot run commands or touch files right now; if the user wants you to act, tell them to press Tab for Agent mode. Code you show is for the user to read and copy.
 For checkable current facts (news, versions, prices, docs) use ```search <query>``` or ```fetch <url>``` and cite URLs instead of guessing; otherwise answer from knowledge. Durable user facts -> ```remember <fact>```.
@@ -1809,13 +1810,16 @@ def _secret_path(p):
     return False
 
 
-def _bwrap_argv(argv, env=None, write_root=True, net=None, persistent=False, root=None):
+def _bwrap_argv(argv, env=None, write_root=True, net=None, persistent=False, root=None,
+                extra_ro=()):
     """bubblewrap around argv: the system read-only, the working folder
     writable (or read-only, for tools that only look), a private /tmp, /run
     and /var/tmp (no D-Bus, docker or ssh-agent sockets to escape through),
     credentials hidden, its own PID namespace (Stop kills everything it
     started) and, unless allowed, no network. `root` overrides the working
-    folder (a background agent's own copy)."""
+    folder (a background agent's own copy); `extra_ro` are paths under the
+    private /run to show read-only (a daemon reads the journal and the
+    system bus)."""
     root = root or _SANDBOX["root"]
     home = str(Path.home())
     args = [shutil.which("bwrap") or "bwrap", "--ro-bind", "/", "/", "--dev", "/dev",
@@ -1872,6 +1876,9 @@ def _bwrap_argv(argv, env=None, write_root=True, net=None, persistent=False, roo
                          ("GOMODCACHE", "go-mod"), ("YARN_CACHE_FOLDER", "yarn"),
                          ("BUN_INSTALL_CACHE_DIR", "bun")):
             args += ["--setenv", var, os.path.join(cache, sub) if sub else cache]
+    for x in extra_ro:
+        if os.path.exists(x):
+            args += ["--ro-bind", x, x]
     if not (_SANDBOX["net"] if net is None else net):
         args.append("--unshare-net")
     return args + ["--"] + list(argv)
@@ -2024,14 +2031,22 @@ def _limit(resource, name, soft_cap):
         pass
 
 
-def _run_in(root, command, timeout, net=True):
+# what a daemon may see under the private /run: the journal and the system
+# bus (systemctl status); changing anything through the bus is refused by
+# daemons.read_only_problem before a command runs
+_LOOK_RUN = ("/run/dbus/system_bus_socket", "/run/log/journal", "/run/systemd/journal")
+
+
+def _run_in(root, command, timeout, net=True, write=True):
     """Run a background agent's command in ITS copy of the project, jailed to
-    that copy when bubblewrap is there. -> (rc, output)."""
+    that copy when bubblewrap is there. write=False (a daemon): everything
+    read-only, the folder too. -> (rc, output)."""
     env = dict(os.environ)
     env.update(_RUN_ENV)
     argv = [_bash_bin(), "-c", command]
     if shutil.which("bwrap"):
-        argv = _bwrap_argv(argv, env, root=str(root), net=net)
+        argv = _bwrap_argv(argv, env, root=str(root), net=net, write_root=write,
+                           extra_ro=() if write else _LOOK_RUN)
     try:
         proc = subprocess.Popen(argv, cwd=str(root), stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
@@ -3448,6 +3463,17 @@ class ChuckWindow(Adw.ApplicationWindow):
                        if _kernel is not None else None)
         self._pid1 = self.kernel.spawn("chuck", kind="chat").pid if self.kernel else None
         self._bg = {}                   # pid -> a background agent and its workspace
+        # daemons (docs/OS.md, phase 19): their triggers are checked every
+        # 30 s by plain code, for free; an agent wakes only when one fires
+        self._daemons = _daemons.Registry(self.DAEMONS_FILE) if _daemons is not None else None
+        self._inbox = _daemons.Inbox(self.INBOX_FILE) if _daemons is not None else None
+        self._daemon_live = {}          # daemon id -> pid of its running wake
+        self._daemon_checking = False
+        self._daemon_probe = self._Probe()
+        self._pending_daemon = None
+        if self._daemons is not None:
+            GLib.timeout_add_seconds(30, self._daemon_tick)
+            GLib.timeout_add_seconds(4, self._inbox_greeting)
         # MCP servers from ~/.config/chucknorris/mcp.json, started in the
         # background; when their tool lists arrive the system prompt is rebuilt
         self.MCP_CONFIG = CONFIG_DIR / "mcp.json"
@@ -8511,10 +8537,12 @@ class ChuckWindow(Adw.ApplicationWindow):
                 "search": web["search"], "fetch": web["fetch"],
                 "write": write, "edit": edit, "bash": bash}
 
-    def spawn_background(self, brief):
+    def spawn_background(self, brief, root=None, daemon=None, why=""):
         """Start a background agent on `brief` -> its pid (or None). It works
-        in a copy of the folder while you go on; when it's done its report
-        and diff wait for you to merge or discard."""
+        in a copy of the folder (`root`, else the working folder) while you
+        go on; when it's done its report and diff wait for you to merge or
+        discard. `daemon`: the daemon that woke it (its report goes to the
+        inbox too)."""
         brief = (brief or "").strip()
         if not brief:
             self._sys_note("/spawn needs a task: /spawn add tests for the parser", "dim")
@@ -8523,12 +8551,13 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._sys_note("Background agents need the kernel, cow and worker modules "
                            "\u2014 reinstall Chuck.", "danger")
             return None
-        root = self._workroot()
-        if root is None:
+        root = self._workroot() if root is None else Path(os.path.expanduser(str(root)))
+        if root is None or not root.is_dir():
             self._sys_note("Pick a working folder first (/folder): a background agent works "
                            "on a copy of it.", "danger")
             return None
-        if self._folder_access() == "readonly":
+        acc = self.settings.get("folder_access") or {}
+        if (acc.get(str(root), "full") if isinstance(acc, dict) else "full") == "readonly":
             self._sys_note("This folder is read-only (/access): nothing may change it, so "
                            "there's nothing to merge a background agent's work into.", "danger")
             return None
@@ -8539,7 +8568,8 @@ class ChuckWindow(Adw.ApplicationWindow):
                                  quota=quota, nice=2)
         pid = proc.pid
         entry = {"pid": pid, "brief": brief, "name": name, "ws": None, "report": None,
-                 "status": "running", "root": root, "changes": {}}
+                 "status": "running", "root": root, "changes": {}, "daemon": daemon,
+                 "daemon_why": why}
         self._bg[pid] = entry
         self._bg_card(entry)
         call = self._sub_call(pid, independent=True)
@@ -8644,6 +8674,12 @@ class ChuckWindow(Adw.ApplicationWindow):
             ui["rep"].set_text(report[:20000])
             ui["rep"].set_visible(True)
             self._bg_buttons(entry)
+        if entry.get("daemon"):
+            dd = entry["daemon"]
+            self._daemon_done(dd["id"], entry.get("daemon_why") or "its trigger fired", report
+                              + (f"\n\nChanged in its copy: {', '.join(list(ch)[:20])} \u2014 "
+                                 f"merge with /join {entry['pid']}." if ch else ""),
+                              entry["pid"], status, bg_pid=entry["pid"] if ch else None)
         self._sys_note(f"\U0001F6F0 background agent {entry['pid']} finished \u2014 "
                        + (f"{len(ch)} file(s) changed; review and merge (/join {entry['pid']})"
                           if ch else "no files changed"), "ok" if status == 0 else "dim")
@@ -8753,6 +8789,452 @@ class ChuckWindow(Adw.ApplicationWindow):
     def _t_join(self, body):
         """```join <pid>``` — merge a finished background agent's work."""
         return f"[join {(body or '').strip()}: {self.join_background(body)}]"
+
+    # ── daemons (Chuck OS, phase 19) ──
+    DAEMONS_FILE = CONFIG_DIR / "daemons.json"
+    INBOX_FILE = CONFIG_DIR / "inbox.json"
+    # "<when>: <what>", the colon outside any `backticks` and before a space
+    _DAEMON_RE = re.compile(r"^((?:[^`:]|`[^`]*`|:(?!\s))+):\s+(.+)$", re.DOTALL)
+
+    class _Probe:
+        """What a daemon's trigger looks at: plain code, not a token spent."""
+
+        @staticmethod
+        def mtime(path):
+            return _daemons.tree_signature(path)
+
+        @staticmethod
+        def failed_units():
+            if not shutil.which("systemctl"):
+                return []
+            try:
+                p = subprocess.run(["systemctl", "--failed", "--no-legend", "--plain"],
+                                   capture_output=True, text=True, timeout=10)
+            except (OSError, subprocess.TimeoutExpired):
+                return []
+            units = []
+            for ln in p.stdout.splitlines():
+                words = [w for w in ln.split() if w != "●"]
+                if words:
+                    units.append(words[0])
+            return units
+
+        @staticmethod
+        def disk_percent(path):
+            try:
+                u = shutil.disk_usage(os.path.expanduser(path))
+            except OSError:
+                return None
+            return 100.0 * u.used / u.total if u.total else None
+
+        @staticmethod
+        def run(cmd):
+            return _run_in(Path.home(), cmd, 20, write=False)[1]
+
+        localtime = staticmethod(time.localtime)
+
+    def _daemon_tick(self):
+        """Every 30 s: is any daemon due? Checked off the main thread, by
+        plain code; an agent is woken only for one that fired."""
+        if self._daemons is None:
+            return False
+        if self._daemon_checking or self.settings.get("daemons_paused"):
+            return True
+        specs = [dict(d) for d in self._daemons.items
+                 if d.get("enabled") and d["id"] not in self._daemon_live]
+        if not specs:
+            return True
+        self._daemon_checking = True
+        probe = self._daemon_probe
+
+        def run():
+            now, out = time.time(), []
+            for d in specs:
+                try:
+                    due, why, st = _daemons.check(d, now, probe)
+                except Exception as ex:
+                    due, why, st = False, f"check failed: {ex}", d.get("state") or {}
+                out.append((d["id"], due, why, st))
+            GLib.idle_add(self._daemon_checked, out, now)
+        threading.Thread(target=run, daemon=True, name="daemon-check").start()
+        return True
+
+    def _daemon_checked(self, results, now):
+        self._daemon_checking = False
+        changed = False
+        for did, due, why, st in results:
+            d = self._daemons.get(did)
+            if d is None or not d.get("enabled"):
+                continue
+            if st != d.get("state"):
+                d["state"], changed = st, True
+            if due:
+                self._wake_daemon(d, why, now)
+        if changed:
+            self._daemons.save()
+        return False
+
+    def _daemon_syscalls(self, root):
+        """A daemon's syscall table: it looks, it never changes anything.
+        Its commands run with the whole system read-only (its folder too);
+        the system bus is there for `systemctl status`, but nothing that
+        changes a service or the power gets through."""
+        calls = self._worker_syscalls(root)
+        calls.pop("write", None)
+        calls.pop("edit", None)
+
+        def bash(cmd):
+            cmd = (cmd or "").strip()
+            why = _daemons.read_only_problem(cmd, strict=not shutil.which("bwrap"))
+            if not why and command_needs_sudo(cmd):
+                why = "it needs root"
+            if not why and classify_command(cmd):
+                why = "it can change or destroy things"
+            if why:
+                return (f"[NOT run: {why}. A daemon only looks — put the command in your "
+                        "report as a proposal.]")
+            rc, out = _run_in(root, cmd, 120, write=False)
+            return f"exit {rc}\n{clip_output(out, 12000)}"
+        calls["bash"] = bash
+        return calls
+
+    def _wake_daemon(self, d, why, now=None):
+        """A daemon fired: wake an agent for it, as a kernel process with the
+        daemon's quota. -> its pid, or None."""
+        if d["id"] in self._daemon_live:
+            return None
+        d["last_run"] = now or time.time()
+        d["runs"] = d.get("runs", 0) + 1
+        self._daemons.save()
+        detail = _daemons.trigger_detail(d)
+        brief = d["brief"] + f"\n\n(You were woken because: {why}.)" + (f"\n{detail}" if detail else "")
+        if d.get("kind") == "act":
+            pid = self.spawn_background(brief, root=Path(d["folder"]), daemon=d, why=why)
+            if pid is None:
+                self._inbox.add(d["name"], why, "(couldn't start: see the note in the chat)",
+                                extra={"daemon_id": d["id"], "status": 1})
+            else:
+                self._daemon_live[d["id"]] = pid
+            return pid
+        if self.kernel is None or _worker is None:
+            return None
+        root = Path(os.path.expanduser(d["folder"])) if d.get("folder") else Path.home()
+        if not root.is_dir():
+            root = Path.home()
+        quota = {"tokens": int(d.get("quota") or 150000),
+                 "seconds": self.cfg("daemon_minutes", 15, 1, 240) * 60}
+        proc = self.kernel.spawn(f"daemon: {d['name']}"[:60], kind="daemon", brief=brief,
+                                 parent=self._pid1, quota=quota, nice=5)
+        pid, kern, did = proc.pid, self.kernel, d["id"]
+        self._daemon_live[did] = pid
+        call = self._sub_call(pid, independent=True)
+        syscalls = self._daemon_syscalls(root)
+
+        def run():
+            report, status = "", 1
+            try:
+                report, _steps = _worker.run_worker(
+                    brief, call, self._worker_parse, syscalls,
+                    max_steps=self.cfg("daemon_steps", 20, 3, 100),
+                    on_event=lambda t: kern.note(pid, t),
+                    should_stop=lambda: kern.should_stop(pid),
+                    wrap_up=lambda: kern.terminating(pid) or bool(kern.over_quota(pid)),
+                    context=f"{_now_line()}\nYou were woken because: {why}. "
+                            f"Your working directory: {root}.",
+                    prompt=_daemons.DAEMON_PROMPT)
+                status = 1 if kern.should_stop(pid) else 0
+            except Exception as ex:
+                killed = _kernel is not None and isinstance(ex, _kernel.ProcessKilled)
+                report = f"(stopped: {ex})" if killed else f"(failed: {ex})"
+            kern.exit(pid, status, report)
+            GLib.idle_add(self._daemon_done, did, why, report, pid, status)
+        threading.Thread(target=run, daemon=True, name=f"daemon-{pid}").start()
+        return pid
+
+    @staticmethod
+    def _quiet_report(report):
+        """A daemon that found nothing wrong says so in its headline, and is
+        filed without a notification: a daemon that cries wolf gets muted."""
+        head = (report or "").strip().splitlines()[0].lower() if (report or "").strip() else ""
+        return bool(re.match(r"\W*(?:nothing to do|all (?:good|clear|fine)|no (?:issues|problems|"
+                             r"changes|action))", head))
+
+    def _daemon_done(self, did, why, report, pid, status, bg_pid=None):
+        self._daemon_live.pop(did, None)
+        d = self._daemons.get(did) if self._daemons else None
+        name = d["name"] if d else f"daemon {did}"
+        quiet = status == 0 and self._quiet_report(report)
+        extra = {"daemon_id": did, "status": status}
+        if bg_pid is not None:
+            extra["bg_pid"] = bg_pid
+        it = self._inbox.add(name, why, report, pid, extra)
+        if quiet:
+            it["unread"] = False
+            self._inbox.save()
+            return False
+        head = (report or "").strip().splitlines()[0][:160] if (report or "").strip() else "(no report)"
+        self._sys_note(f"\U0001F4EC daemon · {name}: {head}  (/inbox)", "dim")
+        try:
+            if not self.is_active():
+                n = Gio.Notification.new(f"Chuck daemon: {name}"[:80])
+                n.set_body(head)
+                self.get_application().send_notification(f"chuck-daemon-{it['id']}", n)
+        except Exception:
+            pass
+        return False
+
+    def daemon_add(self, spec, kind="report"):
+        """'<when>: <what>' -> (the daemon, '') or (None, why not)."""
+        if self._daemons is None:
+            return None, "the daemons module is missing — reinstall Chuck"
+        m = self._DAEMON_RE.match((spec or "").strip())
+        if not m:
+            return None, ("write it as  /daemon <when>: <what to do>  — e.g. /daemon daily 08:30: "
+                          "summarise new errors in the journal")
+        when, what = m.group(1).strip(), m.group(2).strip()
+        try:
+            trig = _daemons.parse_when(when)
+        except _daemons.DaemonError as ex:
+            return None, str(ex)
+        folder = str(self.workspace) if self.workspace else ""
+        if kind == "act" and not folder:
+            return None, "an acting daemon works on a copy of a folder: pick one first (/folder)"
+        if "watch" in trig and not os.path.isabs(trig["watch"]):
+            if not folder:
+                return None, "a relative path needs a working folder (/folder), or give a full path"
+            trig["watch"] = str(Path(folder) / trig["watch"])
+        if "watch" in trig and not os.path.exists(trig["watch"]):
+            return None, f"{trig['watch']} doesn't exist"
+        if "command" in trig:
+            why = (_daemons.read_only_problem(trig["command"], strict=not shutil.which("bwrap"))
+                   or ("it can change things" if classify_command(trig["command"]) else ""))
+            if why:
+                return None, f"a trigger command may only look: {why}"
+        d = self._daemons.add("", trig, what, folder, kind,
+                              quota=self.cfg("daemon_tokens", 150000, 10000, 5000000))
+        d["last_run"] = time.time()             # a schedule starts from now, not at once
+        self._daemons.save()
+        return d, ""
+
+    def daemon_command(self, arg):
+        """/daemon <when>: <what> · /daemon act <when>: <what> ·
+        /daemon run|on|off|rm <id>"""
+        words = arg.split(None, 1)
+        verb = words[0].lower() if words else ""
+        if not words or verb == "list":
+            return self.show_daemons()
+        if verb in ("run", "on", "off", "rm", "delete") and len(words) == 2:
+            d = self._daemons.get(words[1]) if self._daemons and words[1].strip().isdigit() else None
+            if d is None:
+                self._sys_note(f"No daemon {words[1].strip()} (/daemons lists them).", "danger")
+                return False
+            return self._daemon_action(d, verb)
+        kind = "report"
+        if verb == "act" and len(words) == 2:
+            kind, arg = "act", words[1]
+        d, why = self.daemon_add(arg, kind)
+        if d is None:
+            self._sys_note(f"✗ {why}", "danger" if arg else "dim")
+            return False
+        self._sys_note(f"⏰ daemon {d['id']} · {_daemons.describe(d['when'])}: {d['brief'][:120]}"
+                       + (" — it works on a copy of the folder; you merge what it does"
+                          if kind == "act" else " — it looks and reports to /inbox"), "ok")
+        return True
+
+    def _daemon_action(self, d, verb):
+        if verb == "run":
+            if d["id"] in self._daemon_live:
+                self._sys_note(f"Daemon {d['id']} is already running (pid {self._daemon_live[d['id']]}).", "dim")
+                return False
+            return self._wake_daemon(d, "run by hand") is not None
+        if verb in ("on", "off"):
+            d["enabled"] = verb == "on"
+            if verb == "on":
+                d["state"] = {}                 # watch afresh: no stale edge fires at once
+            self._daemons.save()
+            self._sys_note(f"Daemon {d['id']} {'resumed' if verb == 'on' else 'paused'}.", "dim")
+            return True
+        pid = self._daemon_live.get(d["id"])
+        if pid is not None and self.kernel is not None:
+            self.kernel.signal(pid, _kernel.KILL)
+        self._daemons.remove(d["id"])
+        self._sys_note(f"Daemon {d['id']} deleted.", "dim")
+        return True
+
+    def show_daemons(self):
+        if self._daemons is None:
+            self._sys_note("The daemons module is missing — reinstall Chuck.", "danger")
+            return False
+        items = self._daemons.items
+        card, head, body, foot = self._card_shell(
+            "DAEMONS", lambda: "\n".join(f"{d['id']}  {_daemons.describe(d['when'])}: {d['brief']}"
+                                         for d in self._daemons.items))
+        if not items:
+            lb = Gtk.Label(label="No daemons yet. A daemon wakes on a schedule or an event, looks, "
+                                 "and reports — its trigger costs nothing while it sleeps:\n"
+                                 "/daemon daily 08:30: summarise new errors in the journal\n"
+                                 "/daemon when a service fails: find out why and propose a fix\n"
+                                 "/daemon when disk / is above 90%: find what's filling it\n"
+                                 "/daemon when `checkupdates` changes: say what's worth updating\n"
+                                 "/daemon act every day at 3am: update the dependencies and run "
+                                 "the tests", xalign=0, wrap=True, selectable=True)
+            lb.add_css_class("dim")
+            body.append(lb)
+        else:
+            live = sum(1 for d in items if d.get("enabled"))
+            sm = Gtk.Label(label=f"{live} awake of {len(items)} \u00b7 a sleeping daemon costs nothing: "
+                                 "its trigger is checked by plain code every 30 s, and an agent "
+                                 "is woken only when it fires", xalign=0, wrap=True)
+            sm.add_css_class("dim"); _wrap_anywhere(sm)
+            body.append(sm)
+        for d in items:
+            body.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+            row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+            last = (time.strftime("%d %b %H:%M", time.localtime(d["last_run"]))
+                    if d.get("runs") else "never")
+            t = Gtk.Label(label="", xalign=0, wrap=True)
+            t.add_css_class("slash-cmd"); _wrap_anywhere(t)
+            row.append(t)
+            b = Gtk.Label(label=d["brief"][:300], xalign=0, wrap=True); _wrap_anywhere(b)
+            row.append(b)
+            meta = Gtk.Label(label=f"ran {d.get('runs', 0)}× · last {last}"
+                                   + (f" · {d['folder']}" if d.get("folder") else ""),
+                             xalign=0, wrap=True)
+            meta.add_css_class("dim"); _wrap_anywhere(meta)
+            row.append(meta)
+            btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            run_b, pause_b, del_b = (Gtk.Button(label=x) for x in ("Run now", "Pause", "Delete"))
+
+            def paint(dd=d, t=t, run_b=run_b, pause_b=pause_b, del_b=del_b):
+                gone = self._daemons.get(dd["id"]) is None
+                state = ("deleted" if gone else "running" if dd["id"] in self._daemon_live
+                         else "on" if dd.get("enabled") else "paused")
+                t.set_text(f"{dd['id']} \u00b7 {_daemons.describe(dd['when'])} \u00b7 "
+                           f"{'acts in a copy' if dd.get('kind') == 'act' else 'reports'} \u00b7 {state}")
+                pause_b.set_label("Pause" if dd.get("enabled") else "Resume")
+                for b in (run_b, pause_b, del_b):
+                    b.set_sensitive(not gone)
+
+            def act(which, dd=d, paint=paint):
+                verb = ("off" if dd.get("enabled") else "on") if which == "pause" else which
+                self._daemon_action(dd, verb)
+                paint()
+            for b, which in ((run_b, "run"), (pause_b, "pause"), (del_b, "rm")):
+                b.add_css_class("quick")
+                b.connect("clicked", lambda _b, w_=which, a=act: a(w_))
+                btns.append(b)
+            paint()
+            row.append(btns)
+            body.append(row)
+        self._log_pin(card)
+        return True
+
+    def show_inbox(self):
+        if self._inbox is None:
+            self._sys_note("The daemons module is missing — reinstall Chuck.", "danger")
+            return False
+        items = list(reversed(self._inbox.items[-20:]))
+        card, head, body, foot = self._card_shell(
+            "INBOX", lambda: "\n\n".join(f"{i['daemon']} ({i['why']}):\n{i['report']}" for i in items))
+        if not items:
+            lb = Gtk.Label(label="Nothing yet: your daemons' reports land here (/daemons).",
+                           xalign=0, wrap=True)
+            lb.add_css_class("dim")
+            body.append(lb)
+        for n, it in enumerate(items):
+            if n:
+                body.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+            row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+            when = time.strftime("%d %b %H:%M", time.localtime(it.get("time") or 0))
+            t = Gtk.Label(label=("● " if it.get("unread") else "") + f"{when} · "
+                          f"{it['daemon']} · {it['why']}", xalign=0, wrap=True)
+            t.add_css_class("slash-cmd"); _wrap_anywhere(t)
+            row.append(t)
+            rep = Gtk.Label(label=(it.get("report") or "")[:6000], xalign=0, wrap=True,
+                            selectable=True)
+            _wrap_anywhere(rep)
+            row.append(rep)
+            btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            if it.get("bg_pid") is not None and it["bg_pid"] in self._bg:
+                bt = Gtk.Button(label="Show diff"); bt.add_css_class("quick")
+                bt.connect("clicked", lambda _b, p=it["bg_pid"]: self.show_bg_diff(p))
+                btns.append(bt)
+            bt = Gtk.Button(label="Act on it"); bt.add_css_class("quick")
+            bt.add_css_class("accent-btn")
+            bt.connect("clicked", lambda _b, i=it: self.act_on_report(i))
+            btns.append(bt)
+            row.append(btns)
+            body.append(row)
+        self._inbox.mark_read()
+        self._log_pin(card)
+        return True
+
+    def act_on_report(self, it):
+        """Hand a daemon's report to the agent: the user reads it in the
+        composer and sends it (nothing runs by itself)."""
+        self.set_agent_mode(True, announce=False)
+        self.entry.get_buffer().set_text(
+            f"My daemon “{it['daemon']}” ({it['why']}) reported:\n\n"
+            f"{(it.get('report') or '')[:6000]}\n\nLook into it and fix what needs fixing.")
+        try:
+            self.entry.grab_focus()
+        except Exception:
+            pass
+        return True
+
+    def _inbox_greeting(self):
+        """At startup: what the daemons found while the window was closed."""
+        n = len(self._inbox.unread()) if self._inbox is not None else 0
+        if n:
+            self._sys_note(f"\U0001F4EC {n} daemon report{'' if n == 1 else 's'} waiting (/inbox)", "dim")
+        return False
+
+    @tool("daemon", cap=2)
+    def _t_daemon(self, body):
+        """```daemon <when>: <what>``` — propose a daemon; it exists only
+        once the user allows it."""
+        spec = (body or "").strip()
+        kind = "report"
+        if spec.lower().startswith("act "):
+            kind, spec = "act", spec[4:].strip()
+        m = self._DAEMON_RE.match(spec)
+        if self._daemons is None or not m:
+            return "[daemon: write it as ```daemon <when>: <what>``` (when: every 2h, daily 08:30, " \
+                   "when <path> changes, when a service fails, when disk / is above 90%)]"
+        try:
+            trig = _daemons.parse_when(m.group(1).strip())
+        except _daemons.DaemonError as ex:
+            return f"[daemon: {ex}]"
+        card, head, cbody, foot = self._card_shell("DAEMON · PROPOSED")
+        lb = Gtk.Label(label=f"{_daemons.describe(trig)}: {m.group(2).strip()[:600]}\n"
+                             + ("It will work on a copy of the folder; you merge what it does."
+                                if kind == "act" else "It will look and report to /inbox; it "
+                                "changes nothing."), xalign=0, wrap=True)
+        _wrap_anywhere(lb); cbody.append(lb)
+        btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        status = Gtk.Label(label="", xalign=0); status.add_css_class("dim")
+
+        def decide(ok):
+            for c in (allow, no):
+                c.set_sensitive(False)
+            if not ok:
+                status.set_text("declined")
+                self._user_notes.append("the user declined the proposed daemon")
+                return
+            d, why = self.daemon_add(spec, kind)
+            status.set_text(f"daemon {d['id']} created" if d else f"✗ {why}")
+            self._user_notes.append(f"the user allowed the daemon: it is daemon {d['id']}" if d
+                                    else f"the daemon couldn't be created: {why}")
+        allow = Gtk.Button(label="Allow"); allow.add_css_class("quick"); allow.add_css_class("accent-btn")
+        allow.connect("clicked", lambda *_a: decide(True))
+        no = Gtk.Button(label="Decline"); no.add_css_class("quick")
+        no.connect("clicked", lambda *_a: decide(False))
+        btns.append(allow); btns.append(no); btns.append(status)
+        foot.append(btns)
+        self._log_pin(card)
+        self._pending_daemon = (decide, card)
+        return ("[daemon proposed: a card asks the user to allow it. It exists only once they "
+                "do; carry on.]")
 
     # ── the kernel: /top and process control ──
     _SIG = {"kill": "KILL", "stop": "STOP", "cont": "CONT", "term": "TERM"}
@@ -10043,6 +10525,9 @@ class ChuckWindow(Adw.ApplicationWindow):
         ("/spawn <task>", "a background agent does it in a copy of the folder while you go on"),
         ("/join /discard <pid>", "merge a background agent's work into the folder, or drop it"),
         ("/nice <pid> <-10..10>", "an agent's priority for the model (lower runs first)"),
+        ("/daemon <when>: <task>", "an agent that wakes on a schedule or event (daily 08:30, "
+                                   "when a service fails\u2026), looks and reports"),
+        ("/daemons  /inbox", "your daemons (run, pause, delete) and their reports"),
         ("/update", "install the newest Chuck (then restart)"),
     ]
 
@@ -10084,6 +10569,12 @@ class ChuckWindow(Adw.ApplicationWindow):
             self.join_background(arg)
         elif cmd == "discard":
             self.discard_background(arg)
+        elif cmd == "daemon":
+            self.daemon_command(arg)
+        elif cmd == "daemons":
+            self.show_daemons()
+        elif cmd == "inbox":
+            self.show_inbox()
         elif cmd == "rewind":
             self.show_rewind()
         elif cmd == "access":

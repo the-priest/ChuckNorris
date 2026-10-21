@@ -23,6 +23,24 @@ The third roadmap (`docs/ROADMAP.md`, phases 10–15), with tests in
   **voice input** (Moonshine, local; mic button or Ctrl+M, optional
   hands-free sending).
 
+### Chuck OS (`docs/OS.md`, phases 16–19)
+
+- **The agent kernel.** Every agent is a process: a quota of tokens, money
+  and time, its spend charged to it and every ancestor, scheduled onto
+  model-call slots by priority. Past its quota a process is asked to report
+  (TERM), then killed. `/top` shows them live; `/kill`, `/stop`, `/cont`,
+  `/nice`.
+- **Background agents** (`/spawn`, ```` ```spawn ````): a full agent edits,
+  runs and tests in its own copy of the folder while you chat; its diff is
+  merged three-way when you say so, conflicts set aside, never forced.
+- **Virtual memory for the context**: old tool output is paged out of what
+  is sent, exactly recoverable with ```` ```page pN ````, before anything is
+  summarised.
+- **Daemons** (`/daemon <when>: <what>`, `/daemons`, `/inbox`): agents that
+  sleep for free until a schedule, a file change, a failed service, a full
+  disk or a command's output wakes them; they look, report and propose,
+  never change anything unattended.
+
 ### Fixed (bug hunts on this cycle)
 
 - Sandbox escapes: switching folders with ```` ```project ````, a repo's own

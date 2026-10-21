@@ -381,6 +381,244 @@ type_and_send(w, "what failed earlier?")
 check("test_3 failed at line 41" in " ".join(str(m.get("content")) for m in w.history[-3:]),
       "the agent pages it in with a tool call")
 
+# ═══════════════════════════════════════════════════════════════════════════
+print("\n--- daemons: triggers checked for free, an agent woken only when one fires ---")
+from chucknorris_ext import daemons as D
+pw = D.parse_when
+check(pw("every 30m") == {"every": 1800} and pw("every 2 hours") == {"every": 7200}
+      and pw("every day") == {"every": 86400}, "intervals", pw("every 2 hours"))
+check(pw("daily 08:30") == {"daily": "08:30"} and pw("every day at 7pm") == {"daily": "19:00"}
+      and pw("daily at 12am") == {"daily": "00:00"}, "a time of day, 24h or am/pm")
+check(pw("when a service fails") == {"unit_failed": True}
+      and pw("when disk / is above 90%") == {"disk": "/", "above": 90}
+      and pw("when `checkupdates` changes") == {"command": "checkupdates", "changes": True}
+      and pw("when /etc/fstab changes") == {"watch": "/etc/fstab"}, "events")
+for bad in ("every 10s", "daily 25:00", "sometime", ""):
+    try:
+        pw(bad)
+        check(False, f"{bad!r} is refused")
+    except D.DaemonError as ex:
+        check("say when" in str(ex) or "minute" in str(ex) or "exist" in str(ex),
+              f"{bad!r} is refused with a hint", ex)
+
+
+class FakeProbe:
+    def __init__(self):
+        self.sigs, self.units, self.disk, self.out, self.ran = {}, [], 50.0, "", []
+
+    def mtime(self, p):
+        return self.sigs.get(p, "s0")
+
+    def failed_units(self):
+        return list(self.units)
+
+    def disk_percent(self, p):
+        return self.disk
+
+    def run(self, cmd):
+        self.ran.append(cmd)
+        return self.out
+
+    localtime = staticmethod(time.localtime)
+
+
+pr = FakeProbe()
+spec = {"when": {"every": 3600}, "last_run": 1000}
+check(D.check(spec, 1000 + 3599, pr)[0] is False and D.check(spec, 1000 + 3600, pr)[0] is True,
+      "an interval fires when it has passed")
+lt = lambda t: time.struct_time((2026, 1, 2, int(t // 3600) % 24, int(t // 60) % 60, int(t) % 60, 4, 2, 0))
+pr.localtime = staticmethod(lt)
+day = {"when": {"daily": "08:30"}, "last_run": 0}
+check(D.check(day, 8 * 3600 + 29 * 60, pr)[0] is False and D.check(day, 8 * 3600 + 31 * 60, pr)[0] is True,
+      "a daily daemon fires once the time has come")
+day["last_run"] = 8 * 3600 + 31 * 60
+check(D.check(day, 20 * 3600, pr)[0] is False, "and not again the same day")
+check(D.check({"when": {"daily": "08:30"}, "last_run": 0}, 15 * 3600, pr)[0] is True,
+      "a run missed while the computer was off happens when it's back")
+pr.localtime = staticmethod(time.localtime)
+w_ = {"when": {"watch": "/x"}, "state": {}}
+due, _, st = D.check(w_, 0, pr)
+check(due is False and st["sig"] == "s0", "a watch records the first state without firing")
+w_["state"] = st
+check(D.check(w_, 0, pr)[0] is False, "nothing changed: nothing fires")
+pr.sigs["/x"] = "s1"
+check(D.check(w_, 0, pr)[0] is True, "a change fires it")
+u = {"when": {"unit_failed": True}, "state": {}}
+_, _, u["state"] = D.check(u, 0, pr)
+pr.units = ["nginx.service"]
+due, why, u["state"] = D.check(u, 0, pr)
+check(due and "nginx.service" in why, "a newly failed unit fires, naming it", why)
+check(D.check(u, 0, pr)[0] is False, "the same failure doesn't fire twice")
+dk = {"when": {"disk": "/", "above": 90}, "state": {}, "last_run": 0}
+pr.disk = 95.0
+due, why, dk["state"] = D.check(dk, 100, pr)
+check(due and "95%" in why, "the disk passing its threshold fires", why)
+dk["last_run"] = 100
+check(D.check(dk, 200, pr)[0] is False and D.check(dk, 100 + 6 * 3600, pr)[0] is True,
+      "and repeats only every 6 hours while it stays full")
+cm = {"when": {"command": "checkupdates", "changes": True}, "state": {}}
+pr.out = "linux 6.1 -> 6.2"
+_, _, cm["state"] = D.check(cm, 1000, pr)
+pr.out = "linux 6.1 -> 6.3"
+pr.ran.clear()
+check(D.check(cm, 1100, pr)[0] is False and not pr.ran,
+      "a trigger's command isn't run at every tick (checkupdates asks the mirrors)")
+due, _, cm["state"] = D.check(cm, 1300, pr)
+check(due is True, "a command's output changing fires it")
+check("6.3" in D.trigger_detail(cm), "and the woken agent is told what it printed")
+rop = D.read_only_problem
+check(not rop("journalctl -u nginx -n 50 --no-pager") and not rop("systemctl status nginx")
+      and not rop("df -h; du -sh ~/x | sort -h") and not rop("git log -5") and not rop("pacman -Qu"),
+      "looking is allowed")
+check(all(rop(c) for c in ("systemctl restart nginx", "sudo journalctl", "git push", "pacman -Syu",
+                           "find . -delete", "busctl call org.freedesktop.login1 / x PowerOff",
+                           "rm x", "xargs rm", "loginctl poweroff", "dbus-send --system x")),
+      "changing anything is not")
+check(rop("curl x", strict=True) and rop("echo x > f", strict=True) and rop("echo $(id)", strict=True)
+      and not rop("curl x"), "without a sandbox only read-only-by-nature commands run")
+reg = D.Registry(tmp / "dm.json")
+d1 = reg.add("", "every 1h", "look at things")
+check(D.Registry(tmp / "dm.json").get(d1["id"])["brief"] == "look at things", "daemons persist")
+ib = D.Inbox(tmp / "ib.json", keep=3)
+for i in range(5):
+    ib.add("d", "why", f"r{i}")
+check([i["report"] for i in D.Inbox(tmp / "ib.json").items] == ["r2", "r3", "r4"],
+      "the inbox keeps the newest reports")
+
+
+class DaemonBackend(BgBackend):
+    def stream(self, messages, on_delta, on_done, on_error, vision=False,
+               should_stop=None, attempts=3, on_open=None):
+        sysmsg = messages[0]["content"] if messages else ""
+        if sysmsg.startswith("You are a daemon"):
+            self.seen.append(messages[1]["content"])
+            n = sum(1 for m in messages if m["role"] == "assistant")
+            brief = messages[1]["content"]
+            if brief.startswith("quiet"):
+                on_delta("Nothing to do: all services are fine.")
+            elif n == 0:
+                on_delta("Looking.\n```bash\nsystemctl restart nginx\n```\n```bash\necho looked-$((1+1))\n```"
+                         "\n```write evil.txt\nx\n```")
+            else:
+                self.results.append(messages[-1]["content"])
+                on_delta("nginx failed: port 80 in use.\nPropose: sudo systemctl restart nginx")
+            self.last_usage = {"prompt": 500, "completion": 50, "cached": 0, "reasoning": 0}
+            on_done()
+            return
+        super().stream(messages, on_delta, on_done, on_error, vision, should_stop,
+                       attempts, on_open)
+
+
+cn.ChuckWindow.DAEMONS_FILE = tmp / "daemons.json"
+cn.ChuckWindow.INBOX_FILE = tmp / "inbox.json"
+w = new_win([], tmp)
+w.set_agent_mode(True, announce=False)
+w.set_workspace(proj, announce=False)
+w.backend = DaemonBackend([])
+w.backend.seen, w.backend.results = [], []
+probe = FakeProbe()
+w._daemon_probe = probe
+
+
+def slash(t):
+    w.entry.get_buffer().set_text(t)
+    w.on_send()
+
+
+def notes():
+    return [x.get_text() for x in w.msgbox.walk() if isinstance(x.get_text(), str)]
+
+
+slash("/daemon when a service fails: find out why and propose a fix")
+check(len(w._daemons.items) == 1 and w._daemons.items[0]["when"] == {"unit_failed": True},
+      "/daemon <when>: <what> creates one", w._daemons.items)
+slash("/daemon whenever: x")
+check(len(w._daemons.items) == 1 and any("say when" in t for t in notes()),
+      "a trigger it can't read is refused with examples")
+slash("/daemon when `rm -rf ~/x` changes: y")
+check(len(w._daemons.items) == 1, "a trigger command that changes things is refused")
+w._daemon_tick(); settle()
+check(not w._daemon_live and w._daemons.items[0]["state"].get("units") == [] and not w.backend.seen,
+      "the first check only records the state: no agent, no tokens")
+w._daemon_tick(); settle()
+check(not w.backend.seen, "nothing failing: still no tokens spent")
+probe.units = ["nginx.service"]
+w._daemon_tick(); settle()
+dps = [r for r in w.kernel.ps(all=True) if r["kind"] == "daemon"]
+check(len(dps) == 1 and dps[0]["state"] == "done" and dps[0]["tokens"] > 0,
+      "a failed service wakes the daemon as a metered process", dps)
+check(w.backend.seen and "nginx.service" in w.backend.seen[0] and "find out why" in w.backend.seen[0],
+      "it is told what fired and what it saw", w.backend.seen[:1])
+res = w.backend.results[0] if w.backend.results else ""
+check("NOT run: systemctl restart changes the system" in res and "looked-2" in res,
+      "its commands only look: restarting a service is refused, looking runs", res[:400])
+check("not available" in res and not (proj / "evil.txt").exists(), "and it can't write files")
+check(len(w._inbox.unread()) == 1 and "port 80" in w._inbox.unread()[0]["report"],
+      "its report lands in the inbox")
+check(any(t.startswith("\U0001F4EC daemon") and "port 80" in t for t in notes()),
+      "and the chat shows its headline")
+w._daemon_tick(); settle()
+check(len([r for r in w.kernel.ps(all=True) if r["kind"] == "daemon"]) == 1,
+      "the same failure doesn't wake it again")
+slash("/daemon every 1h: quiet check")
+dq = w._daemons.items[-1]
+check(dq["last_run"] > 0, "a schedule starts from now, not at once")
+dq["last_run"] = 0
+w._daemon_tick(); settle()
+check(len(w._inbox.items) == 2 and not w._inbox.items[-1]["unread"],
+      "a daemon that finds nothing is filed quietly (no notification, no unread)")
+slash("/daemons")
+t = notes()
+check("DAEMONS" in t and any("when a service fails" in x for x in t), "/daemons lists them")
+btn = [x for x in w.msgbox.walk() if isinstance(x, cn.Gtk.Button) and x.get_label() == "Pause"]
+btn[0].emit("clicked") if btn and hasattr(btn[0], "emit") else w._daemon_action(w._daemons.items[0], "off")
+check(not w._daemons.items[0]["enabled"] and btn and btn[0].get_label() == "Resume",
+      "Pause turns one off, and the button says Resume", w._daemons.items[0])
+n_d = len([r for r in w.kernel.ps(all=True) if r["kind"] == "daemon"])
+probe.units = ["nginx.service", "cups.service"]
+w._daemon_tick(); settle()
+check(len([r for r in w.kernel.ps(all=True) if r["kind"] == "daemon"]) == n_d, "a paused daemon sleeps")
+w._daemon_action(w._daemons.items[0], "on")
+check(w._daemon_action(w._daemons.items[0], "run"), "Run now wakes it by hand")
+settle()
+check(len([r for r in w.kernel.ps(all=True) if r["kind"] == "daemon"]) == n_d + 1, "(and it ran)")
+slash("/inbox")
+check("INBOX" in notes() and not w._inbox.unread(), "/inbox shows the reports and marks them read")
+w.act_on_report(w._inbox.items[0])
+check("port 80" in w.entry.get_buffer().get_text() and w.agent_mode,
+      "Act on it hands the report to the agent, for the user to send")
+w.entry.get_buffer().set_text("")
+slash("/daemon rm 1")
+check(w._daemons.get(1) is None, "/daemon rm deletes one")
+w.backend = DaemonBackend(["```daemon\ndaily 08:30: summarise the journal's new errors\n```\nProposed.", "ok"])
+w.backend.seen, w.backend.results = [], []
+n0 = len(w._daemons.items)
+type_and_send(w, "watch my journal every morning")
+check("DAEMON · PROPOSED" in notes() and len(w._daemons.items) == n0,
+      "the agent can only PROPOSE a daemon: nothing exists until the user allows it")
+w._pending_daemon[0](True)
+check(len(w._daemons.items) == n0 + 1 and w._daemons.items[-1]["when"] == {"daily": "08:30"},
+      "Allow creates it")
+slash("/daemon act every 1h: zeta: add a file")
+da = w._daemons.items[-1]
+check(da["kind"] == "act" and da["folder"] == str(proj), "an acting daemon belongs to a folder")
+da["last_run"] = 0
+w._daemon_tick()
+settle()
+bg = [r for r in w.kernel.ps(all=True) if r["kind"] == "background"]
+check(bg, "it wakes as a background agent in a copy of the folder", bg)
+if bg:
+    w.kernel.wait(bg[-1]["pid"], 20)
+settle()
+it = w._inbox.items[-1]
+check(it.get("bg_pid") == bg[-1]["pid"] and "/join" in it["report"] and not (proj / "zeta.txt").exists(),
+      "its report goes to the inbox with the merge, and the folder is untouched until you merge",
+      it)
+check(not w._daemon_live, "and the daemon is free to fire again")
+w2 = new_win([], tmp)
+check(len(w2._daemons.items) == len(w._daemons.items) and w2._inbox.items,
+      "daemons and the inbox survive a restart")
+
 print(f"\nTOTAL OS FAILURES: {fails}")
 assert fails == 0 and not FAILS, "OS regressions present"
 print("ALL OS TESTS PASSED")

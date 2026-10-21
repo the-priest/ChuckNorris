@@ -229,8 +229,21 @@ and an agent is a process. The design is in `docs/OS.md`; tests in
 
 ### Phase 19 — daemons
 
-- [ ] Agents that wake on a schedule, a file change, a failed unit, a disk
+- [x] Agents that wake on a schedule, a file change, a failed unit, a disk
       threshold or a changed command output, report to an inbox, and sleep.
+      A sleeping daemon costs nothing: its trigger is checked by plain code
+      every 30 s, and only a trigger that fires wakes an agent (a metered
+      process with its own quota). `/daemon <when>: <what>`, `/daemons`,
+      `/inbox`; the agent can propose one with ```daemon```, the user allows.
+- [x] A daemon looks, it never changes: its commands run with the whole
+      system read-only (the system bus readable for `systemctl status`, but
+      no verb that restarts, stops or powers off gets through), no sudo, no
+      file writes. Its report proposes; **Act on it** hands the report to the
+      agent for you to send. An acting daemon (`/daemon act …`) works in a
+      copy of its folder that you merge.
+- [x] Quiet when nothing is wrong: a report headed "nothing to do" is filed
+      without a notification. Reports that arrive while Chuck is closed are
+      waiting at the next start.
 
 ### Phase 20 — capabilities, programs, governor
 
