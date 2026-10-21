@@ -1193,6 +1193,180 @@ d_["last_run"] = 1
 w3._daemon_action(d_, "on")
 check(d_["last_run"] > time.time() - 5, "resuming a paused daemon doesn't fire it at once")
 
+# ═══════════════════════════════════════════════════════════════════════════
+print("\n--- missions: a goal, planned as a graph and run by agents ---")
+from chucknorris_ext import missions as MS
+plan_txt = ('Here is the plan:\n```json\n{"tasks": [{"id": "t1", "title": "mka: make a", "kind": "code", "deps": [], '
+            '"brief": "write mka.txt"}, {"id": "t2", "title": "look: research", "kind": "research", "deps": [], '
+            '"brief": "find out"}, {"id": "t3", "title": "mkb: make b", "kind": "code", "deps": ["t1"], '
+            '"brief": "write mkb.txt next to mka.txt"}, {"id": "t4", "title": "mkbad: fix", "kind": "code", '
+            '"deps": ["t3"], "brief": "write bad.txt"}], "notes": "t3 needs t1"}\n```')
+tasks, pnotes = MS.parse_plan(plan_txt)
+check([t["id"] for t in tasks] == ["t1", "t2", "t3", "t4"] and pnotes == "t3 needs t1",
+      "a plan is read out of a reply, fences and prose around it")
+for bad, why in (('{"tasks": [{"id": "a", "deps": ["b"], "brief": "x"}, {"id": "b", "deps": ["a"], "brief": "y"}]}', "cycle"),
+                 ('{"tasks": [{"id": "a", "deps": ["zz"], "brief": "x"}]}', "isn't a task"),
+                 ('{"tasks": []}', "no tasks"), ("no json here", "isn't JSON")):
+    try:
+        MS.parse_plan(bad)
+        check(False, f"a broken plan is refused: {why}")
+    except MS.MissionError as ex:
+        check(why in str(ex), f"a broken plan is refused ({why})", ex)
+mm = MS.new_mission("g", "/x", tasks)
+mm["state"] = MS.ACTIVE
+check([t["id"] for t in MS.ready(mm)] == ["t1", "t2"], "tasks with no dependency start together")
+MS.task(mm, "t1")["state"] = MS.MERGED
+check([t["id"] for t in MS.ready(mm, 5)] == ["t2", "t3"], "a task starts when what it depends on is merged")
+
+
+class MissionBackend(ProgBackend):
+    def stream(self, messages, on_delta, on_done, on_error, vision=False,
+               should_stop=None, attempts=3, on_open=None):
+        sysmsg = messages[0]["content"] if messages else ""
+        brief = messages[1]["content"] if len(messages) > 1 else ""
+        self.last_usage = {"prompt": 300, "completion": 30, "cached": 0, "reasoning": 0}
+        if sysmsg.startswith("You plan missions"):
+            self.planned = messages
+            on_delta(plan_txt); on_done(); return
+        if sysmsg.startswith("You are a background agent") and brief.split(":")[0] in ("mka", "mkb", "mkbad"):
+            tag = brief.split(":")[0]
+            n = sum(1 for m in messages if m["role"] == "assistant")
+            last = messages[-1]["content"]
+            if "tests FAIL" in last:
+                on_delta("```write bad.txt\nfixed\n```")
+            elif n == 0:
+                fname, body = ("bad", "broken") if tag == "mkbad" else (tag, f"made by {tag}")
+                on_delta(f"```write {fname}.txt\n{body}\n```\n```bash\nls\n```")
+            else:
+                self.seen_ls = getattr(self, "seen_ls", {})
+                self.seen_ls[tag] = last
+                on_delta(f"REPORT: {tag}.txt written.")
+            on_done(); return
+        super().stream(messages, on_delta, on_done, on_error, vision, should_stop, attempts, on_open)
+
+
+mproj = tmp / "missionproj"
+(mproj / ".chuck").mkdir(parents=True)
+(mproj / "app.py").write_text("x = 1\n")
+(mproj / ".chuck" / "test").write_text("test ! -f bad.txt || grep -q fixed bad.txt\n")
+w = new_win([], tmp)
+w.set_agent_mode(True, announce=False)
+w.set_workspace(mproj, announce=False)
+w.backend = MissionBackend([])
+w.backend.seen, w.backend.results = [], []
+m = w.start_mission("build a and b")
+settle()
+check(m["state"] == MS.AWAITING and len(m["tasks"]) == 4 and "Files and what they define" in w.backend.planned[0]["content"],
+      "/mission plans with the project's map, then waits for Start", m["state"])
+check(any(t.startswith("MISSION") for t in notes()) and "Start" in
+      [x.get_label() for x in w.msgbox.walk() if isinstance(x, cn.Gtk.Button)], "its card shows the plan and Start")
+check(w.kernel.procs[m["pid"]].kind == "mission", "the mission is a process (a group for its agents)")
+w.mission_action(m["id"], "start")
+for _ in range(200):
+    if m["state"] in (MS.COMPLETE, MS.PAUSED, MS.CANCELLED):
+        break
+    time.sleep(0.1)
+    settle()
+check(m["state"] == MS.COMPLETE, "the mission runs to the end on its own", [(t["id"], t["state"], t["note"]) for t in m["tasks"]])
+check((mproj / "mka.txt").exists() and (mproj / "mkb.txt").exists() and (mproj / "bad.txt").exists() and (mproj / "bad.txt").read_text() == "fixed\n",
+      "every code task's work is merged into the folder", [(t["id"], t["state"], t["note"], t["attempts"]) for t in m["tasks"]])
+check("mka.txt" in w.backend.seen_ls.get("mkb", ""), "a task starts from a folder that already has its dependencies' work")
+t4 = MS.task(m, "t4")
+check(t4["attempts"] == 2 and t4["state"] == MS.MERGED and "tests pass" in t4["note"],
+      "a task whose tests fail on its copy is sent back to fix them, then merged", t4)
+kids = [p for p in w.kernel.procs.values() if p.ppid == m["pid"]]
+check(len(kids) >= 5 and sum(p.tokens() for p in kids) > 0 and m["spent_tokens"] > 0
+      and w.kernel.procs[m["pid"]].tokens() >= sum(p.tokens() for p in kids),
+      "every agent of the mission is a child of its process, charged to it",
+      (m["spent_tokens"], [(p.pid, p.kind, p.tokens()) for p in kids]))
+check(any("Mission complete" in n for n in w._user_notes) and any("mission complete" in t for t in notes()),
+      "the chat and the agent hear that it's complete")
+check(MS.Store(w.MISSIONS_DIR).load()[0]["state"] == MS.COMPLETE, "missions are saved")
+m2 = w.start_mission("stop me")
+settle()
+w.mission_action(m2["id"], "cancel")
+check(m2["state"] == MS.CANCELLED and not w.kernel.procs[m2["pid"]].alive(), "Cancel ends a mission and its agents")
+
+
+
+class MissionHibBackend(TimeBackend):
+    def stream(self, messages, on_delta, on_done, on_error, vision=False,
+               should_stop=None, attempts=3, on_open=None):
+        if messages and messages[0]["content"].startswith("You plan missions"):
+            self.last_usage = {"prompt": 300, "completion": 30, "cached": 0, "reasoning": 0}
+            on_delta('{"tasks": [{"id": "t1", "title": "hib: survive a restart", "kind": "code", '
+                     '"deps": [], "brief": "two steps"}]}')
+            on_done(); return
+        super().stream(messages, on_delta, on_done, on_error, vision, should_stop, attempts, on_open)
+
+
+hproj = tmp / "mhibproj"
+hproj.mkdir()
+(hproj / "x.py").write_text("x = 1\n")
+w = new_win([], tmp)
+w.set_agent_mode(True, announce=False)
+w.set_workspace(hproj, announce=False)
+w.backend = MissionHibBackend([])
+TimeBackend.hold.clear()
+mh = w.start_mission("survive a restart", autostart=True)
+for _ in range(100):
+    t1 = MS.task(mh, "t1") if mh["tasks"] else None
+    if t1 and t1.get("pid") and len(w._bg.get(t1["pid"], {}).get("steps", [])) >= 2:
+        break
+    time.sleep(0.05)
+w._closing = True                                  # Chuck closes mid-mission
+w.kernel.signal(mh["pid"], "KILL")
+TimeBackend.hold.set()
+w.kernel.wait(t1["pid"], 10); settle()
+w2 = new_win([], tmp)
+w2.set_agent_mode(True, announce=False)
+w2.set_workspace(hproj, announce=False)
+w2.backend = MissionHibBackend([])
+w2.offer_hibernated()
+mh2 = w2._missions.get(mh["id"])
+check(mh2 is not None and MS.task(mh2, "t1")["state"] == MS.RUNNING,
+      "after a restart a running mission goes on, its cut-off task resumed from its checkpoint",
+      mh2 and MS.task(mh2, "t1"))
+for _ in range(100):
+    if mh2 and mh2["state"] == MS.COMPLETE:
+        break
+    time.sleep(0.1)
+    settle()
+check(mh2 and mh2["state"] == MS.COMPLETE and (hproj / "h.txt").exists() and (hproj / "h2.txt").exists(),
+      "and it completes, with the work from before and after the restart merged",
+      mh2 and [(t["state"], t["note"]) for t in mh2["tasks"]])
+check(not any(t == "INTERRUPTED AGENTS" for t in [x.get_text() for x in w2.msgbox.walk()
+                                                  if isinstance(x.get_text(), str)]),
+      "a mission's agents are resumed by the mission, not offered one by one")
+
+w = new_win([], tmp)
+w.set_agent_mode(True, announce=False)
+w.set_workspace(mproj, announce=False)
+w.backend = MissionBackend([])
+(mproj / "bad.txt").unlink()
+gp = w.spawn_background("mkbad: plain background run")
+w.kernel.wait(gp, 20); settle()
+for _ in range(50):
+    if w._bg[gp].get("verify"):
+        break
+    time.sleep(0.1)
+check(w._bg[gp].get("verify") == "fail" and "tests FAIL on its copy" in w._bg[gp]["ui"]["act"].get_text()
+      and any("FAILS the project's tests" in n for n in w._user_notes),
+      "any background agent's copy is tested when it finishes: the card says it fails before you merge",
+      w._bg[gp].get("verify"))
+
+w = new_win([], tmp)
+w.set_agent_mode(True, announce=False)
+w.set_workspace(mproj, announce=False)
+w.backend = MissionBackend([])
+m5 = w.start_mission("started in the first seconds")
+settle()
+pid5 = m5["pid"]
+w.offer_hibernated()
+check(w._missions[m5["id"]] is m5 and m5["pid"] == pid5,
+      "a mission started in this session isn't taken over by the startup resume")
+w.mission_action(m5["id"], "cancel")
+
 print(f"\nTOTAL OS FAILURES: {fails}")
 assert fails == 0 and not FAILS, "OS regressions present"
 print("ALL OS TESTS PASSED")

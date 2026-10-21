@@ -292,3 +292,24 @@ and an agent is a process. The design is in `docs/OS.md`; tests in
       spent of the quota, minutes left, facts on the board.
 - [x] **Wait.** The main agent's ```wait <pid>``` blocks until a background
       agent or program finishes and returns its report.
+
+### Phase 23 — missions: a goal, run as a graph of agents
+
+- [x] `/mission <goal>` (or ```mission``` from the agent): a planner reads
+      the project's map and rules and turns the goal into 2–8 tasks with
+      dependencies (code, research, check). The card shows the plan; nothing
+      runs until Start.
+- [x] An orchestrator runs it like `make`: every task whose dependencies are
+      finished starts as its own agent (three at once by default), in a copy
+      of the folder that already holds the earlier tasks' merged work.
+- [x] A test gate: a code task's work is merged only once the project's
+      tests pass on its copy (`.chuck/test` overrides the discovered
+      command). Failing tests send the same agent back, in the same copy,
+      with the failure; a task that still fails, or conflicts, pauses the
+      mission with Retry / Skip.
+- [x] One process group, one budget: the mission is a kernel process, every
+      agent in it a child charged to it; Cancel ends them all. Missions are
+      saved and survive a restart, cut-off tasks resuming from their step.
+- [x] The same gate for any background agent: when one finishes, its copy is
+      tested and the card says pass or fail before you merge.
+

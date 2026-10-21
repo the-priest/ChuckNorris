@@ -126,6 +126,7 @@ _daemons = _optional("daemons")
 _governor = _optional("governor")
 _programs = _optional("programs")
 _hibernate = _optional("hibernate")
+_missions = _optional("missions")
 if _pricing is None:
     class _pricing:                     # noqa: N801  — the meter, minus prices
         """Stand-in so a partial install still launches: tokens are counted,
@@ -3484,6 +3485,8 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._daemon_probe = self._Probe()
         self._pending_daemon = None
         self._asks = {}                 # pid -> (event, answer box, question): agents asking you
+        self._missions = {}             # id -> mission (docs/OS.md, phase 23)
+        self._mstore = _missions.Store(self.MISSIONS_DIR) if _missions is not None else None
         # hibernate (docs/OS.md, phase 21): every step of a background agent
         # or program is checkpointed; what was cut off is offered at start
         self._hib = _hibernate.Store(self.PROCS_DIR) if _hibernate is not None else None
@@ -3968,7 +3971,8 @@ class ChuckWindow(Adw.ApplicationWindow):
                                  "investigate and answer."}[acc]
         if self.agent_mode and _programs is not None and "settings" in self.__dict__:
             names = sorted(self.programs())
-            text += ("\n\nAGENT OS: ```send <pid> <message>``` to a running agent; ```wait <pid> "
+            text += ("\n\nAGENT OS: ```mission <goal>``` plans a big job as tasks run by agents "
+                     "(the user starts it); ```send <pid> <message>``` to a running agent; ```wait <pid> "
                      "[min]``` for its report; ```post <key>: <fact>``` / ```board```: facts all "
                      "agents share; ```spawn @<program> <focus>``` runs a program: "
                      + ", ".join(names) + ".")
@@ -8618,7 +8622,8 @@ class ChuckWindow(Adw.ApplicationWindow):
                 "search": web["search"], "fetch": web["fetch"],
                 "write": write, "edit": edit, "bash": bash}
 
-    def spawn_background(self, brief, root=None, daemon=None, why="", program=None):
+    def spawn_background(self, brief, root=None, daemon=None, why="", program=None, parent=None,
+                         mission=None):
         """Start a background agent on `brief` -> its pid (or None). It works
         in a copy of the folder (`root`, else the working folder) while you
         go on; when it's done its report and diff wait for you to merge or
@@ -8652,17 +8657,21 @@ class ChuckWindow(Adw.ApplicationWindow):
         if (acc.get(str(root), "full") if isinstance(acc, dict) else "full") == "sandbox":
             caps.discard("net")
         name = (f"{program['name']}: " if program else "") + brief.splitlines()[0][:60]
-        proc = self.kernel.spawn(name[:60], kind="background", brief=brief, parent=self._pid1,
-                                 quota=quota, nice=2, caps=caps,
+        proc = self.kernel.spawn(name[:60], kind="background", brief=brief,
+                                 parent=parent or self._pid1, quota=quota, nice=2, caps=caps,
                                  program=program["name"] if program else "")
         pid = proc.pid
         entry = {"pid": pid, "brief": brief, "name": name, "ws": None, "report": None,
                  "status": "running", "root": root, "changes": {}, "daemon": daemon,
                  "daemon_why": why, "program": program["name"] if program else "",
-                 "kind": "background"}
+                 "kind": "background", "mission": mission,
+                 "waited": bool(mission)}          # a mission's task reports to its mission
         self._bg[pid] = entry
-        self._bg_card(entry)
+        if not mission:                        # a mission's tasks live in its card
+            self._bg_card(entry)
         self._launch_bg(entry, program)
+        if mission:
+            return pid
         self._sys_note(f"\U0001F6F0 background agent {pid} started \u2014 it works on a copy of "
                        f"{root.name}; you can keep going (/top to watch it)", "dim")
         return pid
@@ -8803,6 +8812,11 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._hib.remove(entry["key"])  # nothing to come back for (replay/fork still work now)
         if quiet:
             return False
+        if entry.get("mission"):
+            self._mission_task_finished(entry, report, status)
+            return False
+        if ch and entry.get("ws") is not None and self.settings.get("verify_background", True):
+            self._bg_verify(entry)
         if entry.get("daemon"):
             dd = entry["daemon"]
             self._daemon_done(dd["id"], entry.get("daemon_why") or "its trigger fired", report
@@ -8834,6 +8848,32 @@ class ChuckWindow(Adw.ApplicationWindow):
         except Exception:
             pass
         return False
+
+    def _bg_verify(self, entry):
+        """The merge gate: the project's tests run on the agent's copy as soon
+        as it finishes, so the card says whether its work passes before you
+        merge it."""
+        ui = entry.get("ui")
+        base = ui["act"].get_text() if ui else ""
+        if ui:
+            ui["act"].set_text(base + " \u00b7 running the tests on its copy\u2026")
+
+        def work():
+            res = self._verify_copy(entry["ws"])
+            GLib.idle_add(done, res)
+
+        def done(res):
+            state, out = res
+            entry["verify"] = state
+            if ui:
+                ui["act"].set_text(base + {"pass": " \u00b7 \u2713 the tests pass on its copy",
+                                           "fail": " \u00b7 \u2717 the tests FAIL on its copy",
+                                           "none": " \u00b7 no tests found to check it"}[state])
+            if state == "fail":
+                self._user_notes.append(f"background agent {entry['pid']}'s copy FAILS the project's "
+                                        f"tests (don't merge it as it is):\n{out[-1500:]}")
+            return False
+        threading.Thread(target=work, daemon=True, name=f"bg-verify-{entry['pid']}").start()
 
     def _bg_entry(self, pid, verb):
         try:
@@ -8880,6 +8920,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._sys_note(f"\u2717 couldn't merge: {ex}", "danger")
             return f"merge failed: {ex}"
         e["status"] = "merged"
+        e["merge_result"] = r
         e["ws"].remove()
         self._hib_drop(e)
         parts = []
@@ -8984,7 +9025,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         progs, self._program_problems = _programs.load(dirs)
         return progs
 
-    def run_program(self, spec):
+    def run_program(self, spec, parent=None, mission=None):
         """/run <program> [input] -> its pid, or None."""
         if _programs is None or self.kernel is None or _worker is None:
             self._sys_note("Programs need the programs, kernel and worker modules — "
@@ -9000,22 +9041,26 @@ class ChuckWindow(Adw.ApplicationWindow):
             return None
         brief = inp or f"Do your job on this {'folder' if self.workspace else 'machine'}."
         if prog["mode"] == "act":
-            return self.spawn_background(brief, program=prog)
+            return self.spawn_background(brief, program=prog, parent=parent, mission=mission)
         root = self._workroot() or Path.home()
         caps = _programs.caps_of(prog)
         if self._folder_access() == "sandbox":
             caps.discard("net")
         proc = self.kernel.spawn(f"{name}: {inp}"[:60] if inp else name, kind="program",
-                                 brief=brief, parent=self._pid1, program=name, nice=1,
+                                 brief=brief, parent=parent or self._pid1, program=name, nice=1,
                                  quota={"tokens": prog["tokens"], "seconds": prog["minutes"] * 60},
                                  caps=caps)
         pid = proc.pid
         entry = {"pid": pid, "brief": brief, "name": f"{name}: {inp}"[:60] if inp else name,
                  "ws": None, "report": None, "status": "running", "root": root, "changes": {},
-                 "daemon": None, "program": name, "kind": "report"}
+                 "daemon": None, "program": name, "kind": "report", "mission": mission,
+                 "waited": bool(mission)}
         self._bg[pid] = entry
-        self._bg_card(entry)
+        if not mission:
+            self._bg_card(entry)
         self._launch_report(entry, prog)
+        if mission:
+            return pid
         self._sys_note(f"\u25b6 {name} started as pid {pid} \u2014 it looks and reports; you can "
                        "keep going (/top)", "dim")
         return pid
@@ -9336,6 +9381,17 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._log_pin(card)
         return True
 
+    @tool("mission", cap=1)
+    def _t_mission(self, body):
+        """```mission <goal>``` — plan a multi-agent mission; it starts only
+        when the user presses Start."""
+        m = self.start_mission(body, autostart=False)
+        if m is None:
+            return "[mission: not started (see the note above)]"
+        return ("[mission planning: a card shows its tasks; it starts when the user presses Start. "
+                "Its tasks' work is tested and merged into the folder one by one; you'll hear when "
+                "it completes.]")
+
     @tool("send", cap=4)
     def _t_send(self, body):
         """```send <pid> <message>``` — tell a running agent something."""
@@ -9448,6 +9504,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             "status": entry["status"], "report": entry.get("report"), "msgs": entry.get("msgs") or [],
             "steps": entry.get("steps", []), "changes": entry.get("changes", {}),
             "parent": entry.get("parent", ""), "base_sha": entry.get("base_sha"),
+            "mission": entry.get("mission"),
             "time": time.time()})
 
     def _hib_drop(self, entry):
@@ -9458,7 +9515,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             shutil.rmtree(sh.git_dir, ignore_errors=True)
             entry["shadow"] = None
 
-    def _new_entry_proc(self, rec, name=None, kind=None, parent_label="", spent=0):
+    def _new_entry_proc(self, rec, name=None, kind=None, parent_label="", spent=0, parent=None):
         """A kernel process for a resumed or forked run. A resumed one gets
         what was left of its quota (`spent` tokens are gone), not a fresh
         one: crash-and-resume must never be a way round a budget."""
@@ -9476,7 +9533,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             caps.discard("net")                # an offline-sandboxed folder stays offline
         proc = self.kernel.spawn((name or rec["name"])[:60],
                                  kind="program" if kind == "report" else "background",
-                                 brief=rec["brief"], parent=self._pid1, quota=quota, nice=2,
+                                 brief=rec["brief"], parent=parent or self._pid1, quota=quota, nice=2,
                                  caps=caps, program=rec.get("program", ""))
         dmn = (self._daemons.get(rec["daemon_id"])
                if rec.get("daemon_id") is not None and self._daemons is not None else None)
@@ -9486,7 +9543,7 @@ class ChuckWindow(Adw.ApplicationWindow):
                  "kind": kind, "parent": parent_label}
         return entry, prog
 
-    def resume_hibernated(self, rec):
+    def resume_hibernated(self, rec, parent=None, mission=None):
         """Go on with a run that was cut off (Chuck closed, crashed, the
         machine rebooted) from its last checkpoint -> the new pid."""
         if self.kernel is None or _worker is None:
@@ -9504,7 +9561,9 @@ class ChuckWindow(Adw.ApplicationWindow):
                 return None
             ws = _cow.Workspace(rec["root"], rec["ws_dir"])
         st = rec.get("steps") or [{}]
-        entry, prog = self._new_entry_proc(rec, spent=st[-1].get("tokens", 0))
+        entry, prog = self._new_entry_proc(rec, spent=st[-1].get("tokens", 0), parent=parent)
+        if mission:
+            entry["mission"], entry["waited"] = tuple(mission), True
         entry["key"], entry["steps"], entry["msgs"] = rec["key"], list(rec.get("steps") or []), rec["msgs"]
         entry["base_sha"] = rec.get("base_sha")
         self._bg[entry["pid"]] = entry
@@ -9542,8 +9601,9 @@ class ChuckWindow(Adw.ApplicationWindow):
         cut = []
         boot, self._hib_boot = self._hib_boot, []
         mine = {e.get("key") for e in self._bg.values()}
+        mission_recs = [r for r in boot if r.get("mission")]
         for rec in boot:
-            if rec["key"] in mine:
+            if rec["key"] in mine or rec.get("mission"):
                 continue
             if rec.get("status") == "running":
                 cut.append(rec)
@@ -9551,6 +9611,8 @@ class ChuckWindow(Adw.ApplicationWindow):
                 self._restore_finished(rec)
             else:
                 self._hib.remove(rec["key"])
+        if _missions is not None:
+            self._missions_boot(mission_recs)
         if not cut:
             return False
         card, head, body, foot = self._card_shell("INTERRUPTED AGENTS")
@@ -9708,6 +9770,459 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._sys_note(f"⑂ forked pid {pid} at step {step} → pid {entry['pid']}"
                        + (f": “{instr[:80]}”" if instr else ""), "ok")
         return entry["pid"]
+
+    # ── missions (Chuck OS, phase 23): a goal, run as a graph of agents ──
+    MISSIONS_DIR = DATA_DIR / "missions"
+
+    def start_mission(self, goal, autostart=None):
+        """/mission <goal> -> the mission. A planner turns the goal into a
+        graph of tasks; nothing runs until you press Start (or autostart)."""
+        goal = (goal or "").strip()
+        if not goal:
+            self._sys_note("/mission needs a goal: /mission set up CI and make every test pass", "dim")
+            return None
+        if _missions is None or self.kernel is None or _worker is None or _cow is None:
+            self._sys_note("Missions need the missions, kernel, worker and cow modules — "
+                           "reinstall Chuck.", "danger")
+            return None
+        root = self._workroot()
+        if root is None:
+            self._sys_note("Pick a working folder first (/folder): a mission works on a project.",
+                           "danger")
+            return None
+        if self._folder_access() == "readonly":
+            self._sys_note("This folder is read-only (/access): a mission would have nothing to "
+                           "merge its work into.", "danger")
+            return None
+        m = _missions.new_mission(goal, root)
+        proc = self.kernel.spawn(f"mission: {goal}"[:60], kind="mission", brief=goal,
+                                 parent=self._pid1, nice=1,
+                                 quota={"tokens": self.cfg("mission_tokens", 5000000, 100000, 100000000),
+                                        "seconds": self.cfg("mission_hours", 4, 1, 72) * 3600})
+        m["pid"] = proc.pid
+        m["autostart"] = bool(self.settings.get("mission_autostart", False) if autostart is None
+                              else autostart)
+        self._missions[m["id"]] = m
+        _missions.log(m, "planning")
+        self._mission_save(m)
+        self._mission_card(m)
+        self.kernel.note(m["pid"], "planning")
+        call = self._sub_call(m["pid"], independent=True, role="main")
+        rules = project_instructions(self.workspace) or ""
+        try:
+            repo = _builder.repo_map(root, 8000)[1]
+        except Exception:
+            repo = ""
+        sysmsg = (_missions.PLAN_PROMPT.format(max=self.cfg("mission_max_tasks", 8, 2, 12))
+                  + f"\n\n{_now_line()}\nProject: {root.name}\n"
+                  + (f"Project rules:\n{rules[:3000]}\n" if rules else "")
+                  + (f"Files and what they define:\n{repo}" if repo else ""))
+
+        def plan():
+            msgs = [{"role": "system", "content": sysmsg}, {"role": "user", "content": goal}]
+            err = ""
+            for _attempt in range(2):
+                try:
+                    reply = call(msgs)
+                    tasks, notes = _missions.parse_plan(reply, self.cfg("mission_max_tasks", 8, 2, 12))
+                    GLib.idle_add(self._mission_planned, m["id"], tasks, notes, "")
+                    return
+                except _missions.MissionError as ex:
+                    err = str(ex)
+                    msgs += [{"role": "assistant", "content": reply},
+                             {"role": "user", "content": f"That plan can't be used: {err}. Reply "
+                                                         "with ONLY the corrected JSON."}]
+                except Exception as ex:
+                    err = str(ex)
+                    break
+            GLib.idle_add(self._mission_planned, m["id"], None, "", err)
+        threading.Thread(target=plan, daemon=True, name=f"mission-plan-{proc.pid}").start()
+        self._sys_note(f"\U0001F3AF mission {m['id'][-5:]}: planning “{goal[:80]}”", "dim")
+        return m
+
+    def _mission_planned(self, mid, tasks, notes, err):
+        m = self._missions.get(mid)
+        if m is None or m["state"] == _missions.CANCELLED:
+            return False
+        if tasks is None:
+            m["state"] = _missions.CANCELLED
+            _missions.log(m, f"planning failed: {err}")
+            self.kernel.exit(m["pid"], 1, f"planning failed: {err}")
+            self._sys_note(f"✗ mission couldn't be planned: {err}", "danger")
+        else:
+            m["tasks"], m["notes"] = tasks, notes
+            m["state"] = _missions.AWAITING
+            _missions.log(m, f"planned {len(tasks)} tasks")
+            self.kernel.note(m["pid"], "waiting for you to start it")
+            if m.get("autostart"):
+                m["state"] = _missions.ACTIVE
+        self._mission_save(m)
+        self._mission_paint(m)
+        if m["state"] == _missions.ACTIVE:
+            self._mission_step(m)
+        return False
+
+    def _mission_save(self, m):
+        if self._mstore is not None:
+            self._mstore.save({k: v for k, v in m.items() if not k.startswith("_")})
+
+    def mission_action(self, mid, verb, tid=None):
+        """start / pause / resume / cancel a mission; retry / skip a task."""
+        m = self._missions.get(mid)
+        if m is None:
+            return False
+        t = _missions.task(m, tid) if tid else None
+        if verb in ("start", "resume") and m["state"] in (_missions.AWAITING, _missions.PAUSED):
+            m["state"] = _missions.ACTIVE
+            _missions.log(m, verb)
+        elif verb == "pause" and m["state"] == _missions.ACTIVE:
+            m["state"] = _missions.PAUSED
+            _missions.log(m, "paused (running tasks finish; nothing new starts)")
+        elif verb == "cancel" and m["state"] not in (_missions.COMPLETE, _missions.CANCELLED):
+            m["state"] = _missions.CANCELLED
+            _missions.log(m, "cancelled")
+            if self.kernel is not None and m.get("pid"):
+                self.kernel.signal(m["pid"], _kernel.KILL)   # every agent in it
+        elif verb == "retry" and t is not None and t["state"] in (
+                _missions.FAILED, _missions.CONFLICT):
+            t["state"], t["attempts"], t["note"] = _missions.PENDING, 0, "retrying"
+            if m["state"] == _missions.PAUSED:
+                m["state"] = _missions.ACTIVE
+        elif verb == "skip" and t is not None and t["state"] in (
+                _missions.FAILED, _missions.CONFLICT, _missions.PENDING):
+            t["state"], t["note"] = _missions.SKIPPED, "skipped by you"
+            if m["state"] == _missions.PAUSED and not _missions.blocked(m):
+                m["state"] = _missions.ACTIVE
+        else:
+            return False
+        self._mission_save(m)
+        self._mission_paint(m)
+        self._mission_step(m)
+        return True
+
+    def _mission_step(self, m):
+        """The orchestrator: start every task that may start, finish the
+        mission when every task is done, pause it when one is stuck."""
+        if m["state"] != _missions.ACTIVE:
+            return
+        if _missions.is_complete(m):
+            return self._mission_complete(m)
+        stuck = _missions.blocked(m)
+        busy = any(t["state"] in (_missions.RUNNING, _missions.VERIFYING) for t in m["tasks"])
+        launched = 0
+        for t in _missions.ready(m, self.cfg("mission_parallel", 3, 1, 8)):
+            if self._mission_launch(m, t):
+                launched += 1
+        if stuck and not busy and not launched and not _missions.ready(m, 99):
+            m["state"] = _missions.PAUSED
+            _missions.log(m, f"paused: {', '.join(x['id'] for x in stuck)} needs you")
+            self._sys_note(f"⚠ mission {m['id'][-5:]} paused: task {stuck[0]['id']} "
+                           f"({stuck[0]['title'][:50]}) {stuck[0]['state']} — Retry or Skip it",
+                           "danger")
+            self._notify(f"Mission paused: {stuck[0]['title'][:60]}", m["goal"][:120])
+        self._mission_save(m)
+        self._mission_paint(m)
+
+    def _mission_launch(self, m, t):
+        brief = f"{t['title']}\n\n" + _missions.context_for(m, t)
+        tag = (m["id"], t["id"])
+        if t["kind"] == "code":
+            pid = self.spawn_background(brief, root=Path(m["folder"]), parent=m["pid"], mission=tag)
+        else:
+            prog = "reviewer" if t["kind"] == "check" else "investigator"
+            pid = self.run_program(f"{prog} {brief}", parent=m["pid"], mission=tag)
+        if pid is None:
+            t["state"], t["note"] = _missions.FAILED, "couldn't start (see the note above)"
+            return False
+        t["state"], t["pid"] = _missions.RUNNING, pid
+        t["attempts"] = t.get("attempts", 0) + 1
+        _missions.log(m, f"{t['id']} started as pid {pid}")
+        return True
+
+    def _mission_task_finished(self, entry, report, status):
+        """A mission's agent finished: verify, merge, send back, or fail."""
+        mid, tid = entry["mission"]
+        m = self._missions.get(mid)
+        t = _missions.task(m, tid) if m else None
+        if m is None or t is None or m["state"] == _missions.CANCELLED:
+            return
+        t["report"] = (report or "")[:4000]
+        if status != 0:
+            if t["attempts"] < self.cfg("mission_attempts", 2, 1, 5) and m["state"] == _missions.ACTIVE:
+                t["state"], t["note"] = _missions.PENDING, "stopped; trying again"
+            else:
+                t["state"], t["note"] = _missions.FAILED, (report or "stopped")[:200]
+            _missions.log(m, f"{tid} stopped")
+            return self._mission_step(m)
+        if t["kind"] != "code":
+            t["state"], t["note"] = _missions.DONE, ""
+            _missions.log(m, f"{tid} done")
+            return self._mission_step(m)
+        if not entry.get("changes"):
+            t["state"], t["note"] = _missions.DONE, "changed nothing"
+            _missions.log(m, f"{tid} done (no changes)")
+            return self._mission_step(m)
+        t["state"], t["note"] = _missions.VERIFYING, "running the tests on its copy"
+        self._mission_paint(m)
+        ws = entry["ws"]
+
+        def verify():
+            res = self._verify_copy(ws)
+            GLib.idle_add(self._mission_verified, entry, res)
+        threading.Thread(target=verify, daemon=True, name=f"mission-verify-{entry['pid']}").start()
+
+    def _mission_verified(self, entry, res):
+        mid, tid = entry["mission"]
+        m = self._missions.get(mid)
+        t = _missions.task(m, tid) if m else None
+        if m is None or t is None or m["state"] == _missions.CANCELLED:
+            return False
+        state, out = res
+        t["verify"] = state
+        if state == "fail":
+            if t["attempts"] < self.cfg("mission_attempts", 2, 1, 5):
+                _missions.log(m, f"{tid}: tests fail; sent back to fix them")
+                t["note"] = "tests fail on its copy; fixing"
+                self._mission_send_back(m, t, entry, out)
+            else:
+                t["state"], t["note"] = _missions.FAILED, "tests still fail: " + out[-160:]
+                _missions.log(m, f"{tid}: tests still fail")
+                self._mission_step(m)
+            return False
+        msg = self.join_background(entry["pid"])
+        r = entry.get("merge_result") or {}
+        if r.get("conflicts"):
+            t["state"], t["note"] = _missions.CONFLICT, msg[:200]
+            _missions.log(m, f"{tid}: merge conflict")
+        elif entry.get("status") == "merged":
+            t["state"] = _missions.MERGED
+            t["note"] = ("tests pass" if state == "pass" else "no tests to run") + "; merged"
+            _missions.log(m, f"{tid} merged")
+        else:
+            t["state"], t["note"] = _missions.FAILED, f"couldn't merge: {msg}"[:200]
+        self._mission_step(m)
+        return False
+
+    def _verify_copy(self, ws):
+        """Run the project's tests on an agent's copy -> ("pass"|"fail"|"none",
+        output). The project's own command (.chuck/test) wins over discovery."""
+        cmd = ""
+        custom = Path(ws.work) / ".chuck" / "test"
+        if custom.is_file():
+            cmd = custom.read_text(errors="replace").strip().splitlines()[0] if custom.read_text().strip() else ""
+        if not cmd:
+            try:
+                cmd = _builder.test_command_str(ws.work) or ""
+            except Exception:
+                cmd = ""
+        if not cmd:
+            return "none", ""
+        rc, out = _run_in(ws.work, cmd, self.cfg("verify_timeout", 600, 30, 3600))
+        return ("pass" if rc == 0 else "fail"), f"$ {cmd}\nexit {rc}\n{clip_output(out, 6000)}"
+
+    def _mission_send_back(self, m, t, entry, output):
+        """Its tests fail: the same agent goes on in the same copy, told what
+        failed (its conversation continues; it isn't a fresh start)."""
+        msgs = (entry.get("msgs") or [])[:]
+        if not msgs:
+            t["state"], t["note"] = _missions.PENDING, "tests failed; starting over"
+            return self._mission_step(m)
+        msgs += [{"role": "assistant", "content": entry.get("report") or "REPORT"},
+                 {"role": "user", "content": "The project's tests FAIL on your copy (this is how "
+                                             "your work is checked before it is merged):\n\n"
+                                             + output + "\n\nFix it, run the tests until they "
+                                             "pass, then write your REPORT."}]
+        rec = {"name": entry["name"], "brief": entry["brief"], "root": str(entry["root"]),
+               "program": "", "kind": "background"}
+        new, _prog = self._new_entry_proc(rec, parent=m["pid"])
+        new.update(ws=entry["ws"], msgs=msgs, steps=list(entry.get("steps") or []),
+                   key=entry.get("key"), shadow=entry.get("shadow"), base_sha=entry.get("base_sha"),
+                   mission=entry["mission"], waited=True)
+        entry["status"] = "superseded"
+        if entry.get("ui"):
+            self._set_status(entry["ui"]["pill"], f"continued as {new['pid']}", "wait")
+            self._bg_buttons(entry)
+        self._bg[new["pid"]] = new
+        t["state"], t["pid"] = _missions.RUNNING, new["pid"]
+        t["attempts"] = t.get("attempts", 0) + 1
+        self._launch_bg(new, None, resume=msgs, ws=entry["ws"])
+        self._mission_save(m)
+        self._mission_paint(m)
+
+    def _mission_complete(self, m):
+        m["state"] = _missions.COMPLETE
+        p = self.kernel.procs.get(m["pid"]) if self.kernel else None
+        if p is not None:
+            m["spent_tokens"], m["spent_usd"] = p.tokens(), p.total["usd"]
+        lines = [f"- {t['id']} {t['title']}: {t['state']}"
+                 + (f" ({t['note']})" if t.get("note") else "")
+                 + (f" — {t['report'].strip().splitlines()[0][:140]}" if t.get("report", "").strip() else "")
+                 for t in m["tasks"]]
+        summary = (f"Mission complete: {m['goal']}\n" + "\n".join(lines)
+                   + f"\nSpent {_pricing.fmt_tokens(m['spent_tokens'])} tokens, "
+                     f"{_pricing.fmt_usd(m['spent_usd'])}.")
+        m["summary"] = summary
+        _missions.log(m, "complete")
+        if self.kernel is not None and m.get("pid"):
+            self.kernel.exit(m["pid"], 0, summary)
+        self._mission_save(m)
+        self._mission_paint(m)
+        self._sys_note(f"\U0001F3C1 mission complete: {m['goal'][:80]} — "
+                       f"{len(m['tasks'])} tasks, {_pricing.fmt_usd(m['spent_usd'])}", "ok")
+        self._user_notes.append(summary[:3000])
+        self._notify("Mission complete", m["goal"][:120])
+
+    def _notify(self, title, body=""):
+        try:
+            if not self.is_active():
+                n = Gio.Notification.new(title[:80])
+                n.set_body(body[:200])
+                self.get_application().send_notification(None, n)
+        except Exception:
+            pass
+
+    _MISSION_ICON = {"pending": "○", "running": "◔", "verifying": "◑", "merged": "✓",
+                     "done": "✓", "failed": "✗", "skipped": "–", "conflict": "⚠"}
+
+    def _mission_card(self, m):
+        card, head, body, foot = self._card_shell(
+            f"MISSION · {m['goal'][:70]}", lambda: m.get("summary") or self._mission_text(m))
+        pill = self._pill(m["state"], "run")
+        head.insert_child_after(pill, head.get_first_child())
+        info = Gtk.Label(xalign=0, wrap=True); info.add_css_class("dim"); _wrap_anywhere(info)
+        body.append(info)
+        rows = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        body.append(rows)
+        btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        foot.append(btns)
+        m["_ui"] = {"pill": pill, "info": info, "rows": rows, "btns": btns}
+        self._log_pin(card)
+        self._mission_paint(m)
+
+    def _mission_text(self, m):
+        return (f"MISSION: {m['goal']} [{m['state']}]\n"
+                + "\n".join(f"{t['id']} [{t['state']}] ({t['kind']}) {t['title']}"
+                            + (f" after {', '.join(t['deps'])}" if t["deps"] else "")
+                            for t in m["tasks"]))
+
+    def _mission_paint(self, m):
+        ui = m.get("_ui")
+        if not ui:
+            return False
+
+        def clear(box):
+            c = box.get_first_child()
+            while c is not None:
+                n = c.get_next_sibling()
+                box.remove(c)
+                c = n
+        st = m["state"]
+        self._set_status(ui["pill"], st, {"running": "run", "complete": "ok", "cancelled": "fail",
+                                          "paused": "wait"}.get(st, "wait"))
+        done, n = _missions.progress(m)
+        p = self.kernel.procs.get(m["pid"]) if self.kernel and m.get("pid") else None
+        spend = (f" · {_pricing.fmt_tokens(p.tokens())} tokens · {_pricing.fmt_usd(p.total['usd'])}"
+                 if p is not None else "")
+        ui["info"].set_text(("planning the tasks…" if st == _missions.PLANNING else
+                             f"{done} of {n} tasks finished{spend}")
+                            + (f"\n{m['notes']}" if m.get("notes") else "")
+                            + ("\nEach code task runs in its own copy of the folder; its tests must pass "
+                               "on that copy before it is merged. Tasks without a dependency between "
+                               "them run at once." if st == _missions.AWAITING else ""))
+        clear(ui["rows"])
+        for t in m["tasks"]:
+            row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            tl = Gtk.Label(label=f"{self._MISSION_ICON.get(t['state'], '?')} {t['id']} · {t['kind']} · "
+                                 f"{t['title']}" + (f"  (after {', '.join(t['deps'])})" if t["deps"] else ""),
+                           xalign=0, wrap=True)
+            tl.add_css_class("slash-cmd"); _wrap_anywhere(tl)
+            row.append(tl)
+            sub = t["state"] + (f" · pid {t['pid']}" if t.get("pid") else "") + \
+                (f" · {t['note']}" if t.get("note") else "")
+            sl = Gtk.Label(label=sub, xalign=0, wrap=True); sl.add_css_class("dim"); _wrap_anywhere(sl)
+            row.append(sl)
+            tb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            if t["state"] in (_missions.FAILED, _missions.CONFLICT):
+                for label, verb in (("Retry", "retry"), ("Skip", "skip")):
+                    b = Gtk.Button(label=label); b.add_css_class("quick")
+                    b.connect("clicked", lambda _b, v=verb, i=t["id"]: self.mission_action(m["id"], v, i))
+                    tb.append(b)
+            e = self._bg.get(t.get("pid")) if t.get("pid") else None
+            if e is not None:
+                if e.get("report") and t["state"] not in (_missions.RUNNING,):
+                    b = Gtk.Button(label="Report"); b.add_css_class("quick")
+                    b.connect("clicked", lambda _b, ee=e: self._sys_note(
+                        f"{ee['name'][:60]}:\n{ee.get('report')}", "dim"))
+                    tb.append(b)
+                for label, fn in (("Trace", self.show_strace), ("Replay", self.show_replay)):
+                    b = Gtk.Button(label=label); b.add_css_class("quick")
+                    b.connect("clicked", lambda _b, f=fn, p=t["pid"]: f(str(p)))
+                    tb.append(b)
+            if tb.get_first_child() is not None:
+                row.append(tb)
+            ui["rows"].append(row)
+        clear(ui["btns"])
+        spec = {_missions.AWAITING: [("Start", "start"), ("Cancel", "cancel")],
+                _missions.ACTIVE: [("Pause", "pause"), ("Cancel", "cancel")],
+                _missions.PAUSED: [("Resume", "resume"), ("Cancel", "cancel")]}.get(st, [])
+        for label, verb in spec:
+            b = Gtk.Button(label=label); b.add_css_class("quick")
+            if verb == "start":
+                b.add_css_class("accent-btn")
+            b.connect("clicked", lambda _b, v=verb: self.mission_action(m["id"], v))
+            ui["btns"].append(b)
+        return False
+
+    def show_missions(self):
+        items = sorted(self._missions.values(), key=lambda x: -x.get("created", 0))[:12]
+        card, head, body, foot = self._card_shell("MISSIONS")
+        if not items:
+            lb = Gtk.Label(label="No missions yet. A mission is a goal too big for one agent: "
+                                 "/mission migrate the API to async, with tests", xalign=0, wrap=True)
+            lb.add_css_class("dim"); body.append(lb)
+        for m in items:
+            done, n = _missions.progress(m)
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            lb = Gtk.Label(label=f"{m['goal'][:70]} · {m['state']} · {done}/{n}", xalign=0,
+                           hexpand=True, wrap=True)
+            _wrap_anywhere(lb)
+            b = Gtk.Button(label="Show"); b.add_css_class("quick")
+            b.connect("clicked", lambda _b, mm=m: self._mission_card(mm))
+            row.append(lb); row.append(b)
+            body.append(row)
+        self._log_pin(card)
+        return True
+
+    def _missions_boot(self, recs):
+        """At startup: missions that were running go on. A task whose agent
+        was cut off resumes from its checkpoint; one with none starts over."""
+        if self._mstore is None:
+            return
+        for m in self._mstore.load():
+            if m["id"] in self._missions:
+                continue                    # started in this session: it's live, not a leftover
+            if m["state"] in (_missions.COMPLETE, _missions.CANCELLED):
+                if time.time() - m.get("created", 0) < 7 * 86400:
+                    self._missions[m["id"]] = m
+                continue
+            self._missions[m["id"]] = m
+            proc = self.kernel.spawn(f"mission: {m['goal']}"[:60], kind="mission", brief=m["goal"],
+                                     parent=self._pid1, nice=1,
+                                     quota={"tokens": max(100000, self.cfg("mission_tokens", 5000000, 100000,
+                                                                           100000000) - int(m.get("spent_tokens") or 0))})
+            m["pid"] = proc.pid
+            if m["state"] == _missions.PLANNING:
+                m["state"] = _missions.CANCELLED          # its planner is gone; ask again
+            for t in m["tasks"]:
+                if t["state"] not in (_missions.RUNNING, _missions.VERIFYING):
+                    continue
+                rec = next((r for r in recs if r.get("mission") == [m["id"], t["id"]]), None)
+                pid = None
+                if rec is not None and rec.get("status") == "running":
+                    pid = self.resume_hibernated(rec, parent=m["pid"], mission=(m["id"], t["id"]))
+                t["state"], t["pid"] = ((_missions.RUNNING, pid) if pid else (_missions.PENDING, None))
+            self._mission_card(m)
+            self._mission_step(m)
 
     # ── daemons (Chuck OS, phase 19) ──
     DAEMONS_FILE = CONFIG_DIR / "daemons.json"
@@ -11472,6 +11987,9 @@ class ChuckWindow(Adw.ApplicationWindow):
         ("/governor [mode]", "performance, balanced or powersave: which model each agent runs on"),
         ("/strace <pid>", "every tool call a process made, its latency and size"),
         ("/replay <pid>", "a background agent's run, step by step"),
+        ("/mission <goal>", "a goal too big for one agent: planned as tasks, run by agents in "
+                            "parallel, each tested before it's merged"),
+        ("/missions", "your missions and how far they got"),
         ("/send <pid> <message>", "tell a running agent something; it hears it at its next step"),
         ("/answer <pid> <text>", "answer an agent that asked you a question"),
         ("/board", "the facts agents share with each other"),
@@ -11530,6 +12048,10 @@ class ChuckWindow(Adw.ApplicationWindow):
             self.show_strace(arg)
         elif cmd == "replay":
             self.show_replay(arg)
+        elif cmd == "mission":
+            self.start_mission(arg)
+        elif cmd == "missions":
+            self.show_missions()
         elif cmd == "send":
             m = re.match(r"(\d+)\s+(.+)$", arg, re.DOTALL)
             self._sys_note(self.send_to(m.group(1), m.group(2)) if m else "/send <pid> <message>", "dim")

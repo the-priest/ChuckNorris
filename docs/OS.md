@@ -207,3 +207,41 @@ when it has only a prompt and a loop.
 - **To wait for its children.** ```wait <pid> [minutes]``` returns a
   background agent's report as a tool result (and not again as a note).
 
+## Missions (phase 23)
+
+`chucknorris_ext/missions.py` (pure) and the orchestrator in the app.
+
+A mission is a goal too big for one agent. Process control was the
+missing piece of an agent OS: one agent per request works for small jobs,
+and big ones need what `make` and a CI system give a team of engineers.
+
+1. **Plan.** One model call with the project's map and rules returns a JSON
+   graph: tasks with an id, a kind (`code` changes files; `research` and
+   `check` only look), a brief, and dependencies. `parse_plan` refuses
+   unknown dependencies and cycles (Kahn's algorithm) and asks again once
+   with the reason. The plan waits for Start.
+2. **Run.** The mission is a kernel process (kind `mission`) with its own
+   token and time quota; every task's agent is spawned under it, so its
+   quota is clipped to what the mission has left and `/kill` on the
+   mission ends them all. Ready tasks (pending, every dependency merged or
+   done) start up to `mission_parallel` at a time. A code task is a
+   background agent in a fresh copy of the folder, taken when it starts,
+   so it sees the earlier tasks' merged work. Research runs the
+   `investigator` program and checks the `reviewer`. Each agent's brief carries
+   the mission, its task, and what the tasks before it reported.
+3. **Verify.** When a code task finishes with changes, the project's tests
+   run on its copy (`.chuck/test`, else `builder.test_command`). Pass →
+   three-way merge. Fail → the same agent goes on in the same copy with the
+   failing output appended to its conversation (it's not a fresh start), up to
+   `mission_attempts`. Still failing, or a merge conflict → the task
+   stops, and the mission pauses with Retry / Skip once nothing else can run.
+4. **Survive.** Missions are saved after every change. At startup, a
+   running mission gets a new process group; a task whose agent was cut off
+   resumes from its hibernated step, and one with no checkpoint starts over.
+   Missions started in this session are never taken over by that startup
+   pass.
+
+The mission card is the whole view: each task's state, pid, test result,
+and its Report, Trace (strace) and Replay. When it completes, the chat and
+the agent get a summary with the spend.
+

@@ -38,6 +38,7 @@ Paste a SiliconFlow key in Settings. Press **Tab** to pick Agent or Chat. Talk t
 - **Each helper has a budget.** When it runs out, it is asked to write up what it found and stop. Nothing runs up your bill forever.
 - **Helpers can work in the background** on a *copy* of your project, so they can't break your files. When one finishes, you look at what it changed and click **Merge** if you like it.
 - **Helpers can talk.** You can send one a message while it works, it can ask you a question without stopping the others, and they share a notice board so they don't get in each other's way.
+- **Give it a whole project-sized job** (`/mission …`). It splits the job into steps, hands them to several helpers working at once, checks each piece by running your project's tests, and only then puts it into your folder.
 - **Helpers can wait for something to happen.** "Every morning at 8:30", "when a service fails", "when the disk is 90% full". Waiting costs nothing; they wake up only when it happens, look, and leave you a report.
 - **Nothing is lost.** Every step is saved. If the computer crashes, a helper picks up where it was. You can even go back to any step of a helper's work and try a different direction from there.
 - **Safety stays on.** A helper can do whatever you allow it to, but anything that could wreck your system (wiping a disk, deleting your home folder) always waits for your click.
@@ -65,6 +66,17 @@ An agent loop with a prompt and a few tools is a program. Run ten of them and yo
 | `top`, `strace` | **`/top`** and **`/strace`**, live |
 | hibernate | **every step checkpointed**: agents survive a crash and resume |
 | (nothing) | **time travel**: replay any run and fork it from any step |
+| `make` + CI | **missions**: a goal as a task graph, every merge gated on the tests |
+
+### Missions: give it the whole job
+
+```text
+/mission make the API return proper 4xx errors everywhere, with tests
+```
+
+Some jobs are too big for one agent. A mission plans the goal as a small graph of tasks with dependencies, shows you the plan, and once you press **Start** runs it the way `make` runs a build. Every task whose dependencies are finished starts as its own agent, several at once. Each code task works in a fresh copy of your folder that already holds the earlier tasks' work. **Nothing is merged until the project's tests pass on that copy.** If they fail, the same agent is sent back with the failure to fix it. A task that still fails pauses the mission and asks you: Retry or Skip. The whole mission is one process group with one budget (Cancel ends every agent in it), and it survives a restart.
+
+<img src="assets/screenshots/os-mission.png" alt="A MISSION card: five tasks with dependencies; three finished (one merged after its tests passed), one running, one waiting, with spend so far and Report / Trace / Replay per task" width="100%">
 
 ### `/top`: every agent is a process
 

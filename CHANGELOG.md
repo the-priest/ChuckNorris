@@ -23,7 +23,7 @@ The third roadmap (`docs/ROADMAP.md`, phases 10–15), with tests in
   **voice input** (Moonshine, local; mic button or Ctrl+M, optional
   hands-free sending).
 
-### Chuck OS (`docs/OS.md`, phases 16–22)
+### Chuck OS (`docs/OS.md`, phases 16–23)
 
 - **The agent kernel.** Every agent is a process: a quota of tokens, money
   and time, its spend charged to it and every ancestor, scheduled onto
@@ -46,6 +46,12 @@ The third roadmap (`docs/ROADMAP.md`, phases 10–15), with tests in
   step and survive a crash or a reboot (Resume at the next start);
   `/replay <pid>` shows a run step by step and `/fork <pid> <step>
   [instruction]` starts a new agent from any step, files as they were then.
+- **Missions** (`/mission <goal>`): a goal planned as a graph of tasks and
+  run by agents in parallel, like `make`; each code task's work is merged
+  only once the project's tests pass on its copy, failures go back to the
+  agent that made them, and the whole mission is one process group with one
+  budget that survives a restart. Any background agent's copy is now tested
+  when it finishes, so the card says pass or fail before you merge.
 - **Agents that talk.** `/send` a running agent a message; a background
   agent can ```ask``` you and wait while everything else goes on; a shared
   board (```post```, ```board```, `/board`); every step shows an agent its
