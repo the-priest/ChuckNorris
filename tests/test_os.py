@@ -1700,6 +1700,23 @@ r2 = w.remind_command("every day at 8:30: stand-up")
 check(r2 and r2["when"] == {"daily": "08:30"}, "a reminder can repeat")
 check(w.remind_command("whenever: x") is None, "a time it can't read is refused with examples")
 
+print("\n--- the shell: the running OS from a terminal ---")
+w = new_win([], tmp)
+w.set_agent_mode(True, announce=False)
+w.backend = ScriptedBackend(["Looking at it."])
+said = []
+check(w.remote_command(["--help"], None, said.append) == 0 and "chucknorris --mission" in said[-1],
+      "chucknorris --help prints what it can do")
+check(w.remote_command(["--here", "fix", "the", "tests"], str(sproj), said.append) == 0
+      and w.workspace == sproj.resolve() and said[-1] == "sent", "--here sets the folder, then the message is sent")
+settle()
+check(any(m.get("content") == "fix the tests" for m in w.history), "the message arrives as if typed")
+check(w.remote_command(["--remind", "in", "20m:", "tea"], None, said.append) == 0 and said[-1] == "done"
+      and any(d["brief"] == "tea" for d in w._daemons.items), "--remind sets a reminder")
+w.remote_command(["--top"], None, said.append)
+check("chuck" in said[-1], "--top prints the process table in the terminal", said[-1][:100])
+check(w.remote_command(["--bogus"], None, said.append) == 2, "an unknown option is an error with a hint")
+
 print(f"\nTOTAL OS FAILURES: {fails}")
 assert fails == 0 and not FAILS, "OS regressions present"
 print("ALL OS TESTS PASSED")

@@ -95,6 +95,20 @@ def total(items):   # make this skip None values AI!
 
 Chuck sees it, does it, and removes the marker. End a comment with `AI?` and it answers the question in the chat instead, changing nothing. Every common comment style works (`#`, `//`, `--`, `/* */`, `<!-- -->`). Watching costs nothing: it's a cheap scan of what you saved, with no model call until a marker appears, and each comment is acted on once.
 
+### A shell for the OS
+
+While Chuck is open, running `chucknorris` again from any terminal talks to it instead of opening a second window. That makes Chuck scriptable from your shell, cron, git hooks and editor tasks:
+
+```bash
+chucknorris --here "the tests in auth are failing, fix them"   # this dir becomes the folder
+chucknorris --mission "add type hints everywhere, with mypy passing"
+chucknorris --remind "in 20m: stretch"
+chucknorris --run "reviewer the last commit"
+chucknorris --top            # the agent processes, printed right here
+chucknorris --budget         # today's and this month's spend
+chucknorris --inbox          # unread daemon reports
+```
+
 ### The tray: the OS at a glance
 
 When something is going on, a small tray appears in the header: `? 1  ▶ 2  ◎ 1  ✉ 1` means a question is waiting for you, two agents are working, a mission is running, and a daemon left a report. It lights up when an agent is waiting for your answer. Click it (or type `/activity`) for one card with all of it, each with a button to act on it.

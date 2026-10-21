@@ -46,6 +46,9 @@ The third roadmap (`docs/ROADMAP.md`, phases 10–15), with tests in
   step and survive a crash or a reboot (Resume at the next start);
   `/replay <pid>` shows a run step by step and `/fork <pid> <step>
   [instruction]` starts a new agent from any step, files as they were then.
+- **A shell for the OS**: with Chuck open, `chucknorris "…"`, `--here`,
+  `--mission`, `--spawn`, `--run`, `--remind`, `--daemon`, `--top`,
+  `--budget`, `--inbox` reach the running window and answer in your terminal.
 - **Reminders** (`/remind in 20m: …`, `at 5pm`, `tomorrow at 9am`, `every
   day at 8:30`, or just ask): a note, a notification and the voice, with no
   agent and no tokens; they fire even over budget.

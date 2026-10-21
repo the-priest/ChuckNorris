@@ -10843,6 +10843,75 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._log_pin(card)
         return True
 
+    # ── the shell: drive the running OS from any terminal ──
+    REMOTE_HELP = """chucknorris — talk to the running Chuck from a terminal
+
+  chucknorris "fix the failing tests"     send a message (as if typed)
+  chucknorris --here "…"                  first make this directory the working folder
+  chucknorris --mission "goal"            plan a mission (it waits for Start)
+  chucknorris --spawn "task"              a background agent in a copy of the folder
+  chucknorris --run "reviewer the parser" run an agent program
+  chucknorris --remind "in 20m: tea"      a reminder
+  chucknorris --daemon "daily 08:30: …"   a daemon
+  chucknorris --top                       print the agent processes here
+  chucknorris --budget                    print today's and this month's spend
+  chucknorris --inbox                     print unread daemon reports
+"""
+
+    def remote_command(self, args, cwd=None, out=print):
+        """A command from another `chucknorris` launch (Gio forwards its
+        arguments here). `out` prints back to that terminal. -> exit code."""
+        args = [a for a in args if a]
+        if not args:
+            return 0
+        if args[0] in ("-h", "--help"):
+            out(self.REMOTE_HELP)
+            return 0
+        if args[0] == "--here":
+            if cwd and os.path.isdir(cwd):
+                self.set_workspace(cwd, announce=True)
+            args = args[1:]
+            if not args:
+                return 0
+        flag, rest = args[0], " ".join(args[1:]).strip()
+        if flag == "--top" or flag == "--ps":
+            out(self._top_text() or "(no processes)")
+            return 0
+        if flag == "--budget":
+            if self._ledger is None:
+                out("budget module missing"); return 1
+            out(f"today {_pricing.fmt_usd(self._ledger.today())}, this month "
+                f"{_pricing.fmt_usd(self._ledger.month())}")
+            return 0
+        if flag == "--inbox":
+            items = self._inbox.unread() if self._inbox is not None else []
+            out("\n\n".join(f"[{i['daemon']}] {i['why']}\n{i['report']}" for i in items) or "(no unread reports)")
+            return 0
+        actions = {"--mission": lambda: self.start_mission(rest),
+                   "--spawn": lambda: self.spawn_background(rest),
+                   "--run": lambda: self.run_program(rest),
+                   "--remind": lambda: self.remind_command(rest),
+                   "--daemon": lambda: self.daemon_command(rest)}
+        if flag in actions:
+            if not rest:
+                out(f"{flag} needs an argument (chucknorris --help)")
+                return 2
+            ok = actions[flag]()
+            out("done" if ok not in (None, False) else "not done: see the note in Chuck's window")
+            return 0 if ok not in (None, False) else 1
+        if flag.startswith("--"):
+            out(f"unknown option {flag} (chucknorris --help)")
+            return 2
+        text = " ".join(args)
+        if self._running:
+            self._steer.append(text)
+            out("sent: Chuck is working, it hears this at its next step")
+        else:
+            self.entry.get_buffer().set_text(text)
+            self.on_send()
+            out("sent")
+        return 0
+
     # ── the system tray: the OS at a glance ──
     def _activity(self):
         """What the OS is doing right now, for the tray and its card."""
@@ -15478,7 +15547,14 @@ class ChuckWindow(Adw.ApplicationWindow):
 
 class ChuckApp(Adw.Application):
     def __init__(self):
-        super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
+        # a second `chucknorris …` hands its arguments to this instance
+        # (remote_command) and gets the answer printed in its own terminal
+        flags = Gio.ApplicationFlags.DEFAULT_FLAGS
+        try:
+            flags |= Gio.ApplicationFlags.HANDLES_COMMAND_LINE
+        except (AttributeError, TypeError):
+            pass
+        super().__init__(application_id=APP_ID, flags=flags)
 
     def do_startup(self):
         Adw.Application.do_startup(self)
@@ -15522,6 +15598,28 @@ class ChuckApp(Adw.Application):
                 except Exception:
                     pass
             threading.Thread(target=_seed, daemon=True).start()
+
+    def do_command_line(self, cmdline):
+        args = list(cmdline.get_arguments() or [])[1:]
+        self.activate()
+        win = self.props.active_window
+        if win is None or not args:
+            return 0
+        try:
+            cwd = cmdline.get_cwd()
+        except Exception:
+            cwd = None
+
+        def out(text):
+            try:
+                cmdline.print_literal(str(text).rstrip("\n") + "\n")
+            except Exception:
+                pass
+        try:
+            return int(win.remote_command(args, cwd, out) or 0)
+        except Exception as ex:
+            out(f"error: {ex}")
+            return 1
 
     def do_activate(self):
         win = self.props.active_window
