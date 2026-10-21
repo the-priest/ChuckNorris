@@ -1492,6 +1492,121 @@ ok_u, msg_u, v_u = U.apply(clone)
 check(ok_u is False and v_u is None and "nothing new" in msg_u,
       "a git pull that brings nothing isn't reported as an update", msg_u)
 
+print("\n--- pacman, sudo and timeouts on Arch ---")
+from chucknorris_ext import safety as S_
+nc = lambda c: S_.add_noconfirm(S_.enforce_syu(c))
+table = {
+    "pacman -S foo": "pacman --noconfirm -Syu foo",
+    "pacman -Sy foo": "pacman --noconfirm -Syu foo",
+    "pacman -Si foo": "pacman -Si foo", "pacman -S --info foo": "pacman -S --info foo",
+    "pacman -S --search foo": "pacman -S --search foo", "pacman -Scc": "pacman -Scc",
+    "pacman -S --asdeps foo": "pacman --noconfirm -Syu && pacman --noconfirm -S --asdeps foo",
+    "sudo pacman -Sdd foo": "sudo pacman --noconfirm -Syu && sudo pacman --noconfirm -Sdd foo",
+    "pacman -Suu": "pacman --noconfirm -Syuu",
+    "which yay && yay -S foo": "which yay && yay --noconfirm -Syu foo",
+    'echo "paru ready" && paru -S foo': 'echo "paru ready" && paru --noconfirm -Syu foo',
+    "git commit -m 'pacman -S foo'": "git commit -m 'pacman -S foo'",
+    "pacman -Qi foo >/dev/null || sudo pacman -S foo": "pacman -Qi foo >/dev/null || sudo pacman --noconfirm -Syu foo",
+    "sudo pacman -Rns $(pacman -Qtdq)": "sudo pacman --noconfirm -Rns $(pacman -Qtdq)",
+    "makepkg -si": "makepkg --noconfirm -si",
+}
+bad = {k: nc(k) for k, v in table.items() if nc(k) != v}
+check(not bad, "-Syu and --noconfirm go on the package command that needs them, and nowhere else", bad)
+check(all(S_.classify_command(c) == "critical" for c in
+          ("sudo pacman --noconfirm -Rdd glibc", "pacman --noconfirm -Rns systemd", "paru -R linux")),
+      "removing a core package still needs a tick after --noconfirm is added")
+check(all(cn.command_needs_sudo(c) for c in ("FOO=1 sudo ls", "time sudo ls", "if x; then sudo ls; fi",
+                                               "{ sudo ls; }", "`sudo ls`", "paru -Syu foo", "makepkg -si"))
+      and not any(cn.command_needs_sudo(c) for c in ("echo 'sudo rm'", "pseudo ls", "sudoedit /x")),
+      "sudo is found wherever a command starts (and AUR helpers count)")
+check(cn._inject_askpass("FOO=1 sudo ls; sudo -A x; sudo y") == "FOO=1 sudo -A ls; sudo -A x; sudo -A y"
+      and "--sudoflags -A" in cn._inject_askpass("paru -Syu foo"),
+      "and every one of them uses the askpass helper when it has to")
+check(all(cn.estimate_runtime(c)["hard_timeout_seconds"] >= 1800
+          for c in ("sudo -E pacman -Syu", "doas pacman -Syu", "sudo mkinitcpio -P")),
+      "a system upgrade under sudo -E/doas, or mkinitcpio, gets the long timeout")
+
+print("\n--- reading web pages ---")
+from chucknorris_ext import web as W_
+import http.server as _hs2
+
+
+class _Pages(_hs2.BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        body, ctype = b"", "text/html"
+        if self.path == "/cp1251":
+            body = ("<html><body><p>" + "Привет, мир. " * 30 + "</p></body></html>").encode("cp1251")
+            ctype = "text/html; charset=windows-1251"
+        elif self.path == "/meta":
+            body = ('<html><head><meta charset="windows-1251"></head><body><p>' + "Привет, мир. " * 30
+                    + "</p></body></html>").encode("cp1251")
+        elif self.path == "/pdf":
+            body, ctype = b"%PDF-1.4\n" + os.urandom(3000), "application/pdf"
+        elif self.path == "/cells":
+            body = b"<p>Line one<br>Line two<br/>Line three</p><table><tr><td>Name</td><td>Price</td></tr></table>" + b"<p>" + b"filler words " * 40 + b"</p>"
+        elif self.path == "/cards":
+            body = (b"<html><body><article>Teaser card</article><div>" + b"The real story text. " * 60
+                    + b"</div><script>a</script><script>b</script><script>c</script></body></html>")
+        elif self.path == "/drip":
+            self.send_response(200); self.send_header("Content-Type", "text/html"); self.end_headers()
+            try:
+                for _ in range(200):
+                    self.wfile.write(b"x"); self.wfile.flush(); time.sleep(0.5)
+            except OSError:
+                pass
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class _TS(socketserver.ThreadingMixIn, socketserver.TCPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+psrv = _TS(("127.0.0.1", 0), _Pages)
+threading.Thread(target=psrv.serve_forever, daemon=True, name="srv-pages").start()
+base = f"http://127.0.0.1:{psrv.server_address[1]}"
+check("Привет, мир" in W_.fetch_page(base + "/cp1251", timeout=5)[0]
+      and "Привет, мир" in W_.fetch_page(base + "/meta", timeout=5)[0],
+      "a page in its own charset (header or <meta>) reads as text, not garbage")
+check(W_.fetch_page(base + "/pdf", timeout=5) == ("", "error"), "a PDF or an image isn't returned as page text")
+cells = W_.fetch_page(base + "/cells", timeout=5)[0]
+check("Line one\nLine two" in cells and "Name | Price" in cells, "line breaks and table cells survive", cells[:120])
+check("The real story text" in W_.fetch_page(base + "/cards", timeout=5)[0],
+      "a teaser <article> card doesn't hide the page's real text")
+t0 = time.time()
+W_.fetch_page(base + "/drip?" + str(t0), timeout=2)
+check(time.time() - t0 < 25, "a server that drips bytes can't hold a fetch for ever", round(time.time() - t0, 1))
+t0 = time.time()
+W_._readable("<nav>" * 30000 + "<p>end</p>", 4000)
+check(time.time() - t0 < 2, "a page full of unclosed tags is stripped in linear time", round(time.time() - t0, 2))
+ddg = ('<div class="result results_links"><a class="result__a" href="https://a.com/">A title</a></div>'
+       '<div class="result results_links"><a class="result__a" href="https://b.com/">B title</a>'
+       '<a class="result__snippet">snippet about B</a></div>'
+       '<div class="result results_links"><a class="result__a" href="https://c.com/">C title</a>'
+       '<a class="result__snippet">snippet about C</a></div>')
+
+
+class _R:
+    def __init__(self, b):
+        self.b = b
+
+    def read(self):
+        return self.b
+real_get = W_._get
+W_._get = lambda *a, **k: _R(ddg.encode())
+rows = W_._ddg_html_search("q", 5)
+W_._get = real_get
+check(rows == [("A title", "https://a.com/", ""), ("B title", "https://b.com/", "snippet about B"),
+               ("C title", "https://c.com/", "snippet about C")],
+      "each search result keeps its own snippet", rows)
+psrv.shutdown()
+
 print("\n--- installer: a stale clone in the current folder isn't installed ---")
 inst = Path(_ROOT, "install.sh").read_text()
 snip = inst[inst.index('SELF_DIR=""'):]

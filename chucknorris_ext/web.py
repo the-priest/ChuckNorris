@@ -56,15 +56,27 @@ def _ddg_html_search(query, n):
             html = _get(host, data=data).read().decode("utf-8", "ignore")
         except Exception:
             continue
-        titles = re.findall(r'class="result__a"[^>]*href="([^"]+)".*?>(.*?)</a>', html, re.DOTALL)
-        snips = [_strip(s) for s in re.findall(r'class="result__snippet"[^>]*>(.*?)</a>', html, re.DOTALL)]
         out = []
-        for i, (href, title) in enumerate(titles[:n]):
+        # one result at a time: pairing all titles with all snippets by
+        # position shifted every snippet after a result that had none
+        blocks = re.split(r'(?=<[^>]+class=["\'][^"\']*\bresult\b(?!__|-))', html)
+        for blk in blocks:
+            a = re.search(r'class=["\'](?:result__a|result-link)["\'][^>]*href=["\']([^"\']+)["\'][^>]*>'
+                          r'(.*?)</a>', blk, re.DOTALL) or \
+                re.search(r'href=["\']([^"\']+)["\'][^>]*class=["\'](?:result__a|result-link)["\'][^>]*>'
+                          r'(.*?)</a>', blk, re.DOTALL)
+            if not a:
+                continue
+            href, title = a.group(1), a.group(2)
+            sn = re.search(r'class=["\']result(?:__|-)snippet["\'][^>]*>(.*?)</(?:a|td|div)>',
+                           blk, re.DOTALL)
             q = urllib.parse.urlparse(href.replace("&amp;", "&"))
             real = urllib.parse.parse_qs(q.query).get("uddg", [href])[0]
             if real.startswith("//"):
                 real = "https:" + real
-            out.append((_strip(title), real, snips[i] if i < len(snips) else ""))
+            out.append((_strip(title), real, _strip(sn.group(1)) if sn else ""))
+            if len(out) >= n:
+                break
         if out:
             return out
     return []
@@ -169,8 +181,50 @@ def video_search(query, n=6):
 MAX_PAGE_BYTES = 3_000_000       # a readable article is never bigger than this
 _MAX_SEARCH_BYTES = 4_000_000    # a JSON result page, generously
 
-_ARTICLE_TAGS = re.compile(r"(?is)<(script|style|nav|footer|header|form|aside|noscript|svg).*?</\1>")
-_BLOCK = re.compile(r"(?is)</(p|div|li|h[1-6]|br|tr|section|article)>")
+_DROP_TAGS = ("script", "style", "nav", "footer", "header", "form", "aside", "noscript", "svg")
+_DROP_OPEN = re.compile(r"(?i)<(" + "|".join(_DROP_TAGS) + r")\b[^>]*>")
+_BLOCK = re.compile(r"(?is)<br\s*/?>|</(?:p|div|li|h[1-6]|tr|section|article|dt|dd|ul|ol|table)>")
+_CELL = re.compile(r"(?i)</t[dh]>")
+
+
+def _drop_tags(raw):
+    """Remove <script>…</script>, <nav>…</nav> and the like in ONE pass. The
+    old `<(tag).*?</tag>` regex rescanned to the end of the page for every
+    tag left open: a broken page cost minutes of CPU."""
+    low = raw.lower()
+    out, pos = [], 0
+    for m in _DROP_OPEN.finditer(raw):
+        if m.start() < pos:
+            continue                                # inside a block already dropped
+        out.append(raw[pos:m.start()])
+        end = low.find("</" + m.group(1).lower(), m.end())
+        if end < 0:
+            pos = m.end()                           # never closed: drop just the tag
+            continue
+        close = low.find(">", end)
+        pos = len(raw) if close < 0 else close + 1
+        out.append(" ")
+    out.append(raw[pos:])
+    return "".join(out)
+
+
+_TEXTY = re.compile(r"(?i)^(?:text/|application/(?:xhtml\+xml|xml|json|ld\+json|rss\+xml|atom\+xml))")
+
+
+def _decode(body, content_type):
+    """Bytes -> text in the page's own charset: the Content-Type header, else a
+    <meta charset> near the top, else UTF-8 (cp1252 when that fails)."""
+    m = re.search(r"(?i)charset=[\"']?([\w-]+)", content_type or "")
+    enc = m.group(1) if m else None
+    if not enc:
+        mb = re.search(rb"(?i)<meta[^>]+charset=[\"']?([\w-]+)", body[:4096])
+        enc = mb.group(1).decode("ascii", "ignore") if mb else None
+    for e in ([enc] if enc else []) + ["utf-8"]:
+        try:
+            return body.decode(e)
+        except (LookupError, UnicodeDecodeError):
+            continue
+    return body.decode("cp1252", "replace")
 
 
 # A bot wall or a page that is nothing until its JavaScript runs. Either way
@@ -205,8 +259,15 @@ def fetch_page(url, limit=4000, timeout=6):
 
 def _fetch_page(url, limit, timeout):
     try:
-        raw = _get(url, timeout=timeout, cache=True,
-                   max_bytes=MAX_PAGE_BYTES).read().decode("utf-8", "ignore")
+        resp = _get(url, timeout=timeout, cache=True, max_bytes=MAX_PAGE_BYTES)
+        ctype = ""
+        try:
+            ctype = resp.headers.get("Content-Type", "") or ""
+        except Exception:
+            pass
+        if ctype and not _TEXTY.match(ctype.strip()):
+            return "", "error"                   # a PDF or an image isn't page text
+        raw = _decode(resp.read(), ctype)
     except urllib.error.HTTPError as ex:
         return "", "blocked" if ex.code in _BLOCK_CODES else "error"
     except Exception:
@@ -229,14 +290,19 @@ def web_fetch(url, limit=4000, timeout=6):
 def _readable(raw, limit):
     if len(raw) > MAX_PAGE_BYTES:
         # A 40MB "page" is a download, not an article. Truncating before the
-        # regex passes matters: _ARTICLE_TAGS over tens of megabytes is where a
+        # regex passes matters: tag stripping over tens of megabytes is where a
         # fetch stops being slow and starts looking like a hang.
         raw = raw[:MAX_PAGE_BYTES]
-    raw = _ARTICLE_TAGS.sub(" ", raw)
-    # Prefer <article>/<main> if present — that's usually the real story.
-    m = re.search(r"(?is)<article[^>]*>(.*?)</article>", raw) or \
-        re.search(r"(?is)<main[^>]*>(.*?)</main>", raw)
-    body = m.group(1) if m else raw
+    raw = _drop_tags(raw)
+    # Prefer <article>/<main> — the real story — but only the LONGEST one,
+    # and only if it holds real text: a page of teaser cards uses <article>
+    # for each card, and the first card is not the page.
+    best = ""
+    for m in re.finditer(r"(?is)<(article|main)[^>]*>(.*?)</\1>", raw):
+        if len(m.group(2)) > len(best):
+            best = m.group(2)
+    body = best if best and len(_strip(best)) >= 500 else raw
+    body = _CELL.sub(" | ", body)
     body = _BLOCK.sub("\n", body)
     text = re.sub(r"[ \t]+", " ", _strip(body))
     text = re.sub(r"\n\s*\n+", "\n\n", text).strip()

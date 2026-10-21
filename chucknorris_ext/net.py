@@ -328,6 +328,23 @@ def request(url, data=None, timeout=20, headers=None, proxy=None,
     return resp
 
 
+def _read_by(r, max_bytes, deadline):
+    """Read the body in chunks against a wall-clock deadline. The socket
+    timeout only bounds each read: a server that drips one byte every half
+    second kept a fetch going for hours."""
+    chunks, n = [], 0
+    cap = (max_bytes + 1) if max_bytes else None
+    while cap is None or n < cap:
+        if time.monotonic() > deadline:
+            raise TimeoutError("the response took too long to arrive")
+        chunk = r.read(min(65536, cap - n) if cap else 65536)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        n += len(chunk)
+    return b"".join(chunks)
+
+
 def _pooled(url, method, data, timeout, hdrs, proxy, max_bytes):
     seen = 0
     current = url
@@ -369,7 +386,7 @@ def _pooled(url, method, data, timeout, hdrs, proxy, max_bytes):
                 if attempt or not reused:
                     raise
 
-        body = r.read(max_bytes + 1) if max_bytes else r.read()
+        body = _read_by(r, max_bytes, time.monotonic() + max(15.0, (timeout or 20) * 3))
         status = r.status
         raw_headers = _Headers(r.getheaders())
         keep = (r.version == 11

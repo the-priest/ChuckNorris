@@ -46,7 +46,7 @@ except Exception:                     # the headless test stub has no Pango
 # optional so a partial install still launches.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from chucknorris_ext.safety import (            # noqa: E402
-    classify_command, classify_code, enforce_syu)
+    classify_command, classify_code, enforce_syu, add_noconfirm, needs_noconfirm)  # noqa: F401
 from chucknorris_ext import safety as _safety   # noqa: E402
 CRITICAL = _safety.CRITICAL                     # re-exported: tests + callers
 DANGER = _safety.DANGER
@@ -1234,29 +1234,6 @@ _RUN_ENV = {
 # to contain `Rns` but not `Rs` or `Rsn`, so the two removal forms people
 # actually type never got --noconfirm — pacman then hit `[Y/n]` against a
 # stdin of /dev/null and aborted.
-_NEEDS_NOCONFIRM = re.compile(
-    r"\b(pacman|paru|yay|pamac)\b(?=[^|;&]*\s(?:-[A-Za-z]*[SRU][A-Za-z]*"
-    r"|--(?:sync|remove|upgrade))\b)",
-    re.IGNORECASE)
-
-
-def needs_noconfirm(cmd):
-    """True if this is a package operation that will stop and ask."""
-    if not cmd or "--noconfirm" in cmd or "-y " in f" {cmd} ":
-        return False
-    if not _NEEDS_NOCONFIRM.search(cmd):
-        return False
-    # read-only queries never prompt
-    return not re.search(r"-{1,2}(Ss|Si|Sl|Sg|Sw|Q[a-z]*|F[a-z]*|search|info)\b", cmd)
-
-
-def add_noconfirm(cmd):
-    """Insert --noconfirm right after the package manager it belongs to."""
-    if not needs_noconfirm(cmd):
-        return cmd
-    return re.sub(r"\b(pacman|paru|yay|pamac)\b", r"\1 --noconfirm", cmd, count=1)
-
-
 def clip_output(out, limit=7000):
     """Keep the START and the END of long output.
 
@@ -1384,21 +1361,30 @@ def _sudo_ready():
 
 # `sudo` at command position (start, after a separator, or after leading env
 # assignments) — so `echo pseudo`, `/opt/sudoku`, `# sudo …` don't false-match.
-_SUDO_RE = re.compile(r'(?:^|[\n;&|(]\s*|\b&&\s*|\b\|\|\s*)(?:\w+=\S*\s+)*sudo\b')
-_SUDO_INJECT_RE = re.compile(r'(^|[\n;&|(]\s*|&&\s*|\|\|\s*)sudo(?=\s|$)')
+# where a command starts, as both detection and the sudo -A rewrite see it:
+# after a separator, `{`, `!`, a backtick or $( , a shell keyword, a VAR=x
+# assignment, or a wrapper (time, env, exec, xargs, nice, nohup)
+_SUDO_PREFIX = (r"((?:^|[\n;&|({!`]|\$\()\s*(?:(?:then|do|else|elif|time|env|exec|xargs|nice"
+                r"|nohup|command)\s+|\w+=\S*\s+)*)")
+_SUDO_RE = re.compile(_SUDO_PREFIX + r"sudo\b")
+_SUDO_INJECT_RE = re.compile(_SUDO_PREFIX + r"sudo(?=\s|$)(?!\s+-A\b)")
+# these call sudo themselves (AUR helpers, makepkg -si): they need the password too
+_SUDO_INSIDE_RE = re.compile(_SUDO_PREFIX + r"(?:paru|yay|pamac\s+(?:install|remove|upgrade|update)"
+                             r"|makepkg\s+(?:\S+\s+)*?-\w*[si])\b")
 
 
 def command_needs_sudo(command):
     """True if the command contains a real `sudo` invocation."""
-    return bool(command) and bool(_SUDO_RE.search(command))
+    return bool(command) and bool(_SUDO_RE.search(command) or _SUDO_INSIDE_RE.search(command))
 
 
 def _inject_askpass(command):
     """Turn each `sudo` into `sudo -A` (use SUDO_ASKPASS). Unlike -S, askpass
     never reads the command's stdin, so `sudo -A tee file` still works."""
-    if "sudo -A" in command:
-        return command
-    return _SUDO_INJECT_RE.sub(r'\1sudo -A', command)
+    out = _SUDO_INJECT_RE.sub(r'\1sudo -A', command) if "sudo" in command else command
+    # paru and yay run sudo themselves: tell them to use the askpass helper too
+    return re.sub(_SUDO_PREFIX + r"(paru|yay)\b(?![^\n;&|]*--sudoflags)",
+                  r"\1\2 --sudoflags -A", out)
 
 
 def _ensure_askpass_helper():
@@ -1489,7 +1475,7 @@ def _run_sudo(script, password, timeout, env):
                                    "/etc/doas.conf, or install sudo.")
     # -k clears any stale timestamp so -S -v truly validates the piped password;
     # rc 97 is our private "auth failed" sentinel.
-    if _ASKPASS_FIRST[0] and pe["askpass"]:
+    if (_ASKPASS_FIRST[0] or _SUDO_INSIDE_RE.search(script)) and pe["askpass"]:
         # this machine's sudo doesn't carry a validated password to the
         # command's own sudo calls: authenticate each one, from the start
         alt = _run_sudo_askpass(script, password, timeout, env)
@@ -1549,9 +1535,12 @@ _LONG_CMDS = {
     "pip3", "pipx", "npm", "yarn", "pnpm", "docker", "podman", "docker-compose",
     "rsync", "dd", "wget", "curl", "git", "gem", "bundle", "mvn", "gradle",
     "nmap", "meson", "ninja", "makepkg", "flatpak", "snap",
+    "mkinitcpio", "grub-mkconfig", "reflector", "dkms", "topgrade", "paccache",
+    "fwupdmgr", "pikaur", "aura", "trizen", "pacstrap", "rustup", "conda", "mamba",
 }
+# compared against the LOWERCASED command: the pacman flags must be lowercase
 _LONG_WORDS = {"upgrade", "dist-upgrade", "install", "update", "build",
-               "compile", "pull", "clone", "download", "-Syu", "-S"}
+               "compile", "pull", "clone", "download", "-syu", "-s", "-syyu", "-su"}
 # Long-running servers / daemons — these do NOT return on their own.
 _SERVER_CMDS = {
     "flask", "uvicorn", "gunicorn", "hypercorn", "daphne", "streamlit", "gradio",
@@ -1577,7 +1566,10 @@ def estimate_runtime(command):
         words = seg.split()
         i = 0
         while i < len(words) and ("=" in words[i] or words[i] in (
-                "sudo", "nohup", "time", "env", "exec", "setsid", "stdbuf")):
+                "sudo", "doas", "pkexec", "run0", "nohup", "time", "env", "exec", "setsid",
+                "stdbuf", "nice", "ionice", "timeout", "command")
+                or (i > 0 and words[i].startswith("-"))      # sudo -E, nice -n 5, timeout 60
+                or (i > 0 and words[i - 1] in ("timeout", "-n") and words[i][:1].isdigit())):
             i += 1
         if i >= len(words):
             continue
@@ -2146,17 +2138,20 @@ def junk_scan():
         return _run_ro(["sh", "-c",
                         "du -sh " + shlex.quote(os.path.expanduser(p)) +
                         " 2>/dev/null | cut -f1"]) or "0"
-    lines.append(f"~/.cache: {sz('~/.cache')}")
+    lines.append(f"thumbnail cache: {sz('~/.cache/thumbnails')} (of ~/.cache {sz('~/.cache')})")
     cmds.append(("Clear thumbnail cache", "rm -rf ~/.cache/thumbnails/*"))
     if shutil.which("pacman"):
         lines.append(f"pacman package cache: {sz('/var/cache/pacman/pkg')}")
-        cmds.append(("Trim pacman cache (keep 1)",
-                     "sudo paccache -rk1" if shutil.which("paccache")
-                     else "sudo pacman -Syu --needed pacman-contrib && sudo paccache -rk1"))
+        if not shutil.which("paccache"):
+            # its own, honestly labelled step: on Arch installing anything
+            # means syncing and upgrading the whole system first
+            cmds.append(("Install paccache (pacman-contrib) \u2014 upgrades the system first",
+                         "sudo pacman -Syu --needed pacman-contrib"))
+        cmds.append(("Trim pacman cache (keep 1)", "sudo paccache -rk1"))
         orph = _run_ro(["sh", "-c", "pacman -Qtdq 2>/dev/null | wc -l"])
         lines.append(f"orphan packages: {orph}")
         if orph and orph != "0":
-            cmds.append(("Remove orphans", "sudo pacman -Rns $(pacman -Qtdq)"))
+            cmds.append(("Remove orphans", "pacman -Qtdq | sudo pacman -Rns --noconfirm -"))
     jsize = _run_ro(["sh", "-c",
              "journalctl --disk-usage 2>/dev/null | grep -oE '[0-9.]+[KMG]' | tail -1"])
     if jsize:
@@ -6324,6 +6319,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         pass the script body so the risk tier is judged on what will actually
         execute, not on the harmless-looking `bash foo.sh` wrapper.
         """
+        original = cmd
         fixed = enforce_syu(cmd)
         if fixed != cmd:
             self._sys_note("using -Syu (a plain -S risks a partial upgrade)", "dim")
@@ -6339,7 +6335,9 @@ class ChuckWindow(Adw.ApplicationWindow):
         if gate_text is not None:
             gate_text = self._sanitise_skill_body(gate_text, cmd)
         judged = cmd if gate_text is None else (cmd + "\n" + gate_text)
-        tier = classify_command(judged)
+        # judged as written AND as rewritten: the worse of the two counts
+        tier = max(classify_command(judged), classify_command(original),
+                   key=lambda t: ("", "danger", "critical").index(t))
         if gate_text and tier != "critical" and re.match(r"(?:\S*/)?(?:python3?|node)\b", cmd):
             tier = classify_code("python", gate_text) or tier   # a python/node skill's body
 
@@ -6644,6 +6642,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         Same rule as commands: it executes. Only the CRITICAL tier waits for a
         deliberate tick.
         """
+        original = body
         if lang in ("bash", "sh"):
             fixed = enforce_syu(body)
             if fixed != body:
@@ -6651,7 +6650,9 @@ class ChuckWindow(Adw.ApplicationWindow):
             body = add_noconfirm(fixed)
         # shell is judged as shell; a program by the commands in its strings
         # and the library calls that delete the same things (rmtree(home))
-        tier = classify_command(body) if lang in ("bash", "sh") else classify_code(lang, body)
+        tier = (max(classify_command(body), classify_command(original),
+                    key=lambda t: ("", "danger", "critical").index(t))
+                if lang in ("bash", "sh") else classify_code(lang, body))
 
         card, chead, cbody, foot = self._card_shell(
             "PYTHON SESSION" if lang == "py" and _pysession is not None else lang.upper(),
@@ -6953,11 +6954,15 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._busy(True); self._live("\u2B07 downloading video\u2026")
 
         def worker():
-            cmd = ["yt-dlp", "-o", str(DL_DIR / "%(title)s.%(ext)s")]
+            # one video, a sane size and length of name: a playlist or channel
+            # URL would otherwise download every entry, unasked
+            cmd = ["yt-dlp", "--no-playlist", "--max-filesize", "2G",
+                   "-f", "bv*[height<=1080]+ba/b[height<=1080]/b", "--trim-filenames", "150",
+                   "-o", str(DL_DIR / "%(title)s.%(ext)s")]
             proxy = (self.settings.get("proxy") or "").strip()
             if proxy:
                 cmd += ["--proxy", proxy]
-            cmd.append(url)
+            cmd += ["--", url]
             try:
                 p = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
                 msg = "\u2713 saved to " + str(DL_DIR) if p.returncode == 0 else \

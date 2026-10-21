@@ -69,7 +69,8 @@ CRITICAL = re.compile(
     # fork bomb
     r"|:\(\)\s*\{"
     # ripping out core packages
-    r"|\bpacman\s+-R[a-z]*\s+[^\n|;]*(?<![\w-])(?:systemd|glibc|linux|bash|coreutils|pacman)(?![\w-])"
+    r"|\b(?:pacman|paru|yay)\s+(?:--?[\w-]+\s+)*?-R[a-z]*\s+[^\n|;]*(?<![\w-])"
+    r"(?:systemd|glibc|linux|bash|coreutils|pacman)(?![\w-])"
     # recursive permission/ownership destruction on root, home or a system dir
     r"|\bchmod\b(?=[^\n;&|]*\s-[a-zA-Z]*R)[^\n;&|]*\s" + _BROAD + _TEND +
     r"|\bchown\b(?=[^\n;&|]*\s-[a-zA-Z]*R)[^\n;&|]*\s" + _BROAD + _TEND +
@@ -88,7 +89,7 @@ DANGER = re.compile(
     r"|\bsystemctl\s+(?:mask|disable|stop)\b"
     r"|\biptables\s+-F\b|\bnft\s+flush\b|\bufw\s+--force\s+reset\b"
     r"|\bkillall\b|\bpkill\s+-9\b"
-    r"|\bpacman\s+-R"
+    r"|\b(?:pacman|paru|yay)\s+(?:--?[\w-]+\s+)*?-R"
     r"|\btruncate\s+-s\s*0\b"
     r"|\bfind\b[^|;]*-delete\b|\bfind\b[^|;]*-exec\s+rm\b",
     re.IGNORECASE | re.MULTILINE)
@@ -152,50 +153,124 @@ def classify_code(lang, code):
 
 
 # pacman AND its AUR wrappers: paru/yay take the same flag grammar, and a bare
-# `paru -S pkg` is the same partial-upgrade footgun as `pacman -S pkg`. Anchoring
-# this on "pacman" alone let every AUR install through un-rewritten.
+# `paru -S pkg` is the same partial-upgrade footgun as `pacman -S pkg`.
 _PAC_TOOLS = r"(?:pacman|paru|yay)"
-_PAC_INSTALL = re.compile(
-    r"\b(?P<tool>" + _PAC_TOOLS + r")\s+(?P<flags>-{1,2}[A-Za-z-]+(?:\s+-{1,2}[A-Za-z-]+)*)",
-    re.IGNORECASE)
+# a package command at COMMAND position (not inside an echo, a commit message
+# or a comment): line start or after ; & | ( ` $( , optionally under sudo/env
+_PAC_CMD = re.compile(
+    r"(?P<pre>(?:^|(?<=[\n;&|(`]))[ \t]*(?:sudo(?:[ \t]+-\S+)*[ \t]+)?"
+    r"(?:env[ \t]+(?:\S+=\S*[ \t]+)*)?)(?P<tool>" + _PAC_TOOLS + r"|pamac|makepkg)\b"
+    r"(?P<args>[^\n;&|)`]*)", re.IGNORECASE)
+# read-only operations, short (in a -S group) and long
+_RO_SHORT = set("silcgpw")
+_RO_LONG = re.compile(r"--(?:search|info|list|groups|clean|print|downloadonly|query|files|"
+                      r"print-format|version|help)\b")
+# install-only flags: harmless for the package asked for, damaging when they
+# ride along on a whole-system upgrade (-Syu --asdeps marks EVERYTHING a dep)
+_INSTALL_ONLY = re.compile(r"--(?:asdeps|asexplicit|overwrite|dbonly|nodeps|assume-installed)\b")
+
+
+def _flags(args):
+    toks = args.split()
+    shorts = [t[1:] for t in toks if re.fullmatch(r"-[A-Za-z]+", t)]
+    return toks, shorts
+
+
+def _op(shorts, args):
+    """The pacman operation letter (S, R, U, Q, …), or ''."""
+    for sh in shorts:
+        for c in sh:
+            if c in "SRUQFDTV":
+                return c
+    m = re.search(r"--(sync|remove|upgrade|query|files|database|deptest)\b", args)
+    return {"sync": "S", "remove": "R", "upgrade": "U", "query": "Q", "files": "F",
+            "database": "D", "deptest": "T"}.get(m.group(1), "") if m else ""
+
+
+def _read_only(shorts, args, op):
+    if op in ("Q", "F", "T", "V", "D"):
+        return True
+    if op == "S" and any(set(sh) & _RO_SHORT for sh in shorts if "S" in sh):
+        return True
+    return bool(_RO_LONG.search(args))
 
 
 def enforce_syu(cmd):
     """Rewrite `pacman -S pkg` into `pacman -Syu pkg` (also paru / yay).
 
     On Arch a plain -S installs against a stale local database, which is the
-    classic partial-upgrade footgun: you end up with a package built for a newer
-    libc than the one you have, and things break in ways that are miserable to
-    unpick. Syncing first is the only supported way to install. This is enforced
-    here rather than merely requested in the prompt, because a rule the model
-    can forget isn't a rule.
+    classic partial-upgrade footgun. Syncing first is the only supported way
+    to install. This is enforced here rather than merely requested in the
+    prompt, because a rule the model can forget isn't a rule. Only a real
+    package command is touched (not one quoted in an echo or a commit
+    message), read-only operations are left alone, and install-only flags
+    (--asdeps, -d, --overwrite) stay on the install instead of riding along
+    on the system upgrade.
     """
-    if not cmd:
+    if not cmd or not re.search(r"\b" + _PAC_TOOLS + r"\b", cmd, re.IGNORECASE):
         return cmd
-    if not re.search(r"\b" + _PAC_TOOLS + r"\b", cmd, re.IGNORECASE):
-        return cmd
-
-    # Sync sub-operations that only READ (search/info/list/clean/groups/print/
-    # download-only) must be left completely alone — turning `-Ss` into `-Syus`
-    # would break a harmless package search.
-    READONLY = set("silcgpw")
-    OTHER_OPS = set("RQUDFT")
 
     def fix(m):
-        tool = m.group("tool")
-        parts = m.group("flags").split()
-        out, changed = [], False
-        for p_ in parts:
-            if p_.startswith("--"):
-                out.append(p_); continue
-            body = p_[1:]
-            if "S" not in body or OTHER_OPS & set(body) or READONLY & set(body):
-                out.append(p_); continue
-            if "y" in body and "u" in body:
-                out.append(p_); continue      # already correct (incl. -Syyu)
-            # a real install: make sure it syncs AND upgrades first
-            rest = "".join(c for c in body if c not in "Syu")
-            out.append("-Syu" + rest); changed = True
-        return f"{tool} " + " ".join(out) if changed else m.group(0)
+        tool, args = m.group("tool"), m.group("args")
+        if tool.lower() in ("pamac", "makepkg"):
+            return m.group(0)
+        toks, shorts = _flags(args)
+        op = _op(shorts, args)
+        if op != "S" or _read_only(shorts, args, op):
+            return m.group(0)
+        sgroups = [t for t in toks if re.fullmatch(r"-[A-Za-z]*S[A-Za-z]*", t)]
+        has_y = any("y" in t for t in toks if re.fullmatch(r"-[A-Za-z]+", t))
+        has_u = any("u" in t for t in toks if re.fullmatch(r"-[A-Za-z]+", t)) or "--sysupgrade" in args
+        if has_y and has_u:
+            return m.group(0)                     # already syncs and upgrades
+        pkgs = [t for t in toks if not t.startswith("-")]
+        install_only = bool(_INSTALL_ONLY.search(args)) or any(
+            "d" in t[1:] for t in sgroups)
+        pre = m.group("pre")
+        if install_only and pkgs:
+            # upgrade the system first, then install with those flags
+            lead = re.match(r"[ \t]*", pre).group(0)
+            return (f"{pre}{tool} -Syu && {pre.strip() + ' ' if pre.strip() else ''}"
+                    f"{tool}{args}").replace(lead + lead, lead)
+        if sgroups:
+            g = sgroups[0]
+            rest = g[1:].replace("S", "", 1)
+            ny = max(rest.count("y"), 0 if has_y else 1)
+            nu = max(rest.count("u"), 0 if has_u else 1)
+            new = "-S" + "y" * ny + "u" * nu + rest.replace("y", "").replace("u", "")
+            return f"{pre}{tool}" + re.sub(r"(?<!\S)" + re.escape(g) + r"(?!\S)", new, args, count=1)
+        # long form: --sync
+        return f"{pre}{tool}" + re.sub(r"--sync\b", "--sync --refresh --sysupgrade", args, count=1)
 
-    return _PAC_INSTALL.sub(fix, cmd)
+    return _PAC_CMD.sub(fix, cmd)
+
+
+def add_noconfirm(cmd):
+    """--noconfirm on each package command that would stop and ask (there is
+    no keyboard: stdin is /dev/null, so a prompt aborts the operation). Placed
+    on THAT command, never on a `which yay` before it, and never on a
+    read-only query. `-Scc` is left alone: its "remove ALL files?" question
+    defaults to No, so --noconfirm would silently do nothing."""
+    if not cmd:
+        return cmd
+
+    def fix(m):
+        tool, args = m.group("tool"), m.group("args")
+        if "--noconfirm" in args:
+            return m.group(0)
+        if tool.lower() == "makepkg":
+            return (m.group("pre") + tool + " --noconfirm" + args
+                    if re.search(r"(?<!\S)-[A-Za-z]*[si][A-Za-z]*(?!\S)", args) else m.group(0))
+        toks, shorts = _flags(args)
+        op = _op(shorts, args)
+        if op not in ("S", "R", "U") or _read_only(shorts, args, op):
+            return m.group(0)
+        if op == "S" and any(sh.count("c") for sh in shorts):
+            return m.group(0)
+        return m.group("pre") + tool + " --noconfirm" + args
+
+    return _PAC_CMD.sub(fix, cmd)
+
+
+def needs_noconfirm(cmd):
+    return add_noconfirm(cmd) != cmd
