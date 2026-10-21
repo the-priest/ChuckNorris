@@ -3487,6 +3487,9 @@ class ChuckWindow(Adw.ApplicationWindow):
         # hibernate (docs/OS.md, phase 21): every step of a background agent
         # or program is checkpointed; what was cut off is offered at start
         self._hib = _hibernate.Store(self.PROCS_DIR) if _hibernate is not None else None
+        # what was on disk at startup: only those runs belong to an earlier
+        # session (an agent started in the first seconds is not "interrupted")
+        self._hib_boot = self._hib.load() if self._hib is not None else []
         if self._hib is not None:
             if _checkpoint is not None:
                 threading.Thread(target=_checkpoint.prune, args=(self.PROC_SHADOWS, 14),
@@ -5996,7 +5999,8 @@ class ChuckWindow(Adw.ApplicationWindow):
         characters per token, the usual rule of thumb."""
         return max(0, int(chars / 4))
 
-    def _account(self, sent_chars, recv_chars, vision=False, usage=None, model=None, pid=None):
+    def _account(self, sent_chars, recv_chars, vision=False, usage=None, model=None, pid=None,
+                 charged=False):
         """Book one model call into this chat's and this session's totals, and
         into the kernel: to the process that made it and its ancestors."""
         u = usage if usage is not None else getattr(self.backend, "last_usage", None)
@@ -6020,7 +6024,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             else:
                 tot["cost"] += c
         self._tok_in, self._tok_out = self._usage["prompt"], self._usage["completion"]
-        if self.kernel is not None:
+        if self.kernel is not None and not charged:
             self.kernel.charge(pid or self._pid1, int(u.get("prompt") or 0),
                                int(u.get("completion") or 0), c or 0.0)
         self._paint_meter()
@@ -7335,8 +7339,15 @@ class ChuckWindow(Adw.ApplicationWindow):
             u, txt = getattr(b, "last_usage", None) or {}, "".join(out)
             # the model that ANSWERED: a fallback is priced as itself
             mdl = getattr(b, "last_model", None) or (b.model() if hasattr(b, "model") else None)
-            GLib.idle_add(lambda: (self._account(sent, len(txt), usage=u, model=mdl, pid=pid),
-                                   False)[1])
+            if kern is not None:
+                # booked to the process NOW, on its own thread: its next
+                # [kernel] line and its quota check must see this call
+                uu = u or {"prompt": self._est_tokens(sent), "completion": self._est_tokens(len(txt))}
+                c = _pricing.cost(uu, _pricing.price_for(
+                    mdl or self.settings.get("model") or DEFAULT_MODEL, self.settings))
+                kern.charge(pid, int(uu.get("prompt") or 0), int(uu.get("completion") or 0), c or 0.0)
+            GLib.idle_add(lambda: (self._account(sent, len(txt), usage=u, model=mdl, pid=pid,
+                                                 charged=kern is not None), False)[1])
             self._note_progress()
             return txt
         return call
@@ -9464,7 +9475,11 @@ class ChuckWindow(Adw.ApplicationWindow):
             return False
         self._hib.prune()
         cut = []
-        for rec in self._hib.load():
+        boot, self._hib_boot = self._hib_boot, []
+        mine = {e.get("key") for e in self._bg.values()}
+        for rec in boot:
+            if rec["key"] in mine:
+                continue
             if rec.get("status") == "running":
                 cut.append(rec)
             elif rec.get("kind") == "background" and rec.get("status") == "finished":

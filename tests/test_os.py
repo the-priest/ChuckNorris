@@ -1013,6 +1013,23 @@ w.backend = TimeBackend(["```post plan: refactor the parser first\n```", "ok"])
 type_and_send(w, "share the plan")
 check(w.kernel.board_items()[0][:2] == ("plan", "refactor the parser first"), "the main agent posts too")
 check("no running process" in w.send_to(9999, "hi"), "sending to a process that isn't running says so")
+w3 = new_win([], tmp)
+w3.set_agent_mode(True, announce=False)
+w3.set_workspace(tproj, announce=False)
+w3.backend = TalkBackend([])
+TimeBackend.hold.clear()
+young = w3.spawn_background("hib: started in the first seconds")
+for _ in range(100):
+    if len(w3._bg[young].get("steps", [])) >= 2:
+        break
+    time.sleep(0.05)
+w3.offer_hibernated()
+check(not any(t == "INTERRUPTED AGENTS" for t in [x.get_text() for x in w3.msgbox.walk()
+                                                  if isinstance(x.get_text(), str)]),
+      "an agent started in this session is never offered as interrupted")
+w3.process_command("kill", str(young))
+TimeBackend.hold.set()
+w3.kernel.wait(young, 10); settle()
 
 print(f"\nTOTAL OS FAILURES: {fails}")
 assert fails == 0 and not FAILS, "OS regressions present"

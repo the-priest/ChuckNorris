@@ -2,13 +2,17 @@
 
 # Chuck
 
-**A desktop coding and system agent for Linux, on SiliconFlow models.**
-Runs commands, edits real code, plays its own web apps in a real browser, keeps a live Python session, reads whole repos, speaks MCP, runs sub-agents in parallel, plans before it acts when you ask, and tells you what it all cost.
+### The operating system for AI agents.
 
-![version](https://img.shields.io/badge/version-16.0.0-8b5cf6?style=flat-square&labelColor=0c0c10)
+**In the mainframe era you rented the CPU by the second. Now you rent the model by the token.**
+Tokens are the new cycles, the context window is the new RAM, tools are the new syscalls, and an agent is the new process.
+Every other agent is one program running on bare metal. Chuck is the OS underneath: a kernel that schedules tokens, isolates agents, lets them talk, puts them to sleep, wakes them on events, and rewinds them in time.
+On your Linux desktop, today.
+
+![version](https://img.shields.io/badge/version-17_·_Chuck_OS-8b5cf6?style=flat-square&labelColor=0c0c10)
 ![gtk](https://img.shields.io/badge/GTK4-libadwaita-8b5cf6?style=flat-square&labelColor=0c0c10)
 ![python](https://img.shields.io/badge/Python-3.11_·_3.12_·_3.13-8b5cf6?style=flat-square&labelColor=0c0c10)
-![suites](https://img.shields.io/badge/test_suites-23-2ea043?style=flat-square&labelColor=0c0c10)
+![suites](https://img.shields.io/badge/test_suites-24-2ea043?style=flat-square&labelColor=0c0c10)
 ![deps](https://img.shields.io/badge/runtime_deps-stdlib_+_GTK-2ea043?style=flat-square&labelColor=0c0c10)
 ![licence](https://img.shields.io/badge/licence-MIT-8b5cf6?style=flat-square&labelColor=0c0c10)
 
@@ -20,7 +24,113 @@ Runs commands, edits real code, plays its own web apps in a real browser, keeps 
 curl -fsSL https://raw.githubusercontent.com/the-priest/ChuckNorris/main/install.sh | bash && chucknorris
 ```
 
-Paste a SiliconFlow key in Settings. Press **Tab** to pick Agent or Chat. Talk to it.
+Paste a SiliconFlow key in Settings. Press **Tab** to pick Agent or Chat. Talk to it. Then type `/top`.
+
+---
+
+## Chuck OS
+
+An agent loop with a prompt and a few tools is a program. Run ten of them and you need what computers needed in 1965: something to decide who runs, who pays, who may touch what, and what happens when one crashes. That layer is Chuck OS. The full design is in [`docs/OS.md`](docs/OS.md).
+
+| a computer has | Chuck OS has |
+|---|---|
+| CPU time | **tokens and dollars**, metered per process and charged up the tree |
+| processes | **agents**: a pid, a parent, a quota, a state, a journal |
+| a scheduler | **model-call slots**, granted by priority with ageing, never past a quota |
+| RAM and virtual memory | **the context window**, with old tool output *paged out* and paged back exactly |
+| syscalls and permissions | **tools**, each checked against the process's **capabilities** |
+| fork, copy-on-write | **background agents** in their own copy of your folder, merged three-way |
+| signals and IPC | **STOP / CONT / TERM / KILL**, mailboxes, a shared **blackboard** |
+| init and systemd | **daemons** that sleep for free and wake on a schedule or an event |
+| packages | **agent programs**: a prompt, tools, a model and a quota in one Markdown file |
+| a CPU governor | **a model governor**: cheap work on a cheap model |
+| `top`, `strace` | **`/top`** and **`/strace`**, live |
+| hibernate | **every step checkpointed**: agents survive a crash and resume |
+| (nothing) | **time travel**: replay any run and fork it from any step |
+
+### `/top`: every agent is a process
+
+<img src="assets/screenshots/os-top.png" alt="/top: the chat as PID 1 and its sub-agents, with state, priority, tokens, cost, tokens per second, run time, what each is doing, and Pause / Continue / Kill per process" width="100%">
+
+The chat you are talking to is PID 1. Every sub-agent, background agent, program and daemon is a process under it, with a quota of tokens, money and time. A child can never spend more than its parent was allowed. Past its quota, a process is sent **TERM** and gets exactly one more call to write up what it has, then **KILL**. No runaway loop ever eats your balance. `/kill`, `/stop`, `/cont` and `/nice` work on any pid.
+
+### Background agents: fork, then merge
+
+```text
+/spawn add tests for the parser and fix what they find
+```
+
+A full agent that writes, runs and tests code works **in its own copy of your folder** while you keep talking to Chuck. Its commands are jailed to that copy by bubblewrap. Run five at once; none can trample another. When one finishes, its card shows the diff, and **Merge** brings it home three-way: your edits and its edits to the same file are combined; overlapping edits are never forced, but set aside for you. The merge is checkpointed, so `/rewind` undoes it.
+
+<img src="assets/screenshots/os-background.png" alt="A background agent's card: done, two files changed in its copy, its report, and Show diff / Merge into folder / Discard / Trace / Replay" width="100%">
+
+### Agents that talk, ask, share, and know their budget
+
+What an agent needs from its OS is what any colleague needs:
+
+- **To be told things.** `/send 4 also keep the old port as a fallback` reaches pid 4 with its next results. The main agent does it with ```` ```send ````.
+- **To ask without stopping the world.** A background agent's ```` ```ask ```` pops a card and a notification and waits, *WAITING* in `/top`, while every other agent keeps working.
+- **Shared memory.** A blackboard every agent reads and writes: *"pid 3 is rewriting auth.py"*, *"the tests need Postgres on :5432"*. ```` ```post ````, ```` ```board ````, `/board`.
+- **To see its own budget.** Every result ends with a `[kernel]` line (`step 7 of 60 · tokens 212k of 1.5M · 41 min left`), so an agent paces itself instead of being cut off mid-thought.
+- **To wait for its children.** The main agent's ```` ```wait 4 ```` returns a background agent's report as a tool result.
+
+<img src="assets/screenshots/os-ask.png" alt="A running background agent asks a question in a card with an answer box while it waits; the rest of the session carries on" width="100%">
+
+### Time travel: replay and fork any run
+
+Every step of a background agent is checkpointed: its conversation and, in a private git store, its copy of the folder. So:
+
+- **It survives anything.** Close Chuck, crash it, reboot: the next start offers **Resume**, and the agent goes on from the step it was on, in the same copy. Finished work you never merged comes back, ready to merge.
+- **`/replay <pid>`** walks through a run step by step: what it did, what it got back, what it had spent.
+- **`/fork <pid> <step> [instruction]`** starts a *new* agent from any step, with the conversation up to there and the files **exactly as they were at that step**. *"At step 3 you went for a rewrite. Patch it instead."* The original is untouched; fork the fork as often as you like.
+
+<img src="assets/screenshots/os-replay.png" alt="REPLAY: each step of a background agent's run with the tools it called, what came back, the kernel line, and a Fork here button" width="100%">
+
+### Daemons: agents that sleep for free
+
+An agent that polls *"is the disk full yet?"* burns tokens on every look. A Chuck daemon's trigger is plain code (a clock, a file's mtime, `systemctl --failed`, the disk, a command's output), checked every 30 seconds **for zero tokens**. Only when it fires is an agent woken, as a metered process told what fired and what was seen.
+
+```text
+/daemon daily 08:30: summarise new errors in the journal since yesterday
+/daemon when a service fails: find out why and propose a fix
+/daemon when disk / is above 90%: find what's filling it and what's safe to delete
+/daemon when `checkupdates` changes: say which updates are worth taking
+/daemon act every day at 3am: update the dependencies and run the tests
+```
+
+Unattended means **it looks, it never changes**: no file writes; commands run with the whole system read-only; nothing that restarts a service, powers off or installs a package gets through, even on the system bus. Reports land in `/inbox` with a desktop notification (and quietly, with none, when there's nothing to do). **Act on it** hands one to the agent. A daemon that should change code (`/daemon act …`) is a background agent in a copy you merge.
+
+<table>
+<tr>
+<td width="50%"><img src="assets/screenshots/os-daemons.png" alt="DAEMONS: four daemons with their triggers, state and run counts, each with Run now / Pause / Delete"></td>
+<td width="50%"><img src="assets/screenshots/os-inbox.png" alt="INBOX: daemon reports with their reasons, and Act on it"></td>
+</tr>
+</table>
+
+### Programs, capabilities, the governor, strace
+
+- **Agent programs** are packages: one Markdown file with a mode, tools, a model, a quota and a prompt. Six ship built in (`reviewer`, `tester`, `auditor`, `checkup`, `researcher`, `explainer`); add your own in `~/.config/chucknorris/programs/` or a project's `.chuck/programs/`. `/run reviewer the parser`, or the agent's ```` ```spawn @reviewer ````.
+- **Capabilities.** Every process holds `read`, `write`, `exec`, `net` and `spawn`, clipped to its parent's. Every tool call goes through one guard that checks, times and logs it. A program without `fetch` never reaches the network; an offline-sandboxed folder takes `net` away from everything that works in it.
+- **The model governor.** *Performance* runs everything on your chat model. *Balanced* moves read-only sub-agents, daemons, report programs and summaries to the fast model (here about 39% cheaper). *Powersave* runs everything on it. `/governor`, or Settings.
+- **`/strace <pid>`**: every syscall a process made, its latency, its size, and what its capabilities refused.
+
+<table>
+<tr>
+<td width="50%"><img src="assets/screenshots/os-programs.png" alt="PROGRAMS: the six built-in programs with their mode, capabilities, model and quota"></td>
+<td width="50%"><img src="assets/screenshots/os-governor.png" alt="GOVERNOR · BALANCED: which model each kind of agent runs on, and the saving"></td>
+</tr>
+<tr>
+<td colspan="2"><img src="assets/screenshots/os-strace.png" alt="STRACE: a program's syscalls with timing, size, and a denied write"></td>
+</tr>
+</table>
+
+### Virtual memory for the context window
+
+Long sessions don't forget; they page. Once a conversation is big, tool output older than the newest few results is swapped out of what is sent for a one-line page-table entry (`[p17 · npm test · 12k chars · FAILED in auth.test.ts:41]`). The model pages it back **exactly** with ```` ```page p17 ````, a line range, or a search inside it. Lossless comes before lossy: summarising only happens when even the page table no longer fits, and the summary carries the page table with it.
+
+### The one thing it won't do
+
+Inside Chuck OS an agent can do anything you grant it. One gate stays, by design: commands that can destroy the machine (disk wipes, `rm -rf ~`, `curl | sh`, removing core packages) wait for your tick, and agents running unattended never get sudo. That gate is what lets you leave twenty agents working overnight and come back to a machine you still own.
 
 ---
 
@@ -75,7 +185,7 @@ Click the folder chip (or **Ctrl+O**) to point the session at a project. Command
 
 <img src="assets/screenshots/agent-subagents.png" alt="Three sub-agents running in parallel, each with a done badge and a folded report" width="100%">
 
-**Sub-agents are read-only by design.** Parallel writers would trample each other's edits and race each other's sudo prompts. Parallel readers can't. They survey, research and report; the main agent acts, one verified step at a time.
+**Sub-agents are read-only by design.** They survey, research and report, many at once, and only their summaries enter the main context. Parallel *writers* exist too: they are [background agents](#background-agents-fork-then-merge), each in its own copy of the folder, so they never trample each other's edits.
 
 ## Steer it, plan it, retry it
 
@@ -254,7 +364,7 @@ Arch / CachyOS first-class; apt and dnf supported. The installer handles GTK4 + 
 ./run_tests.sh
 ```
 
-Twenty-three suites run headless against a stubbed toolkit and drive the real window end to end. They cover whole conversations, both modes, edits in a real folder, paged reads of a 12,000-line file, a file written across two cut-off replies, parallel sub-agents, images reaching the model as images, cache-hit pricing, memory updates and scopes, an agent that stops early or never stops, late streams from a stopped turn, undo and background jobs, steering mid-task, plan approval, git and hooks, a Python session that survives Stop, bot walls on a local site read through real Chromium, updates that refuse a broken download, renames through real pyright and TypeScript servers, rewinding what commands changed, real bubblewrap sandboxes that block writes outside the project and the network, a README whose example must not run, the critical gate, sudo storms, orphaned processes, and the ledger chain. `test_deep.py` runs whole sessions with real processes and ports, plus 180 seeded random model replies that must never hang the app, run something they shouldn't, or write outside the folder. The UI itself was checked by rendering every screen on real GTK 4.14 / libadwaita 1.5. The screenshots above are those renders.
+Twenty-four suites run headless against a stubbed toolkit and drive the real window end to end. They cover whole conversations, both modes, edits in a real folder, paged reads of a 12,000-line file, a file written across two cut-off replies, parallel sub-agents, images reaching the model as images, cache-hit pricing, memory updates and scopes, an agent that stops early or never stops, late streams from a stopped turn, undo and background jobs, the kernel's scheduler and quotas, background agents merging three-way, paging, daemons that only look, capabilities and programs, a crash mid-run resumed and a run forked from a past step with its files as they were, agents asking and messaging each other, steering mid-task, plan approval, git and hooks, a Python session that survives Stop, bot walls on a local site read through real Chromium, updates that refuse a broken download, renames through real pyright and TypeScript servers, rewinding what commands changed, real bubblewrap sandboxes that block writes outside the project and the network, a README whose example must not run, the critical gate, sudo storms, orphaned processes, and the ledger chain. `test_deep.py` runs whole sessions with real processes and ports, plus 180 seeded random model replies that must never hang the app, run something they shouldn't, or write outside the folder. The UI itself was checked by rendering every screen on real GTK 4.14 / libadwaita 1.5. The screenshots above are those renders.
 
 ## Being straight with you
 
