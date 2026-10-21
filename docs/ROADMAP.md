@@ -220,8 +220,12 @@ and an agent is a process. The design is in `docs/OS.md`; tests in
 
 ### Phase 18 — virtual memory for context
 
-- [ ] Long tool output paged out to a page store, with a page table in the
-      context; ```page``` brings it back exactly. Compaction only as a last resort.
+- [x] Once a conversation is big, tool output older than the newest three
+      results is paged out of what is sent (history keeps every byte): a
+      one-line page-table entry with the tool and its error lines stands in.
+      ```page pN``` brings it back exactly, a line range numbered, or
+      ```page pN /regex/``` searches it. A compaction summary carries the page
+      table of what it summarised, so nothing is ever more than one call away.
 
 ### Phase 19 — daemons
 

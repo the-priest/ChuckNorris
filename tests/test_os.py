@@ -6,6 +6,7 @@ sys.path.insert(0, _ROOT)
 
 """Chuck OS (docs/OS.md, roadmap phases 16-21): the agent kernel on its own,
 then wired into the real window on the stub toolkit."""
+import re
 import threading
 import time
 from shutil import which as shutil_which
@@ -333,6 +334,52 @@ check(w.discard_background(p3) and w._bg[p3]["status"] == "discarded", "and its 
 w.set_access("readonly")
 check(w.spawn_background("eps: nope") is None, "no background agent in a read-only folder")
 w.set_access("full")
+
+# ═══════════════════════════════════════════════════════════════════════════
+print("\n--- virtual memory: tool output paged out, paged back in exactly ---")
+w = new_win([], tmp)
+w.set_agent_mode(True, announce=False)
+big = lambda i: (f"TOOL RESULTS (continue):\n\n[read src/mod{i}.py]\n" + "\n".join(
+    f"line {n} of module {i}" for n in range(400)) + (f"\nERROR: test_{i} failed at line 41" if i == 3 else ""))
+w.history = [w.history[0], {"role": "user", "content": "fix the build"}]
+for i in range(8):
+    w.history += [{"role": "assistant", "content": f"```read src/mod{i}.py```"},
+                  {"role": "user", "content": big(i)}]
+before = [m["content"] for m in w.history]
+sent = w._trim_for_send(list(w.history))
+paged = [m["content"] for m in sent if str(m.get("content")).startswith("[PAGED OUT")]
+inline = [m["content"] for m in sent if str(m.get("content")).startswith("TOOL RESULTS")]
+check(len(paged) == 5 and len(inline) == 3, "older tool output is paged out; the newest three stay inline",
+      (len(paged), len(inline)))
+check([m["content"] for m in w.history] == before, "history keeps every byte (only what's sent changes)")
+p3 = next(x for x in paged if "mod3" in x)
+check("ERROR: test_3 failed" in p3 and "read src/mod3.py" in p3,
+      "a page-table entry carries the gist: the tool and the error lines", p3[:300])
+pid3 = int(re.search(r"p(\d+)", p3).group(1))
+got = w._t_page(f"p{pid3}")
+check(got.split("\n", 1)[1] == w.history[pid3]["content"], "```page``` brings it back exactly")
+got = w._t_page(f"p{pid3} 4-6")
+check("4: line 0 of module 3" in got and "6: line 2 of module 3" in got and "line 3 of" not in got,
+      "a line range, numbered", got[:200])
+got = w._t_page(f"p{pid3} /ERROR/")
+check("1 matching line" in got and "test_3 failed" in got, "or a search inside it")
+check("no such page" in w._t_page("p9999"), "a missing page says so")
+w2 = new_win([], tmp)
+w2.history = [w2.history[0], {"role": "user", "content": "hi"},
+              {"role": "assistant", "content": "```read a```"}, {"role": "user", "content": big(0)},
+              {"role": "assistant", "content": "ok"}]
+check(not any(str(m.get("content")).startswith("[PAGED") for m in w2._trim_for_send(list(w2.history))),
+      "a small conversation isn't paged at all")
+w._compact = {"upto": 12, "text": "Summary: read modules 0-4.", "anchor": cn._msg_key(w.history[11])}
+sent = w._trim_for_send(list(w.history))
+summ = next(m["content"] for m in sent if str(m.get("content")).startswith("CONVERSATION SUMMARY"))
+check("PAGE TABLE" in summ and f"p{pid3}" in summ,
+      "after compaction the summary carries a page table: old output is still one call away")
+w._compact = None
+w.backend = ScriptedBackend([f"```page p{pid3} /ERROR/```", "Found it: test_3 fails at line 41."])
+type_and_send(w, "what failed earlier?")
+check("test_3 failed at line 41" in " ".join(str(m.get("content")) for m in w.history[-3:]),
+      "the agent pages it in with a tool call")
 
 print(f"\nTOTAL OS FAILURES: {fails}")
 assert fails == 0 and not FAILS, "OS regressions present"

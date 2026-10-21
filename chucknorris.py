@@ -10690,6 +10690,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         """
         if not messages:
             return messages
+        messages = self._page_out(messages)     # virtual memory: lossless, before anything lossy
         c = self._compact
         if c and c.get("anchor") and not (1 < c["upto"] <= len(self.history)
                                          and _msg_key(self.history[c["upto"] - 1]) == c["anchor"]):
@@ -10713,6 +10714,10 @@ class ChuckWindow(Adw.ApplicationWindow):
                     break
                 if self._is_real_user(m):
                     break                        # a plan from an earlier request
+            table = self._page_table(1, c["upto"])
+            if table:
+                extra += ("\n\nPAGE TABLE (the exact tool output of the summarised turns is still "
+                          "there: ```page <id>``` brings any of it back):\n" + table)
             messages = (messages[:1] + [{"role": "user", "content":
                         "CONVERSATION SUMMARY (earlier turns, compacted — the work so far):\n"
                         + c["text"] + extra}] + messages[c["upto"]:])
@@ -10750,6 +10755,91 @@ class ChuckWindow(Adw.ApplicationWindow):
         while len(kept) > 1 and kept[0].get("role") == "assistant":
             kept.pop(0)
         return sys_msgs + kept
+
+    # ── virtual memory for the context (Chuck OS, phase 18) ──
+    PAGE_MIN = 3000                 # a tool result smaller than this stays inline
+    _PAGEABLE = ("TOOL RESULTS", "FILE ", "SUB-AGENT REPORTS")
+
+    def _pageable(self, m):
+        c = m.get("content")
+        return (m.get("role") == "user" and isinstance(c, str) and len(c) >= self.PAGE_MIN
+                and c.startswith(self._PAGEABLE))
+
+    @staticmethod
+    def _gist(text, limit=420):
+        """What a paged-out result was, in one line: the tools that produced it
+        and the lines that matter (errors, failures, exit codes)."""
+        heads = re.findall(r"(?m)^\[([a-z]+ [^\]\n]{0,70})\]", text)[:6]
+        hot = [ln.strip() for ln in text.splitlines()
+               if re.search(r"(?i)\b(error|failed|failure|exception|traceback|exit [1-9]|"
+                            r"not found|denied|warning)\b", ln)][:4]
+        g = "; ".join(heads) + (" \u2014 " + " | ".join(h[:120] for h in hot) if hot else "")
+        return (g or text.split("\n", 2)[-1][:200]).replace("\n", " ")[:limit]
+
+    def _page_entry(self, idx, text):
+        return (f"[PAGED OUT p{idx}: {len(text):,} chars of earlier tool output \u2014 ```page p{idx}``` "
+                f"brings it back exactly (```page p{idx} 40-120``` for lines, ```page p{idx} "
+                f"/regex/``` to search it)]\nGist: {self._gist(text)}")
+
+    def _page_out(self, messages):
+        """Context is RAM. Once the conversation is big, older tool output is
+        swapped out of what is SENT (history keeps every byte) and replaced by
+        a one-line page-table entry; ```page``` swaps it back in, exactly.
+        Lossless, unlike trimming or compaction, and cheaper on every call
+        that follows."""
+        if not self.settings.get("paging", True):
+            return messages
+        size = sum(len(m["content"]) for m in messages[1:] if isinstance(m.get("content"), str))
+        if size < self.cfg("page_after_chars", 24000, 4000, 2000000):
+            return messages
+        where = {id(m): i for i, m in enumerate(self.history)}
+        pageable = [j for j, m in enumerate(messages) if self._pageable(m) and id(m) in where]
+        keep = set(pageable[-self.cfg("page_keep", 3, 1, 20):])   # the newest stay inline
+        out = list(messages)
+        for j in pageable:
+            if j not in keep:
+                m = out[j]
+                out[j] = {"role": m["role"], "content": self._page_entry(where[id(m)], m["content"])}
+        return out
+
+    def _page_table(self, lo, hi, limit=25):
+        rows = [f"p{i}: {self._gist(m['content'], 160)}" for i, m in enumerate(self.history[lo:hi], lo)
+                if self._pageable(m)]
+        return "\n".join(rows[-limit:])
+
+    @tool("page", agent_only=False, cap=4)
+    def _t_page(self, body):
+        """```page p17``` (whole, in pieces), ```page p17 40-120``` (lines),
+        ```page p17 /regex/``` (matching lines): exact tool output that was
+        paged out of the context, swapped back in."""
+        m = re.match(r"^\s*p?(\d+)\s*(.*)$", body or "", re.S)
+        if not m:
+            return "[page: give a page id, e.g. ```page p17```]"
+        idx, rest = int(m.group(1)), m.group(2).strip()
+        if not (0 < idx < len(self.history)) or not isinstance(self.history[idx].get("content"), str):
+            return f"[page p{idx}: no such page]"
+        lines = self.history[idx]["content"].split("\n")
+        rx = re.match(r"^/(.+)/$", rest)
+        if rx:
+            try:
+                pat = re.compile(rx.group(1), re.I)
+            except re.error as ex:
+                return f"[page p{idx}: bad regex: {ex}]"
+            hits = [f"{n}: {ln[:300]}" for n, ln in enumerate(lines, 1) if pat.search(ln)]
+            return (f"[page p{idx} /{rx.group(1)}/: {len(hits)} matching line(s)]\n"
+                    + "\n".join(hits[:200]) + ("\n\u2026" if len(hits) > 200 else ""))
+        rng = re.match(r"^(\d+)\s*-\s*(\d*)$", rest)
+        a, b = (int(rng.group(1)), int(rng.group(2) or len(lines))) if rng else (1, len(lines))
+        a, b = max(1, a), min(len(lines), b)
+        chunk, n = [], 0
+        for i in range(a, b + 1):
+            ln = lines[i - 1]
+            if n + len(ln) > 24000:
+                chunk.append(f"\u2026 (more: ```page p{idx} {i}-{b}```)")
+                break
+            chunk.append(f"{i}: {ln}" if rng else ln)     # a range is numbered, to navigate by
+            n += len(ln) + 1
+        return f"[page p{idx}, lines {a}-{b} of {len(lines)}]\n" + "\n".join(chunk)
 
     def _workspace_note(self):
         """One compact line about the working folder: where it is and what is at
