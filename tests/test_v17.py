@@ -274,6 +274,78 @@ w5 = agent(["```bash\necho hi\n```", "ok"], Path.home())
 check(w5._checkpoint("x") is None, "your home folder is never snapshotted")
 settle()
 
+ck = cn._checkpoint
+ws = tmp / "cp2"
+(ws / "data").mkdir(parents=True)
+(ws / "logs").mkdir()                           # empty when the snapshot is taken
+(ws / ".gitignore").write_text("data/\n.env\n")
+(ws / ".env").write_text("SECRET=1\n")
+(ws / "data" / "big.bin").write_text("x" * 100)
+(ws / "app.py").write_text("v1\n")
+odd = "we\tird \u00e9 name.txt"
+(ws / odd).write_text("odd\n")
+sh = ck.Shadow(ws, tmp / "cpstore")
+s0 = sh.snapshot("start")
+(ws / ".gitignore").write_text("")              # a step un-ignores them...
+(ws / "app.py").write_text("v2\n")
+(ws / "gen.py").write_text("generated\n")
+(ws / "logs" / "run.log").write_text("log\n")
+(ws / odd).unlink()
+sh.snapshot("step")                             # ...so this snapshot holds .env and data/
+(sh.git_dir / "index.lock").write_text("")       # a git killed mid-way left its lock
+before, changed = sh.restore(s0)
+check((ws / ".env").read_text() == "SECRET=1\n" and (ws / "data" / "big.bin").exists(),
+      "a rewind never deletes files that were ignored at the snapshot (.env, data/)")
+check((ws / "app.py").read_text() == "v1\n" and not (ws / "gen.py").exists()
+      and (ws / ".gitignore").read_text() == "data/\n.env\n",
+      "changed files come back and created ones go, despite a stale git lock")
+check((ws / odd).read_text() == "odd\n", "a file name with a tab and an accent is restored")
+check((ws / "logs").is_dir() and not (ws / "logs" / "run.log").exists(),
+      "a folder that was empty at the snapshot is kept")
+lib = ws / "lib"
+lib.mkdir()
+subprocess.run(["git", "-C", str(lib), "init", "-q"])
+(lib / "x.py").write_text("x\n")
+subprocess.run(["git", "-C", str(lib), "add", "-A"])
+subprocess.run(["git", "-C", str(lib), "-c", "user.email=t@e", "-c", "user.name=T", "commit", "-qm", "l"])
+sh.snapshot("with lib")
+check(sh.nested() == ["lib"], "a folder that's its own git repo is detected", sh.nested())
+w6 = agent(["```bash\necho hi > hi.txt\n```", "ok"], ws)
+type_and_send(w6, "touch something")
+w6.entry.get_buffer().set_text("/rewind")
+w6.on_send()
+texts = [x.get_text() for x in w6.msgbox.walk() if isinstance(x.get_text(), str)]
+check(any("lib is its own git repository" in t for t in texts),
+      "/rewind warns that a nested repo isn't snapshotted", [t for t in texts if "repo" in t])
+real_restore = ck.Shadow.restore
+
+
+def half_restore(self, sha):
+    raise ck.CheckpointError("disk full", before="f" * 40)
+
+
+ck.Shadow.restore = half_restore
+n = len(w6._checkpoints)
+check(w6.rewind_to(w6._checkpoints[0]) is False and len(w6._checkpoints) == n + 1
+      and w6._checkpoints[-1]["sha"] == "f" * 40 and w6._checkpoints[-1]["label"] == "undo the rewind",
+      "a rewind that fails part-way still leaves a way back", w6._checkpoints[-1:])
+ck.Shadow.restore = real_restore
+w7 = agent(["```runtests\n```", "ok"], ws)
+type_and_send(w7, "run the tests")
+check(len(w7._checkpoints) == 1, "running the tests is snapshotted too (they can write files)")
+store = tmp / "prune"
+for name, folder, age in (("gone", tmp / "nope", 8), ("unplugged", tmp / "nope", 2), ("old", ws, 40),
+                          ("fresh", ws, 1)):
+    (store / name).mkdir(parents=True)
+    (store / name / "chuck-folder").write_text(str(folder) + "\n")
+    t = time.time() - age * 86400
+    os.utime(store / name / "chuck-folder", (t, t))
+(store / "stranger").mkdir()
+check(ck.prune(store) == 2 and sorted(p.name for p in store.iterdir()) == ["fresh", "stranger", "unplugged"],
+      "snapshots of folders gone a week and ones unused for 30 days are pruned",
+      sorted(p.name for p in store.iterdir()))
+settle()
+
 # ═══════════════════════════════════════════════════════════════════════════
 print("\n--- folder access: sandboxed and read-only ---")
 import socketserver, threading, subprocess

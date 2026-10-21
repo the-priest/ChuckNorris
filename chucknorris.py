@@ -3247,6 +3247,9 @@ class ChuckWindow(Adw.ApplicationWindow):
             _listen.warm_up()
         self._show_empty_hint()
         GLib.timeout_add_seconds(20, self._update_check)   # once a day, after startup settles
+        if _checkpoint is not None:             # old folders' snapshots, in the background
+            threading.Thread(target=lambda: _checkpoint.prune(self.CHECKPOINT_STORE), daemon=True,
+                             name="srv-cp-prune").start()
 
     # ── layout ───────────────────────────────────────────────────────────────
     def _build_ui(self):
@@ -8276,6 +8279,17 @@ class ChuckWindow(Adw.ApplicationWindow):
         hint = Gtk.Label(label="Puts the files AND the conversation back to before that step. "
                                "Rewinding is itself undoable.", xalign=0, wrap=True)
         hint.add_css_class("dim"); body.append(hint)
+        try:
+            nested = _checkpoint.Shadow(cps[-1]["root"], self.CHECKPOINT_STORE).nested()
+        except Exception:
+            nested = []
+        if nested:
+            w = Gtk.Label(label="\u26a0 " + ", ".join(nested[:4]) + (" \u2026" if len(nested) > 4 else "")
+                          + (" is its own git repository" if len(nested) == 1 else
+                             " are their own git repositories")
+                          + ": what's inside isn't snapshotted, so a rewind leaves it as it is.",
+                          xalign=0, wrap=True)
+            w.add_css_class("dim"); _wrap_anywhere(w); body.append(w)
         now = time.time()
         for cp in reversed(cps[-12:]):
             row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
@@ -8316,15 +8330,19 @@ class ChuckWindow(Adw.ApplicationWindow):
             return False
         if _checkpoint is None:
             return False
+        def undo_of(sha):
+            return {"sha": sha, "root": cp["root"], "hist": len(self.history),
+                    "label": "undo the rewind", "ask": "", "t": time.time(),
+                    "history": [dict(m) for m in self.history],
+                    "later": [c for c in self._checkpoints if not c.get("history")]}
         try:
             before, changed = _checkpoint.Shadow(cp["root"], self.CHECKPOINT_STORE).restore(cp["sha"])
         except _checkpoint.CheckpointError as ex:
+            if ex.before:                 # files may be part-way back: keep the way home
+                self._checkpoints = (self._checkpoints + [undo_of(ex.before)])[-200:]
             self._sys_note(f"\u2717 couldn't rewind: {ex}", "danger")
             return False
-        undo = {"sha": before, "root": cp["root"], "hist": len(self.history),
-                "label": "undo the rewind", "ask": "", "t": time.time(),
-                "history": [dict(m) for m in self.history],
-                "later": [c for c in self._checkpoints if not c.get("history")]}
+        undo = undo_of(before)
         if cp.get("history"):                     # undoing a rewind: everything comes back
             self.history = [dict(m) for m in cp["history"]]
             self._rebuild_transcript()
@@ -10149,7 +10167,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._dispatching = True
         if (self.agent_mode and not blocked_agent and not self.plan_mode and not fence_clash
                 and (codes or writes or edits or rmfiles or bgs or runskills or packages
-                     or projects or undo_req or any(_TOOL_REG[t]["acts"] for t, _ in reg_calls))):
+                     or runtests or projects or undo_req or any(_TOOL_REG[t]["acts"] for t, _ in reg_calls))):
             self._checkpoint(self._actions_of(text) or "a step")
         if stall:
             self._nudges += 1

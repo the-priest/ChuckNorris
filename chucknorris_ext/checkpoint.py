@@ -15,9 +15,11 @@ snapshots the present, so a rewind can itself be undone.
 (node_modules, .venv, target, …) are left out: they're big and rebuildable.
 """
 import hashlib
+import json
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 EXCLUDE = """\
@@ -41,7 +43,9 @@ target/
 
 
 class CheckpointError(Exception):
-    pass
+    def __init__(self, msg, before=None):
+        super().__init__(msg)
+        self.before = before                 # set when a restore failed part-way
 
 
 class Shadow:
@@ -74,6 +78,57 @@ class Shadow:
             raise CheckpointError((p.stderr or p.stdout).strip()[-300:] or f"git {args[0]} failed")
         return p.stdout
 
+    def _unlock(self):
+        """A git killed by a timeout leaves index.lock behind, and every later
+        snapshot would fail on it. Only Chuck uses this repository and it does
+        one thing at a time, so a lock found here is always stale."""
+        try:
+            (self.git_dir / "index.lock").unlink()
+        except OSError:
+            pass
+
+    def _names(self, *args):
+        out = self._git(*args, "-z", check=False)
+        return [p for p in out.split("\0") if p]
+
+    def _manifest_path(self, sha):
+        return self.git_dir / "chuck-manifest" / f"{sha}.json"
+
+    def _record_manifest(self, sha):
+        """What a snapshot can't hold: the ignored files and the empty folders
+        that existed then. Restore must never delete or remove those."""
+        ignored = self._names("ls-files", "--others", "--ignored", "--exclude-standard",
+                              "--directory")
+        empty, n = [], 0
+        for dp, dns, fns in os.walk(self.work):
+            dns[:] = [d for d in dns if d != ".git"]
+            n += 1
+            if n > 20000:
+                break
+            if not dns and not fns:
+                empty.append(os.path.relpath(dp, self.work))
+        try:
+            p = self._manifest_path(sha)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps({"ignored": ignored, "empty": empty}))
+        except OSError:
+            pass
+
+    def _manifest(self, sha):
+        try:
+            return json.loads(self._manifest_path(sha).read_text())
+        except (OSError, ValueError):
+            return {"ignored": [], "empty": []}
+
+    def nested(self):
+        """Folders that are git repositories of their own: their insides
+        aren't snapshotted (git keeps only a pointer to them)."""
+        out = []
+        for line in self._git("ls-files", "-s", "-z", check=False).split("\0"):
+            if line.startswith("160000 "):
+                out.append(line.split("\t", 1)[-1])
+        return out
+
     def _ensure(self):
         if (self.git_dir / "HEAD").exists():
             return
@@ -86,39 +141,86 @@ class Shadow:
     def snapshot(self, label):
         """Commit the folder as it is now -> commit id."""
         self._ensure()
+        self._unlock()
         self._git("add", "-A", "--ignore-errors", check=False)
         self._git("commit", "--quiet", "--allow-empty", "--no-verify", "-m", label[:200] or "step")
-        return self._git("rev-parse", "HEAD").strip()
+        sha = self._git("rev-parse", "HEAD").strip()
+        self._record_manifest(sha)
+        try:
+            os.utime(self.git_dir / "chuck-folder")     # last used, for prune()
+        except OSError:
+            pass
+        return sha
 
     def changed_since(self, sha):
         """Paths that differ between the snapshot and the folder now."""
+        self._unlock()
         self._git("add", "-A", "--ignore-errors", check=False)
-        out = self._git("diff", "--cached", "--name-only", "--no-renames", sha, check=False)
-        return [ln for ln in out.splitlines() if ln]
+        return self._names("diff", "--cached", "--name-only", "--no-renames", sha)
 
     def restore(self, sha):
-        """Make the folder what it was at sha -> (before_sha, changed paths)."""
+        """Make the folder what it was at sha -> (before_sha, changed paths).
+        Files that were ignored at the snapshot (a .env, a data folder) are
+        never deleted, even if a later step changed .gitignore; folders that
+        existed then are never removed."""
         self._git("cat-file", "-e", sha + "^{commit}")
         before = self.snapshot("before rewind")
-        changed = [ln for ln in self._git("diff", "--name-only", "--no-renames", sha, before)
-                   .splitlines() if ln]
-        added = [ln for ln in self._git("diff", "--name-only", "--no-renames",
-                                         "--diff-filter=A", sha, before).splitlines() if ln]
-        for rel in added:                       # created since the snapshot: remove
-            p = self.work / rel
-            try:
-                if p.is_file() or p.is_symlink():
-                    p.unlink()
-            except OSError:
-                pass
-            d = p.parent
-            while d != self.work and d.is_dir():   # and folders that are now empty
+        try:
+            changed = self._names("diff", "--name-only", "--no-renames", sha, before)
+            added = self._names("diff", "--name-only", "--no-renames", "--diff-filter=A",
+                                sha, before)
+            man = self._manifest(sha)
+            ign = [p.rstrip("/") for p in man.get("ignored", [])]
+            keep_dirs = set(man.get("empty", []))
+
+            def was_ignored(rel):
+                return any(rel == p or rel.startswith(p + "/") for p in ign)
+            # put back what changed or was deleted first, then remove what's new
+            if self._git("ls-tree", "-r", "--name-only", sha).strip():
+                self._unlock()
+                self._git("checkout", sha, "--", ".")
+            for rel in added:
+                if was_ignored(rel):
+                    continue
+                p = self.work / rel
                 try:
-                    d.rmdir()
+                    if p.is_file() or p.is_symlink():
+                        p.unlink()
                 except OSError:
-                    break
-                d = d.parent
-        if self._git("ls-tree", "-r", "--name-only", sha).strip():
-            self._git("checkout", sha, "--", ".")
-        self._git("reset", "--quiet", "--soft", before, check=False)
-        return before, changed
+                    continue
+                d = p.parent
+                while d != self.work and d.is_dir():
+                    if os.path.relpath(d, self.work) in keep_dirs:
+                        break
+                    try:
+                        d.rmdir()                  # only if now empty
+                    except OSError:
+                        break
+                    d = d.parent
+            self._git("reset", "--quiet", "--soft", before, check=False)
+        except CheckpointError as ex:
+            raise CheckpointError(f"{ex} (the folder may be part-way back; undo the rewind to "
+                                  "return to how it was)", before=before)
+        return before, [c for c in changed if c not in added or not was_ignored(c)]
+
+
+def prune(store, days=30):
+    """Delete the snapshots of folders not worked in for `days` days, or that
+    have been missing for a week (not just a drive that isn't plugged in
+    today). -> how many were removed."""
+    gone, cutoff, week = 0, time.time() - days * 86400, time.time() - 7 * 86400
+    try:
+        repos = [d for d in Path(store).iterdir() if d.is_dir()]
+    except OSError:
+        return 0
+    for d in repos:
+        mark = d / "chuck-folder"
+        try:
+            folder = mark.read_text().strip()
+            used = mark.stat().st_mtime
+        except OSError:
+            continue                        # not one of ours (or half-made): leave it
+        if used < cutoff or (used < week and not (folder and os.path.isdir(folder))):
+            shutil.rmtree(d, ignore_errors=True)
+            gone += 1
+    return gone
