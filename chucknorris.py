@@ -4306,9 +4306,42 @@ class ChuckWindow(Adw.ApplicationWindow):
                 b.connect("clicked", lambda _b, p=prompt: self._prefill(p))
             grid.append(b)
         box.append(grid)
-        keys = Gtk.Label(label=("Tab  switch Agent / Chat     Ctrl+O  working folder     "
+        if self.agent_mode:
+            # the agent OS, one click each: what a single chat can't do
+            osl = Gtk.Label(label="OR LET IT RUN ON ITS OWN", xalign=0.5)
+            osl.add_css_class("empty-keys"); osl.set_margin_top(22)
+            box.append(osl)
+            row = Gtk.FlowBox()
+            row.set_halign(Gtk.Align.CENTER); row.set_margin_top(8)
+            try:
+                row.set_selection_mode(Gtk.SelectionMode.NONE)
+                # a centred FlowBox settles at its narrowest natural width
+                # (one per line); asking for three per line spreads them, and
+                # they still wrap in a narrow window
+                row.set_max_children_per_line(6); row.set_min_children_per_line(3)
+                row.set_column_spacing(6); row.set_row_spacing(6)
+            except Exception:
+                pass
+            for label, tip, fn in (
+                    ("Mission", "a big goal, planned as tasks run by agents, each tested before merge",
+                     lambda: self._prefill("/mission ")),
+                    ("Background agent", "a whole job done in a copy of the folder while you go on",
+                     lambda: self._prefill("/spawn ")),
+                    ("Watch my editor", "AI! comments you save in any editor become tasks",
+                     lambda: self.watch_command("on")),
+                    ("Daemon", "an agent that wakes on a schedule or an event, for free while it sleeps",
+                     lambda: self._prefill("/daemon ")),
+                    ("Remind me", "in 20m, at 5pm, every day at 8:30",
+                     lambda: self._prefill("/remind ")),
+                    ("Everything\u2026  Ctrl+P", "the command palette", self.open_palette)):
+                b = Gtk.Button(label=label)
+                b.add_css_class("quick"); b.set_tooltip_text(tip)
+                b.connect("clicked", lambda _b, f=fn: f())
+                row.append(b)
+            box.append(row)
+        keys = Gtk.Label(label=("Tab  switch Agent / Chat     Ctrl+P  everything     Ctrl+O  folder     "
                                 "/  commands     @  files" if self.agent_mode else
-                                "Tab  switch Agent / Chat     /  commands     "
+                                "Tab  switch Agent / Chat     Ctrl+P  everything     /  commands     "
                                 "Shift+Enter  new line"), xalign=0.5)
         keys.add_css_class("empty-keys"); keys.set_margin_top(26)
         keys.set_wrap(True); keys.set_justify(Gtk.Justification.CENTER)
