@@ -771,6 +771,147 @@ w.entry.get_buffer().set_text("/programs")
 w.on_send()
 check("PROGRAMS" in notes() and any(t.startswith("webby") for t in notes()), "/programs lists them")
 
+# ═══════════════════════════════════════════════════════════════════════════
+print("\n--- hibernate, replay, fork: time travel for agents ---")
+from chucknorris_ext import hibernate as H, worker as WK
+st = H.Store(tmp / "procs-unit")
+st.save({"key": "1-2", "msgs": [], "time": 5})
+st.save({"key": "1-1", "msgs": [], "time": 1})
+check([r["key"] for r in st.load()] == ["1-1", "1-2"], "records persist, oldest first")
+st.remove("1-1")
+check([r["key"] for r in st.load()] == ["1-2"] and not st.save({"key": "../evil", "msgs": []}),
+      "a record is removed; a key that isn't a key is refused")
+conv = [{"role": "system", "content": "S"}, {"role": "user", "content": "B"},
+        {"role": "assistant", "content": "```read a.py```"}, {"role": "user", "content": "R1"},
+        {"role": "assistant", "content": "```bash\nmake\n```"},
+        {"role": "user", "content": "R2\n\nThis was your last step: write the REPORT now."}]
+check([s[0] for s in H.steps_of(conv)] == [1, 2] and H.steps_of(conv)[1][2].startswith("R2"),
+      "a run reads back as steps")
+fm = H.fork_messages(conv, 2, "try make -j")
+check(len(fm) == 6 and "last step" not in fm[-1]["content"] and "try make -j" in fm[-1]["content"]
+      and conv[-1]["content"].endswith("now."), "a fork keeps the run up to its step, adds the "
+      "instruction, and leaves the original alone")
+check(len(H.fork_messages(conv, 1)) == 4 and H.tool_labels(conv[4]["content"]) == "bash make",
+      "fork at an earlier step; a step's tools as a label")
+seen_steps = []
+replies = iter(["```read x```", "REPORT: done"])
+rep_, n_ = WK.run_worker("", lambda m: next(replies), lambda r: [("read", "x")] if "```" in r else [],
+                         {"read": lambda a: "X"}, resume=conv[:4], on_step=lambda m, n: seen_steps.append(n))
+check(rep_ == "REPORT: done" and seen_steps == [2] and n_ == 3,
+      "a worker resumes from a saved conversation and goes on numbering steps", (rep_, seen_steps, n_))
+
+
+class TimeBackend(BgBackend):
+    """tt: a three-step writer; a fork's instruction changes what it writes.
+    hib: a run that can be cut off between steps."""
+    hold = threading.Event()
+
+    def stream(self, messages, on_delta, on_done, on_error, vision=False,
+               should_stop=None, attempts=3, on_open=None):
+        sysmsg = messages[0]["content"] if messages else ""
+        brief = messages[1]["content"] if len(messages) > 1 else ""
+        if sysmsg.startswith("You are a background agent") and brief.startswith(("tt", "hib")):
+            n = sum(1 for m in messages if m["role"] == "assistant")
+            forked = re.search(r"Their instruction: write (\w+)", messages[-1]["content"])
+            if brief.startswith("hib"):
+                if n == 0:
+                    on_delta("```write h.txt\nfirst\n```")
+                elif n == 1 and not TimeBackend.hold.is_set():
+                    TimeBackend.hold.wait(5)
+                    on_delta("```bash\necho never\n```")
+                elif n == 1:
+                    on_delta("```write h2.txt\nafter the restart\n```")
+                else:
+                    on_delta(f"REPORT: finished after {n} steps.")
+            elif forked:
+                on_delta(f"```write a.txt\n{forked.group(1)}\n```")
+            elif n == 0:
+                on_delta("```write a.txt\nv1\n```")
+            elif n == 1:
+                on_delta("```write a.txt\nv2\n```\n```write b.txt\nb\n```")
+            else:
+                on_delta("REPORT: a.txt and b.txt written.")
+            self.last_usage = {"prompt": 300, "completion": 30, "cached": 0, "reasoning": 0}
+            on_done()
+            return
+        super().stream(messages, on_delta, on_done, on_error, vision, should_stop,
+                       attempts, on_open)
+
+
+tproj = tmp / "timeproj"
+tproj.mkdir()
+(tproj / "keep.py").write_text("x = 1\n")
+(tproj / ".gitignore").write_text(".env\n")
+(tproj / ".env").write_text("SECRET=1\n")
+w = new_win([], tmp)
+w.set_agent_mode(True, announce=False)
+w.set_workspace(tproj, announce=False)
+w.backend = TimeBackend([])
+pid = w.spawn_background("tt: write two files")
+w.kernel.wait(pid, 20); settle()
+e = w._bg[pid]
+check([s["step"] for s in e["steps"]] == [0, 1, 2] and all(s["sha"] for s in e["steps"]),
+      "every step of a writer is snapshotted", e["steps"])
+check(e["changes"] == {"a.txt": "added", "b.txt": "added"} and any(r["key"] == e["key"] for r in w._hib.load()),
+      "its finished, unmerged work is kept on disk")
+check(w.show_replay(str(pid)) and any(t.startswith("REPLAY") for t in notes())
+      and any("step 2 · write a.txt, write b.txt" in t for t in notes()),
+      "/replay shows the run step by step", [t for t in notes() if t.startswith("step")][:4])
+fpid = w.fork_process(f"{pid} 1 write v9")
+w.kernel.wait(fpid, 20); settle()
+f = w._bg[fpid]
+check((f["ws"].work / "a.txt").read_text() == "v9\n" and not (f["ws"].work / "b.txt").exists()
+      and (f["ws"].work / ".env").read_text() == "SECRET=1\n",
+      "/fork restarts it from step 1: the files as they were then (ignored ones kept), "
+      "the new instruction followed", sorted(os.listdir(f["ws"].work)))
+check((e["ws"].work / "a.txt").read_text() == "v2\n", "and the original run is untouched")
+check(f["msgs"][3]["content"].count("FORKED") == 1 and len(f["msgs"]) >= 6,
+      "the fork has the original conversation up to its step")
+ffpid = w.fork_process(f"{fpid} 2 write v77")
+w.kernel.wait(ffpid, 20); settle()
+check(ffpid and (w._bg[ffpid]["ws"].work / "a.txt").read_text() == "v77\n"
+      and not (w._bg[ffpid]["ws"].work / "b.txt").exists(),
+      "a fork of a fork replays from the original base")
+check(w.fork_process(f"{fpid} 0 x") is None, "a fork can't be forked before its own fork point")
+check("merged" in w.join_background(fpid) and (tproj / "a.txt").read_text() == "v9\n",
+      "a fork's work merges like any background agent's")
+
+TimeBackend.hold.clear()
+hpid = w.spawn_background("hib: two steps then a restart")
+for _ in range(100):
+    if len(w._bg[hpid].get("steps", [])) >= 2:
+        break
+    time.sleep(0.05)
+w._closing = True                       # the window closes (or Chuck crashes) mid-run
+w.kernel.signal(hpid, "KILL")
+TimeBackend.hold.set()
+w.kernel.wait(hpid, 10); settle()
+recs = {r["name"]: r for r in w._hib.load()}
+hrec = next((r for r in recs.values() if r["name"].startswith("hib")), None)
+check(hrec and hrec["status"] == "running" and len(H.steps_of(hrec["msgs"])) == 1,
+      "a run cut off mid-way stays hibernated at its last step", hrec and hrec["status"])
+w2 = new_win([], tmp)
+w2.set_agent_mode(True, announce=False)
+w2.set_workspace(tproj, announce=False)
+w2.backend = TimeBackend([])
+check(w2.offer_hibernated() and "INTERRUPTED AGENTS" in [x.get_text() for x in w2.msgbox.walk()
+                                                          if isinstance(x.get_text(), str)],
+      "the next start offers to resume it")
+restored = [x for x in w2._bg.values() if x["name"].startswith("tt") and x["status"] == "finished"]
+check(restored and restored[0]["changes"] == {"a.txt": "added", "b.txt": "added"},
+      "finished work that was never merged comes back after a restart, ready to merge",
+      [(x["name"], x["status"]) for x in w2._bg.values()])
+npid = w2.resume_hibernated(hrec)
+w2.kernel.wait(npid, 20); settle()
+he = w2._bg[npid]
+check(he["report"] == "REPORT: finished after 2 steps." and (he["ws"].work / "h.txt").exists()
+      and (he["ws"].work / "h2.txt").exists(),
+      "Resume goes on from the step it was cut off at, in the same copy", he["report"])
+check(restored and "merged" in w2.join_background(restored[0]["pid"]) and (tproj / "b.txt").exists(),
+      "and the restored work merges")
+check(not [r for r in w2._hib.load() if r["key"] == restored[0]["key"]],
+      "a merged run's record is gone")
+
 print(f"\nTOTAL OS FAILURES: {fails}")
 assert fails == 0 and not FAILS, "OS regressions present"
 print("ALL OS TESTS PASSED")

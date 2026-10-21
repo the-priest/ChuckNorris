@@ -265,7 +265,15 @@ and an agent is a process. The design is in `docs/OS.md`; tests in
 
 ### Phase 21 — hibernate, replay, time travel
 
-- [ ] Every process checkpoints and survives a crash.
-- [ ] Replay a run from the journal; fork it from any step.
+- [x] Every background agent and program checkpoints after each completed
+      step (its conversation; a writer's copy of the folder too, in a
+      private git store). Closed, crashed or rebooted mid-run, it is offered
+      for Resume at the next start and goes on from that step; finished work
+      that was never merged comes back ready to merge.
+- [x] `/replay <pid>`: the run step by step (what it did, what it got back,
+      tokens so far). `/fork <pid> <step> [instruction]`: a new agent from
+      any step, its files exactly as they were then (ignored files like
+      `.env` kept), the instruction where it picks up; the original is
+      untouched, and a fork of a fork replays from the original base.
 - [x] `/strace <pid>`: every syscall a process made, its latency, how much it
       returned, and what was denied.

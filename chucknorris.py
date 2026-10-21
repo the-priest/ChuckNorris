@@ -125,6 +125,7 @@ _worker = _optional("worker")
 _daemons = _optional("daemons")
 _governor = _optional("governor")
 _programs = _optional("programs")
+_hibernate = _optional("hibernate")
 if _pricing is None:
     class _pricing:                     # noqa: N801  — the meter, minus prices
         """Stand-in so a partial install still launches: tokens are counted,
@@ -3481,6 +3482,14 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._daemon_checking = False
         self._daemon_probe = self._Probe()
         self._pending_daemon = None
+        # hibernate (docs/OS.md, phase 21): every step of a background agent
+        # or program is checkpointed; what was cut off is offered at start
+        self._hib = _hibernate.Store(self.PROCS_DIR) if _hibernate is not None else None
+        if self._hib is not None:
+            if _checkpoint is not None:
+                threading.Thread(target=_checkpoint.prune, args=(self.PROC_SHADOWS, 14),
+                                 daemon=True, name="srv-shadow-prune").start()
+            GLib.timeout_add_seconds(2, lambda: (self.offer_hibernated(), False)[1])
         if self._daemons is not None:
             GLib.timeout_add_seconds(30, self._daemon_tick)
             GLib.timeout_add_seconds(4, self._inbox_greeting)
@@ -5483,6 +5492,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             kill_live_commands()
         except Exception:
             pass
+        self._closing = True                    # running agents stay hibernated for next time
         if self.kernel is not None:             # every agent process ends with the window
             for r in self.kernel.ps():
                 if r["pid"] != self._pid1:
@@ -8597,24 +8607,43 @@ class ChuckWindow(Adw.ApplicationWindow):
         pid = proc.pid
         entry = {"pid": pid, "brief": brief, "name": name, "ws": None, "report": None,
                  "status": "running", "root": root, "changes": {}, "daemon": daemon,
-                 "daemon_why": why, "program": program["name"] if program else ""}
+                 "daemon_why": why, "program": program["name"] if program else "",
+                 "kind": "background"}
         self._bg[pid] = entry
         self._bg_card(entry)
+        self._launch_bg(entry, program)
+        self._sys_note(f"\U0001F6F0 background agent {pid} started \u2014 it works on a copy of "
+                       f"{root.name}; you can keep going (/top to watch it)", "dim")
+        return pid
+
+    def _launch_bg(self, entry, program=None, resume=None, ws=None):
+        """Run a background agent's process: in a fresh copy of its folder,
+        or (resume / fork) in the copy `ws` from the conversation `resume`.
+        Every step is checkpointed (hibernate)."""
+        pid, root, brief = entry["pid"], entry["root"], entry["brief"]
+        entry.setdefault("key", _hibernate.new_key(pid) if _hibernate else str(pid))
+        entry.setdefault("steps", [])
         call = self._sub_call(pid, independent=True, role="background", pin=self._pin_for(program))
-        slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:30] or "task"
+        slug = re.sub(r"[^a-z0-9]+", "-", entry["name"].lower()).strip("-")[:30] or "task"
         kern = self.kernel
 
         def run():
             report, status = "", 1
             try:
-                kern.note(pid, "copying the folder")
-                ws = _cow.Workspace.create(root, self.WORKTREES, f"{pid}-{slug}")
-                entry["ws"] = ws
+                if ws is None:
+                    kern.note(pid, "copying the folder")
+                    entry["ws"] = _cow.Workspace.create(root, self.WORKTREES, f"{pid}-{slug}")
+                else:
+                    entry["ws"] = ws
+                wsp = entry["ws"]
+                self._shadow_for(entry)
+                if not entry["steps"]:            # where this run starts (a fork: its fork point)
+                    self._on_step(entry, None, len(_hibernate.steps_of(resume)) if resume and _hibernate else 0)
 
                 def ev(t):
                     kern.note(pid, t)
                     GLib.idle_add(self._bg_paint, entry)
-                table = self._worker_syscalls(ws.work, net=kern.can(pid, "net"))
+                table = self._worker_syscalls(wsp.work, net=kern.can(pid, "net"))
                 if program is not None:
                     table = {t: f for t, f in table.items() if t in program["tools"]}
                 report, _steps = _worker.run_worker(
@@ -8623,8 +8652,9 @@ class ChuckWindow(Adw.ApplicationWindow):
                     should_stop=lambda: kern.should_stop(pid),
                     wrap_up=lambda: kern.terminating(pid) or bool(kern.over_quota(pid)),
                     context=f"{_now_line()}\nProject: {root.name}. Your private copy of it "
-                            f"is your working directory ({ws.work}).",
-                    prompt=_programs.act_prompt(program, _worker.WORKER_PROMPT) if program else None)
+                            f"is your working directory ({wsp.work}).",
+                    prompt=_programs.act_prompt(program, _worker.WORKER_PROMPT) if program else None,
+                    resume=resume, on_step=lambda m, n: self._on_step(entry, m, n))
                 status = 1 if kern.should_stop(pid) else 0
             except Exception as ex:
                 killed = _kernel is not None and isinstance(ex, _kernel.ProcessKilled)
@@ -8632,9 +8662,6 @@ class ChuckWindow(Adw.ApplicationWindow):
             kern.exit(pid, status, report)
             GLib.idle_add(self._bg_finished, entry, report, status)
         threading.Thread(target=run, daemon=True, name=f"bg-agent-{pid}").start()
-        self._sys_note(f"\U0001F6F0 background agent {pid} started \u2014 it works on a copy of "
-                       f"{root.name}; you can keep going (/top to watch it)", "dim")
-        return pid
 
     def _bg_card(self, entry):
         title = (f"PROGRAM {entry['program'].upper()}" if entry.get("program")
@@ -8673,6 +8700,8 @@ class ChuckWindow(Adw.ApplicationWindow):
             if entry.get("kind") != "report":      # a report program has no copy to discard
                 spec.append(("Discard", lambda *_a: self.discard_background(pid)))
             spec.append(("Trace", lambda *_a: self.show_strace(str(pid))))
+            if entry.get("msgs"):
+                spec.append(("Replay", lambda *_a: self.show_replay(str(pid))))
         else:
             spec = []
         for i, (label, fn) in enumerate(spec):
@@ -8691,7 +8720,9 @@ class ChuckWindow(Adw.ApplicationWindow):
                                f"{_pricing.fmt_usd(p.total['usd'])}")
         return False
 
-    def _bg_finished(self, entry, report, status):
+    def _bg_finished(self, entry, report, status, quiet=False):
+        if getattr(self, "_closing", False):
+            return False                # killed by the window closing: it stays hibernated
         entry["report"] = report
         ws = entry.get("ws")
         try:
@@ -8710,6 +8741,12 @@ class ChuckWindow(Adw.ApplicationWindow):
             ui["rep"].set_text(report[:20000])
             ui["rep"].set_visible(True)
             self._bg_buttons(entry)
+        if ch:
+            self._hib_save(entry)           # unmerged work survives a restart
+        elif self._hib is not None and entry.get("key"):
+            self._hib.remove(entry["key"])  # nothing to come back for (replay/fork still work now)
+        if quiet:
+            return False
         if entry.get("daemon"):
             dd = entry["daemon"]
             self._daemon_done(dd["id"], entry.get("daemon_why") or "its trigger fired", report
@@ -8786,6 +8823,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             return f"merge failed: {ex}"
         e["status"] = "merged"
         e["ws"].remove()
+        self._hib_drop(e)
         parts = []
         if r["applied"] or r["merged"]:
             parts.append(f"{len(r['applied']) + len(r['merged'])} file(s) merged")
@@ -8810,6 +8848,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         if e.get("ws") is not None:
             e["ws"].remove()
         e["status"] = "discarded"
+        self._hib_drop(e)
         if e.get("ui"):
             self._set_status(e["ui"]["pill"], "discarded", "wait")
             self._bg_buttons(e)
@@ -8911,12 +8950,22 @@ class ChuckWindow(Adw.ApplicationWindow):
                                  brief=brief, parent=self._pid1, program=name, nice=1,
                                  quota={"tokens": prog["tokens"], "seconds": prog["minutes"] * 60},
                                  caps=caps)
-        pid, kern = proc.pid, self.kernel
+        pid = proc.pid
         entry = {"pid": pid, "brief": brief, "name": f"{name}: {inp}"[:60] if inp else name,
                  "ws": None, "report": None, "status": "running", "root": root, "changes": {},
                  "daemon": None, "program": name, "kind": "report"}
         self._bg[pid] = entry
         self._bg_card(entry)
+        self._launch_report(entry, prog)
+        self._sys_note(f"\u25b6 {name} started as pid {pid} \u2014 it looks and reports; you can "
+                       "keep going (/top)", "dim")
+        return pid
+
+    def _launch_report(self, entry, prog, resume=None):
+        """Run a report program's process (fresh, resumed or forked)."""
+        pid, root, brief, kern = entry["pid"], entry["root"], entry["brief"], self.kernel
+        entry.setdefault("key", _hibernate.new_key(pid) if _hibernate else str(pid))
+        entry.setdefault("steps", [])
         call = self._sub_call(pid, independent=True, role="reader", pin=self._pin_for(prog))
         table = {t: f for t, f in self._daemon_syscalls(root, net=kern.can(pid, "net")).items()
                  if t in prog["tools"]}
@@ -8934,7 +8983,8 @@ class ChuckWindow(Adw.ApplicationWindow):
                     should_stop=lambda: kern.should_stop(pid),
                     wrap_up=lambda: kern.terminating(pid) or bool(kern.over_quota(pid)),
                     context=f"{_now_line()}\nYour working directory: {root}.",
-                    prompt=_programs.report_prompt(prog))
+                    prompt=_programs.report_prompt(prog), resume=resume,
+                    on_step=lambda m, n: self._on_step(entry, m, n))
                 status = 1 if kern.should_stop(pid) else 0
             except Exception as ex:
                 killed = _kernel is not None and isinstance(ex, _kernel.ProcessKilled)
@@ -8942,9 +8992,6 @@ class ChuckWindow(Adw.ApplicationWindow):
             kern.exit(pid, status, report)
             GLib.idle_add(self._bg_finished, entry, report, status)
         threading.Thread(target=run, daemon=True, name=f"program-{pid}").start()
-        self._sys_note(f"▶ {name} started as pid {pid} — it looks and reports; you can "
-                       "keep going (/top)", "dim")
-        return pid
 
     def show_programs(self):
         progs = self.programs()
@@ -9059,6 +9106,298 @@ class ChuckWindow(Adw.ApplicationWindow):
         body.append(lb)
         self._log_pin(card)
         return True
+
+    # ── hibernate, replay, fork (Chuck OS, phase 21) ──
+    PROCS_DIR = DATA_DIR / "procs"
+    PROC_SHADOWS = DATA_DIR / "proc-shadows"
+
+    def _shadow_for(self, entry):
+        """A writer's copy of the folder is snapshotted after every step, in
+        a private git store, so it can be forked from any step."""
+        ws = entry.get("ws")
+        if entry.get("shadow") is not None or ws is None or _checkpoint is None:
+            return entry.get("shadow")
+        try:
+            entry["shadow"] = _checkpoint.Shadow(ws.work, self.PROC_SHADOWS)
+        except Exception:
+            entry["shadow"] = None
+        return entry["shadow"]
+
+    def _on_step(self, entry, msgs, step):
+        """After every step: snapshot, journal, hibernate. Runs on the
+        agent's own thread; a failure here never stops the agent."""
+        try:
+            if msgs is not None:
+                entry["msgs"] = [dict(m) for m in msgs]
+            sha = None
+            sh = entry.get("shadow")
+            if sh is not None:
+                try:
+                    sha = sh.snapshot(f"step {step}")
+                except Exception:
+                    sha = None
+            p = self.kernel.procs.get(entry["pid"]) if self.kernel else None
+            reply = entry["msgs"][-2]["content"] if msgs is not None and len(entry["msgs"]) >= 4 else ""
+            if msgs is None and sha and not entry.get("base_sha"):
+                entry["base_sha"] = sha             # a fresh run: it starts at the base
+            entry["steps"].append({"step": step, "sha": sha, "time": time.time(),
+                                   "tokens": p.tokens() if p else 0,
+                                   "tools": _hibernate.tool_labels(reply) if _hibernate else ""})
+            self._hib_save(entry)
+        except Exception:
+            pass
+
+    def _hib_save(self, entry):
+        if self._hib is None or not entry.get("key"):
+            return
+        ws = entry.get("ws")
+        d = entry.get("daemon") or {}
+        self._hib.save({
+            "key": entry["key"], "kind": entry.get("kind", "background"), "name": entry["name"],
+            "brief": entry["brief"], "root": str(entry["root"]), "ws_dir": str(ws.dir) if ws else "",
+            "program": entry.get("program", ""), "daemon_id": d.get("id"),
+            "status": entry["status"], "report": entry.get("report"), "msgs": entry.get("msgs") or [],
+            "steps": entry.get("steps", []), "changes": entry.get("changes", {}),
+            "parent": entry.get("parent", ""), "base_sha": entry.get("base_sha"),
+            "time": time.time()})
+
+    def _hib_drop(self, entry):
+        if self._hib is not None and entry.get("key"):
+            self._hib.remove(entry["key"])
+        sh = entry.get("shadow")
+        if sh is not None:
+            shutil.rmtree(sh.git_dir, ignore_errors=True)
+            entry["shadow"] = None
+
+    def _new_entry_proc(self, rec, name=None, kind=None, parent_label=""):
+        """A kernel process for a resumed or forked run."""
+        prog = self.programs().get(rec.get("program")) if rec.get("program") else None
+        kind = kind or rec.get("kind", "background")
+        caps = (_programs.caps_of(prog) if prog is not None
+                else {"read", "write", "exec", "net"} if kind == "background" else {"read", "exec", "net"})
+        quota = ({"tokens": prog["tokens"], "seconds": prog["minutes"] * 60} if prog is not None else
+                 {"tokens": self.cfg("background_tokens", 1500000, 20000, 50000000),
+                  "seconds": self.cfg("background_minutes", 60, 1, 1440) * 60})
+        proc = self.kernel.spawn((name or rec["name"])[:60],
+                                 kind="program" if kind == "report" else "background",
+                                 brief=rec["brief"], parent=self._pid1, quota=quota, nice=2,
+                                 caps=caps, program=rec.get("program", ""))
+        entry = {"pid": proc.pid, "brief": rec["brief"], "name": name or rec["name"], "ws": None,
+                 "report": None, "status": "running", "root": Path(rec["root"]), "changes": {},
+                 "daemon": None, "program": rec.get("program", ""), "kind": kind,
+                 "parent": parent_label}
+        return entry, prog
+
+    def resume_hibernated(self, rec):
+        """Go on with a run that was cut off (Chuck closed, crashed, the
+        machine rebooted) from its last checkpoint -> the new pid."""
+        if self.kernel is None or _worker is None:
+            return None
+        kind = rec.get("kind", "background")
+        if rec.get("program") and rec["program"] not in self.programs():
+            self._sys_note(f"Can't resume: the program {rec['program']!r} is gone.", "danger")
+            return None
+        ws = None
+        if kind == "background":
+            if not rec.get("ws_dir") or not Path(rec["ws_dir"], "work").is_dir():
+                self._sys_note("Can't resume: its copy of the folder is gone.", "danger")
+                self._hib.remove(rec["key"])
+                return None
+            ws = _cow.Workspace(rec["root"], rec["ws_dir"])
+        entry, prog = self._new_entry_proc(rec)
+        entry["key"], entry["steps"], entry["msgs"] = rec["key"], list(rec.get("steps") or []), rec["msgs"]
+        entry["base_sha"] = rec.get("base_sha")
+        self._bg[entry["pid"]] = entry
+        self._bg_card(entry)
+        if kind == "background":
+            self._launch_bg(entry, prog, resume=rec["msgs"], ws=ws)
+        else:
+            self._launch_report(entry, prog, resume=rec["msgs"])
+        n = len(_hibernate.steps_of(rec["msgs"]))
+        self._sys_note(f"↻ {rec['name'][:60]} resumed at step {n} as pid {entry['pid']}", "ok")
+        return entry["pid"]
+
+    def _restore_finished(self, rec):
+        """A finished background agent's unmerged work, after a restart: its
+        card comes back with Merge and Discard."""
+        if not rec.get("ws_dir") or not Path(rec["ws_dir"], "work").is_dir():
+            self._hib.remove(rec["key"])
+            return None
+        entry, _prog = self._new_entry_proc(rec)
+        entry.update(key=rec["key"], steps=list(rec.get("steps") or []), msgs=rec["msgs"],
+                     ws=_cow.Workspace(rec["root"], rec["ws_dir"]), base_sha=rec.get("base_sha"))
+        self.kernel.exit(entry["pid"], 0, rec.get("report"))
+        self._bg[entry["pid"]] = entry
+        self._bg_card(entry)
+        self._shadow_for(entry)
+        self._bg_finished(entry, rec.get("report") or "(no report)", 0, quiet=True)
+        return entry["pid"]
+
+    def offer_hibernated(self):
+        """At startup: runs that were cut off are offered for resuming;
+        finished work that was never merged comes back as it was."""
+        if self._hib is None or self.kernel is None:
+            return False
+        self._hib.prune()
+        cut = []
+        for rec in self._hib.load():
+            if rec.get("status") == "running":
+                cut.append(rec)
+            elif rec.get("kind") == "background" and rec.get("status") == "finished":
+                self._restore_finished(rec)
+            else:
+                self._hib.remove(rec["key"])
+        if not cut:
+            return False
+        card, head, body, foot = self._card_shell("INTERRUPTED AGENTS")
+        lb = Gtk.Label(label="These were working when Chuck stopped. Each was checkpointed after "
+                             "every step: resume it exactly where it was, or drop it.",
+                       xalign=0, wrap=True)
+        lb.add_css_class("dim"); _wrap_anywhere(lb)
+        body.append(lb)
+        for rec in cut:
+            body.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+            n = len(_hibernate.steps_of(rec["msgs"]))
+            st = rec.get("steps") or [{}]
+            t = Gtk.Label(label=f"{rec['name'][:80]} · step {n} · "
+                                f"{_pricing.fmt_tokens(st[-1].get('tokens', 0))} tokens so far",
+                          xalign=0, wrap=True)
+            t.add_css_class("slash-cmd"); _wrap_anywhere(t)
+            body.append(t)
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            res = Gtk.Button(label="Resume"); res.add_css_class("quick"); res.add_css_class("accent-btn")
+            drop = Gtk.Button(label="Drop"); drop.add_css_class("quick")
+
+            def go(_b, r=rec, a=res, d=drop):
+                a.set_sensitive(False); d.set_sensitive(False)
+                self.resume_hibernated(r)
+
+            def no(_b, r=rec, a=res, d=drop):
+                a.set_sensitive(False); d.set_sensitive(False)
+                self._hib.remove(r["key"])
+                if r.get("ws_dir"):
+                    shutil.rmtree(r["ws_dir"], ignore_errors=True)
+                self._sys_note(f"Dropped {r['name'][:60]}.", "dim")
+            res.connect("clicked", go); drop.connect("clicked", no)
+            row.append(res); row.append(drop)
+            body.append(row)
+        self._log_pin(card)
+        self._hib_offered = cut
+        return True
+
+    def show_replay(self, arg):
+        """/replay <pid>: the run step by step: what it did, what it got
+        back, with Fork here on every step."""
+        try:
+            pid = int((arg or "").split()[0])
+        except (IndexError, ValueError):
+            self._sys_note("/replay <pid> — a background agent or program (/top lists them).", "dim")
+            return False
+        e = self._bg.get(pid)
+        if e is None or not e.get("msgs"):
+            self._sys_note(f"No recorded run for pid {pid} (only background agents and programs "
+                           "are journalled).", "danger")
+            return False
+        steps = _hibernate.steps_of(e["msgs"])
+        shas = {s["step"]: s for s in e.get("steps", [])}
+
+        def text():
+            return "\n\n".join(f"STEP {n}\n{a}\n--- got back ---\n{r}" for n, a, r in steps)
+        card, head, body, foot = self._card_shell(f"REPLAY · PID {pid} · {e['name'][:50]}", text)
+        sm = Gtk.Label(label=f"{len(steps)} steps" + (" · its files are snapshotted at each one"
+                                                      if e.get("shadow") else "")
+                       + " · Fork here starts a new agent from that step, with the files as "
+                         "they were then", xalign=0, wrap=True)
+        sm.add_css_class("dim"); _wrap_anywhere(sm)
+        body.append(sm)
+        for n, a, r in [(0, e["brief"], "")] + steps:
+            body.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+            st = shas.get(n, {})
+            tl = Gtk.Label(label=(f"step {n} · " + (st.get("tools") or "thinking")
+                                  + f" · {_pricing.fmt_tokens(st.get('tokens', 0))} tokens")
+                           if n else "start · the brief", xalign=0, wrap=True)
+            tl.add_css_class("slash-cmd"); _wrap_anywhere(tl)
+            body.append(tl)
+            al = Gtk.Label(label=clip_output(a, 600), xalign=0, wrap=True, selectable=True)
+            _wrap_anywhere(al); body.append(al)
+            if r:
+                rl = Gtk.Label(label=clip_output(r, 400), xalign=0, wrap=True, selectable=True)
+                rl.add_css_class("dim"); _wrap_anywhere(rl); body.append(rl)
+            fb = Gtk.Button(label="Fork here"); fb.add_css_class("quick")
+            fb.set_halign(Gtk.Align.START)
+            fb.connect("clicked", lambda _b, k=n: (
+                self.entry.get_buffer().set_text(f"/fork {pid} {k} "), self.entry.grab_focus()))
+            body.append(fb)
+        self._log_pin(card)
+        return True
+
+    def fork_process(self, arg):
+        """/fork <pid> <step> [new instruction] -> the new pid. A new agent
+        starts from that step of the old one's run: the same conversation up
+        to there, its copy of the folder as it was then, and your
+        instruction where it picks up. The original is untouched."""
+        m = re.match(r"\s*(\d+)\s+(\d+)\s*(.*)$", arg or "", re.DOTALL)
+        if not m:
+            self._sys_note("/fork <pid> <step> [new instruction] — /replay <pid> shows the steps.", "dim")
+            return None
+        pid, step, instr = int(m.group(1)), int(m.group(2)), m.group(3).strip()
+        e = self._bg.get(pid)
+        if e is None or not e.get("msgs") or self.kernel is None:
+            self._sys_note(f"No recorded run for pid {pid}.", "danger")
+            return None
+        total = len(_hibernate.steps_of(e["msgs"]))
+        if step > total:
+            self._sys_note(f"pid {pid} has {total} steps.", "danger")
+            return None
+        msgs = _hibernate.fork_messages(e["msgs"], step, instr)
+        rec = {"name": f"fork of {pid}@{step}: {e['name']}"[:60], "brief": e["brief"],
+               "root": str(e["root"]), "program": e.get("program", ""), "kind": e.get("kind", "background")}
+        ws = None
+        if rec["kind"] == "background":
+            src = e.get("ws")
+            sh = e.get("shadow")
+            snaps = {s["step"]: s.get("sha") for s in e.get("steps", [])}
+            if src is None or not src.base.is_dir() or sh is None or not e.get("base_sha"):
+                self._sys_note("Can't fork: that run's copy of the folder or its snapshots are gone "
+                               "(merged or discarded).", "danger")
+                return None
+            if not snaps.get(step):
+                first = min(snaps) if snaps else 0
+                self._sys_note(f"pid {pid}'s files weren't snapshotted at step {step}"
+                               + (f" (it is itself a fork from step {first}: fork its parent for "
+                                  "earlier steps)" if first else ""), "danger")
+                return None
+            entry, prog = self._new_entry_proc(rec, parent_label=f"{pid}@{step}")
+            try:
+                d = self.WORKTREES / f"{entry['pid']}-fork-of-{pid}"
+                shutil.rmtree(d, ignore_errors=True)
+                shutil.copytree(src.base, d / "base", symlinks=True)
+                shutil.copytree(src.base, d / "work", symlinks=True)
+                ws = _cow.Workspace(e["root"], d)
+                # the fork's own store starts at the base, like any run's,
+                # so a fork of the fork replays from the same place
+                entry["ws"] = ws
+                nsh = self._shadow_for(entry)
+                if nsh is not None:
+                    entry["base_sha"] = nsh.snapshot("base")
+                sh.replay_onto(e["base_sha"], snaps[step], d / "work")
+            except Exception as ex:
+                self.kernel.exit(entry["pid"], 1, f"fork failed: {ex}")
+                self._sys_note(f"✗ couldn't fork: {ex}", "danger")
+                return None
+        else:
+            entry, prog = self._new_entry_proc(rec, parent_label=f"{pid}@{step}")
+        entry["msgs"] = msgs
+        entry["steps"] = [s for s in e.get("steps", []) if s["step"] <= step and rec["kind"] != "background"]
+        self._bg[entry["pid"]] = entry
+        self._bg_card(entry)
+        if rec["kind"] == "background":
+            self._launch_bg(entry, prog, resume=msgs, ws=ws)
+        else:
+            self._launch_report(entry, prog, resume=msgs)
+        self._sys_note(f"⑂ forked pid {pid} at step {step} → pid {entry['pid']}"
+                       + (f": “{instr[:80]}”" if instr else ""), "ok")
+        return entry["pid"]
 
     # ── daemons (Chuck OS, phase 19) ──
     DAEMONS_FILE = CONFIG_DIR / "daemons.json"
@@ -10804,6 +11143,9 @@ class ChuckWindow(Adw.ApplicationWindow):
                                    "researcher, explainer, or your own (/programs)"),
         ("/governor [mode]", "performance, balanced or powersave: which model each agent runs on"),
         ("/strace <pid>", "every tool call a process made, its latency and size"),
+        ("/replay <pid>", "a background agent's run, step by step"),
+        ("/fork <pid> <step> [instruction]", "start a new agent from any step of a run, its "
+                                             "files as they were then"),
         ("/update", "install the newest Chuck (then restart)"),
     ]
 
@@ -10855,6 +11197,10 @@ class ChuckWindow(Adw.ApplicationWindow):
             self.governor_command(arg)
         elif cmd == "strace":
             self.show_strace(arg)
+        elif cmd == "replay":
+            self.show_replay(arg)
+        elif cmd == "fork":
+            self.fork_process(arg)
         elif cmd == "daemons":
             self.show_daemons()
         elif cmd == "inbox":

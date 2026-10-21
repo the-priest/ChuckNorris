@@ -152,6 +152,43 @@ class Shadow:
             pass
         return sha
 
+    def delta(self, a, b):
+        """What changed from snapshot a to snapshot b: [(status, path)] with
+        status A (added), M (modified) or D (deleted)."""
+        out = self._git("diff", "--name-status", "--no-renames", "-z", a, b, check=False)
+        parts = [p for p in out.split("\0") if p]
+        return [(parts[i][0], parts[i + 1]) for i in range(0, len(parts) - 1, 2)]
+
+    def blob(self, sha, rel):
+        """A file's exact bytes at a snapshot."""
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        env.update({"GIT_DIR": str(self.git_dir), "GIT_CONFIG_NOSYSTEM": "1"})
+        try:
+            p = subprocess.run(["git", "cat-file", "blob", f"{sha}:{rel}"], env=env,
+                               capture_output=True, timeout=self.timeout, stdin=subprocess.DEVNULL)
+        except (OSError, subprocess.TimeoutExpired) as ex:
+            raise CheckpointError(str(ex))
+        if p.returncode != 0:
+            raise CheckpointError(p.stderr.decode("utf-8", "replace").strip()[-200:] or "no such file")
+        return p.stdout
+
+    def replay_onto(self, a, b, dest):
+        """Make folder `dest` (a copy of the folder as it was at snapshot a)
+        what the folder was at snapshot b: exactly the files that changed
+        between them are written or deleted; nothing else (an ignored .env,
+        a data folder) is touched."""
+        dest = Path(dest)
+        for st, rel in self.delta(a, b):
+            p = dest / rel
+            if st == "D":
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+                continue
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(self.blob(b, rel))
+
     def changed_since(self, sha):
         """Paths that differ between the snapshot and the folder now."""
         self._unlock()

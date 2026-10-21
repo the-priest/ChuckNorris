@@ -158,7 +158,26 @@ merged by the user.
 
 ## Hibernate, replay, time travel (phase 21)
 
-Every process checkpoints after each step and resumes after a crash. The
-journal replays a run step by step; `/fork <pid> <step>` restarts it from
-any step with a different instruction. `/strace <pid>` lists every syscall
-with its latency and token cost.
+`chucknorris_ext/hibernate.py`. After every completed step a background
+agent or program is written to disk: its conversation, its step list and,
+for a writer, a snapshot of its copy of the folder in a private git store
+(`checkpoint.Shadow`, one per copy). A step cut short is never a
+checkpoint: its tools didn't all run, so resuming from it would resume
+from a lie.
+
+- **Hibernate.** Chuck closing, crashing or the machine rebooting leaves
+  the record at its last step; the next start shows INTERRUPTED AGENTS
+  with Resume / Drop. Resume reattaches the same copy and goes on.
+  Finished work that was never merged comes back as its card, ready to
+  merge.
+- **Replay.** `/replay <pid>` (or the card's Replay button): every step,
+  the tools it called, what came back, and the tokens spent so far.
+- **Fork.** `/fork <pid> <step> [instruction]` (or Fork here on a step):
+  a new process with the conversation up to that step, the instruction
+  where it picks up, and its copy of the folder as it was at that step:
+  a copy of the base with exactly the changes between the base snapshot
+  and that step's replayed onto it (`Shadow.replay_onto`), so files the
+  snapshots ignore, like `.env`, are kept. Every run's store starts at
+  its base, so a fork of a fork replays from the same place.
+- **strace.** `/strace <pid>` lists every syscall with its latency, its
+  size and whether the capability check refused it.

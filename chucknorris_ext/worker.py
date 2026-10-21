@@ -41,11 +41,20 @@ def _clip(text, limit):
 
 
 def run_worker(brief, call_model, parse, syscalls, max_steps=60, on_event=None,
-               should_stop=None, wrap_up=None, context="", prompt=None):
-    """Run one background agent to its report. -> (report, steps_used)."""
-    msgs = [{"role": "system", "content": (prompt or WORKER_PROMPT) + ("\n\n" + context if context else "")},
-            {"role": "user", "content": brief}]
-    for step in range(max(1, max_steps)):
+               should_stop=None, wrap_up=None, context="", prompt=None, resume=None,
+               on_step=None):
+    """Run one background agent to its report. -> (report, steps_used).
+    resume: a saved conversation to go on from (hibernate, fork).
+    on_step(msgs, step): called after every step, to checkpoint it."""
+    if resume:
+        msgs = [dict(m) for m in resume]
+        first = sum(1 for m in msgs if m.get("role") == "assistant")
+    else:
+        msgs = [{"role": "system", "content": (prompt or WORKER_PROMPT)
+                 + ("\n\n" + context if context else "")},
+                {"role": "user", "content": brief}]
+        first = 0
+    for step in range(first, max(first + 1, max_steps)):
         if should_stop and should_stop():
             return "(stopped before finishing)", step
         if wrap_up and wrap_up() and step > 0:
@@ -83,5 +92,9 @@ def run_worker(brief, call_model, parse, syscalls, max_steps=60, on_event=None,
             for m in msgs[2:-6]:
                 if m["role"] == "user" and len(m["content"]) > 1500:
                     m["content"] = _clip(m["content"], 1500)
+        # a step cut short (stopped, killed) is not a checkpoint: its tools
+        # didn't all run, so resuming from it would be resuming from a lie
+        if on_step and not (should_stop and should_stop()):
+            on_step(msgs, step + 1)
     msgs.append({"role": "user", "content": "Step budget spent. Write your REPORT now."})
     return (call_model(msgs) or "").strip() or "(no report)", max_steps
