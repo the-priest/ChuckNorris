@@ -39,6 +39,7 @@ Paste a SiliconFlow key in Settings. Press **Tab** to pick Agent or Chat. Talk t
 - **Helpers can work in the background** on a *copy* of your project, so they can't break your files. When one finishes, you look at what it changed and click **Merge** if you like it.
 - **Helpers can talk.** You can send one a message while it works, it can ask you a question without stopping the others, and they share a notice board so they don't get in each other's way.
 - **Give it a whole project-sized job** (`/mission …`). It splits the job into steps, hands them to several helpers working at once, checks each piece by running your project's tests, and only then puts it into your folder.
+- **Reminders.** "Remind me in 20 minutes to take the pizza out" (or `/remind at 5pm: call the bank`, `/remind every day at 8:30: stand-up`). You get a note, a desktop notification, and it's read aloud. No AI is woken for it, so it costs nothing.
 - **Helpers can wait for something to happen.** "Every morning at 8:30", "when a service fails", "when the disk is 90% full". Waiting costs nothing; they wake up only when it happens, look, and leave you a report.
 - **Nothing is lost.** Every step is saved. If the computer crashes, a helper picks up where it was. You can even go back to any step of a helper's work and try a different direction from there.
 - **Safety stays on.** A helper can do whatever you allow it to, but anything that could wreck your system (wiping a disk, deleting your home folder) always waits for your click.

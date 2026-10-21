@@ -51,9 +51,37 @@ class DaemonError(ValueError):
     pass
 
 
-def parse_when(text):
-    """'every 2h' -> {"every": 7200} etc. Raises DaemonError with a hint."""
+def _clock(h, mi, ampm):
+    h, mi = int(h), int(mi or 0)
+    if ampm == "pm" and h < 12:
+        h += 12
+    if ampm == "am" and h == 12:
+        h = 0
+    if h > 23 or mi > 59:
+        raise DaemonError("that time doesn't exist")
+    return h, mi
+
+
+def _at(day_offset, h, mi, now):
+    lt = time.localtime(now)
+    return time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday + day_offset, h, mi, 0, 0, 0, -1))
+
+
+def parse_when(text, now=None):
+    """'every 2h' -> {"every": 7200} etc. One-shot times too ('in 20m',
+    'at 17:30', 'tomorrow at 9am') -> {"at": epoch}. Raises DaemonError."""
+    now = time.time() if now is None else now
     t = (text or "").strip().lower()
+    m = re.fullmatch(r"in\s+(\d+)\s*([a-z]+?)s?", t)
+    if m and m.group(2) in _UNITS:
+        return {"at": now + int(m.group(1)) * _UNITS[m.group(2)]}
+    m = re.fullmatch(r"(?:(today|tomorrow)\s+)?(?:at\s+)?(\d{1,2})(?::(\d\d))?\s*(am|pm)?", t)
+    if m and (m.group(1) or t.startswith("at ") or m.group(3) or m.group(4)):
+        h, mi = _clock(m.group(2), m.group(3), m.group(4))
+        at = _at(1 if m.group(1) == "tomorrow" else 0, h, mi, now)
+        if at <= now and m.group(1) != "today":
+            at = _at(1, h, mi, now)               # "at 9am" said at 10am means tomorrow
+        return {"at": at}
     m = re.fullmatch(r"(?:every\s+day\s+at|daily(?:\s+at)?|each\s+day\s+at)\s+(\d{1,2})(?::(\d\d))?\s*(am|pm)?", t)
     if m:
         h, mi = int(m.group(1)), int(m.group(2) or 0)
@@ -81,9 +109,9 @@ def parse_when(text):
     m = re.fullmatch(r"when\s+(.+?)\s+changes", (text or "").strip(), re.IGNORECASE)
     if m:
         return {"watch": os.path.expanduser(m.group(1).strip().strip("'\""))}
-    raise DaemonError("say when: 'every 30m', 'daily 08:30', 'when ~/src changes', "
-                      "'when a service fails', 'when disk / is above 90%' or "
-                      "'when `cmd` changes'")
+    raise DaemonError("say when: 'in 20m', 'at 17:30', 'tomorrow at 9am', 'every 30m', "
+                      "'daily 08:30', 'when ~/src changes', 'when a service fails', "
+                      "'when disk / is above 90%' or 'when `cmd` changes'")
 
 
 def describe(trig):
@@ -96,6 +124,8 @@ def describe(trig):
         return f"every {n}s"
     if "daily" in trig:
         return f"daily at {trig['daily']}"
+    if "at" in trig:
+        return "at " + time.strftime("%a %d %b %H:%M", time.localtime(trig["at"]))
     if "watch" in trig:
         return f"when {trig['watch']} changes"
     if trig.get("unit_failed"):
@@ -310,6 +340,8 @@ def check(spec, now, probe):
     if "every" in trig:
         due = now - last >= trig["every"]
         return due, describe(trig), st
+    if "at" in trig:
+        return (now >= trig["at"] and last < trig["at"]), "it's time", st
     if "daily" in trig:
         hh, mm = (int(x) for x in trig["daily"].split(":"))
         lt = probe.localtime(now)

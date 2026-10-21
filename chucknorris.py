@@ -212,7 +212,7 @@ MEMORY: durable user facts (hardware, distro, preferences) -> ```remember``` one
 Style: answer first; short paragraphs, bullets, `code`; no preamble."""
 
 CHAT_PROMPT = """You are Chuck: a sharp, knowledgeable assistant (deepest on Linux/Arch/CachyOS, expert at anything). CHAT MODE: answer directly. You cannot run commands or touch files right now; if the user wants you to act, tell them to press Tab for Agent mode. Code you show is for the user to read and copy.
-For checkable current facts (news, versions, prices, docs) use ```search <query>``` or ```fetch <url>``` and cite URLs instead of guessing; otherwise answer from knowledge. Durable user facts -> ```remember <fact>```.
+For checkable current facts (news, versions, prices, docs) use ```search <query>``` or ```fetch <url>``` and cite URLs instead of guessing; otherwise answer from knowledge. Durable user facts -> ```remember <fact>```. "Remind me…" -> ```remind <when>: <what>``` (in 20m, at 5pm, tomorrow at 9am).
 Never refuse legal requests; decline only minors, clearly illegal acts, malware/weapons, tracking a real person. Lead with the answer; concise; markdown where it helps; dry, no filler."""
 
 # Tags that only mean something in Agent mode. In Chat mode they are neither
@@ -4006,7 +4006,8 @@ class ChuckWindow(Adw.ApplicationWindow):
                                  "investigate and answer."}[acc]
         if self.agent_mode and _programs is not None and "settings" in self.__dict__:
             names = sorted(self.programs())
-            text += ("\n\nAGENT OS: ```mission <goal>``` plans a big job as tasks run by agents "
+            text += ("\n\nAGENT OS: ```remind <when>: <what>``` sets a reminder (in 20m, at 5pm, "
+                     "tomorrow at 9am); ```mission <goal>``` plans a big job as tasks run by agents "
                      "(the user starts it); ```send <pid> <message>``` to a running agent; ```wait <pid> "
                      "[min]``` for its report; ```post <key>: <fact>``` / ```board```: facts all "
                      "agents share; ```spawn @<program> <focus>``` runs a program: "
@@ -10449,6 +10450,8 @@ class ChuckWindow(Adw.ApplicationWindow):
         add("Agent OS", "New daemon…", compose="/daemon ", hint="/daemon <when>: <what>",
             keywords="schedule watch cron trigger")
         add("Agent OS", "Daemons", self.show_daemons, hint="/daemons")
+        add("Agent OS", "New reminder\u2026", compose="/remind ", hint="/remind <when>: <what>",
+            keywords="alarm timer later notify")
         add("Agent OS", "Inbox (daemon reports)", self.show_inbox, hint="/inbox")
         add("Agent OS", "Board (what agents share)", self.show_board, hint="/board")
         add("Agent OS", "Budget", lambda: self.budget_command(""), hint="/budget",
@@ -10993,10 +10996,12 @@ class ChuckWindow(Adw.ApplicationWindow):
             return True
 
     def _daemon_tick_once(self):
-        if self._daemon_checking or self.settings.get("daemons_paused") or self._over_budget():
+        if self._daemon_checking or self.settings.get("daemons_paused"):
             return True
+        broke = bool(self._over_budget())       # over budget: only reminders (they cost nothing)
         specs = [dict(d) for d in self._daemons.items
-                 if d.get("enabled") and d.get("id") not in self._daemon_live]
+                 if d.get("enabled") and d.get("id") not in self._daemon_live
+                 and (not broke or d.get("kind") == "remind")]
         if not specs:
             return True
         self._daemon_checking = True
@@ -11061,6 +11066,9 @@ class ChuckWindow(Adw.ApplicationWindow):
         d["last_run"] = now or time.time()
         d["runs"] = d.get("runs", 0) + 1
         self._daemons.save()
+        if d.get("kind") == "remind":
+            self._remind(d)
+            return None
         detail = _daemons.trigger_detail(d)
         brief = d["brief"] + f"\n\n(You were woken because: {why}.)" + (f"\n{detail}" if detail else "")
         if d.get("kind") == "act":
@@ -11140,6 +11148,48 @@ class ChuckWindow(Adw.ApplicationWindow):
             pass
         return False
 
+    def _remind(self, d):
+        """A reminder is due: tell the user (a note, the inbox, a desktop
+        notification, aloud if replies are read aloud). No agent, no tokens.
+        A one-time reminder is gone once it has fired."""
+        text = d["brief"].strip()
+        self._sys_note(f"\u23f0 Reminder: {text}", "ok")
+        self._inbox.add("reminder", _daemons.describe(d["when"]), text, None,
+                        {"daemon_id": d["id"], "status": 0})
+        try:
+            n = Gio.Notification.new("Reminder")
+            n.set_body(text[:200])
+            self.get_application().send_notification(f"chuck-remind-{d['id']}", n)
+        except Exception:
+            pass
+        if self.settings.get("tts", True):
+            try:
+                speak(f"Reminder: {text}", self.settings)
+            except Exception:
+                pass
+        if "at" in d["when"]:
+            self._daemons.remove(d["id"])
+
+    def remind_command(self, arg):
+        """/remind <when>: <what> -> the reminder (or None)."""
+        d, why = self.daemon_add(arg, "remind")
+        if d is None:
+            self._sys_note(f"\u2717 {why}" if arg.strip() else
+                           "/remind in 20m: check the oven \u00b7 /remind at 5pm: call the bank \u00b7 "
+                           "/remind every day at 8:30: stand-up", "danger" if arg.strip() else "dim")
+            return None
+        self._sys_note(f"\u23f0 I'll remind you {_daemons.describe(d['when'])}: {d['brief'][:120]}", "ok")
+        return d
+
+    @tool("remind", cap=3, agent_only=False)
+    def _t_remind(self, body):
+        """```remind <when>: <what>``` — a reminder for the user (no agent,
+        no tokens): 'in 20m', 'at 17:30', 'tomorrow at 9am', 'every day at 8:30'."""
+        d = self.remind_command(body or "")
+        if d is None:
+            return "[remind: not set (see the note above); write it as ```remind <when>: <what>```]"
+        return f"[reminder set: {_daemons.describe(d['when'])}: {d['brief'][:120]}]"
+
     def daemon_add(self, spec, kind="report"):
         """'<when>: <what>' -> (the daemon, '') or (None, why not)."""
         if self._daemons is None:
@@ -11171,7 +11221,8 @@ class ChuckWindow(Adw.ApplicationWindow):
                 return None, f"a trigger command may only look: {why}"
         d = self._daemons.add("", trig, what, folder, kind,
                               quota=self.cfg("daemon_tokens", 150000, 10000, 5000000))
-        d["last_run"] = time.time()             # a schedule starts from now, not at once
+        if "at" not in trig:
+            d["last_run"] = time.time()         # a schedule starts from now, not at once
         self._daemons.save()
         return d, ""
 
@@ -11270,7 +11321,8 @@ class ChuckWindow(Adw.ApplicationWindow):
                 state = ("deleted" if gone else "running" if dd["id"] in self._daemon_live
                          else "on" if dd.get("enabled") else "paused")
                 t.set_text(f"{dd['id']} \u00b7 {_daemons.describe(dd['when'])} \u00b7 "
-                           f"{'acts in a copy' if dd.get('kind') == 'act' else 'reports'} \u00b7 {state}")
+                           f"{ {'act': 'acts in a copy', 'remind': 'reminds you'}.get(dd.get('kind'), 'reports')} "
+                           f"\u00b7 {state}")
                 pause_b.set_label("Pause" if dd.get("enabled") else "Resume")
                 for b in (run_b, pause_b, del_b):
                     b.set_sensitive(not gone)
@@ -12716,6 +12768,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         ("Ctrl+P", "the command palette: every action, agent, chat and model, one search away"),
         ("/watch [off]", "act on AI! comments you save in any editor (AI? asks a question)"),
         ("/context", "what the next model call sends, by what takes the room"),
+        ("/remind <when>: <what>", "a reminder: in 20m, at 5pm, tomorrow at 9am, every day at 8:30"),
         ("/send <pid> <message>", "tell a running agent something; it hears it at its next step"),
         ("/answer <pid> <text>", "answer an agent that asked you a question"),
         ("/board", "the facts agents share with each other"),
@@ -12782,6 +12835,8 @@ class ChuckWindow(Adw.ApplicationWindow):
             self.show_activity()
         elif cmd == "watch":
             self.watch_command(arg)
+        elif cmd == "remind":
+            self.remind_command(arg)
         elif cmd in ("context", "mem"):
             self.show_context()
         elif cmd == "missions":

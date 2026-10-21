@@ -1669,6 +1669,37 @@ w.on_send()
 tx = [x.get_text() for x in w.msgbox.walk() if isinstance(x.get_text(), str)]
 check("CONTEXT" in tx and any("The next model call sends" in t for t in tx), "/context shows it")
 
+print("\n--- reminders ---")
+now_ = time.mktime((2026, 3, 10, 10, 0, 0, 0, 0, -1))
+check(D.describe(D.parse_when("at 9am", now_)) == "at Wed 11 Mar 09:00"
+      and D.parse_when("in 20m", now_) == {"at": now_ + 1200}
+      and D.describe(D.parse_when("tomorrow at 9:15", now_)) == "at Wed 11 Mar 09:15",
+      "'in 20m', 'at 9am' (tomorrow, if 9am has passed) and 'tomorrow at 9:15' are understood")
+w = new_win([], tmp)
+w.set_agent_mode(False, announce=False)
+w.backend = ScriptedBackend(["```remind in 20m: take the pizza out\n```\nWill do."])
+type_and_send(w, "remind me in 20 minutes to take the pizza out")
+rem = [d for d in w._daemons.items if d.get("kind") == "remind"]
+check(rem and rem[-1]["brief"] == "take the pizza out" and "at" in rem[-1]["when"],
+      "the agent sets a reminder, even in Chat mode", rem[-1:] if rem else None)
+spoken = []
+real_speak = cn.speak
+cn.speak = lambda t, s=None: spoken.append(t)
+w.settings["budget_day_usd"] = 0.000001
+w._ledger.add(0.01)
+rem[-1]["when"]["at"] = time.time() - 1
+w._daemon_probe = FakeProbe()
+w._daemon_tick(); settle()
+cn.speak = real_speak
+w.settings["budget_day_usd"] = 0.0
+check(any("Reminder: take the pizza out" in t for t in notes()) and spoken
+      and not any(d.get("kind") == "remind" and d["brief"] == "take the pizza out" for d in w._daemons.items)
+      and any(i["report"] == "take the pizza out" for i in w._inbox.items),
+      "when it's due: a note, the inbox, aloud, and gone (even over budget: it costs nothing)")
+r2 = w.remind_command("every day at 8:30: stand-up")
+check(r2 and r2["when"] == {"daily": "08:30"}, "a reminder can repeat")
+check(w.remind_command("whenever: x") is None, "a time it can't read is refused with examples")
+
 print(f"\nTOTAL OS FAILURES: {fails}")
 assert fails == 0 and not FAILS, "OS regressions present"
 print("ALL OS TESTS PASSED")
