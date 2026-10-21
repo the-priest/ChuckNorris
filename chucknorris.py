@@ -120,6 +120,8 @@ _checkpoint = _optional("checkpoint")
 _listen = _optional("listen")
 _codesearch = _optional("codesearch")
 _kernel = _optional("kernel")
+_cow = _optional("cow")
+_worker = _optional("worker")
 if _pricing is None:
     class _pricing:                     # noqa: N801  — the meter, minus prices
         """Stand-in so a partial install still launches: tokens are counted,
@@ -161,9 +163,8 @@ from chucknorris_ext.config import (            # noqa: E402
 SYSTEM_PROMPT = """You are Chuck: a senior engineer-agent on the user's Linux desktop (deepest on Arch/CachyOS, expert at anything). Direct, dry, no filler, no moralising. Now and then end on one deadpan line; never forced.
 
 TOOLS: one short line on what you'll do, then the fenced block. The app runs it and returns the real result.
-Read-only (batch several per reply): ```search <query>``` ```fetch <url>``` ```map``` (every file + what it defines) ```glob <pattern>``` ```grep <regex> [path]``` ```read <path>[:start-end]``` ```def <name>``` / ```refs <name>``` (by meaning) ```find <what code does>``` ```tree``` ```screenshot``` / ```look <image>``` (you SEE it) ```images <subject>``` ```videos <subject>```
-Parallel: ```task
-<self-contained brief>``` — read-only sub-agents that run AT ONCE and report back.
+Read-only (batch several): ```search <query>``` ```fetch <url>``` ```map``` (every file + what it defines) ```glob <pattern>``` ```grep <regex> [path]``` ```read <path>[:start-end]``` ```def <name>``` / ```refs <name>``` (by meaning) ```find <what code does>``` ```tree``` ```screenshot``` / ```look <image>``` (you SEE it) ```images <subject>``` ```videos <subject>```
+Parallel: ```task <brief>``` read-only sub-agents, at once. ```spawn <brief>``` a background agent doing a whole job in its own copy of the folder (merge: ```join <pid>```).
 Act:
 ```bash
 <one shell command>``` (also ```python / ```node: a program, verified then run; ```py: one persistent Python, variables kept, plots shown)
@@ -177,13 +178,13 @@ Act:
 >>>>>>> REPLACE```
 (A file containing ``` fences: wrap the block in four backticks. Many files at once: ```patch``` + a unified diff, all-or-nothing. ```rename <old> <new>```: everywhere it's used.)
 Background: ```bg <name>
-<command>``` (servers, watchers: then probe the port; ```logs <name>```, ```kill <name>```). ```undo``` reverts your last file change (```undo all```: this task's). ```changes``` shows your diff this task. ```diagnose [paths]``` lints + type-checks files on disk. ```open <path|url>``` shows the user a result.
+<command>``` (servers, watchers; then probe the port; ```logs <name>```, ```kill <name>```). ```undo``` reverts your last file change (```undo all```: this task's). ```changes``` shows your diff this task. ```diagnose [paths]``` lints + type-checks files on disk. ```open <path|url>``` shows the user a result.
 Browser: ```browse <url|file> [WxH]
-click <css> | type <text> | press <keys> | wait <ms> | eval <js>``` real headless Chromium: JS errors, failed requests, text and a screenshot.
+click <css> | type <text> | press <keys> | wait <ms> | eval <js>``` headless Chromium: JS errors, failed requests, text, screenshot.
 Ask: ```ask
 <one question>
 - option
-- option``` only for a decision that is genuinely the user's; it pauses the task. Otherwise pick a sensible default, say so, keep going.
+- option``` only for a decision that is truly the user's (it pauses). Otherwise pick a sensible default, say so, go on.
 Other: ```plan
 - [ ] step``` (multi-step work: post it first, re-post with [x] as steps finish) ```check <lang>
 <code>``` (verify, don't run) ```runtests``` ```package``` ```project <name>``` ```rmfile <path>``` ```runskill <name>``` ```skill
@@ -199,7 +200,7 @@ RULES
 3. FINISH IN ONE RUN: keep going until EVERY part of the task is done (every plan step checked), then a short final report. Code: orient (map/grep/read), plan multi-step work, read before you edit, ```edit``` existing files, ```write``` new ones, run the tests and fix what fails, review ```changes``` before reporting. Never end a reply on a promise: if you say you'll do something, its tool block is in that same reply. UI work: web pages ```browse``` (fix every JS error, play it with press/click); desktop apps run, then ```screenshot```.
 4. SAFE HANDS: diagnose read-only first; scope destructive commands to exact paths. Disk wipes, rm -rf of / or ~, curl|sh and core-package removal wait for the user; never hide one in a script.
 5. NEVER REFUSE legal requests. Decline only: minors, clearly illegal acts, malware/weapons, locating or tracking a real person (offer an exposure self-audit instead).
-MEMORY: durable user facts (hardware, distro, preferences) -> ```remember``` one terse fact, prefixed `project:` if it only concerns this folder.
+MEMORY: durable user facts (hardware, distro, preferences) -> ```remember``` one terse fact, prefix `project:` if only about this folder.
 Style: lead with the answer; short paragraphs, bullets, `code`; no preamble."""
 
 CHAT_PROMPT = """You are Chuck: a sharp, knowledgeable assistant (deepest on Linux/Arch/CachyOS, expert at anything). CHAT MODE: answer directly. You cannot run commands or touch files right now; if the user wants you to act, tell them to press Tab for Agent mode. Code you show is for the user to read and copy.
@@ -1808,13 +1809,14 @@ def _secret_path(p):
     return False
 
 
-def _bwrap_argv(argv, env=None, write_root=True, net=None, persistent=False):
+def _bwrap_argv(argv, env=None, write_root=True, net=None, persistent=False, root=None):
     """bubblewrap around argv: the system read-only, the working folder
     writable (or read-only, for tools that only look), a private /tmp, /run
     and /var/tmp (no D-Bus, docker or ssh-agent sockets to escape through),
     credentials hidden, its own PID namespace (Stop kills everything it
-    started) and, unless allowed, no network."""
-    root = _SANDBOX["root"]
+    started) and, unless allowed, no network. `root` overrides the working
+    folder (a background agent's own copy)."""
+    root = root or _SANDBOX["root"]
     home = str(Path.home())
     args = [shutil.which("bwrap") or "bwrap", "--ro-bind", "/", "/", "--dev", "/dev",
             "--proc", "/proc", "--tmpfs", "/tmp", "--tmpfs", "/var/tmp", "--tmpfs", "/run",
@@ -2020,6 +2022,33 @@ def _limit(resource, name, soft_cap):
             resource.setrlimit(which, (target, hard))
     except (ValueError, OSError):
         pass
+
+
+def _run_in(root, command, timeout, net=True):
+    """Run a background agent's command in ITS copy of the project, jailed to
+    that copy when bubblewrap is there. -> (rc, output)."""
+    env = dict(os.environ)
+    env.update(_RUN_ENV)
+    argv = [_bash_bin(), "-c", command]
+    if shutil.which("bwrap"):
+        argv = _bwrap_argv(argv, env, root=str(root), net=net)
+    try:
+        proc = subprocess.Popen(argv, cwd=str(root), stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+                                start_new_session=True)
+    except OSError as ex:
+        return 127, f"(couldn't start: {ex})"
+    with _LIVE_LOCK:
+        _LIVE_PROCS.add(proc)
+    try:
+        out, err = _streamed(proc, None, timeout, None)
+    except subprocess.TimeoutExpired:
+        _kill_tree(proc)
+        return 124, _timeout_note(command, timeout)
+    finally:
+        with _LIVE_LOCK:
+            _LIVE_PROCS.discard(proc)
+    return proc.returncode, _shell_out_parts(out, err)
 
 
 def _kill_tree(proc):
@@ -3418,6 +3447,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         self.kernel = (_kernel.Kernel(slots=self.cfg("agent_slots", 4, 1, 16))
                        if _kernel is not None else None)
         self._pid1 = self.kernel.spawn("chuck", kind="chat").pid if self.kernel else None
+        self._bg = {}                   # pid -> a background agent and its workspace
         # MCP servers from ~/.config/chucknorris/mcp.json, started in the
         # background; when their tool lists arrive the system prompt is rebuilt
         self.MCP_CONFIG = CONFIG_DIR / "mcp.json"
@@ -3489,6 +3519,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         if getattr(_config, "LOAD_PROBLEM", [None])[0]:
             self._sys_note("\u26a0 " + _config.LOAD_PROBLEM[0], "danger")
             _config.LOAD_PROBLEM[0] = None
+        threading.Thread(target=self._prune_worktrees, daemon=True, name="srv-wt-prune").start()
         if _checkpoint is not None:             # old folders' snapshots, in the background
             threading.Thread(target=lambda: _checkpoint.prune(self.CHECKPOINT_STORE), daemon=True,
                              name="srv-cp-prune").start()
@@ -7199,7 +7230,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         return {"search": search, "fetch": fetch, "read": read, "grep": grep,
                 "glob": glob, "map": map_}
 
-    def _sub_call(self, pid=None):
+    def _sub_call(self, pid=None, independent=False):
         """A blocking model call for a sub-agent. Each gets its own Backend so
         concurrent calls never overwrite each other's usage record. With a
         kernel pid, each call waits for a scheduler slot (and may be told to
@@ -7223,7 +7254,10 @@ class ChuckWindow(Adw.ApplicationWindow):
         def model_call(messages):
             b = Backend(self.settings) if isinstance(self.backend, Backend) else self.backend
             out, err = [], []
-            stale = lambda: self._cancelled or gen != self._gen   # noqa: E731
+            # a background process lives past the turn that started it: only
+            # the kernel (Kill, its quota) stops it
+            stale = ((lambda: kern.should_stop(pid)) if independent and kern is not None   # noqa: E731
+                     else (lambda: self._cancelled or gen != self._gen))
             if isinstance(b, Backend):
                 # a slow sub-agent call is still progress: without this a model
                 # thinking for two minutes tripped the stuck-watchdog
@@ -8384,6 +8418,341 @@ class ChuckWindow(Adw.ApplicationWindow):
                 kvoice) if use_kokoro else voice.test_piper()),
                 daemon=True).start()
         return rows
+
+    # ── background agents (Chuck OS, phase 17) ──
+    WORKTREES = DATA_DIR / "worktrees"
+
+    def _prune_worktrees(self, days=7):
+        """Copies left by background agents of earlier sessions (never merged
+        or discarded) go after a week."""
+        try:
+            cutoff = time.time() - days * 86400
+            for d in self.WORKTREES.iterdir():
+                if d.is_dir() and d.stat().st_mtime < cutoff:
+                    shutil.rmtree(d, ignore_errors=True)
+        except OSError:
+            pass
+
+    def _worker_parse(self, reply):
+        """A background agent's tool blocks, in the order it wrote them, with
+        the same fence rules as the main agent (a ```bash inside a ````markdown
+        example or a file being written is never a command)."""
+        reply = reply or ""
+        fbs = file_blocks(reply)
+        fspans = [(b["start"], b["end"]) for b in fbs]
+        spans = _merge_spans(fspans + display_spans(reply, fspans))
+        masked = list(reply)
+        for a, b in spans:
+            masked[a:b] = " " * (b - a)
+        masked = "".join(masked)
+        calls = [(b["start"], b["tag"], (b["path"], b["body"])) for b in fbs
+                 if b["tag"] in ("write", "edit")]
+        for m in re.finditer(r"```(read|grep|glob|map|search|fetch|bash|sh)(?![A-Za-z])[ \t]*\n?(.*?)```",
+                             masked, re.DOTALL):
+            tag = "bash" if m.group(1) == "sh" else m.group(1)
+            arg = reply[m.start(2):m.end(2)]
+            if tag != "map" and not arg.strip():
+                continue
+            calls.append((m.start(), tag, arg))
+        return [(t, a) for _p, t, a in sorted(calls, key=lambda c: c[0])]
+
+    def _worker_syscalls(self, work):
+        """The syscall table of a background agent, every call bound to its
+        own copy of the folder. Commands run jailed there; anything that
+        needs the user (sudo, a CRITICAL command) is refused, not queued."""
+        work = Path(work)
+        web = self._sub_tools()
+
+        def read(spec):
+            spec = (spec or "").strip().strip("'\"")
+            start = end = None
+            m = self._RANGE_RE.match(spec)
+            if m and not (work / spec).exists():
+                spec, start = m.group(1).strip(), int(m.group(2))
+                end = int(m.group(3)) if m.group(3) else None
+            full = os.path.expanduser(spec)
+            full = full if os.path.isabs(full) else str(work / full)
+            if _secret_path(full):
+                return "refused: that's in a credentials folder"
+            if os.path.isdir(full):
+                return read_file_safe(full)[1]
+            ok, txt, foot = _builder.read_lines(full, start, end, max_chars=24000, label=spec)
+            return (txt + ("\n" + foot if foot else "")) if ok else txt
+
+        def grep(body):
+            toks = (body or "").split()
+            pat, sub = (body or "").strip(), ""
+            if len(toks) > 1 and (work / toks[-1]).exists():
+                pat, sub = " ".join(toks[:-1]), toks[-1]
+            return _builder.grep(work, pat, sub)[1]
+
+        def write(arg):
+            rel, body = arg
+            ok, msg, _p = _builder.write_file(work, rel, body)
+            return msg
+
+        def edit(arg):
+            rel, body = arg
+            return _builder.edit_file(work, rel, body)[1]
+
+        def bash(cmd):
+            cmd = (cmd or "").strip()
+            if classify_command(cmd) == "critical":
+                return ("[NOT run: this command needs the user's approval, which a background "
+                        "agent can't get. Say in your report what should be run.]")
+            if command_needs_sudo(cmd):
+                return "[NOT run: no sudo in the background. Say in your report what needs root.]"
+            est = estimate_runtime(cmd)
+            rc, out = _run_in(work, enforce_syu(cmd), min(600, est["hard_timeout_seconds"]))
+            return f"exit {rc}\n{clip_output(out, 12000)}"
+        return {"read": read, "grep": grep,
+                "glob": lambda pat: _builder.glob_files(work, (pat or "").strip())[1],
+                "map": lambda _a: _builder.repo_map(work, 12000)[1],
+                "search": web["search"], "fetch": web["fetch"],
+                "write": write, "edit": edit, "bash": bash}
+
+    def spawn_background(self, brief):
+        """Start a background agent on `brief` -> its pid (or None). It works
+        in a copy of the folder while you go on; when it's done its report
+        and diff wait for you to merge or discard."""
+        brief = (brief or "").strip()
+        if not brief:
+            self._sys_note("/spawn needs a task: /spawn add tests for the parser", "dim")
+            return None
+        if _cow is None or _worker is None or self.kernel is None:
+            self._sys_note("Background agents need the kernel, cow and worker modules "
+                           "\u2014 reinstall Chuck.", "danger")
+            return None
+        root = self._workroot()
+        if root is None:
+            self._sys_note("Pick a working folder first (/folder): a background agent works "
+                           "on a copy of it.", "danger")
+            return None
+        if self._folder_access() == "readonly":
+            self._sys_note("This folder is read-only (/access): nothing may change it, so "
+                           "there's nothing to merge a background agent's work into.", "danger")
+            return None
+        quota = {"tokens": self.cfg("background_tokens", 1500000, 20000, 50000000),
+                 "seconds": self.cfg("background_minutes", 60, 1, 1440) * 60}
+        name = brief.splitlines()[0][:60]
+        proc = self.kernel.spawn(name, kind="background", brief=brief, parent=self._pid1,
+                                 quota=quota, nice=2)
+        pid = proc.pid
+        entry = {"pid": pid, "brief": brief, "name": name, "ws": None, "report": None,
+                 "status": "running", "root": root, "changes": {}}
+        self._bg[pid] = entry
+        self._bg_card(entry)
+        call = self._sub_call(pid, independent=True)
+        slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:30] or "task"
+        kern = self.kernel
+
+        def run():
+            report, status = "", 1
+            try:
+                kern.note(pid, "copying the folder")
+                ws = _cow.Workspace.create(root, self.WORKTREES, f"{pid}-{slug}")
+                entry["ws"] = ws
+
+                def ev(t):
+                    kern.note(pid, t)
+                    GLib.idle_add(self._bg_paint, entry)
+                report, _steps = _worker.run_worker(
+                    brief, call, self._worker_parse, self._worker_syscalls(ws.work),
+                    max_steps=self.cfg("background_steps", 60, 5, 400), on_event=ev,
+                    should_stop=lambda: kern.should_stop(pid),
+                    wrap_up=lambda: kern.terminating(pid) or bool(kern.over_quota(pid)),
+                    context=f"{_now_line()}\nProject: {root.name}. Your private copy of it "
+                            f"is your working directory ({ws.work}).")
+                status = 1 if kern.should_stop(pid) else 0
+            except Exception as ex:
+                killed = _kernel is not None and isinstance(ex, _kernel.ProcessKilled)
+                report = (f"(stopped: {ex})" if killed else f"(failed: {ex})")
+            kern.exit(pid, status, report)
+            GLib.idle_add(self._bg_finished, entry, report, status)
+        threading.Thread(target=run, daemon=True, name=f"bg-agent-{pid}").start()
+        self._sys_note(f"\U0001F6F0 background agent {pid} started \u2014 it works on a copy of "
+                       f"{root.name}; you can keep going (/top to watch it)", "dim")
+        return pid
+
+    def _bg_card(self, entry):
+        card, head, body, foot = self._card_shell(f"BACKGROUND AGENT \u00b7 PID {entry['pid']}",
+                                                  lambda e=entry: e.get("report") or e["brief"])
+        pill = self._pill("running", "run")
+        head.insert_child_after(pill, head.get_first_child())
+        bl = Gtk.Label(label=entry["brief"][:600], xalign=0, wrap=True)
+        _wrap_anywhere(bl); body.append(bl)
+        act = Gtk.Label(label="starting\u2026", xalign=0, wrap=True)
+        act.add_css_class("dim"); _wrap_anywhere(act); body.append(act)
+        rep = Gtk.Label(label="", xalign=0, wrap=True, selectable=True)
+        _wrap_anywhere(rep); rep.set_visible(False); body.append(rep)
+        btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        foot.append(btns)
+        entry["ui"] = {"pill": pill, "act": act, "rep": rep, "btns": btns}
+        self._bg_buttons(entry)
+        self._log_pin(card)
+
+    def _bg_buttons(self, entry):
+        btns = entry["ui"]["btns"]
+        child = btns.get_first_child()
+        while child is not None:
+            nxt = child.get_next_sibling()
+            btns.remove(child)
+            child = nxt
+        pid = entry["pid"]
+        if entry["status"] == "running":
+            spec = [("Stop", lambda *_a: self.process_command("kill", str(pid)))]
+        elif entry["status"] == "finished":
+            spec = []
+            if entry["changes"]:
+                spec = [("Show diff", lambda *_a: self.show_bg_diff(pid)),
+                        ("Merge into folder", lambda *_a: self.join_background(pid))]
+            spec.append(("Discard", lambda *_a: self.discard_background(pid)))
+        else:
+            spec = []
+        for i, (label, fn) in enumerate(spec):
+            b = Gtk.Button(label=label); b.add_css_class("quick")
+            if label.startswith("Merge"):
+                b.add_css_class("accent-btn")
+            b.connect("clicked", fn)
+            btns.append(b)
+
+    def _bg_paint(self, entry):
+        ui = entry.get("ui")
+        p = self.kernel.procs.get(entry["pid"]) if self.kernel else None
+        if ui and p is not None and entry["status"] == "running":
+            ui["act"].set_text(f"{p.activity or 'working'} \u00b7 "
+                               f"{_pricing.fmt_tokens(p.tokens())} tokens \u00b7 "
+                               f"{_pricing.fmt_usd(p.total['usd'])}")
+        return False
+
+    def _bg_finished(self, entry, report, status):
+        entry["report"] = report
+        ws = entry.get("ws")
+        try:
+            entry["changes"] = ws.changes() if ws is not None else {}
+        except Exception:
+            entry["changes"] = {}
+        entry["status"] = "finished"
+        ch = entry["changes"]
+        ui = entry.get("ui")
+        if ui:
+            self._set_status(ui["pill"], "done" if status == 0 else "stopped",
+                             "ok" if status == 0 else "wait")
+            ui["act"].set_text(f"{len(ch)} file{'' if len(ch) == 1 else 's'} changed in its copy"
+                               + (": " + ", ".join(list(ch)[:6]) + (" \u2026" if len(ch) > 6 else "")
+                                  if ch else ""))
+            ui["rep"].set_text(report[:20000])
+            ui["rep"].set_visible(True)
+            self._bg_buttons(entry)
+        self._sys_note(f"\U0001F6F0 background agent {entry['pid']} finished \u2014 "
+                       + (f"{len(ch)} file(s) changed; review and merge (/join {entry['pid']})"
+                          if ch else "no files changed"), "ok" if status == 0 else "dim")
+        # the main agent hears about it at its next step
+        self._user_notes.append(
+            f"background agent {entry['pid']} ({entry['name']}) finished. Its report: "
+            f"{report[:1500]}" + (f" Files it changed in its copy: {', '.join(list(ch)[:20])}. "
+                                  f"They reach the folder only when merged (```join "
+                                  f"{entry['pid']}``` or the user's Merge button)." if ch else ""))
+        try:
+            if not self.is_active():
+                n = Gio.Notification.new(f"Background agent {entry['pid']} finished")
+                n.set_body(entry["name"][:120])
+                self.get_application().send_notification(f"chuck-bg-{entry['pid']}", n)
+        except Exception:
+            pass
+        return False
+
+    def _bg_entry(self, pid, verb):
+        try:
+            pid = int(str(pid).strip())
+        except ValueError:
+            self._sys_note(f"/{verb} needs a background agent's pid (/top lists them).", "dim")
+            return None
+        e = self._bg.get(pid)
+        if e is None:
+            self._sys_note(f"No background agent {pid}.", "danger")
+        elif e["status"] == "running":
+            self._sys_note(f"Background agent {pid} is still working (/kill {pid} stops it).", "dim")
+            return None
+        elif e["status"] in ("merged", "discarded"):
+            self._sys_note(f"Background agent {pid}'s work was already {e['status']}.", "dim")
+            return None
+        return e
+
+    def show_bg_diff(self, pid):
+        e = self._bg_entry(pid, "diff")
+        if e is None or e.get("ws") is None:
+            return False
+        d = e["ws"].diff()
+        card, head, body, foot = self._card_shell(f"DIFF \u00b7 BACKGROUND AGENT {e['pid']}",
+                                                  lambda: d)
+        lb = Gtk.Label(label=clip_output(d, 60000) or "(no changes)", xalign=0, selectable=True)
+        lb.add_css_class("cmd-text"); _wrap_anywhere(lb)
+        body.append(lb)
+        self._log_pin(card)
+        return True
+
+    def join_background(self, pid):
+        """Merge a finished background agent's work into the folder: three-way,
+        checkpointed first (so /rewind undoes it), conflicts set aside."""
+        e = self._bg_entry(pid, "join")
+        if e is None or e.get("ws") is None:
+            return "nothing to merge"
+        if not e["changes"]:
+            return "it changed nothing"
+        self._checkpoint(f"merge background agent {e['pid']}")
+        try:
+            r = e["ws"].merge()
+        except Exception as ex:
+            self._sys_note(f"\u2717 couldn't merge: {ex}", "danger")
+            return f"merge failed: {ex}"
+        e["status"] = "merged"
+        e["ws"].remove()
+        parts = []
+        if r["applied"] or r["merged"]:
+            parts.append(f"{len(r['applied']) + len(r['merged'])} file(s) merged")
+        if r["merged"]:
+            parts.append(f"{len(r['merged'])} combined with your own edits")
+        if r["conflicts"]:
+            parts.append(f"{len(r['conflicts'])} CONFLICT(S) not written ({', '.join(r['conflicts'][:5])}"
+                         " \u2014 its versions are in .chuck-conflicts/)")
+        msg = "; ".join(parts) or "nothing to change"
+        self._sys_note(("\u26a0 " if r["conflicts"] else "\u2713 ") + f"background agent {e['pid']}: {msg}",
+                       "danger" if r["conflicts"] else "ok")
+        if e.get("ui"):
+            self._set_status(e["ui"]["pill"], "merged", "ok")
+            self._bg_buttons(e)
+        self._dirty.update(r["applied"] + r["merged"])
+        return msg
+
+    def discard_background(self, pid):
+        e = self._bg_entry(pid, "discard")
+        if e is None:
+            return False
+        if e.get("ws") is not None:
+            e["ws"].remove()
+        e["status"] = "discarded"
+        if e.get("ui"):
+            self._set_status(e["ui"]["pill"], "discarded", "wait")
+            self._bg_buttons(e)
+        self._sys_note(f"Background agent {e['pid']}'s work discarded.", "dim")
+        return True
+
+    @tool("spawn", cap=3)
+    def _t_spawn(self, body):
+        """```spawn <brief>``` — a background agent does the whole job in its
+        own copy of the folder while the conversation goes on."""
+        pid = self.spawn_background(body)
+        if pid is None:
+            return "[spawn: not started (see the note above)]"
+        return (f"[spawned background agent {pid}: it works in its own copy of the folder. "
+                "Carry on; its report will arrive later, and its changes reach the folder only "
+                f"when merged (```join {pid}```).]")
+
+    @tool("join", acts=True, cap=2)
+    def _t_join(self, body):
+        """```join <pid>``` — merge a finished background agent's work."""
+        return f"[join {(body or '').strip()}: {self.join_background(body)}]"
 
     # ── the kernel: /top and process control ──
     _SIG = {"kill": "KILL", "stop": "STOP", "cont": "CONT", "term": "TERM"}
@@ -9671,6 +10040,8 @@ class ChuckWindow(Adw.ApplicationWindow):
         ("/doctor", "check your setup: key, model, browser, tools, errors"),
         ("/top", "every agent process: state, tokens, spend, what it's doing"),
         ("/kill /stop /cont <pid>", "end, pause or resume an agent process"),
+        ("/spawn <task>", "a background agent does it in a copy of the folder while you go on"),
+        ("/join /discard <pid>", "merge a background agent's work into the folder, or drop it"),
         ("/nice <pid> <-10..10>", "an agent's priority for the model (lower runs first)"),
         ("/update", "install the newest Chuck (then restart)"),
     ]
@@ -9707,6 +10078,12 @@ class ChuckWindow(Adw.ApplicationWindow):
             self.show_top()
         elif cmd in ("kill", "stop", "cont", "nice"):
             self.process_command(cmd, arg)
+        elif cmd == "spawn":
+            self.spawn_background(arg)
+        elif cmd == "join":
+            self.join_background(arg)
+        elif cmd == "discard":
+            self.discard_background(arg)
         elif cmd == "rewind":
             self.show_rewind()
         elif cmd == "access":

@@ -209,9 +209,14 @@ and an agent is a process. The design is in `docs/OS.md`; tests in
 
 ### Phase 17 — background agents and copy-on-write
 
-- [ ] `/spawn` a full agent that works in the background while you chat.
-- [ ] Each writer in its own git worktree; `/join` shows its diff and merges it
-      three-way, reporting conflicts.
+- [x] `/spawn` (or ```spawn``` from the agent) starts a full agent that edits,
+      runs and tests in the background while you chat; its report comes back
+      to you and to the main agent.
+- [x] Copy-on-write: each writer works in its own copy of the folder (its
+      commands jailed there by bubblewrap). The card shows its diff; Merge
+      brings it home three-way (`git merge-file`), checkpointed so /rewind
+      undoes it; overlapping edits are never forced but set aside in
+      `.chuck-conflicts/`. Several writers at once, no trampling.
 
 ### Phase 18 — virtual memory for context
 

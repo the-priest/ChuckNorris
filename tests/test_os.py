@@ -8,6 +8,7 @@ sys.path.insert(0, _ROOT)
 then wired into the real window on the stub toolkit."""
 import threading
 import time
+from shutil import which as shutil_which
 
 from chucknorris_ext import kernel as K
 
@@ -221,6 +222,117 @@ check(all(x["state"] != "running" for x in w.kernel.ps() if x["kind"] == "subage
       "and Stop ends the rest of the turn's sub-agents")
 settle()
 check(w.process_command("kill", str(w._pid1)) is False, "PID 1 can't be killed from /kill (Esc stops a turn)")
+
+# ═══════════════════════════════════════════════════════════════════════════
+print("\n--- background agents: copy-on-write workspaces, fork and join ---")
+from chucknorris_ext import cow as C
+src = tmp / "cowproj"
+src.mkdir()
+(src / "a.py").write_text("one\ntwo\nthree\nfour\nfive\n")
+(src / "c.py").write_text("c1\nc2\nc3\n")
+(src / "del.py").write_text("bye\n")
+(src / "node_modules").mkdir()
+(src / "node_modules" / "big.js").write_text("x")
+ws_ = C.Workspace.create(src, tmp / "wt", "t1")
+check(not (ws_.work / "node_modules").exists() and (ws_.work / "a.py").exists(),
+      "a workspace copies the project, not its dependencies")
+(ws_.work / "a.py").write_text("ONE\ntwo\nthree\nfour\nfive\n")
+(ws_.work / "c.py").write_text("c1\nAGENT\nc3\n")
+(ws_.work / "new.py").write_text("new\n")
+(ws_.work / "del.py").unlink()
+(src / "a.py").write_text("one\ntwo\nthree\nfour\nFIVE\n")      # you, meanwhile
+(src / "c.py").write_text("c1\nYOURS\nc3\n")
+check(ws_.changes() == {"a.py": "modified", "c.py": "modified", "del.py": "deleted", "new.py": "added"},
+      "it knows exactly what the agent changed", ws_.changes())
+r_ = ws_.merge()
+check((src / "a.py").read_text() == "ONE\ntwo\nthree\nfour\nFIVE\n" and r_["merged"] == ["a.py"],
+      "your edit and the agent's to different lines of one file are merged three-way")
+check((src / "c.py").read_text() == "c1\nYOURS\nc3\n" and r_["conflicts"] == ["c.py"]
+      and (src / ".chuck-conflicts" / "c.py").read_text() == "c1\nAGENT\nc3\n",
+      "overlapping edits are never forced: yours stays, the agent's is set aside")
+check((src / "new.py").exists() and not (src / "del.py").exists(), "new and deleted files carry over")
+
+
+class BgBackend(SubBackend):
+    """Background agents act by their brief."""
+    def stream(self, messages, on_delta, on_done, on_error, vision=False,
+               should_stop=None, attempts=3, on_open=None):
+        sysmsg = messages[0]["content"] if messages else ""
+        if sysmsg.startswith("You are a background agent"):
+            brief = messages[1]["content"]
+            n = sum(1 for m in messages if m["role"] == "assistant")
+            tag = brief.split()[0].rstrip(":")
+            if n == 0:
+                on_delta(f"Writing it.\n```write {tag}.txt\nmade by {tag}\n```\n"
+                         f"```bash\ncat {tag}.txt && pwd && touch /tmp/escape-{tag}\n```")
+            elif n == 1 and "slow" in brief:
+                time.sleep(1.0)
+                on_delta(f"```bash\necho still working\n```")
+            else:
+                on_delta(f"REPORT: wrote {tag}.txt and checked it with cat.")
+            self.last_usage = {"prompt": 800, "completion": 100, "cached": 0, "reasoning": 0}
+            on_done()
+            return
+        super().stream(messages, on_delta, on_done, on_error, vision, should_stop,
+                       attempts, on_open)
+
+
+proj = tmp / "bgproj"
+proj.mkdir()
+(proj / "app.py").write_text("print('hi')\n")
+w = new_win([], tmp)
+w.set_agent_mode(True, announce=False)
+w.set_workspace(proj, announce=False)
+w.backend = BgBackend(["```spawn\nalpha: add a file\n```\nStarted it.", "ok"])
+type_and_send(w, "do it in the background")
+bgs = [r for r in w.kernel.ps(all=True) if r["kind"] == "background"]
+check(len(bgs) == 1, "```spawn``` starts a background agent process", bgs)
+pid = bgs[0]["pid"]
+check(w.kernel.wait(pid, timeout=20) is not None, "it runs to the end on its own")
+settle()
+e = w._bg[pid]
+check(not (proj / "alpha.txt").exists() and e["changes"] == {"alpha.txt": "added"},
+      "its work stays in its own copy until merged", e["changes"])
+cat_out = " ".join(str(m.get("content")) for m in w.history)
+check("made by alpha" in str(e["report"]) or "wrote alpha.txt" in str(e["report"]),
+      "and it reports back", e["report"])
+check(any("background agent" in n for n in w._user_notes) or "background agent" in cat_out,
+      "the main agent is told it finished")
+texts = [x.get_text() for x in w.msgbox.walk() if isinstance(x.get_text(), str)]
+check(any(t.startswith("BACKGROUND AGENT") for t in texts) and "Merge into folder" in
+      [x.get_label() for x in w.msgbox.walk() if isinstance(x, cn.Gtk.Button)],
+      "its card offers the diff and a merge")
+check(w.show_bg_diff(pid) and any("+made by alpha" in str(x.get_text()) for x in w.msgbox.walk()
+                                   if isinstance(x.get_text(), str)),
+      "the diff shows exactly what it would change")
+msg = w.join_background(pid)
+check((proj / "alpha.txt").read_text() == "made by alpha\n" and "merged" in msg,
+      "merging brings its work into the folder", msg)
+check(w._bg[pid]["status"] == "merged" and not w._bg[pid]["ws"].dir.exists(),
+      "and its copy is cleaned up")
+check(w.join_background(pid) == "nothing to merge", "a second merge does nothing")
+if shutil_which("bwrap"):
+    check(not Path("/tmp/escape-alpha").exists(), "its commands are jailed to its copy (no writes outside)")
+p1 = w.spawn_background("beta: one file\nslow")
+p2 = w.spawn_background("gamma: another file")
+check(p1 and p2 and len([r for r in w.kernel.ps() if r["kind"] == "background"]) >= 1,
+      "two background agents can run at once")
+w.kernel.wait(p1, 20); w.kernel.wait(p2, 20)
+settle()
+w.join_background(p1); w.join_background(p2)
+check((proj / "beta.txt").exists() and (proj / "gamma.txt").exists(),
+      "and both merge: two writers, no trampling")
+p3 = w.spawn_background("delta: will be stopped\nslow")
+time.sleep(0.3)
+w.process_command("kill", str(p3))
+w.kernel.wait(p3, 10)
+settle()
+check(w._bg[p3]["status"] == "finished" and not (proj / "delta.txt").exists(),
+      "a killed background agent leaves the folder alone")
+check(w.discard_background(p3) and w._bg[p3]["status"] == "discarded", "and its work can be discarded")
+w.set_access("readonly")
+check(w.spawn_background("eps: nope") is None, "no background agent in a read-only folder")
+w.set_access("full")
 
 print(f"\nTOTAL OS FAILURES: {fails}")
 assert fails == 0 and not FAILS, "OS regressions present"
