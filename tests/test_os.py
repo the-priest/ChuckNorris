@@ -1528,6 +1528,49 @@ w._account(4000, 400, usage={"prompt": 1000, "completion": 100, "cached": 0, "re
 check(w._ledger.today() > before, "a model with no known price still counts against the budget")
 w.settings["model"] = cn.DEFAULT_MODEL
 
+print("\n--- the command palette (Ctrl+P) ---")
+from chucknorris_ext import palette as PA
+its = [{"title": "New mission…", "group": "Agent OS", "keywords": "plan big job"},
+       {"title": "Missions", "group": "Agent OS"}, {"title": "Settings", "group": "Settings"},
+       {"title": "Use DeepSeek-V4-Flash", "group": "Models", "keywords": "deepseek-ai/DeepSeek-V4-Flash"},
+       {"title": "Kill 4 · survey the auth module", "group": "Processes"}]
+check(PA.rank(its, "miss")[0]["title"] == "Missions" and PA.rank(its, "mission")[0]["title"] == "Missions",
+      "a title that starts with what you typed comes first")
+check(PA.rank(its, "nmis")[0]["title"].startswith("New mission"), "letters in order find it ('nmis')")
+check(PA.rank(its, "big job")[0]["title"].startswith("New mission"), "keywords find it too")
+check(PA.rank(its, "auth")[0]["title"].startswith("Kill 4"), "and words inside a title")
+check(PA.rank(its, "zzzq") == [], "nothing that doesn't match")
+w = new_win([], tmp)
+w.set_agent_mode(True, announce=False)
+w.set_workspace(mproj, announce=False)
+sp2 = w.kernel.spawn("survey the auth module", kind="subagent", parent=w._pid1)
+items = w.palette_items()
+titles = [i["title"] for i in items]
+groups = {i["group"] for i in items}
+check({"Agent OS", "Processes", "Programs", "Chat", "Code", "Folder", "Models", "Voice", "Settings"} <= groups,
+      "the palette organises everything into groups", groups)
+check(any(t.startswith(f"Kill {sp2.pid}") for t in titles) and any(t == "Run reviewer…" for t in titles)
+      and any(t.startswith("Use ") for t in titles), "live processes, programs and models are in it")
+it = next(i for i in items if i["title"] == "Activity: everything waiting and working")
+w.palette_run(it)
+check("ACTIVITY" in notes(), "running an item does it")
+it = next(i for i in items if i["title"] == "New mission…")
+w.palette_run(it)
+check(w.entry.get_buffer().get_text() == "/mission ", "an item that needs more puts it in the composer to finish")
+w.entry.get_buffer().set_text("")
+kill = next(i for i in items if i["title"].startswith(f"Kill {sp2.pid}"))
+w.palette_run(kill)
+check(w.kernel.procs[sp2.pid].state == "killed", "killing an agent from the palette works")
+check(w.open_palette() and w._palette_state["rows"]["rows"], "Ctrl+P opens it with rows to choose from")
+ps = w._palette_state
+ps["search"].set_text("diff")
+ps["fill"]()
+first = ps["rows"]["rows"][0]._item
+check(first["title"] == "Show the diff", "typing filters it, best match first", first["title"])
+ps["run"](ps["rows"]["rows"][0])
+settle()
+check(w._palette_win is None, "running a row closes it")
+
 print(f"\nTOTAL OS FAILURES: {fails}")
 assert fails == 0 and not FAILS, "OS regressions present"
 print("ALL OS TESTS PASSED")

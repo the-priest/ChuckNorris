@@ -78,6 +78,12 @@ Some jobs are too big for one agent. A mission plans the goal as a small graph o
 
 <img src="assets/screenshots/os-mission.png" alt="A MISSION card: five tasks with dependencies; three finished (one merged after its tests passed), one running, one waiting, with spend so far and Report / Trace / Replay per task" width="100%">
 
+### Ctrl+P: everything, one search away
+
+**Ctrl+P** (or Ctrl+K) opens the command palette: every action Chuck has, organised in groups. That's the agent OS (activity, processes, missions, daemons, inbox, board, budget, governor), each running agent (Kill, Trace, Replay, Message), your programs, chat and code actions (diff, commit, review, rewind), folders and folder access, models, voice, recent chats and settings. Type a few letters (`nmis` finds *New mission*), move with the arrows, press Enter. An action that needs more, like a mission's goal, is put in the composer for you to finish.
+
+<p align="center"><img src="assets/screenshots/palette.png" alt="The command palette: a search box and the Agent OS group: Activity, Processes, New mission, Missions, Background agent, Daemons, Inbox, Board, Budget, Governor" width="620"></p>
+
 ### The tray: the OS at a glance
 
 When something is going on, a small tray appears in the header: `? 1  ▶ 2  ◎ 1  ✉ 1` means a question is waiting for you, two agents are working, a mission is running, and a daemon left a report. It lights up when an agent is waiting for your answer. Click it (or type `/activity`) for one card with all of it, each with a button to act on it.
@@ -371,6 +377,7 @@ Commands run on their own; that's the point of an agent. **CRITICAL** ones (disk
 | **Ctrl+R** · **↑** | retry the last answer · edit your last message |
 | **Ctrl+M** | talk to Chuck (local speech recognition) |
 | **Ctrl+V** | paste text, an image, or copied files |
+| **Ctrl+P** · **Ctrl+K** | the command palette: every action, agent, chat and model |
 | **Ctrl+O** | working folder |
 | **Ctrl+N** · **Ctrl+B** · **Ctrl+,** | new chat · chats sidebar · settings |
 | **Esc** | stop the current run (and its command) |

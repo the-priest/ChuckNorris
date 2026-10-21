@@ -46,6 +46,9 @@ The third roadmap (`docs/ROADMAP.md`, phases 10–15), with tests in
   step and survive a crash or a reboot (Resume at the next start);
   `/replay <pid>` shows a run step by step and `/fork <pid> <step>
   [instruction]` starts a new agent from any step, files as they were then.
+- **Ctrl+P, the command palette**: every action, running agent, program,
+  mission, chat, folder and model in groups, fuzzy-searched; Enter runs it
+  or puts what it needs in the composer.
 - **The tray**: a header indicator of questions waiting, agents working,
   missions and unread reports (lit when an agent waits for you); a click or
   `/activity` lists them all with a button for each.

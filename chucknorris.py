@@ -128,6 +128,7 @@ _programs = _optional("programs")
 _hibernate = _optional("hibernate")
 _missions = _optional("missions")
 _budget = _optional("budget")
+_palette = _optional("palette")
 if _pricing is None:
     class _pricing:                     # noqa: N801  — the meter, minus prices
         """Stand-in so a partial install still launches: tokens are counted,
@@ -328,6 +329,18 @@ button.tray { background-color: @surface; border: 1px solid @line; border-radius
              font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace; box-shadow: none; }
 button.tray:hover { border-color: alpha(@accent, 0.5); background-color: @surface2; }
 button.tray.tray-ask { border-color: @accent; color: @accent_hi; background-color: @accent_bg; }
+window.palette { background-color: transparent; }
+.palette-box { background-color: @surface; border: 1px solid @line2; border-radius: 14px;
+               padding: 8px; box-shadow: 0 18px 48px rgba(0,0,0,0.55); }
+.palette-search { font-size: 15px; min-height: 40px; margin: 2px 2px 8px 2px; }
+.palette-list { background: transparent; }
+.palette-list > row { padding: 7px 10px; border-radius: 8px; color: @body; }
+.palette-list > row:selected { background-color: @accent_bg; color: @ink; }
+.palette-list > row:selected .palette-hint { color: @accent_hi; }
+.palette-group { font-size: 10.5px; letter-spacing: 1px; font-weight: 700; color: @accent_hi;
+                 margin: 10px 4px 2px 4px; }
+.palette-hint { font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace; font-size: 11px; }
+.palette-foot { font-size: 11px; margin: 8px 6px 2px 6px; }
 
 /* ── transcript ──────────────────────────────────────────────────────── */
 .chat-scroll, .chat-scroll > viewport { background-color: @bg; }
@@ -5621,6 +5634,8 @@ class ChuckWindow(Adw.ApplicationWindow):
                 self.retry_last(); return True
             if k == getattr(Gdk, "KEY_m", -3):
                 self.toggle_listen(); return True
+            if k in (getattr(Gdk, "KEY_p", -4), getattr(Gdk, "KEY_k", -5)):
+                self.open_palette(); return True
         return False
 
     # ── indicators ──
@@ -10332,6 +10347,264 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._mission_card(m)
             self._mission_step(m)
 
+    # ── the command palette (Ctrl+P): everything Chuck can do, one search away ──
+    def palette_items(self):
+        """Every action as an item, built fresh (live processes, missions,
+        programs, chats, folders, models). An item runs `fn`, or puts
+        `compose` in the composer for you to finish (a goal, a brief)."""
+        items = []
+
+        def add(group, title, fn=None, keys="", hint="", compose=None, keywords=""):
+            items.append({"group": group, "title": title, "fn": fn, "keys": keys, "hint": hint,
+                          "compose": compose, "keywords": keywords, "order": len(items)})
+        for pid, (_ev, box, q) in list(getattr(self, "_asks", {}).items()):
+            add("Waiting for you", f"Answer pid {pid}: {q[:70]}",
+                lambda p=pid, qq=q, b=box: self._ask_card(p, qq, b), keywords="question ask")
+        add("Agent OS", "Activity: everything waiting and working", self.show_activity,
+            hint="/activity", keywords="tray status")
+        add("Agent OS", "Processes (top)", self.show_top, hint="/top", keywords="ps kill agents")
+        add("Agent OS", "New mission…", compose="/mission ", hint="/mission <goal>",
+            keywords="plan big job graph agents")
+        add("Agent OS", "Missions", self.show_missions, hint="/missions")
+        add("Agent OS", "Background agent…", compose="/spawn ", hint="/spawn <task>",
+            keywords="spawn copy worktree")
+        add("Agent OS", "New daemon…", compose="/daemon ", hint="/daemon <when>: <what>",
+            keywords="schedule watch cron trigger")
+        add("Agent OS", "Daemons", self.show_daemons, hint="/daemons")
+        add("Agent OS", "Inbox (daemon reports)", self.show_inbox, hint="/inbox")
+        add("Agent OS", "Board (what agents share)", self.show_board, hint="/board")
+        add("Agent OS", "Budget", lambda: self.budget_command(""), hint="/budget",
+            keywords="spend money limit cost")
+        if _governor is not None:
+            cur = _governor.mode_of(self.settings)
+            for mode in _governor.MODES:
+                add("Agent OS", f"Governor: {mode}" + (" ✓" if mode == cur else ""),
+                    lambda md=mode: self.governor_command(md), hint="/governor",
+                    keywords="model cheap fast")
+        if self.kernel is not None:
+            for r in self.kernel.ps():
+                if r["pid"] == self._pid1:
+                    continue
+                label = f"{r['pid']} · {r['name'][:50]}"
+                add("Processes", f"Kill {label}", lambda p=r["pid"]: self.process_command("kill", str(p)),
+                    hint=r["state"], keywords="stop end")
+                add("Processes", f"Trace {label}", lambda p=r["pid"]: self.show_strace(str(p)),
+                    hint="/strace", keywords="strace syscalls")
+                if r["pid"] in self._bg:
+                    add("Processes", f"Replay {label}", lambda p=r["pid"]: self.show_replay(str(p)),
+                        hint="/replay")
+                    add("Processes", f"Message {label}…", compose=f"/send {r['pid']} ",
+                        hint="/send", keywords="tell steer")
+        for m in sorted(getattr(self, "_missions", {}).values(), key=lambda x: -x.get("created", 0))[:8]:
+            done, n = _missions.progress(m) if _missions else (0, 0)
+            add("Missions", f"Mission: {m['goal'][:60]} ({m['state']}, {done}/{n})",
+                lambda mm=m: self._mission_card(mm))
+        for name, p in sorted(self.programs().items()):
+            add("Programs", f"Run {name}…", compose=f"/run {name} ",
+                hint=p["mode"], keywords=p.get("description", ""))
+        add("Chat", "New chat", self.new_chat, keys="Ctrl+N")
+        add("Chat", "Retry the last answer", self.retry_last, keys="Ctrl+R")
+        add("Chat", "Switch Agent / Chat mode", self.toggle_mode, keys="Tab")
+        add("Chat", "Plan mode on/off", lambda: self.set_plan_mode(not self.plan_mode),
+            hint="/plan", keywords="approve")
+        add("Chat", "Compact the conversation", self.compact_now, hint="/compact",
+            keywords="summarise context")
+        add("Chat", "Export this chat", self.export_chat, hint="/export", keywords="markdown save")
+        add("Chat", "Cost of this chat", lambda: self._slash("/cost"), hint="/cost")
+        add("Code", "Show the diff", self.show_git_diff, hint="/diff", keywords="git changes")
+        add("Code", "Commit", lambda: self._slash("/commit"), hint="/commit", keywords="git")
+        add("Code", "Review the uncommitted changes", lambda: self._slash("/review"), hint="/review",
+            keywords="bugs")
+        add("Code", "Rewind files and chat", self.show_rewind, hint="/rewind", keywords="undo checkpoint")
+        add("Code", "Write CHUCK.md for this project", lambda: self._slash("/init"), hint="/init",
+            keywords="rules instructions")
+        add("Code", "Doctor: check the setup", self.run_doctor, hint="/doctor")
+        add("Folder", "Choose a working folder…", self.open_workspace, keys="Ctrl+O")
+        for path in (self.settings.get("recent_workspaces") or [])[:8]:
+            if path and os.path.isdir(path):
+                add("Folder", f"Open {_short_path(path)}",
+                    lambda p=path: self.set_workspace(p), keywords=path)
+        for mode, label in (("full", "full access"), ("sandbox-net", "sandboxed"),
+                            ("sandbox", "sandboxed, offline"), ("readonly", "read-only")):
+            add("Folder", f"Folder access: {label}", lambda md=mode: self.set_access(md),
+                hint="/access", keywords="safety bubblewrap")
+        cur_model = (self.settings.get("model") or DEFAULT_MODEL)
+        for mid in _pricing.SUGGESTED + [mm for mm in (self.settings.get("models") or [])
+                                         if mm not in _pricing.SUGGESTED][:8]:
+            add("Models", f"Use {mid.split('/')[-1]}" + (" ✓" if mid == cur_model else ""),
+                lambda x=mid: self.set_model(x), keywords=mid)
+        add("Voice", "Talk to Chuck", self.toggle_listen, keys="Ctrl+M", keywords="mic speech")
+        add("Voice", "Read replies aloud on/off", lambda: self.tts_btn.set_active(not self.tts_btn.get_active()),
+            keywords="tts speak")
+        add("Voice", "Install the natural voice and voice input", lambda: self.offer_voice_install("both"),
+            hint="/voice")
+        try:
+            for f in chat_files()[:12]:
+                try:
+                    title = (json.loads(f.read_text()).get("title") or "chat").strip().replace("\n", " ")
+                except Exception:
+                    continue
+                add("Chats", f"Open chat: {title[:70]}", lambda p=f: self._load_chat(p))
+        except Exception:
+            pass
+        add("Settings", "Settings", self.open_settings, keys="Ctrl+,")
+        add("Settings", "Memory & skills", self.open_memory)
+        add("Settings", "Update Chuck", self.run_update, hint="/update")
+        add("Settings", "Toggle the chats sidebar", lambda: self.side_btn.set_active(not self.side_btn.get_active()),
+            keys="Ctrl+B")
+        seen = {it["hint"].split()[0] for it in items if it["hint"].startswith("/")}
+        for c, d in self.SLASH_HELP + [(f"/{n}", dsc or "your command")
+                                       for n, (_p, dsc) in sorted(self.custom_commands().items())]:
+            first = c.split()[0]
+            if first not in seen and first.startswith("/"):
+                takes = len(c.split()) > 1
+                add("Commands", f"{c}  — {d}"[:110], (lambda cc=first: self._slash(cc)) if not takes else None,
+                    compose=(first + " ") if takes else None)
+        return items
+
+    def palette_run(self, item):
+        """Run one palette item (the window is already closed)."""
+        if item.get("compose"):
+            self.entry.get_buffer().set_text(item["compose"])
+            try:
+                self.entry.grab_focus()
+                buf = self.entry.get_buffer()
+                buf.place_cursor(buf.get_end_iter())
+            except Exception:
+                pass
+            return True
+        if item.get("fn"):
+            item["fn"]()
+            return True
+        return False
+
+    def open_palette(self, *_a):
+        """Ctrl+P: search every action, arrows to move, Enter to run."""
+        if _palette is None:
+            return False
+        if getattr(self, "_palette_win", None) is not None:
+            try:
+                self._palette_win.present()
+                return True
+            except Exception:
+                pass
+        items = self.palette_items()
+        win = Gtk.Window(transient_for=self, modal=True, decorated=False)
+        win.add_css_class("palette")
+        try:
+            width = min(720, max(420, int(self.get_width()) - 80))
+        except (TypeError, ValueError):
+            width = 640
+        win.set_default_size(width, 460)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        box.add_css_class("palette-box")
+        search = Gtk.SearchEntry(hexpand=True)
+        search.set_placeholder_text("Type a command, an agent, a chat, a model…  (Esc closes)")
+        search.add_css_class("palette-search")
+        box.append(search)
+        sc = Gtk.ScrolledWindow(vexpand=True)
+        sc.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        lb = Gtk.ListBox()
+        lb.add_css_class("palette-list")
+        lb.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        sc.set_child(lb)
+        box.append(sc)
+        foot = Gtk.Label(label="↑↓ move · Enter run · Esc close", xalign=0)
+        foot.add_css_class("dim"); foot.add_css_class("palette-foot")
+        box.append(foot)
+        win.set_child(box)
+        state = {"rows": []}
+
+        def fill(*_x):
+            c = lb.get_first_child()
+            while c is not None:
+                n = c.get_next_sibling(); lb.remove(c); c = n
+            q = search.get_text() if hasattr(search, "get_text") else ""
+            shown = _palette.rank(items, q)
+            state["rows"] = []
+            last_group = None
+            for it in shown:
+                if not q and it["group"] != last_group:
+                    last_group = it["group"]
+                    hr = Gtk.ListBoxRow(); hr.set_selectable(False); hr.set_activatable(False)
+                    hl = Gtk.Label(label=it["group"].upper(), xalign=0)
+                    hl.add_css_class("palette-group")
+                    hr.set_child(hl)
+                    lb.append(hr)
+                row = Gtk.ListBoxRow()
+                rb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+                t = Gtk.Label(label=it["title"], xalign=0, hexpand=True)
+                if Pango is not None:
+                    t.set_ellipsize(Pango.EllipsizeMode.END)
+                rb.append(t)
+                side = it["keys"] or it["hint"] or (it["group"] if q else "")
+                if side:
+                    s_ = Gtk.Label(label=side, xalign=1)
+                    s_.add_css_class("dim"); s_.add_css_class("palette-hint")
+                    rb.append(s_)
+                row.set_child(rb)
+                row._item = it
+                lb.append(row)
+                state["rows"].append(row)
+            if state["rows"]:
+                lb.select_row(state["rows"][0])
+
+        def close(*_x):
+            self._palette_win = None
+            try:
+                win.destroy()
+            except Exception:
+                pass
+
+        def run_row(row):
+            it = getattr(row, "_item", None)
+            close()
+            if it is not None:
+                GLib.idle_add(lambda: (self.palette_run(it), False)[1])
+
+        def move(d):
+            rows = state["rows"]
+            if not rows:
+                return
+            cur = lb.get_selected_row()
+            i = rows.index(cur) if cur in rows else -1
+            nxt = rows[max(0, min(len(rows) - 1, i + d))]
+            lb.select_row(nxt)
+            try:
+                nxt.grab_focus(); search.grab_focus()
+            except Exception:
+                pass
+
+        def on_key(_c, keyval, _code, _state):
+            if keyval == Gdk.KEY_Escape:
+                close(); return True
+            if keyval in (Gdk.KEY_Down, getattr(Gdk, "KEY_KP_Down", -1)):
+                move(1); return True
+            if keyval in (Gdk.KEY_Up, getattr(Gdk, "KEY_KP_Up", -1)):
+                move(-1); return True
+            if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+                row = lb.get_selected_row() or (state["rows"][0] if state["rows"] else None)
+                if row is not None:
+                    run_row(row)
+                return True
+            return False
+        kc = Gtk.EventControllerKey()
+        kc.connect("key-pressed", on_key)
+        win.add_controller(kc)
+        search.connect("search-changed", fill)
+        lb.connect("row-activated", lambda _l, row: run_row(row))
+        win.connect("close-request", lambda *_x: (setattr(self, "_palette_win", None), False)[1])
+        fill()
+        self._palette_win = win
+        self._palette_state = {"items": items, "fill": fill, "search": search, "run": run_row,
+                               "rows": state, "close": close}
+        win.present()
+        try:
+            search.grab_focus()
+        except Exception:
+            pass
+        return True
+
     # ── the system tray: the OS at a glance ──
     def _activity(self):
         """What the OS is doing right now, for the tray and its card."""
@@ -12192,6 +12465,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         ("/missions", "your missions and how far they got"),
         ("/budget [day|month <$>]", "what everything spent today and this month, and the limits"),
         ("/activity", "everything waiting for you and everything working (the tray in the header)"),
+        ("Ctrl+P", "the command palette: every action, agent, chat and model, one search away"),
         ("/send <pid> <message>", "tell a running agent something; it hears it at its next step"),
         ("/answer <pid> <text>", "answer an agent that asked you a question"),
         ("/board", "the facts agents share with each other"),
