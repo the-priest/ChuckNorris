@@ -15,42 +15,66 @@ import re
 
 # block devices, incl. NVMe / virtio / SD / loop / device-mapper (not just sdX)
 _DEV = r"/dev/(?:sd[a-z]|nvme\d+n\d+|vd[a-z]|hd[a-z]|mmcblk\d+|loop\d+|dm-\d+|disk\d+)"
-# a "root-ish" target: / itself, /*, ~, $HOME, a bare wildcard, or cwd
-_NUKE_TARGET = r"(?:/|/\*|~|~/\*|\$HOME(?:/\*)?|\*|\.)"
+# where a command starts: line start, after ; & | ( ` or $( , optionally under
+# sudo (with its flags), env VAR=..., command or exec
+_CMD = (r"(?:^|[\n;&|(`]|\$\()\s*(?:sudo(?:\s+-\S+)*\s+)?(?:env\s+(?:\S+=\S*\s+)*)?"
+        r"(?:command\s+|exec\s+|nohup\s+)?\\?(?:/usr)?(?:/s?bin/)?")
+_Q = r"""["']?"""
+# home, every way it's written; and the top-level system directories
+_HOME = r"(?:~|\$HOME\b|\$\{HOME\}|/home/[^/\s'\";&|]+|/home|/root)"
+_SYS = r"/(?:etc|usr|boot|var|bin|sbin|lib|lib32|lib64|opt|srv|dev|proc|sys|nix|snap)"
+# a "root-ish" target: / itself, /*, home, a system dir, a bare wildcard, or cwd
+_NUKE_TARGET = _Q + r"(?:/\*?|" + _HOME + r"(?:/\*?)?|" + _SYS + r"/?\*?|\*|\.)/?" + _Q
+# the same without "." and "*": `find . -delete` or `chmod -R 755 .` in a
+# project is ordinary work
+_BROAD = _Q + r"(?:/\*?|" + _HOME + r"(?:/\*?)?|" + _SYS + r"/?\*?)/?" + _Q
+# a target ends at whitespace, a separator, a comment, a redirect or the line end
+_TEND = r"(?=\s|$|[;&|)#<>`])"
 # rm with recursive intent, short cluster (-rf/-fr/-Rf) or long flags
-_RM_REC = r"\brm\s+(?:(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive|--force|-[a-zA-Z]*f[a-zA-Z]*)\s+)+"
+_RM_REC = r"\brm\s+(?:(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive|--force|-[a-zA-Z]*f[a-zA-Z]*|--)\s+)+"
+_ARGS = r"(?:[^\s;&|]+\s+)*?"                     # other arguments before the target
+_SHELL = r"(?:sudo(?:\s+-\S+)*\s+)?(?:env\s+(?:\S+=\S*\s+)*)?(?:ba|z|k|da|fi)?sh\b"
+_INTERP = r"(?:" + _SHELL + r"|(?:sudo(?:\s+-\S+)*\s+)?(?:python3?|perl|ruby|node)\b)"
 
 CRITICAL = re.compile(
-    # rm -rf aimed at root / home / bare wildcard
-    _RM_REC + _NUKE_TARGET + r"\s*(?:$|[;&|])"
+    # rm -rf aimed at root / home / a system dir / a bare wildcard
+    _RM_REC + _ARGS + _NUKE_TARGET + _TEND +
     r"|--no-preserve-root"
-    # filesystem / partition / crypto destruction
-    r"|\bmkfs(?:\.[a-z0-9]+)?\b|\bwipefs\b|\bblkdiscard\b|\bshred\b"
+    # filesystem / partition / crypto destruction (as a command, not a word in
+    # a grep or an echo; a version or help query is harmless)
+    r"|" + _CMD + r"(?:mkfs(?:\.\w+)?|mke2fs|mkfs\w*|wipefs|blkdiscard|shred|userdel)\b"
+    r"(?![^\n;&|]*\s(?:-V|--version|--help|-h)\b)"
     r"|\bcryptsetup\s+(?:luksFormat|erase)\b"
-    r"|\b(?:parted|fdisk|sgdisk|cfdisk|gdisk)\b[^|;]*" + _DEV +
-    r"|\bsgdisk\b[^|;]*--zap-all"
+    r"|" + _CMD + r"(?:parted|fdisk|sgdisk|cfdisk|gdisk)\b"
+    r"(?![^\n;&|]*\s(?:-l|--list|print|-p|--print)\b)[^\n;&|]*" + _DEV +
+    r"|\bsgdisk\b[^\n;&|]*--zap-all"
     # raw writes to a block device
-    r"|\bdd\b[^|;]*\bof=" + _DEV +
+    r"|\bdd\b[^\n;&|]*\bof=" + _DEV +
     r"|>\s*" + _DEV +
-    # remote code execution: curl/wget piped into a shell
-    r"|\b(?:curl|wget)\b[^|;&]*\|\s*(?:sudo\s+)?(?:ba|z|k)?sh\b"
+    r"|\btee\s+(?:-a\s+)?" + _DEV +
+    r"|\bcp\b[^\n;&|]*\s" + _DEV + _TEND +
+    # remote code execution: a download piped into a shell or interpreter,
+    # or run through process substitution / $(...)
+    r"|\b(?:curl|wget)\b[^\n;&|]*\|\s*" + _INTERP +
+    r"|(?:<\(|\$\()\s*(?:curl|wget)\b"
+    r"|\bbase64\s+(?:-d|--decode)\b[^\n;&]*\|\s*" + _INTERP +
     # clobbering critical system files
-    r"|>\s*/etc/(?:passwd|shadow|sudoers|fstab)\b"
+    r"|>\s*/etc/(?:passwd|shadow|sudoers|fstab|group)\b"
+    r"|\btee\s+(?:-a\s+)?/etc/(?:passwd|shadow|sudoers|fstab|group)\b"
     r"|\btruncate\s+-s\s*0\s+/(?:etc|boot)/"
     r"|\bmv\s+(?:/|/etc|/boot|/home|~)\S*\s+/dev/null\b"
     # mass delete via find on a broad path
-    r"|\bfind\s+(?:/|~|\$HOME)\S*[^|;]*-delete\b"
-    r"|\bfind\s+(?:/|~|\$HOME)\S*[^|;]*-exec\s+rm\b"
+    r"|\bfind\s+" + _BROAD + _TEND + r"[^\n;&|]*(?:-delete\b|-exec\s+rm\b)"
+    r"|\bgit\s+clean\b[^\n;&|]*\s" + _BROAD + _TEND +
     # fork bomb
     r"|:\(\)\s*\{"
     # ripping out core packages
-    r"|\bpacman\s+-R[a-z]*\s+[^|;]*\b(?:systemd|glibc|linux|bash|coreutils|pacman)\b"
-    # recursive permission/ownership destruction from root
-    r"|\bchmod\s+-R\s+[0-7]{3,4}\s+/\s*(?:$|[;&|])"
-    r"|\bchown\s+-R\s+\S+\s+/\s*(?:$|[;&|])"
-    # account destruction
-    r"|\buserdel\b|\bpasswd\s+-d\b",
-    re.IGNORECASE)
+    r"|\bpacman\s+-R[a-z]*\s+[^\n|;]*(?<![\w-])(?:systemd|glibc|linux|bash|coreutils|pacman)(?![\w-])"
+    # recursive permission/ownership destruction on root, home or a system dir
+    r"|\bchmod\b(?=[^\n;&|]*\s-[a-zA-Z]*R)[^\n;&|]*\s" + _BROAD + _TEND +
+    r"|\bchown\b(?=[^\n;&|]*\s-[a-zA-Z]*R)[^\n;&|]*\s" + _BROAD + _TEND +
+    r"|\bpasswd\s+-d\b",
+    re.IGNORECASE | re.MULTILINE)
 
 DANGER = re.compile(
     # everything critical, plus scoped-but-destructive things worth reading twice
@@ -67,19 +91,64 @@ DANGER = re.compile(
     r"|\bpacman\s+-R"
     r"|\btruncate\s+-s\s*0\b"
     r"|\bfind\b[^|;]*-delete\b|\bfind\b[^|;]*-exec\s+rm\b",
-    re.IGNORECASE)
+    re.IGNORECASE | re.MULTILINE)
+
+# the command inside bash -c '…', sh -c "…" or eval "…" is a command too
+_INNER = re.compile(r"""(?:\b(?:ba|z|k|da)?sh\s+(?:-\w+\s+)*-c|\beval)\s+(['"])(.*?)(?<!\\)\1""",
+                    re.DOTALL)
 
 
-def classify_command(cmd):
+def classify_command(cmd, _depth=0):
     """Return 'critical', 'danger', or '' for a shell command string.
     Static and fast — this runs on every card, so it must never be slow."""
     if not cmd:
         return ""
+    cmd = cmd.replace("\\\n", " ")                  # line continuations
     if CRITICAL.search(cmd):
         return "critical"
-    if DANGER.search(cmd):
-        return "danger"
-    return ""
+    worst = "danger" if DANGER.search(cmd) else ""
+    if _depth < 3:
+        for m in _INNER.finditer(cmd):
+            inner = classify_command(m.group(2), _depth + 1)
+            if inner == "critical":
+                return "critical"
+            worst = worst or inner
+    return worst
+
+
+# ── code blocks: Python / JavaScript that destroys the same things ─────────
+_PY_HOME = (r"(?:(?:pathlib\.)?Path\.home\(\)|os\.path\.expanduser\(\s*['\"]~/?['\"]\s*\)"
+            r"|os\.(?:environ\[['\"]HOME['\"]\]|getenv\(\s*['\"]HOME['\"]\s*\))"
+            r"|os\.homedir\(\)|homedir\(\)|process\.env\.HOME"
+            r"|(?:Path\()?['\"](?:/|~|~/|/home|/home/[^/'\"]+|/root|" + _SYS[1:] + r")/?['\"]\)?)")
+_CODE_CRIT = re.compile(
+    r"\b(?:shutil\.)?rmtree\(\s*" + _PY_HOME +
+    r"|\b(?:fs\.)?(?:rmSync|rmdirSync|rm|rmdir)\(\s*" + _PY_HOME + r"[^)]*recursive"
+    r"|\bopen\(\s*['\"]" + _DEV + r"['\"]\s*,\s*['\"][wa]"
+    r"|\b(?:os\.)?(?:remove|unlink)\(\s*['\"]/etc/(?:passwd|shadow|sudoers|fstab)['\"]",
+    re.IGNORECASE)
+_STR = re.compile(r"""(?:[rbuf]{0,2})(['"])((?:\\.|(?!\1).)*)\1""")
+_LIST = re.compile(r"""\[\s*((?:[rbuf]{0,2}(['"])(?:\\.|(?!\2).)*\2\s*,\s*)+[rbuf]{0,2}(['"])(?:\\.|(?!\3).)*\3)\s*,?\s*\]""")
+
+
+def classify_code(lang, code):
+    """'critical', 'danger' or '' for a python/node program: the shell
+    commands inside its strings (os.system("rm -rf ~"), ['rm', '-rf', '/'])
+    and the library calls that do the same (rmtree(Path.home()))."""
+    if not code:
+        return ""
+    if _CODE_CRIT.search(code):
+        return "critical"
+    worst = ""
+    cmds = [m.group(2) for m in _STR.finditer(code)]
+    for m in _LIST.finditer(code):
+        cmds.append(" ".join(x.group(2) for x in _STR.finditer(m.group(1))))
+    for c in cmds:
+        r = classify_command(c)
+        if r == "critical":
+            return "critical"
+        worst = worst or r
+    return worst
 
 
 # pacman AND its AUR wrappers: paru/yay take the same flag grammar, and a bare

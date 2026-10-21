@@ -46,7 +46,7 @@ except Exception:                     # the headless test stub has no Pango
 # optional so a partial install still launches.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from chucknorris_ext.safety import (            # noqa: E402
-    classify_command, enforce_syu)
+    classify_command, classify_code, enforce_syu)
 from chucknorris_ext import safety as _safety   # noqa: E402
 CRITICAL = _safety.CRITICAL                     # re-exported: tests + callers
 DANGER = _safety.DANGER
@@ -1345,9 +1345,10 @@ def _inject_askpass(command):
 
 
 def _ensure_askpass_helper():
-    """Write (once, 0700) a tiny askpass helper that echoes $CHUCK_SUDO_PW. The
-    script holds NO secret — the password reaches it only via the environment of
-    the single sudo call."""
+    """Write (once, 0700) a tiny askpass helper that prints the password file
+    named by $CHUCK_SUDO_PWFILE. Neither the helper nor the environment holds
+    the secret: an env var would be inherited by everything the script runs
+    (and `env` would print it into the chat)."""
     path = CONFIG_DIR / ".chuck-askpass.sh"
     try:
         try:
@@ -1357,7 +1358,7 @@ def _ensure_askpass_helper():
         fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o700)
         try:
             os.fchmod(fd, 0o700)          # defeat umask before content lands
-            os.write(fd, b'#!/bin/sh\nprintf "%s\\n" "$CHUCK_SUDO_PW"\n')
+            os.write(fd, b'#!/bin/sh\ncat "$CHUCK_SUDO_PWFILE" 2>/dev/null\n')
         finally:
             os.close(fd)
         return str(path)
@@ -1387,21 +1388,36 @@ def _run_sudo_askpass(script, password, timeout, env):
         return None
     e2 = dict(env)
     e2["SUDO_ASKPASS"] = helper
-    e2["CHUCK_SUDO_PW"] = password
+    pwfile = None
     try:
+        # a 0600 file in the user's runtime dir (tmpfs), removed straight after
+        fd, pwfile = tempfile.mkstemp(prefix=".chuck-pw-",
+                                      dir=os.environ.get("XDG_RUNTIME_DIR") or None)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(password + "\n")
+        e2["CHUCK_SUDO_PWFILE"] = pwfile
         p = _guarded_proc([_bash_bin(), "-c", _inject_askpass(script)], timeout, e2)
         low = (p.stderr or "").lower()
         if p.returncode != 0 and ("a terminal is required" in low or "askpass" in low
                                   or "no password was provided" in low
                                   or "a password is required" in low):
             return _SUDO_AUTH_FAILED, "sudo: askpass authentication failed."
-        return p.returncode, _shell_out(p)
+        return p.returncode, _scrub_pw(_shell_out(p), password)
     except subprocess.TimeoutExpired:
         return 124, _timeout_note(script, timeout)
     except Exception as ex:
         return 1, f"(error: {ex})"
     finally:
-        e2["CHUCK_SUDO_PW"] = ""
+        if pwfile:
+            try:
+                os.unlink(pwfile)
+            except OSError:
+                pass
+
+
+def _scrub_pw(text, password):
+    """Whatever a command printed, the password never reaches the chat."""
+    return text.replace(password, "\u2022\u2022\u2022\u2022") if password and len(password) >= 3 else text
 
 
 def _run_sudo(script, password, timeout, env):
@@ -1416,6 +1432,12 @@ def _run_sudo(script, password, timeout, env):
                                    "/etc/doas.conf, or install sudo.")
     # -k clears any stale timestamp so -S -v truly validates the piped password;
     # rc 97 is our private "auth failed" sentinel.
+    if _ASKPASS_FIRST[0] and pe["askpass"]:
+        # this machine's sudo doesn't carry a validated password to the
+        # command's own sudo calls: authenticate each one, from the start
+        alt = _run_sudo_askpass(script, password, timeout, env)
+        if alt is not None:
+            return alt
     prelude = f"{binname} -k 2>/dev/null\n{binname} -S -p '' -v || exit 97\n"
     try:
         p = _guarded_proc([_bash_bin(), "-c", prelude + script], timeout, env,
@@ -1436,15 +1458,22 @@ def _run_sudo(script, password, timeout, env):
                                    "a typo, a `Defaults rootpw/targetpw` policy (sudo "
                                    "wants ROOT's password, not yours), or your user not "
                                    "being in the wheel group.")
-    # -v succeeded but an inner sudo still failed (timestamp didn't carry) → askpass
+    # -v succeeded but an inner sudo still failed (the timestamp didn't carry).
+    # Running the script AGAIN with askpass would repeat everything that did
+    # run (an append, a mv): instead say so, and use askpass from now on.
     low = (p.stderr or "").lower()
     if p.returncode != 0 and pe["askpass"] and (
             "a terminal is required" in low or "no password was provided" in low
             or "a password is required" in low or "askpass" in low):
-        alt = _run_sudo_askpass(script, password, timeout, env)
-        if alt is not None:
-            return alt
-    return p.returncode, _shell_out(p)
+        _ASKPASS_FIRST[0] = True
+        return p.returncode, _scrub_pw(_shell_out(p), password) + (
+            "\n(sudo on this machine doesn't keep the password between calls, so the "
+            "sudo steps above failed; the rest of the script ran once. Chuck now "
+            "authenticates every sudo call itself \u2014 run the sudo steps again.)")
+    return p.returncode, _scrub_pw(_shell_out(p), password)
+
+
+_ASKPASS_FIRST = [False]
 
 
 # ── command runtime awareness: how long should this take, when to give up ─────
@@ -6206,6 +6235,8 @@ class ChuckWindow(Adw.ApplicationWindow):
             gate_text = self._sanitise_skill_body(gate_text, cmd)
         judged = cmd if gate_text is None else (cmd + "\n" + gate_text)
         tier = classify_command(judged)
+        if gate_text and tier != "critical" and re.match(r"(?:\S*/)?(?:python3?|node)\b", cmd):
+            tier = classify_code("python", gate_text) or tier   # a python/node skill's body
 
         card, head, cbody, foot = self._card_shell("COMMAND", lambda: cmd)
         prompt = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -6215,6 +6246,15 @@ class ChuckWindow(Adw.ApplicationWindow):
         ct.add_css_class("cmd-text"); _wrap_anywhere(ct)
         prompt.append(dollar); prompt.append(ct)
         cbody.append(prompt)
+        if gate_text:
+            # a skill runs as `bash /path/x.sh`: show what is IN it, so an
+            # approval is of the real thing
+            lines_ = gate_text.splitlines()
+            shown = "\n".join(lines_[:40]) + (f"\n\u2026 {len(lines_) - 40} more lines"
+                                              if len(lines_) > 40 else "")
+            sk = Gtk.Label(label=shown, xalign=0, wrap=True, selectable=True)
+            sk.add_css_class("cmd-text"); sk.add_css_class("dim"); _wrap_anywhere(sk)
+            cbody.append(sk)
         status = self._pill("queued", "wait")
 
         if tier == "critical":
@@ -6504,7 +6544,9 @@ class ChuckWindow(Adw.ApplicationWindow):
             if fixed != body:
                 self._sys_note("using -Syu (a plain -S risks a partial upgrade)", "dim")
             body = add_noconfirm(fixed)
-        tier = classify_command(body)
+        # shell is judged as shell; a program by the commands in its strings
+        # and the library calls that delete the same things (rmtree(home))
+        tier = classify_command(body) if lang in ("bash", "sh") else classify_code(lang, body)
 
         card, chead, cbody, foot = self._card_shell(
             "PYTHON SESSION" if lang == "py" and _pysession is not None else lang.upper(),
@@ -6825,8 +6867,10 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._sys_note("skill needs a name and a body.", "danger"); return
         ok, msg, run_cmd = _skills.skill_write(name, lang or "bash", body, desc)
         self._sys_note(("\U0001F4BE " if ok else "\u26a0 ") + msg, "ok" if ok else "danger")
-        if ok and run_cmd:
-            self._sys_note("\u2192 run it now:"); self._command_card(run_cmd, gate_text=body)
+        # saving is not running (it used to start at once, unchecked): it runs
+        # when asked, through the same gate as any command
+        self._tool_feedback.append(f"[skill {name}: {msg}" + (f" \u2014 ```runskill {name}``` runs it]"
+                                                             if ok else "]"))
 
     def _run_skill(self, name):
         if not _skills:
