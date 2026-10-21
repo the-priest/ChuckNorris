@@ -268,7 +268,7 @@ class BgBackend(SubBackend):
                          f"```bash\ncat {tag}.txt && pwd && touch /tmp/escape-{tag}\n```")
             elif n == 1 and "slow" in brief:
                 time.sleep(1.0)
-                on_delta(f"```bash\necho still working\n```")
+                on_delta("```bash\necho still working\n```")
             else:
                 on_delta(f"REPORT: wrote {tag}.txt and checked it with cat.")
             self.last_usage = {"prompt": 800, "completion": 100, "cached": 0, "reasoning": 0}
@@ -618,6 +618,158 @@ check(not w._daemon_live, "and the daemon is free to fire again")
 w2 = new_win([], tmp)
 check(len(w2._daemons.items) == len(w._daemons.items) and w2._inbox.items,
       "daemons and the inbox survive a restart")
+
+# ═══════════════════════════════════════════════════════════════════════════
+print("\n--- capabilities, programs and the governor ---")
+k = K.Kernel()
+a = k.spawn("root")
+b = k.spawn("reader", parent=a.pid, caps={"read", "net"})
+c = k.spawn("wants-more", parent=b.pid, caps={"read", "write", "exec"})
+check(a.caps is None and b.caps == {"read", "net"} and c.caps == {"read"},
+      "a child's capabilities are clipped to its parent's", (b.caps, c.caps))
+check(k.can(c.pid, "read") and not k.can(c.pid, "write") and not k.can(999, "read"),
+      "can() answers per process; an unknown pid may do nothing")
+k.syscall(c.pid, "read", "src/app.py", 2.5, 1200)
+k.syscall(c.pid, "write", ("x.py", "body"), 0, 0, denied=True)
+tr = k.strace(c.pid)
+check(len(tr) == 2 and tr[0][1:5] == ("read", "src/app.py", 2.5, 1200) and tr[1][2] == "x.py" and tr[1][5],
+      "every syscall is logged with its latency and size, denials marked", tr)
+
+from chucknorris_ext import governor as G, programs as PG, pricing as PR
+chat = "zai-org/GLM-5.3-Flash"
+S = {"governor": "performance"}
+check(all(G.pick(S, r, chat, PR.PRICES, PR.SUGGESTED) == chat for r in G.ROLE_NAMES),
+      "performance: every call on the chat model")
+S = {"governor": "balanced"}
+fast = G.fast_model(S, chat, PR.PRICES, PR.SUGGESTED)
+check(fast == "deepseek-ai/DeepSeek-V4-Flash", "the fast model is the cheapest suggested one", fast)
+check(G.pick(S, "main", chat, PR.PRICES, PR.SUGGESTED) == chat
+      and G.pick(S, "background", chat, PR.PRICES, PR.SUGGESTED) == chat
+      and G.pick(S, "sub", chat, PR.PRICES, PR.SUGGESTED) == fast
+      and G.pick(S, "daemon", chat, PR.PRICES, PR.SUGGESTED) == fast,
+      "balanced: writing on the chat model, reading on the fast one")
+check(G.pick({"governor": "powersave"}, "main", chat, PR.PRICES, PR.SUGGESTED) == fast,
+      "powersave: everything on the fast model")
+check(G.fast_model({"fast_model": "Qwen/Qwen3-8B"}, chat, PR.PRICES, PR.SUGGESTED) == "Qwen/Qwen3-8B",
+      "the fast model can be chosen")
+check(G.fast_model({}, "deepseek-ai/DeepSeek-V4-Flash", PR.PRICES, PR.SUGGESTED)
+      == "deepseek-ai/DeepSeek-V4-Flash", "when the chat model is already the cheapest, it stays")
+check(0.2 < G.saving(S, chat, PR.PRICES, PR.SUGGESTED) < 0.9, "and it knows what it saves",
+      G.saving(S, chat, PR.PRICES, PR.SUGGESTED))
+check(G.mode_of({"governor": "turbo"}) == "performance", "an unknown mode is performance")
+
+progs, probs = PG.load([])
+check(set(progs) >= {"reviewer", "tester", "auditor", "checkup", "researcher", "explainer"} and not probs,
+      "the built-in programs all parse", probs)
+check(PG.caps_of(progs["reviewer"]) == {"read", "exec"} and PG.caps_of(progs["tester"]) == {"read", "write", "exec"}
+      and PG.caps_of(progs["researcher"]) == {"read", "net"}, "a program's capabilities follow from its tools")
+for bad, why in (("---\nmode: report\ntools: read write\n---\nx", "can't use write"),
+                 ("---\nmode: sideways\n---\nx", "mode must be"), ("---\nmode: report\n---\n", "no prompt"),
+                 ("---\ntokens: lots\n---\nx", "must be a number")):
+    try:
+        PG.parse(bad, "bad")
+        check(False, f"refused: {why}")
+    except PG.ProgramError as ex:
+        check(why in str(ex), f"a broken program is refused ({why})", ex)
+pdir = tmp / "progs"
+pdir.mkdir()
+(pdir / "reviewer.md").write_text("---\ndescription: mine\nmode: report\ntools: read\n---\nMy review.")
+(pdir / "Bad Name.md").write_text("x")
+progs, probs = PG.load([pdir])
+check(progs["reviewer"]["description"] == "mine" and progs["reviewer"]["source"].endswith("reviewer.md")
+      and probs, "your program replaces a built-in of the same name; a bad file is reported", probs)
+
+
+class ProgBackend(BgBackend):
+    def stream(self, messages, on_delta, on_done, on_error, vision=False,
+               should_stop=None, attempts=3, on_open=None):
+        sysmsg = messages[0]["content"] if messages else ""
+        if sysmsg.startswith("You are an agent program"):
+            self.seen.append((sysmsg, messages[1]["content"]))
+            n = sum(1 for m in messages if m["role"] == "assistant")
+            if n == 0:
+                on_delta("```bash\necho reviewing-$((2+2))\n```\n```fetch https://example.com```\n"
+                         "```write hack.txt\nx\n```")
+            else:
+                self.results.append(messages[-1]["content"])
+                on_delta("2 bugs found\nparser.py:3 crashes on empty input.")
+            self.last_usage = {"prompt": 400, "completion": 40, "cached": 0, "reasoning": 0}
+            on_done()
+            return
+        super().stream(messages, on_delta, on_done, on_error, vision, should_stop,
+                       attempts, on_open)
+
+
+w = new_win([], tmp)
+w.set_agent_mode(True, announce=False)
+w.set_workspace(proj, announce=False)
+w.backend = ProgBackend([])
+w.backend.seen, w.backend.results = [], []
+check("PROGRAMS (" in w.history[0]["content"] and "reviewer" in w.history[0]["content"],
+      "the agent knows which programs it can run")
+pid = w.run_program("reviewer the parser")
+w.kernel.wait(pid, 20); settle()
+p = w.kernel.procs[pid]
+check(p.kind == "program" and p.program == "reviewer" and p.caps == {"read", "exec"},
+      "/run starts a program as a process with the program's capabilities", (p.kind, p.caps))
+check(w.backend.seen and "YOUR PROGRAM (reviewer)" in w.backend.seen[0][0]
+      and w.backend.seen[0][1] == "the parser", "it runs the program's prompt on your input")
+res = w.backend.results[0] if w.backend.results else ""
+check("reviewing-4" in res and "fetch is not available" in res and "write is not available" in res
+      and not (proj / "hack.txt").exists(), "only the program's own tools exist for it", res[:500])
+tr = w.kernel.strace(pid)
+check([t[1] for t in tr] == ["bash"] and tr[0][3] >= 0, "and its syscalls are traced", tr)
+texts = notes()
+check(any(t.startswith("PROGRAM REVIEWER") for t in texts) and any("2 bugs found" in t for t in texts),
+      "its card and its headline show in the chat")
+check(w.show_strace(str(pid)) and any(t.startswith("STRACE") for t in notes())
+      and any("capabilities: read exec" in t for t in notes()), "/strace shows them")
+w.set_access("sandbox")
+w.backend.results.clear()
+(CONFIG := cn.CONFIG_DIR / "programs").mkdir(parents=True, exist_ok=True)
+(CONFIG / "webby.md").write_text("---\ndescription: looks things up\nmode: report\ntools: bash fetch\n---\nLook it up.")
+pid2 = w.run_program("webby")
+w.kernel.wait(pid2, 20); settle()
+res = w.backend.results[-1] if w.backend.results else ""
+check("no 'net' capability" in res and not w.kernel.can(pid2, "net"),
+      "in an offline-sandboxed folder a program loses the network, and the kernel refuses it", res[:300])
+check(any(t[5] for t in w.kernel.strace(pid2)), "the refusal is in its trace")
+w.set_access("full")
+(CONFIG / "maker.md").write_text("---\ndescription: makes a file\nmode: act\ntools: read write bash\n---\nMake it.")
+w.backend = ProgBackend(["```spawn\n@maker kappa: make a file\n```\nStarted.", "ok"])
+w.backend.seen, w.backend.results = [], []
+type_and_send(w, "have maker do it")
+bgs = [r for r in w.kernel.ps(all=True) if r["kind"] == "background" and r["program"] == "maker"]
+check(bgs and bgs[0]["caps"] == "read write exec", "```spawn @program``` runs an act program in a copy", bgs)
+if bgs:
+    w.kernel.wait(bgs[0]["pid"], 20); settle()
+    e = w._bg[bgs[0]["pid"]]
+    check(e["changes"] == {"kappa.txt": "added"} and not (proj / "kappa.txt").exists(),
+          "its work waits in its copy for a merge", e["changes"])
+d = [r for r in w.kernel.ps(all=True) if r["kind"] == "subagent"]
+w.backend = SubBackend(["```task\nfind hello\n```", "done"])
+type_and_send(w, "look")
+sub = [r for r in w.kernel.ps(all=True) if r["kind"] == "subagent"][-1]
+check(sub["caps"] == "read net", "sub-agents run with read and net only", sub["caps"])
+sv = w._guard(sub["pid"], {"write": lambda a: "WROTE", "read": lambda a: "ok"})
+check(sv["write"](("x", "y")).startswith("[refused") and sv["read"]("x") == "ok",
+      "the guard refuses a syscall the process has no capability for")
+w.entry.get_buffer().set_text("/governor balanced")
+w.on_send()
+check(w.settings.get("governor") == "balanced" and any(t.startswith("GOVERNOR") for t in notes()),
+      "/governor switches mode and shows who runs on what")
+bk = cn.Backend(w.settings)
+bk.role = "sub"
+m_sub = bk.model()
+bk.role = "main"
+check(m_sub != bk.model() and m_sub == cn._governor.fast_model(w.settings, bk.model(), PR.PRICES, PR.SUGGESTED),
+      "a sub-agent's call goes to the fast model under balanced", (m_sub, bk.model()))
+bk.pin = "zai-org/GLM-5.3"
+check(bk.model() == "zai-org/GLM-5.3", "a program's pinned model wins")
+w.settings["governor"] = "performance"
+w.entry.get_buffer().set_text("/programs")
+w.on_send()
+check("PROGRAMS" in notes() and any(t.startswith("webby") for t in notes()), "/programs lists them")
 
 print(f"\nTOTAL OS FAILURES: {fails}")
 assert fails == 0 and not FAILS, "OS regressions present"

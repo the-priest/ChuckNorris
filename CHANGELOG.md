@@ -23,7 +23,7 @@ The third roadmap (`docs/ROADMAP.md`, phases 10–15), with tests in
   **voice input** (Moonshine, local; mic button or Ctrl+M, optional
   hands-free sending).
 
-### Chuck OS (`docs/OS.md`, phases 16–19)
+### Chuck OS (`docs/OS.md`, phases 16–20)
 
 - **The agent kernel.** Every agent is a process: a quota of tokens, money
   and time, its spend charged to it and every ancestor, scheduled onto
@@ -36,6 +36,12 @@ The third roadmap (`docs/ROADMAP.md`, phases 10–15), with tests in
 - **Virtual memory for the context**: old tool output is paged out of what
   is sent, exactly recoverable with ```` ```page pN ````, before anything is
   summarised.
+- **Capabilities, programs, a governor.** Every agent process holds
+  capabilities (read, write, exec, net, spawn) clipped to its parent's and
+  checked at every tool call; `/strace <pid>` shows each call it made.
+  Agent programs are installable Markdown files (six built in: reviewer,
+  tester, auditor, checkup, researcher, explainer): `/run`, `/programs`,
+  ```` ```spawn @name ````. `/governor` puts cheap work on a cheap model.
 - **Daemons** (`/daemon <when>: <what>`, `/daemons`, `/inbox`): agents that
   sleep for free until a schedule, a file change, a failed service, a full
   disk or a command's output wakes them; they look, report and propose,

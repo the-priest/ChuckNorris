@@ -105,7 +105,7 @@ print("  all 6 malformed replies survived without hanging")
 
 head("8 stop mid-run restores the button")
 class Slow(ScriptedBackend):
-    def stream(self, messages, on_delta, on_done, on_error, vision=False, should_stop=None):
+    def stream(self, messages, on_delta, on_done, on_error, vision=False, should_stop=None, **_k):
         self.calls.append(len(messages))
         for _ in range(200):
             if should_stop and should_stop(): return

@@ -24,6 +24,13 @@ READY, RUNNING, WAITING, STOPPED, DONE, FAILED, KILLED = (
 LIVE = (READY, RUNNING, WAITING, STOPPED)
 # signals
 STOP, CONT, TERM, KILL, INFO = "STOP", "CONT", "TERM", "KILL", "INFO"
+# capabilities: what a process may do. None means all of them (PID 1, the
+# user's own chat); a child gets at most what its parent has.
+CAPS = ("read", "write", "exec", "net", "spawn")
+# the capability each syscall needs
+SYSCALL_CAP = {"read": "read", "grep": "read", "glob": "read", "map": "read", "page": "read",
+               "write": "write", "edit": "write", "patch": "write", "rename": "write",
+               "bash": "exec", "search": "net", "fetch": "net", "spawn": "spawn", "task": "spawn"}
 
 
 class ProcessKilled(Exception):
@@ -32,8 +39,9 @@ class ProcessKilled(Exception):
 
 
 class Process:
-    def __init__(self, pid, ppid, name, kind, brief, program, nice, quota, now):
+    def __init__(self, pid, ppid, name, kind, brief, program, nice, quota, now, caps=None):
         self.pid, self.ppid = pid, ppid
+        self.caps = None if caps is None else frozenset(caps)
         self.name, self.kind, self.brief, self.program = name, kind, brief, program
         self.nice = max(-10, min(10, int(nice)))
         self.quota = dict(quota or {})          # tokens / usd / seconds; absent = no limit
@@ -54,6 +62,8 @@ class Process:
         self.done_event = threading.Event()
         self._stop_pending = False              # STOP arrived mid-call: park when it ends
         self._since = now                       # when it joined the slot queue
+        # every syscall: (time, tool, argument, ms, result chars, denied) — strace
+        self.syscalls = deque(maxlen=1000)
 
     def tokens(self):
         return self.total["prompt"] + self.total["completion"]
@@ -73,7 +83,9 @@ class Process:
                 "seconds": round((self.ended or now) - self.started, 1),
                 "quota": dict(self.quota), "exit": self.exit_status,
                 "terminating": self.terminating, "children": list(self.children),
-                "brief": self.brief[:200]}
+                "brief": self.brief[:200], "program": self.program,
+                "caps": "all" if self.caps is None else " ".join(c for c in CAPS if c in self.caps),
+                "syscalls": len(self.syscalls)}
 
 
 class Kernel:
@@ -93,9 +105,10 @@ class Kernel:
 
     # ── lifecycle ──
     def spawn(self, name, kind="agent", brief="", parent=None, program="", nice=0,
-              quota=None):
-        """A new process. Its quota is clipped to what its parent has left:
-        a child can never spend more than its parent was allowed."""
+              quota=None, caps=None):
+        """A new process. Its quota is clipped to what its parent has left,
+        and its capabilities to its parent's: a child can never spend more,
+        nor do more, than its parent was allowed."""
         with self._lock:
             pid = next(self._pids)
             par = self.procs.get(parent) if parent else None
@@ -105,8 +118,11 @@ class Kernel:
                     left = self._left(par, k)
                     if left is not None:
                         q[k] = left if q.get(k) is None else min(q[k], left)
+            c = None if caps is None else frozenset(caps)
+            if par is not None and par.caps is not None:
+                c = par.caps if c is None else c & par.caps
             p = Process(pid, par.pid if par else 0, name, kind, brief, program, nice, q,
-                        self.clock())
+                        self.clock(), c)
             self.procs[pid] = p
             if par is not None:
                 par.children.append(pid)
@@ -386,6 +402,27 @@ class Kernel:
         return v[0] if v else None
 
     # ── views ──
+    # ── capabilities and syscalls ──
+    def can(self, pid, cap):
+        """May this process use `cap`? An unknown pid may do nothing."""
+        p = self.procs.get(pid)
+        return p is not None and (p.caps is None or cap in p.caps)
+
+    def syscall(self, pid, tool, arg, ms, size, denied=False):
+        """Record one syscall (for strace and the journal)."""
+        p = self.procs.get(pid)
+        if p is None:
+            return
+        a = arg[0] if isinstance(arg, tuple) else str(arg or "")
+        a = " ".join(a.split())[:160]
+        with self._lock:
+            p.syscalls.append((time.time(), tool, a, round(ms, 1), size, denied))
+            self._log(pid, "denied" if denied else "syscall", f"{tool} {a[:80]}")
+
+    def strace(self, pid):
+        p = self.procs.get(pid)
+        return list(p.syscalls) if p is not None else []
+
     def ps(self, all=False):
         now = self.clock()
         with self._lock:

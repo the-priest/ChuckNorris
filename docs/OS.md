@@ -134,14 +134,27 @@ merged by the user.
 
 ## Capabilities, programs and the governor (phase 20)
 
-- **Capabilities**: `read:<paths>`, `write:<paths>`, `exec`, `sudo`,
-  `net`, `spend:<usd>`; checked at every syscall; a child's are a subset of
-  its parent's.
-- **Programs**: `~/.config/chucknorris/programs/<name>.md` (prompt, tools,
-  capabilities, model, quota); `/run reviewer "the diff"`.
-- **Governor**: `performance` (strongest model everywhere), `balanced`
-  (strong for planning and acting, fast for reading and sub-agents),
-  `powersave` (fastest that passes).
+- **Capabilities**: `read`, `write`, `exec`, `net`, `spawn`, held by each
+  process (PID 1, your chat, holds them all) and clipped at spawn to the
+  parent's. Every syscall of an agent process goes through one guard
+  (`_guard`): the capability it needs is checked (`kernel.SYSCALL_CAP`),
+  the call is timed, and both land in the process's syscall log. Money is
+  the `usd` quota; sudo is never a capability of an unattended process.
+- **Programs** (`chucknorris_ext/programs.py`): a Markdown file whose
+  header gives a mode (`report`: looks, read-only; `act`: works in a
+  copy-on-write copy you merge), its tools, a model (`chat`, `fast`, or an
+  id) and a quota, and whose body is the prompt. Its capabilities follow
+  from its mode and tools. Built in: reviewer, tester, auditor, checkup,
+  researcher, explainer; `~/.config/chucknorris/programs/` and a project's
+  `.chuck/programs/` add or replace them. `/run reviewer the parser`; the
+  agent uses ```spawn @reviewer the parser```.
+- **Governor** (`chucknorris_ext/governor.py`): `performance` (the chat
+  model everywhere), `balanced` (the chat and writers on the chat model;
+  read-only sub-agents, daemons, report programs and summaries on the fast
+  model), `powersave` (the fast model everywhere). The fast model is
+  Settings' choice or the cheapest suggested model, weighted for agents
+  (input counts three times); `/governor` shows who runs on what and what it
+  saves.
 
 ## Hibernate, replay, time travel (phase 21)
 

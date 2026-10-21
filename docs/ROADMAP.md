@@ -247,11 +247,25 @@ and an agent is a process. The design is in `docs/OS.md`; tests in
 
 ### Phase 20 — capabilities, programs, governor
 
-- [ ] Per-process capabilities checked at every syscall (children get subsets).
-- [ ] Installable agent programs (`/run reviewer …`).
-- [ ] A model governor: the cheapest model that can do each call.
+- [x] Per-process capabilities (`read write exec net spawn`) checked at every
+      syscall; a child's are clipped to its parent's. Sub-agents get `read
+      net`, daemons `read exec net` (exec read-only), background agents what
+      their folder allows (an offline-sandboxed folder takes `net` away). A
+      refused call is a result the agent reads, and it is in the trace.
+- [x] Installable agent programs: Markdown files with a mode (report / act),
+      tools, a model and a quota. Six built in: reviewer, tester, auditor,
+      checkup, researcher, explainer; yours in ~/.config/chucknorris/programs/
+      or a project's .chuck/programs/. `/run <name> [focus]`, `/programs`,
+      and ```spawn @name``` from the agent.
+- [x] A model governor (`/governor`, Settings): performance (the chat model
+      everywhere), balanced (read-only sub-agents, daemons, report programs
+      and summaries on the fast model), powersave (the fast model
+      everywhere). The fast model is the cheapest suggested one unless you
+      pick it; a program may pin its own.
 
 ### Phase 21 — hibernate, replay, time travel
 
 - [ ] Every process checkpoints and survives a crash.
-- [ ] Replay a run from the journal; fork it from any step; `/strace`.
+- [ ] Replay a run from the journal; fork it from any step.
+- [x] `/strace <pid>`: every syscall a process made, its latency, how much it
+      returned, and what was denied.

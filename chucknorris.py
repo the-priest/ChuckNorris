@@ -123,6 +123,8 @@ _kernel = _optional("kernel")
 _cow = _optional("cow")
 _worker = _optional("worker")
 _daemons = _optional("daemons")
+_governor = _optional("governor")
+_programs = _optional("programs")
 if _pricing is None:
     class _pricing:                     # noqa: N801  — the meter, minus prices
         """Stand-in so a partial install still launches: tokens are counted,
@@ -2289,6 +2291,10 @@ class Backend:
         self.last_model = None       # the model that actually answered (fallback-aware)
         self.on_think = None         # callable(chunk) for reasoning deltas
         self.on_fallback = None      # callable(failed_model, fallback, why)
+        # who is calling (the governor picks the model by role) and a model a
+        # program pinned for itself
+        self.role = "main"
+        self.pin = None
 
     def key(self):
         return (self.s.get("siliconflow_api_key") or "").strip()
@@ -2301,6 +2307,10 @@ class Backend:
         model can't see, in which case the vision model takes it. With a
         multimodal chat model (the default) one model does both."""
         chat = (self.s.get("model") or DEFAULT_MODEL).strip()
+        if self.pin:
+            chat = self.pin
+        elif _governor is not None:
+            chat = _governor.pick(self.s, self.role, chat, _pricing.PRICES, _pricing.SUGGESTED)
         if vision and not _pricing.sees_images(chat):
             return (self.s.get("vision_model") or DEFAULT_VISION).strip()
         return chat
@@ -3942,6 +3952,10 @@ class ChuckWindow(Adw.ApplicationWindow):
                                     "writable; no sudo. Work within that.",
                      "readonly": "\n\nFOLDER ACCESS: read-only. Nothing may be run or changed; "
                                  "investigate and answer."}[acc]
+        if self.agent_mode and _programs is not None and "settings" in self.__dict__:
+            names = sorted(self.programs())
+            text += ("\n\nPROGRAMS (```spawn @<name> <focus>```, report back like spawn): "
+                     + ", ".join(names))
         if self.agent_mode and getattr(self, "_mcp", None) is not None:
             tools = self._mcp.index()          # costs nothing when no server is set up
             if tools:
@@ -4028,7 +4042,9 @@ class ChuckWindow(Adw.ApplicationWindow):
 
     def _update_subtitle(self):
         model = (self.settings.get("model") or DEFAULT_MODEL).split("/")[-1]
-        parts = [model, "Agent" if self.agent_mode else "Chat"]
+        gov = _governor.mode_of(self.settings) if _governor is not None else "performance"
+        parts = [model + ("" if gov == "performance" else f" ({gov})"),
+                 "Agent" if self.agent_mode else "Chat"]
         if self.workspace:
             parts.append(_short_path(self.workspace))
         try:
@@ -7256,7 +7272,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         return {"search": search, "fetch": fetch, "read": read, "grep": grep,
                 "glob": glob, "map": map_}
 
-    def _sub_call(self, pid=None, independent=False):
+    def _sub_call(self, pid=None, independent=False, role="sub", pin=None):
         """A blocking model call for a sub-agent. Each gets its own Backend so
         concurrent calls never overwrite each other's usage record. With a
         kernel pid, each call waits for a scheduler slot (and may be told to
@@ -7279,6 +7295,8 @@ class ChuckWindow(Adw.ApplicationWindow):
 
         def model_call(messages):
             b = Backend(self.settings) if isinstance(self.backend, Backend) else self.backend
+            if isinstance(b, Backend):
+                b.role, b.pin = role, pin
             out, err = [], []
             # a background process lives past the turn that started it: only
             # the kernel (Kill, its quota) stops it
@@ -7321,7 +7339,8 @@ class ChuckWindow(Adw.ApplicationWindow):
         kern = self.kernel
         quota = {"tokens": self.cfg("subagent_tokens", 250000, 5000, 5000000)}
         procs = [kern.spawn(b.strip().splitlines()[0][:60] if b.strip() else "sub-agent",
-                            kind="subagent", brief=b, parent=self._pid1, quota=quota)
+                            kind="subagent", brief=b, parent=self._pid1, quota=quota,
+                            caps={"read", "net"})
                  if kern is not None else None for b in briefs]
         for row, pr in zip(rows, procs):
             if pr is not None:
@@ -7332,6 +7351,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             pr = procs[i]
             pid = pr.pid if pr is not None else None
             call = self._sub_call(pid)
+            ptools = self._guard(pid, tools)
             GLib.idle_add(self._sub_update, rows[i], "running", "starting")
 
             def ev(txt):
@@ -7345,7 +7365,7 @@ class ChuckWindow(Adw.ApplicationWindow):
                         or (kern is not None and kern.should_stop(pid)))
             try:
                 rep = _agents.run_subagent(
-                    brief, call, tools, max_steps=steps, on_event=ev, context=ctx,
+                    brief, call, ptools, max_steps=steps, on_event=ev, context=ctx,
                     should_stop=stop,
                     # asked to finish, or already past its quota: the next
                     # call (its last) writes the report
@@ -8482,7 +8502,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             calls.append((m.start(), tag, arg))
         return [(t, a) for _p, t, a in sorted(calls, key=lambda c: c[0])]
 
-    def _worker_syscalls(self, work):
+    def _worker_syscalls(self, work, net=True):
         """The syscall table of a background agent, every call bound to its
         own copy of the folder. Commands run jailed there; anything that
         needs the user (sudo, a CRITICAL command) is refused, not queued."""
@@ -8529,7 +8549,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             if command_needs_sudo(cmd):
                 return "[NOT run: no sudo in the background. Say in your report what needs root.]"
             est = estimate_runtime(cmd)
-            rc, out = _run_in(work, enforce_syu(cmd), min(600, est["hard_timeout_seconds"]))
+            rc, out = _run_in(work, enforce_syu(cmd), min(600, est["hard_timeout_seconds"]), net=net)
             return f"exit {rc}\n{clip_output(out, 12000)}"
         return {"read": read, "grep": grep,
                 "glob": lambda pat: _builder.glob_files(work, (pat or "").strip())[1],
@@ -8537,12 +8557,12 @@ class ChuckWindow(Adw.ApplicationWindow):
                 "search": web["search"], "fetch": web["fetch"],
                 "write": write, "edit": edit, "bash": bash}
 
-    def spawn_background(self, brief, root=None, daemon=None, why=""):
+    def spawn_background(self, brief, root=None, daemon=None, why="", program=None):
         """Start a background agent on `brief` -> its pid (or None). It works
         in a copy of the folder (`root`, else the working folder) while you
         go on; when it's done its report and diff wait for you to merge or
         discard. `daemon`: the daemon that woke it (its report goes to the
-        inbox too)."""
+        inbox too). `program`: an act program it runs (programs.py)."""
         brief = (brief or "").strip()
         if not brief:
             self._sys_note("/spawn needs a task: /spawn add tests for the parser", "dim")
@@ -8563,16 +8583,24 @@ class ChuckWindow(Adw.ApplicationWindow):
             return None
         quota = {"tokens": self.cfg("background_tokens", 1500000, 20000, 50000000),
                  "seconds": self.cfg("background_minutes", 60, 1, 1440) * 60}
-        name = brief.splitlines()[0][:60]
-        proc = self.kernel.spawn(name, kind="background", brief=brief, parent=self._pid1,
-                                 quota=quota, nice=2)
+        caps = {"read", "write", "exec", "net"}
+        if program is not None:
+            quota = {"tokens": program["tokens"], "seconds": program["minutes"] * 60}
+            caps = _programs.caps_of(program)
+        # an offline-sandboxed folder keeps its agents offline too
+        if (acc.get(str(root), "full") if isinstance(acc, dict) else "full") == "sandbox":
+            caps.discard("net")
+        name = (f"{program['name']}: " if program else "") + brief.splitlines()[0][:60]
+        proc = self.kernel.spawn(name[:60], kind="background", brief=brief, parent=self._pid1,
+                                 quota=quota, nice=2, caps=caps,
+                                 program=program["name"] if program else "")
         pid = proc.pid
         entry = {"pid": pid, "brief": brief, "name": name, "ws": None, "report": None,
                  "status": "running", "root": root, "changes": {}, "daemon": daemon,
-                 "daemon_why": why}
+                 "daemon_why": why, "program": program["name"] if program else ""}
         self._bg[pid] = entry
         self._bg_card(entry)
-        call = self._sub_call(pid, independent=True)
+        call = self._sub_call(pid, independent=True, role="background", pin=self._pin_for(program))
         slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:30] or "task"
         kern = self.kernel
 
@@ -8586,13 +8614,17 @@ class ChuckWindow(Adw.ApplicationWindow):
                 def ev(t):
                     kern.note(pid, t)
                     GLib.idle_add(self._bg_paint, entry)
+                table = self._worker_syscalls(ws.work, net=kern.can(pid, "net"))
+                if program is not None:
+                    table = {t: f for t, f in table.items() if t in program["tools"]}
                 report, _steps = _worker.run_worker(
-                    brief, call, self._worker_parse, self._worker_syscalls(ws.work),
+                    brief, call, self._worker_parse, self._guard(pid, table),
                     max_steps=self.cfg("background_steps", 60, 5, 400), on_event=ev,
                     should_stop=lambda: kern.should_stop(pid),
                     wrap_up=lambda: kern.terminating(pid) or bool(kern.over_quota(pid)),
                     context=f"{_now_line()}\nProject: {root.name}. Your private copy of it "
-                            f"is your working directory ({ws.work}).")
+                            f"is your working directory ({ws.work}).",
+                    prompt=_programs.act_prompt(program, _worker.WORKER_PROMPT) if program else None)
                 status = 1 if kern.should_stop(pid) else 0
             except Exception as ex:
                 killed = _kernel is not None and isinstance(ex, _kernel.ProcessKilled)
@@ -8605,7 +8637,9 @@ class ChuckWindow(Adw.ApplicationWindow):
         return pid
 
     def _bg_card(self, entry):
-        card, head, body, foot = self._card_shell(f"BACKGROUND AGENT \u00b7 PID {entry['pid']}",
+        title = (f"PROGRAM {entry['program'].upper()}" if entry.get("program")
+                 else "BACKGROUND AGENT")
+        card, head, body, foot = self._card_shell(f"{title} \u00b7 PID {entry['pid']}",
                                                   lambda e=entry: e.get("report") or e["brief"])
         pill = self._pill("running", "run")
         head.insert_child_after(pill, head.get_first_child())
@@ -8636,7 +8670,9 @@ class ChuckWindow(Adw.ApplicationWindow):
             if entry["changes"]:
                 spec = [("Show diff", lambda *_a: self.show_bg_diff(pid)),
                         ("Merge into folder", lambda *_a: self.join_background(pid))]
-            spec.append(("Discard", lambda *_a: self.discard_background(pid)))
+            if entry.get("kind") != "report":      # a report program has no copy to discard
+                spec.append(("Discard", lambda *_a: self.discard_background(pid)))
+            spec.append(("Trace", lambda *_a: self.show_strace(str(pid))))
         else:
             spec = []
         for i, (label, fn) in enumerate(spec):
@@ -8680,12 +8716,18 @@ class ChuckWindow(Adw.ApplicationWindow):
                               + (f"\n\nChanged in its copy: {', '.join(list(ch)[:20])} \u2014 "
                                  f"merge with /join {entry['pid']}." if ch else ""),
                               entry["pid"], status, bg_pid=entry["pid"] if ch else None)
-        self._sys_note(f"\U0001F6F0 background agent {entry['pid']} finished \u2014 "
-                       + (f"{len(ch)} file(s) changed; review and merge (/join {entry['pid']})"
-                          if ch else "no files changed"), "ok" if status == 0 else "dim")
+        what = (f"program {entry['program']} (pid {entry['pid']})" if entry.get("program")
+                else f"background agent {entry['pid']}")
+        if entry.get("kind") == "report":
+            head = (report or "").strip().splitlines()[0][:160] if (report or "").strip() else "no report"
+            self._sys_note(f"\u25b6 {what} finished \u2014 {head}", "ok" if status == 0 else "dim")
+        else:
+            self._sys_note(f"\U0001F6F0 {what} finished \u2014 "
+                           + (f"{len(ch)} file(s) changed; review and merge (/join {entry['pid']})"
+                              if ch else "no files changed"), "ok" if status == 0 else "dim")
         # the main agent hears about it at its next step
         self._user_notes.append(
-            f"background agent {entry['pid']} ({entry['name']}) finished. Its report: "
+            f"{what} ({entry['name']}) finished. Its report: "
             f"{report[:1500]}" + (f" Files it changed in its copy: {', '.join(list(ch)[:20])}. "
                                   f"They reach the folder only when merged (```join "
                                   f"{entry['pid']}``` or the user's Merge button)." if ch else ""))
@@ -8777,8 +8819,10 @@ class ChuckWindow(Adw.ApplicationWindow):
     @tool("spawn", cap=3)
     def _t_spawn(self, body):
         """```spawn <brief>``` — a background agent does the whole job in its
-        own copy of the folder while the conversation goes on."""
-        pid = self.spawn_background(body)
+        own copy of the folder while the conversation goes on.
+        ```spawn @program <input>``` runs an agent program instead."""
+        pid = (self.run_program(body) if (body or "").strip().startswith("@")
+               else self.spawn_background(body))
         if pid is None:
             return "[spawn: not started (see the note above)]"
         return (f"[spawned background agent {pid}: it works in its own copy of the folder. "
@@ -8789,6 +8833,232 @@ class ChuckWindow(Adw.ApplicationWindow):
     def _t_join(self, body):
         """```join <pid>``` — merge a finished background agent's work."""
         return f"[join {(body or '').strip()}: {self.join_background(body)}]"
+
+    # ── capabilities, syscalls, programs, the governor (Chuck OS, phase 20) ──
+    def _guard(self, pid, table):
+        """Every syscall of process `pid` goes through here: checked against
+        its capabilities, timed, and logged for /strace. A refused call is a
+        result the agent reads, not a crash."""
+        kern = self.kernel
+        if kern is None or pid is None or _kernel is None:
+            return table
+
+        def wrap(tag, fn):
+            cap = _kernel.SYSCALL_CAP.get(tag)
+
+            def call(arg):
+                if cap and not kern.can(pid, cap):
+                    kern.syscall(pid, tag, arg, 0, 0, denied=True)
+                    return (f"[refused: this process has no '{cap}' capability — say in your "
+                            "report what you would have done]")
+                t0, out = time.monotonic(), ""
+                try:
+                    out = fn(arg)
+                    return out
+                finally:
+                    kern.syscall(pid, tag, arg, (time.monotonic() - t0) * 1000,
+                                 len(out) if isinstance(out, str) else 0)
+            return call
+        return {t: wrap(t, f) for t, f in table.items()}
+
+    def _pin_for(self, program):
+        """The model a program asked for: 'fast', 'chat', an id, or nothing
+        (the governor decides)."""
+        want = ((program or {}).get("model") or "").strip()
+        if not want:
+            return None
+        chat = (self.settings.get("model") or DEFAULT_MODEL).strip()
+        if want.lower() == "chat":
+            return chat
+        if want.lower() == "fast":
+            return (_governor.fast_model(self.settings, chat, _pricing.PRICES, _pricing.SUGGESTED)
+                    if _governor is not None else chat)
+        return want
+
+    def programs(self):
+        """Every agent program: built-in, yours, this project's. -> {name: prog}"""
+        if _programs is None:
+            return {}
+        dirs = [CONFIG_DIR / "programs"]
+        ws = getattr(self, "workspace", None)
+        if ws:
+            dirs.append(Path(ws) / ".chuck" / "programs")
+        progs, self._program_problems = _programs.load(dirs)
+        return progs
+
+    def run_program(self, spec):
+        """/run <program> [input] -> its pid, or None."""
+        if _programs is None or self.kernel is None or _worker is None:
+            self._sys_note("Programs need the programs, kernel and worker modules — "
+                           "reinstall Chuck.", "danger")
+            return None
+        name, _sp, inp = (spec or "").strip().lstrip("@").partition(" ")
+        name, inp = name.lower(), inp.strip()
+        progs = self.programs()
+        prog = progs.get(name)
+        if prog is None:
+            self._sys_note((f"No program {name!r}. " if name else "")
+                           + "Programs: " + ", ".join(sorted(progs)) + " (/programs)", "danger")
+            return None
+        brief = inp or f"Do your job on this {'folder' if self.workspace else 'machine'}."
+        if prog["mode"] == "act":
+            return self.spawn_background(brief, program=prog)
+        root = self._workroot() or Path.home()
+        caps = _programs.caps_of(prog)
+        if self._folder_access() == "sandbox":
+            caps.discard("net")
+        proc = self.kernel.spawn(f"{name}: {inp}"[:60] if inp else name, kind="program",
+                                 brief=brief, parent=self._pid1, program=name, nice=1,
+                                 quota={"tokens": prog["tokens"], "seconds": prog["minutes"] * 60},
+                                 caps=caps)
+        pid, kern = proc.pid, self.kernel
+        entry = {"pid": pid, "brief": brief, "name": f"{name}: {inp}"[:60] if inp else name,
+                 "ws": None, "report": None, "status": "running", "root": root, "changes": {},
+                 "daemon": None, "program": name, "kind": "report"}
+        self._bg[pid] = entry
+        self._bg_card(entry)
+        call = self._sub_call(pid, independent=True, role="reader", pin=self._pin_for(prog))
+        table = {t: f for t, f in self._daemon_syscalls(root, net=kern.can(pid, "net")).items()
+                 if t in prog["tools"]}
+        syscalls = self._guard(pid, table)
+
+        def run():
+            report, status = "", 1
+            try:
+                def ev(t):
+                    kern.note(pid, t)
+                    GLib.idle_add(self._bg_paint, entry)
+                report, _steps = _worker.run_worker(
+                    brief, call, self._worker_parse, syscalls,
+                    max_steps=self.cfg("program_steps", 30, 3, 200), on_event=ev,
+                    should_stop=lambda: kern.should_stop(pid),
+                    wrap_up=lambda: kern.terminating(pid) or bool(kern.over_quota(pid)),
+                    context=f"{_now_line()}\nYour working directory: {root}.",
+                    prompt=_programs.report_prompt(prog))
+                status = 1 if kern.should_stop(pid) else 0
+            except Exception as ex:
+                killed = _kernel is not None and isinstance(ex, _kernel.ProcessKilled)
+                report = f"(stopped: {ex})" if killed else f"(failed: {ex})"
+            kern.exit(pid, status, report)
+            GLib.idle_add(self._bg_finished, entry, report, status)
+        threading.Thread(target=run, daemon=True, name=f"program-{pid}").start()
+        self._sys_note(f"▶ {name} started as pid {pid} — it looks and reports; you can "
+                       "keep going (/top)", "dim")
+        return pid
+
+    def show_programs(self):
+        progs = self.programs()
+        card, head, body, foot = self._card_shell(
+            "PROGRAMS", lambda: "\n".join(f"{n}: {p['description']}" for n, p in sorted(progs.items())))
+        if _programs is None:
+            body.append(Gtk.Label(label="The programs module is missing — reinstall Chuck.", xalign=0))
+            self._log_pin(card)
+            return False
+        intro = Gtk.Label(label="An agent program is a prompt with a mode, tools, a model and a quota. "
+                                "Run one with /run <name> [what to focus on]; the agent runs them with "
+                                "```spawn @name```. Add your own as ~/.config/chucknorris/programs/"
+                                "<name>.md or .chuck/programs/<name>.md in a project.",
+                          xalign=0, wrap=True)
+        intro.add_css_class("dim"); _wrap_anywhere(intro)
+        body.append(intro)
+        for n, p in sorted(progs.items()):
+            body.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+            t = Gtk.Label(label=f"{n} · {'acts in a copy' if p['mode'] == 'act' else 'reports'} · "
+                                f"{' '.join(sorted(_programs.caps_of(p)))} · "
+                                f"{p['model'] or 'governor'} · {_pricing.fmt_tokens(p['tokens'])} tokens",
+                          xalign=0, wrap=True)
+            t.add_css_class("slash-cmd"); _wrap_anywhere(t)
+            d = Gtk.Label(label=p["description"] + ("" if p["source"] == "built-in"
+                                                    else f"  ({p['source']})"), xalign=0, wrap=True)
+            _wrap_anywhere(d)
+            body.append(t); body.append(d)
+        for prob in getattr(self, "_program_problems", []):
+            e = Gtk.Label(label="✗ " + prob, xalign=0, wrap=True)
+            e.add_css_class("danger"); _wrap_anywhere(e)
+            body.append(e)
+        self._log_pin(card)
+        return True
+
+    def governor_command(self, arg):
+        """/governor [performance|balanced|powersave]"""
+        if _governor is None:
+            self._sys_note("The governor module is missing — reinstall Chuck.", "danger")
+            return False
+        arg = (arg or "").strip().lower()
+        if arg:
+            if arg not in _governor.MODES:
+                self._sys_note("/governor performance | balanced | powersave", "danger")
+                return False
+            self.settings["governor"] = arg
+            save_settings(self.settings)
+        chat = (self.settings.get("model") or DEFAULT_MODEL).strip()
+        mode = _governor.mode_of(self.settings)
+        rows = _governor.table(self.settings, chat, _pricing.PRICES, _pricing.SUGGESTED)
+        sv = _governor.saving(self.settings, chat, _pricing.PRICES, _pricing.SUGGESTED)
+        card, head, body, foot = self._card_shell(f"GOVERNOR · {mode.upper()}")
+        lb = Gtk.Label(label={"performance": "Every call on the chat model.",
+                              "balanced": "The chat and background writers on the chat model; "
+                                          "read-only work on the fast model.",
+                              "powersave": "Everything on the fast model."}[mode]
+                       + (f" The fast model costs about {sv:.0%} less." if sv else ""),
+                       xalign=0, wrap=True)
+        lb.add_css_class("dim"); _wrap_anywhere(lb)
+        body.append(lb)
+        grid = Gtk.Grid(column_spacing=18, row_spacing=4)
+        for i, (role, model) in enumerate(rows):
+            a = Gtk.Label(label=role, xalign=0); a.add_css_class("dim")
+            b = Gtk.Label(label=model.split("/")[-1], xalign=0); b.add_css_class("slash-cmd")
+            grid.attach(a, 0, i, 1, 1); grid.attach(b, 1, i, 1, 1)
+        body.append(grid)
+        btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        for m in _governor.MODES:
+            bt = Gtk.Button(label=m.capitalize()); bt.add_css_class("quick")
+            if m == mode:
+                bt.add_css_class("accent-btn")
+            bt.connect("clicked", lambda _b, mm=m: self.governor_command(mm))
+            btns.append(bt)
+        foot.append(btns)
+        self._log_pin(card)
+        self._update_subtitle()
+        return True
+
+    def show_strace(self, arg):
+        """/strace <pid>: every syscall a process made, with its latency and
+        how much it returned."""
+        try:
+            pid = int((arg or "").split()[0])
+        except (IndexError, ValueError):
+            self._sys_note("/strace <pid> — /top lists them.", "dim")
+            return False
+        p = self.kernel.procs.get(pid) if self.kernel else None
+        if p is None:
+            self._sys_note(f"No process {pid}.", "danger")
+            return False
+        calls = self.kernel.strace(pid)
+        t0 = calls[0][0] if calls else 0
+
+        def text():
+            def size_of(n):
+                return f"{n / 1000:.1f}k" if n >= 1000 else str(n)
+            return "\n".join(f"{'+%.1fs' % (t - t0):>8}  {tool:<6}  {a}  \u2192 "
+                             + ("DENIED" if den else f"{size_of(size)} chars, {ms:.0f} ms")
+                             for t, tool, a, ms, size, den in calls)
+        card, head, body, foot = self._card_shell(f"STRACE · PID {pid} · {p.name}", text)
+        caps = "all" if p.caps is None else " ".join(c for c in _kernel.CAPS if c in p.caps)
+        n_den = sum(1 for c in calls if c[5])
+        sm = Gtk.Label(label=f"{len(calls)} syscall{'' if len(calls) == 1 else 's'} · "
+                             f"{sum(c[3] for c in calls) / 1000:.1f}s in tools · "
+                             f"{n_den} denied · capabilities: {caps} · "
+                             f"{_pricing.fmt_tokens(p.tokens())} tokens in {p.own['calls']} model calls",
+                       xalign=0, wrap=True)
+        sm.add_css_class("dim"); _wrap_anywhere(sm)
+        body.append(sm)
+        lb = Gtk.Label(label=clip_output(text(), 30000) if calls else "(no syscalls yet)", xalign=0,
+                       selectable=True)
+        lb.add_css_class("cmd-text"); _wrap_anywhere(lb)
+        body.append(lb)
+        self._log_pin(card)
+        return True
 
     # ── daemons (Chuck OS, phase 19) ──
     DAEMONS_FILE = CONFIG_DIR / "daemons.json"
@@ -8874,12 +9144,12 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._daemons.save()
         return False
 
-    def _daemon_syscalls(self, root):
+    def _daemon_syscalls(self, root, net=True):
         """A daemon's syscall table: it looks, it never changes anything.
         Its commands run with the whole system read-only (its folder too);
         the system bus is there for `systemctl status`, but nothing that
         changes a service or the power gets through."""
-        calls = self._worker_syscalls(root)
+        calls = self._worker_syscalls(root, net=net)
         calls.pop("write", None)
         calls.pop("edit", None)
 
@@ -8893,7 +9163,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             if why:
                 return (f"[NOT run: {why}. A daemon only looks — put the command in your "
                         "report as a proposal.]")
-            rc, out = _run_in(root, cmd, 120, write=False)
+            rc, out = _run_in(root, cmd, 120, write=False, net=net)
             return f"exit {rc}\n{clip_output(out, 12000)}"
         calls["bash"] = bash
         return calls
@@ -8924,11 +9194,12 @@ class ChuckWindow(Adw.ApplicationWindow):
         quota = {"tokens": int(d.get("quota") or 150000),
                  "seconds": self.cfg("daemon_minutes", 15, 1, 240) * 60}
         proc = self.kernel.spawn(f"daemon: {d['name']}"[:60], kind="daemon", brief=brief,
-                                 parent=self._pid1, quota=quota, nice=5)
+                                 parent=self._pid1, quota=quota, nice=5,
+                                 caps={"read", "exec", "net"})
         pid, kern, did = proc.pid, self.kernel, d["id"]
         self._daemon_live[did] = pid
-        call = self._sub_call(pid, independent=True)
-        syscalls = self._daemon_syscalls(root)
+        call = self._sub_call(pid, independent=True, role="daemon")
+        syscalls = self._guard(pid, self._daemon_syscalls(root))
 
         def run():
             report, status = "", 1
@@ -9290,6 +9561,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             tot = k.procs[self._pid1].info(k.clock()) if self._pid1 in k.procs else {}
             summary.set_text(f"{sum(1 for r in rows if r['state'] in _kernel.LIVE)} live \u00b7 "
                              f"{running} running \u00b7 model slots {len(k._running)}/{k.slots} "
+                             f"\u00b7 governor {_governor.mode_of(self.settings) if _governor else '-'} "
                              f"\u00b7 {_pricing.fmt_tokens(tot.get('tokens', 0))} tokens \u00b7 "
                              f"{_pricing.fmt_usd(tot.get('usd', 0))} this session")
             child = grid.get_first_child()
@@ -10528,6 +10800,10 @@ class ChuckWindow(Adw.ApplicationWindow):
         ("/daemon <when>: <task>", "an agent that wakes on a schedule or event (daily 08:30, "
                                    "when a service fails\u2026), looks and reports"),
         ("/daemons  /inbox", "your daemons (run, pause, delete) and their reports"),
+        ("/run <program> [focus]", "run an agent program: reviewer, tester, auditor, checkup, "
+                                   "researcher, explainer, or your own (/programs)"),
+        ("/governor [mode]", "performance, balanced or powersave: which model each agent runs on"),
+        ("/strace <pid>", "every tool call a process made, its latency and size"),
         ("/update", "install the newest Chuck (then restart)"),
     ]
 
@@ -10564,13 +10840,21 @@ class ChuckWindow(Adw.ApplicationWindow):
         elif cmd in ("kill", "stop", "cont", "nice"):
             self.process_command(cmd, arg)
         elif cmd == "spawn":
-            self.spawn_background(arg)
+            self.run_program(arg) if arg.startswith("@") else self.spawn_background(arg)
         elif cmd == "join":
             self.join_background(arg)
         elif cmd == "discard":
             self.discard_background(arg)
         elif cmd == "daemon":
             self.daemon_command(arg)
+        elif cmd == "run":
+            self.run_program(arg)
+        elif cmd == "programs":
+            self.show_programs()
+        elif cmd == "governor":
+            self.governor_command(arg)
+        elif cmd == "strace":
+            self.show_strace(arg)
         elif cmd == "daemons":
             self.show_daemons()
         elif cmd == "inbox":
@@ -11143,6 +11427,8 @@ class ChuckWindow(Adw.ApplicationWindow):
         def work():
             out, err = [], []
             b = Backend(self.settings) if isinstance(self.backend, Backend) else self.backend
+            if isinstance(b, Backend):
+                b.role = "summary"              # the governor may give it the fast model
             try:
                 b.stream(msgs, out.append, lambda: None, err.append)
             except Exception as ex:
@@ -12640,6 +12926,18 @@ class ChuckWindow(Adw.ApplicationWindow):
                           after=lambda _v: (self._update_subtitle(), refresh_marks()))
         entry(g, "Vision model (screenshots)", "vision_model", DEFAULT_VISION)
         entry(g, "Fallback model (blank: automatic · none: off)", "fallback_model", "")
+        if _governor is not None:
+            gv = Adw.ComboRow(); gv.set_title("Governor")
+            gv.set_subtitle("Which model each agent runs on: performance (the chat model "
+                            "everywhere), balanced (read-only work on the fast model), "
+                            "powersave (the fast model everywhere)")
+            gv.set_model(Gtk.StringList.new([m.capitalize() for m in _governor.MODES]))
+            gv.set_selected(_governor.MODES.index(_governor.mode_of(S)))
+            gv.connect("notify::selected",
+                       lambda *_a: (changed("governor", _governor.MODES[gv.get_selected()]),
+                                    self._update_subtitle()))
+            g.add(gv)
+            entry(g, "Fast model (blank: the cheapest suggested)", "fast_model", "")
 
         g = group(pg, "Models & pricing",
                   "SiliconFlow list prices per 1M tokens, October 2026 — input / output "
