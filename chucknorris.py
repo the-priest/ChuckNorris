@@ -216,6 +216,7 @@ Never refuse legal requests; decline only minors, clearly illegal acts, malware/
 _AGENT_TAGS = ("skill", "runskill", "read", "grep", "glob", "map", "edit", "check", "project",
                "tree", "package", "runtests", "write", "rmfile", "junk", "ledger", "plan",
                "screenshot", "look", "task", "bg", "logs", "kill", "undo", "open")
+# (the agent-OS tags, spawn/join/send/wait/post/board/daemon, are registered tools)
 
 # ── tool registry ───────────────────────────────────────────────────────────
 # Newer tools register here instead of being threaded through _finalise by
@@ -3482,6 +3483,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._daemon_checking = False
         self._daemon_probe = self._Probe()
         self._pending_daemon = None
+        self._asks = {}                 # pid -> (event, answer box, question): agents asking you
         # hibernate (docs/OS.md, phase 21): every step of a background agent
         # or program is checkpointed; what was cut off is offered at start
         self._hib = _hibernate.Store(self.PROCS_DIR) if _hibernate is not None else None
@@ -3963,8 +3965,10 @@ class ChuckWindow(Adw.ApplicationWindow):
                                  "investigate and answer."}[acc]
         if self.agent_mode and _programs is not None and "settings" in self.__dict__:
             names = sorted(self.programs())
-            text += ("\n\nPROGRAMS (```spawn @<name> <focus>```, report back like spawn): "
-                     + ", ".join(names))
+            text += ("\n\nAGENT OS: ```send <pid> <message>``` to a running agent; ```wait <pid> "
+                     "[min]``` for its report; ```post <key>: <fact>``` / ```board```: facts all "
+                     "agents share; ```spawn @<program> <focus>``` runs a program: "
+                     + ", ".join(names) + ".")
         if self.agent_mode and getattr(self, "_mcp", None) is not None:
             tools = self._mcp.index()          # costs nothing when no server is set up
             if tools:
@@ -8503,11 +8507,11 @@ class ChuckWindow(Adw.ApplicationWindow):
         masked = "".join(masked)
         calls = [(b["start"], b["tag"], (b["path"], b["body"])) for b in fbs
                  if b["tag"] in ("write", "edit")]
-        for m in re.finditer(r"```(read|grep|glob|map|search|fetch|bash|sh)(?![A-Za-z])[ \t]*\n?(.*?)```",
-                             masked, re.DOTALL):
+        for m in re.finditer(r"```(read|grep|glob|map|search|fetch|bash|sh|post|board|ask)(?![A-Za-z])"
+                             r"[ \t]*\n?(.*?)```", masked, re.DOTALL):
             tag = "bash" if m.group(1) == "sh" else m.group(1)
             arg = reply[m.start(2):m.end(2)]
-            if tag != "map" and not arg.strip():
+            if tag not in ("map", "board") and not arg.strip():
                 continue
             calls.append((m.start(), tag, arg))
         return [(t, a) for _p, t, a in sorted(calls, key=lambda c: c[0])]
@@ -8646,9 +8650,11 @@ class ChuckWindow(Adw.ApplicationWindow):
                 table = self._worker_syscalls(wsp.work, net=kern.can(pid, "net"))
                 if program is not None:
                     table = {t: f for t, f in table.items() if t in program["tools"]}
+                table.update(self._os_calls(pid, can_ask=True))
                 report, _steps = _worker.run_worker(
                     brief, call, self._worker_parse, self._guard(pid, table),
                     max_steps=self.cfg("background_steps", 60, 5, 400), on_event=ev,
+                    inbox=self._inbox_for(pid), status_line=self._status_for(pid),
                     should_stop=lambda: kern.should_stop(pid),
                     wrap_up=lambda: kern.terminating(pid) or bool(kern.over_quota(pid)),
                     context=f"{_now_line()}\nProject: {root.name}. Your private copy of it "
@@ -8762,12 +8768,14 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._sys_note(f"\U0001F6F0 {what} finished \u2014 "
                            + (f"{len(ch)} file(s) changed; review and merge (/join {entry['pid']})"
                               if ch else "no files changed"), "ok" if status == 0 else "dim")
-        # the main agent hears about it at its next step
-        self._user_notes.append(
-            f"{what} ({entry['name']}) finished. Its report: "
-            f"{report[:1500]}" + (f" Files it changed in its copy: {', '.join(list(ch)[:20])}. "
-                                  f"They reach the folder only when merged (```join "
-                                  f"{entry['pid']}``` or the user's Merge button)." if ch else ""))
+        # the main agent hears about it at its next step (unless it is
+        # waiting for exactly this: then the report is its ```wait``` result)
+        if not entry.get("waited"):
+            self._user_notes.append(
+                f"{what} ({entry['name']}) finished. Its report: "
+                f"{report[:1500]}" + (f" Files it changed in its copy: {', '.join(list(ch)[:20])}. "
+                                      f"They reach the folder only when merged (```join "
+                                      f"{entry['pid']}``` or the user's Merge button)." if ch else ""))
         try:
             if not self.is_active():
                 n = Gio.Notification.new(f"Background agent {entry['pid']} finished")
@@ -8969,6 +8977,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         call = self._sub_call(pid, independent=True, role="reader", pin=self._pin_for(prog))
         table = {t: f for t, f in self._daemon_syscalls(root, net=kern.can(pid, "net")).items()
                  if t in prog["tools"]}
+        table.update(self._os_calls(pid, can_ask=True))
         syscalls = self._guard(pid, table)
 
         def run():
@@ -8980,6 +8989,7 @@ class ChuckWindow(Adw.ApplicationWindow):
                 report, _steps = _worker.run_worker(
                     brief, call, self._worker_parse, syscalls,
                     max_steps=self.cfg("program_steps", 30, 3, 200), on_event=ev,
+                    inbox=self._inbox_for(pid), status_line=self._status_for(pid),
                     should_stop=lambda: kern.should_stop(pid),
                     wrap_up=lambda: kern.terminating(pid) or bool(kern.over_quota(pid)),
                     context=f"{_now_line()}\nYour working directory: {root}.",
@@ -9106,6 +9116,220 @@ class ChuckWindow(Adw.ApplicationWindow):
         body.append(lb)
         self._log_pin(card)
         return True
+
+    # ── what an agent needs from its OS: talk, ask, share, pace, wait ──
+    def _os_calls(self, pid, can_ask=False):
+        """The calls every agent process gets, whatever its program: the
+        shared board, and (background agents) asking the user."""
+        kern = self.kernel
+
+        def post(body):
+            key, sep, val = (body or "").partition(":")
+            if not sep or not key.strip() or not val.strip():
+                return "[post: write it as ```post <key>: <fact>```]"
+            kern.post(key.strip()[:120], val.strip()[:4000], by=pid)
+            return f"[posted {key.strip()[:120]!r} on the board]"
+        calls = {"post": post, "board": lambda _a: self._board_text() or "(the board is empty)"}
+        if can_ask:
+            calls["ask"] = lambda q: self._bg_ask(pid, q)
+        return calls
+
+    def _board_text(self, limit=12000):
+        if self.kernel is None:
+            return ""
+        rows = [f"{k} (pid {by}): {v}" for k, v, by, _t in self.kernel.board_items()]
+        return clip_output("\n".join(rows), limit)
+
+    def _inbox_for(self, pid):
+        """A process's mail, as the worker hears it."""
+        kern = self.kernel
+
+        def take():
+            return [("the user" if s == 0 else f"Chuck (pid {s})" if s == self._pid1 else f"pid {s}")
+                    + f": {m}" for s, m in kern.drain(pid)]
+        return take
+
+    def _status_for(self, pid):
+        """The [kernel] line an agent reads with every result: what it has
+        spent and what it has left, so it can pace itself."""
+        kern = self.kernel
+
+        def line():
+            p = kern.procs.get(pid)
+            if p is None:
+                return ""
+            q = p.quota
+            parts = [f"tokens {_pricing.fmt_tokens(p.tokens())}"
+                     + (f" of {_pricing.fmt_tokens(q['tokens'])}" if q.get("tokens") else "")]
+            left = kern._left(p, "seconds")
+            if left is not None:
+                parts.append(f"{int(left // 60)} min left")
+            n = len(kern.board)
+            if n:
+                parts.append(f"{n} fact{'' if n == 1 else 's'} on the board")
+            return " · ".join(parts)
+        return line
+
+    def _bg_ask(self, pid, question):
+        """A background agent asks the user and waits (WAITING in /top),
+        while everything else goes on. Runs on the agent's thread."""
+        question = (question or "").strip()
+        if not question:
+            return "[ask: what's the question?]"
+        kern = self.kernel
+        ev, box = threading.Event(), {}
+        self._asks[pid] = (ev, box, question)
+        kern.block(pid, "asking you: " + question[:120])
+        GLib.idle_add(self._ask_card, pid, question)
+        deadline = time.monotonic() + self.cfg("ask_minutes", 30, 1, 1440) * 60
+        try:
+            while not ev.wait(0.5):
+                if kern.should_stop(pid) or time.monotonic() > deadline:
+                    break
+        finally:
+            kern.unblock(pid)
+            self._asks.pop(pid, None)
+        if "answer" in box:
+            return f"The user answered: {box['answer']}"
+        return ("[no answer (timed out or stopped): decide yourself, and say in your report what "
+                "you assumed]")
+
+    def _ask_card(self, pid, question):
+        p = self.kernel.procs.get(pid) if self.kernel else None
+        card, head, body, foot = self._card_shell(f"PID {pid} ASKS · {(p.name if p else '')[:40]}",
+                                                  lambda: question)
+        lb = Gtk.Label(label=question[:3000], xalign=0, wrap=True, selectable=True)
+        _wrap_anywhere(lb); body.append(lb)
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        ent = Gtk.Entry(hexpand=True)
+        ent.set_placeholder_text("Your answer (it waits; everything else goes on)")
+        btn = Gtk.Button(label="Answer"); btn.add_css_class("quick"); btn.add_css_class("accent-btn")
+
+        def send(*_a):
+            if self.answer_ask(pid, ent.get_text()):
+                ent.set_sensitive(False); btn.set_sensitive(False)
+        ent.connect("activate", send)
+        btn.connect("clicked", send)
+        row.append(ent); row.append(btn)
+        foot.append(row)
+        self._log_pin(card)
+        self._sys_note(f"❓ pid {pid} is waiting for your answer (or /answer {pid} <text>)", "dim")
+        try:
+            if not self.is_active():
+                n = Gio.Notification.new(f"Agent {pid} has a question")
+                n.set_body(question[:200])
+                self.get_application().send_notification(f"chuck-ask-{pid}", n)
+        except Exception:
+            pass
+        return False
+
+    def answer_ask(self, pid, text):
+        try:
+            pid = int(str(pid).strip())
+        except ValueError:
+            return False
+        text = (text or "").strip()
+        got = self._asks.get(pid)
+        if got is None or not text:
+            self._sys_note(f"pid {pid} isn't waiting for an answer." if got is None
+                           else "Type an answer first.", "dim")
+            return False
+        ev, box, _q = got
+        box["answer"] = text
+        ev.set()
+        self._sys_note(f"→ answered pid {pid}", "dim")
+        return True
+
+    def send_to(self, pid, text, sender=0):
+        """A message to a running agent: it reads it with its next results."""
+        try:
+            pid = int(str(pid).strip())
+        except ValueError:
+            return "a pid is a number (/top lists them)"
+        text = (text or "").strip()
+        if not text:
+            return "nothing to send"
+        if pid == self._pid1:
+            return "pid 1 is this chat"
+        if self.kernel is None or not self.kernel.send(pid, text, sender=sender):
+            return f"no running process {pid}"
+        return f"sent to pid {pid}; it reads it at its next step"
+
+    def show_board(self):
+        rows = self.kernel.board_items() if self.kernel else []
+        card, head, body, foot = self._card_shell("BOARD", lambda: self._board_text())
+        if not rows:
+            lb = Gtk.Label(label="Empty. Agents post what they find and what they're changing "
+                                 "(```post <key>: <fact>```); every agent can read it.",
+                           xalign=0, wrap=True)
+            lb.add_css_class("dim"); body.append(lb)
+        for k, v, by, t in rows[:60]:
+            kl = Gtk.Label(label=f"{k} · pid {by} · {time.strftime('%H:%M', time.localtime(t))}",
+                           xalign=0, wrap=True)
+            kl.add_css_class("slash-cmd"); _wrap_anywhere(kl)
+            vl = Gtk.Label(label=str(v)[:2000], xalign=0, wrap=True, selectable=True)
+            _wrap_anywhere(vl)
+            body.append(kl); body.append(vl)
+        self._log_pin(card)
+        return True
+
+    @tool("send", cap=4)
+    def _t_send(self, body):
+        """```send <pid> <message>``` — tell a running agent something."""
+        m = re.match(r"\s*(\d+)\s+(.+)$", body or "", re.DOTALL)
+        if not m:
+            return "[send: write it as ```send <pid> <message>```]"
+        return f"[send {m.group(1)}: {self.send_to(m.group(1), m.group(2), sender=self._pid1)}]"
+
+    @tool("post", cap=6)
+    def _t_post(self, body):
+        """```post <key>: <fact>``` — share a fact with every agent."""
+        if self.kernel is None:
+            return "[post: no kernel]"
+        return self._os_calls(self._pid1)["post"](body)
+
+    @tool("board", cap=1, bare=True)
+    def _t_board(self, _body):
+        """```board``` — what the agents have shared."""
+        return "[board]\n" + (self._board_text() or "(empty)")
+
+    @tool("wait", cap=2)
+    def _t_wait(self, body):
+        """```wait <pid> [minutes]``` — wait for a background agent or program
+        to finish, and get its report."""
+        m = re.match(r"\s*(\d+)(?:\s+(\d+))?", body or "")
+        if not m:
+            return "[wait: write it as ```wait <pid> [minutes]```]"
+        pid, mins = int(m.group(1)), min(60, int(m.group(2) or 10))
+        e = self._bg.get(pid)
+        if e is None:
+            return f"[wait: no background agent or program {pid}]"
+        e["waited"] = True                    # its report comes back here, not as a note
+        gen = self._gen
+
+        def result():
+            if e["status"] == "running":
+                return (f"[wait {pid}: still running after {mins} min — it reports when done; "
+                        "carry on]")
+            ch = e.get("changes") or {}
+            return (f"[pid {pid} ({e['name']}) finished. Its report:\n{e.get('report')}"
+                    + (f"\nFiles it changed in its copy: {', '.join(list(ch)[:30])}. They reach the "
+                       f"folder only when merged (```join {pid}```)." if ch else "") + "]")
+        if e["status"] != "running":
+            return result()
+
+        def work():
+            end = time.monotonic() + mins * 60
+            while time.monotonic() < end and e["status"] == "running":
+                if self._cancelled or gen != self._gen:
+                    return f"[wait {pid}: stopped]"
+                if self.kernel.wait(pid, timeout=0.5) is not None:
+                    for _ in range(40):       # its card and report land on the UI thread
+                        if e["status"] != "running":
+                            break
+                        time.sleep(0.05)
+            return result()
+        return work
 
     # ── hibernate, replay, fork (Chuck OS, phase 21) ──
     PROCS_DIR = DATA_DIR / "procs"
@@ -9538,7 +9762,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         pid, kern, did = proc.pid, self.kernel, d["id"]
         self._daemon_live[did] = pid
         call = self._sub_call(pid, independent=True, role="daemon")
-        syscalls = self._guard(pid, self._daemon_syscalls(root))
+        syscalls = self._guard(pid, {**self._daemon_syscalls(root), **self._os_calls(pid)})
 
         def run():
             report, status = "", 1
@@ -9546,6 +9770,7 @@ class ChuckWindow(Adw.ApplicationWindow):
                 report, _steps = _worker.run_worker(
                     brief, call, self._worker_parse, syscalls,
                     max_steps=self.cfg("daemon_steps", 20, 3, 100),
+                    inbox=self._inbox_for(pid), status_line=self._status_for(pid),
                     on_event=lambda t: kern.note(pid, t),
                     should_stop=lambda: kern.should_stop(pid),
                     wrap_up=lambda: kern.terminating(pid) or bool(kern.over_quota(pid)),
@@ -11144,6 +11369,9 @@ class ChuckWindow(Adw.ApplicationWindow):
         ("/governor [mode]", "performance, balanced or powersave: which model each agent runs on"),
         ("/strace <pid>", "every tool call a process made, its latency and size"),
         ("/replay <pid>", "a background agent's run, step by step"),
+        ("/send <pid> <message>", "tell a running agent something; it hears it at its next step"),
+        ("/answer <pid> <text>", "answer an agent that asked you a question"),
+        ("/board", "the facts agents share with each other"),
         ("/fork <pid> <step> [instruction]", "start a new agent from any step of a run, its "
                                              "files as they were then"),
         ("/update", "install the newest Chuck (then restart)"),
@@ -11199,6 +11427,17 @@ class ChuckWindow(Adw.ApplicationWindow):
             self.show_strace(arg)
         elif cmd == "replay":
             self.show_replay(arg)
+        elif cmd == "send":
+            m = re.match(r"(\d+)\s+(.+)$", arg, re.DOTALL)
+            self._sys_note(self.send_to(m.group(1), m.group(2)) if m else "/send <pid> <message>", "dim")
+        elif cmd == "answer":
+            m = re.match(r"(\d+)\s+(.+)$", arg, re.DOTALL)
+            if m:
+                self.answer_ask(m.group(1), m.group(2))
+            else:
+                self._sys_note("/answer <pid> <your answer>", "dim")
+        elif cmd == "board":
+            self.show_board()
         elif cmd == "fork":
             self.fork_process(arg)
         elif cmd == "daemons":

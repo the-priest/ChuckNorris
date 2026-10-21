@@ -210,7 +210,9 @@ def load(dirs=()):
 
 
 def report_prompt(prog):
-    tools = " ".join(TOOL_DOC[t] for t in prog["tools"] if t in TOOL_DOC)
+    tools = (" ".join(TOOL_DOC[t] for t in prog["tools"] if t in TOOL_DOC)
+             + "\n```post <key>: <fact>``` shares a finding on the board every agent reads; "
+               "```board``` reads it.")
     return (REPORT_PROMPT.replace("{tools}", tools)
             + f"\n\nYOUR PROGRAM ({prog['name']}):\n{prog['prompt']}")
 

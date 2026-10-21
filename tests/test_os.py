@@ -705,7 +705,7 @@ w.set_agent_mode(True, announce=False)
 w.set_workspace(proj, announce=False)
 w.backend = ProgBackend([])
 w.backend.seen, w.backend.results = [], []
-check("PROGRAMS (" in w.history[0]["content"] and "reviewer" in w.history[0]["content"],
+check("AGENT OS:" in w.history[0]["content"] and "reviewer" in w.history[0]["content"],
       "the agent knows which programs it can run")
 pid = w.run_program("reviewer the parser")
 w.kernel.wait(pid, 20); settle()
@@ -911,6 +911,108 @@ check(restored and "merged" in w2.join_background(restored[0]["pid"]) and (tproj
       "and the restored work merges")
 check(not [r for r in w2._hib.load() if r["key"] == restored[0]["key"]],
       "a merged run's record is gone")
+
+# ═══════════════════════════════════════════════════════════════════════════
+print("\n--- what agents need: talk, ask, share, pace, wait ---")
+k = K.Kernel()
+a = k.spawn("a")
+k.block(a.pid, "asking you: which port?")
+check(a.state == "waiting" and "which port" in a.activity, "a process waiting on the user is WAITING")
+k.unblock(a.pid)
+check(a.state == "ready", "and ready again once answered")
+k.send(a.pid, "hello", sender=0); k.send(a.pid, "again", sender=1)
+check(k.drain(a.pid) == [(0, "hello"), (1, "again")] and k.drain(a.pid) == [], "mail is drained in order")
+k.post("auth", "pid 3 is rewriting auth.py", by=3)
+check(k.board_items()[0][:3] == ("auth", "pid 3 is rewriting auth.py", 3), "the board lists who posted what")
+box = {"mail": ["the user: also add a README"], "n": 0}
+
+
+def fake_model(m):
+    box["n"] += 1
+    if box["n"] == 1:
+        return "REPORT: done"                      # about to finish: mail arrives
+    return "REPORT: done, and the README too" if "also add a README" in m[-1]["content"] else "REPORT: ?"
+
+
+rep_, _ = WK.run_worker("x", fake_model, lambda r: [], {}, inbox=lambda: box.pop("mail", []))
+check(rep_ == "REPORT: done, and the README too",
+      "a message that arrives as an agent is finishing is heard before it reports")
+seen = {}
+
+
+def fm2(m):
+    seen.setdefault("msgs", m)
+    return "```read x```" if len(m) < 4 else "REPORT"
+
+
+WK.run_worker("x", fm2, lambda r: [("read", "x")] if "```" in r else [], {"read": lambda a: "X"},
+              status_line=lambda: "tokens 1.2k of 50k · 9 min left")
+check("[kernel] step 1 of 60 · tokens 1.2k of 50k" in seen["msgs"][-1]["content"],
+      "every result carries the kernel's line: what's spent, what's left")
+
+
+class TalkBackend(TimeBackend):
+    def stream(self, messages, on_delta, on_done, on_error, vision=False,
+               should_stop=None, attempts=3, on_open=None):
+        sysmsg = messages[0]["content"] if messages else ""
+        brief = messages[1]["content"] if len(messages) > 1 else ""
+        if sysmsg.startswith("You are a background agent") and brief.startswith("talk"):
+            n = sum(1 for m in messages if m["role"] == "assistant")
+            last = messages[-1]["content"]
+            if n == 0:
+                on_delta("```post auth: talk agent is changing server.py\n```\n```board```\n"
+                         "```ask Which port, 8080 or 9090?```")
+            elif n == 1:
+                self.saw = last
+                port = re.search(r"The user answered: (\d+)", last)
+                on_delta(f"```write port.txt\n{port.group(1) if port else 'none'}\n```")
+            else:
+                on_delta("REPORT: port set.")
+            self.last_usage = {"prompt": 300, "completion": 30, "cached": 0, "reasoning": 0}
+            on_done()
+            return
+        super().stream(messages, on_delta, on_done, on_error, vision, should_stop,
+                       attempts, on_open)
+
+
+w = new_win([], tmp)
+w.set_agent_mode(True, announce=False)
+w.set_workspace(tproj, announce=False)
+w.backend = TalkBackend([])
+tpid = w.spawn_background("talk: set the port")
+for _ in range(100):
+    if tpid in w._asks:
+        break
+    time.sleep(0.05)
+check(tpid in w._asks and w.kernel.procs[tpid].state == "waiting",
+      "a background agent's ```ask``` waits for you (WAITING in /top)", w.kernel.procs[tpid].state)
+check(any(t.startswith(f"PID {tpid} ASKS") for t in notes()), "and shows you the question")
+check(w.kernel.board_items() and w.kernel.board_items()[0][0] == "auth", "its ```post``` is on the board")
+w.entry.get_buffer().set_text(f"/send {tpid} also keep the old port as a fallback")
+w.on_send()
+w.entry.get_buffer().set_text(f"/answer {tpid} 9090")
+w.on_send()
+w.kernel.wait(tpid, 20); settle()
+saw = getattr(w.backend, "saw", "")
+check("The user answered: 9090" in saw and "the user: also keep the old port" in saw
+      and "[kernel] step 1" in saw and "talk agent is changing server.py" in saw,
+      "the answer, your message, its budget and the board all reach it", saw[:600])
+check((w._bg[tpid]["ws"].work / "port.txt").read_text() == "9090\n", "and it acts on the answer")
+w.entry.get_buffer().set_text("/board")
+w.on_send()
+check("BOARD" in notes() and any("talk agent is changing" in t for t in notes()), "/board shows it")
+p2 = w.spawn_background("tt: for waiting")
+w.backend = TimeBackend([f"```wait {p2}```", "Got it."])
+type_and_send(w, "do it and wait")
+h = " ".join(str(m.get("content")) for m in w.history[-4:])
+check(f"pid {p2}" in h and "a.txt and b.txt written" in h and f"```join {p2}```" in h,
+      "the main agent can ```wait``` for a background agent and gets its report", h[-500:])
+check(not any("a.txt and b.txt written" in n for n in w._user_notes),
+      "a waited-for report isn't delivered twice")
+w.backend = TimeBackend(["```post plan: refactor the parser first\n```", "ok"])
+type_and_send(w, "share the plan")
+check(w.kernel.board_items()[0][:2] == ("plan", "refactor the parser first"), "the main agent posts too")
+check("no running process" in w.send_to(9999, "hi"), "sending to a process that isn't running says so")
 
 print(f"\nTOTAL OS FAILURES: {fails}")
 assert fails == 0 and not FAILS, "OS regressions present"

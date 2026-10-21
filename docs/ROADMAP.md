@@ -277,3 +277,18 @@ and an agent is a process. The design is in `docs/OS.md`; tests in
       untouched, and a fork of a fork replays from the original base.
 - [x] `/strace <pid>`: every syscall a process made, its latency, how much it
       returned, and what was denied.
+
+### Phase 22 — what an agent needs from its OS
+
+- [x] **Talk.** `/send <pid>` (or ```send``` from the main agent): a running
+      agent hears it with its next results, even one about to finish.
+- [x] **Ask without stopping the world.** A background agent's ```ask```
+      puts the question in a card (and a notification) and waits, WAITING in
+      `/top`, while everything else goes on; `/answer` or the card answers.
+- [x] **Share.** A blackboard every agent reads and writes (```post <key>:
+      <fact>```, ```board```, `/board`): "I'm rewriting auth.py", "the tests
+      need Postgres".
+- [x] **Pace.** Every result carries a `[kernel]` line: the step, tokens
+      spent of the quota, minutes left, facts on the board.
+- [x] **Wait.** The main agent's ```wait <pid>``` blocks until a background
+      agent or program finishes and returns its report.

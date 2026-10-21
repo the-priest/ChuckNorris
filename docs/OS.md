@@ -181,3 +181,29 @@ from a lie.
   its base, so a fork of a fork replays from the same place.
 - **strace.** `/strace <pid>` lists every syscall with its latency, its
   size and whether the capability check refused it.
+
+## What an agent needs from its OS (phase 22)
+
+Written from the agent's side: what an agent working inside Chuck lacks
+when it has only a prompt and a loop.
+
+- **To be told things while it works.** `/send <pid> <message>` (the main
+  agent: ```send```) lands in the process's mailbox; the worker drains it
+  after each step's tools ran and hands it over with the results. A
+  message that arrives as the agent is about to report is heard first.
+- **To ask without stopping everything.** ```ask <question>``` in a
+  background agent blocks only that process (WAITING, no slot held) and
+  shows a card with an answer box and a desktop notification; an
+  unanswered question times out (`ask_minutes`, 30) and the agent is told
+  to decide and say what it assumed.
+- **Shared memory between agents.** The kernel's blackboard as tools:
+  ```post <key>: <fact>``` and ```board```, for every process including
+  the chat; `/board` shows it. Two agents changing code at once tell each
+  other what they are touching.
+- **To know its own budget.** Every result ends with a `[kernel]` line:
+  `step 7 of 60 · tokens 212k of 1.5M · 41 min left · 3 facts on the
+  board`. An agent that can see its budget plans for it, instead of
+  being cut off mid-thought.
+- **To wait for its children.** ```wait <pid> [minutes]``` returns a
+  background agent's report as a tool result (and not again as a note).
+

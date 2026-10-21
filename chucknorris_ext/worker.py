@@ -23,6 +23,10 @@ WORKER_PROMPT = (
     "```edit <path>\\n<<<<<<< SEARCH\\n<exact lines>\\n=======\\n<new lines>\\n>>>>>>> REPLACE\\n```\n"
     "```bash\\n<command>\\n``` (runs in your copy of the project; no sudo; commands that "
     "need the user's approval are refused) ```search <query>``` ```fetch <url>```\n"
+    "```post <key>: <fact>``` puts a fact on the board that every agent and Chuck read (what "
+    "you are changing, what you found); ```board``` reads it. ```ask <question>``` asks the "
+    "user and waits for the answer: only for a decision that is truly theirs. Messages from the "
+    "user and the [kernel] line (your budget) arrive with your results.\n"
     "Work like a careful engineer: read before you change, change in small steps, run the "
     "tests or the code after changing it, fix what fails. When the task is DONE (or truly "
     "blocked), reply with no tool block: your REPORT for the user — what you changed (files), "
@@ -40,12 +44,19 @@ def _clip(text, limit):
     return text[:head] + f"\n… [{len(text) - limit} characters cut] …\n" + text[-(limit - head):]
 
 
+def _mail_text(mail):
+    return ("MESSAGES that arrived while you worked:\n"
+            + "\n".join(f"- {m}" for m in mail))
+
+
 def run_worker(brief, call_model, parse, syscalls, max_steps=60, on_event=None,
                should_stop=None, wrap_up=None, context="", prompt=None, resume=None,
-               on_step=None):
+               on_step=None, inbox=None, status_line=None):
     """Run one background agent to its report. -> (report, steps_used).
     resume: a saved conversation to go on from (hibernate, fork).
-    on_step(msgs, step): called after every step, to checkpoint it."""
+    on_step(msgs, step): called after every step, to checkpoint it.
+    inbox() -> [text]: messages for the agent, delivered with its results.
+    status_line() -> text: the kernel's line (budget left), likewise."""
     if resume:
         msgs = [dict(m) for m in resume]
         first = sum(1 for m in msgs if m.get("role") == "assistant")
@@ -64,6 +75,13 @@ def run_worker(brief, call_model, parse, syscalls, max_steps=60, on_event=None,
             return (call_model(msgs) or "").strip() or "(no report)", step + 1
         reply = call_model(msgs) or ""
         calls = parse(reply)
+        mail = inbox() if inbox and not calls else []
+        if not calls and mail and step < max_steps - 1:
+            # a message arrived as it was about to finish: it hears it first
+            msgs.append({"role": "assistant", "content": reply})
+            msgs.append({"role": "user", "content": _mail_text(mail)
+                         + "\n\nTake this into account, then finish (your REPORT when done)."})
+            continue
         if not calls:
             return reply.strip() or "(the agent returned an empty report)", step + 1
         msgs.append({"role": "assistant", "content": reply})
@@ -85,7 +103,13 @@ def run_worker(brief, call_model, parse, syscalls, max_steps=60, on_event=None,
             results.append(f"[{len(calls) - MAX_CALLS_PER_STEP} more tool blocks were NOT run: "
                            "send them in your next reply]")
         last = step >= max_steps - 2
-        msgs.append({"role": "user", "content": "RESULTS:\n\n" + "\n\n".join(results)
+        # mail is collected after the tools ran: what arrived while it
+        # worked (or waited on the user) is heard now, not a step late
+        mail = inbox() if inbox else []
+        extra = ("\n\n" + _mail_text(mail)) if mail else ""
+        sl = status_line() if status_line else ""
+        extra += f"\n\n[kernel] step {step + 1} of {max_steps} \u00b7 {sl}" if sl else ""
+        msgs.append({"role": "user", "content": "RESULTS:\n\n" + "\n\n".join(results) + extra
                      + ("\n\nThis was your last step: write the REPORT now." if last else "")})
         # keep the conversation bounded: old results shrink, the brief stays
         if sum(len(m["content"]) for m in msgs) > 160000:

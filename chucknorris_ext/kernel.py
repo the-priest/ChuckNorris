@@ -401,6 +401,41 @@ class Kernel:
         v = self.board.get(key)
         return v[0] if v else None
 
+    def board_items(self):
+        """[(key, value, by pid, time)], newest first."""
+        with self._lock:
+            return sorted(((k, v, by, t) for k, (v, by, t) in self.board.items()),
+                          key=lambda r: -r[3])
+
+    def block(self, pid, why=""):
+        """The process waits on something outside the scheduler (the user's
+        answer): WAITING in /top, holding no slot."""
+        with self._lock:
+            p = self.procs.get(pid)
+            if p is None or not p.alive() or p.state == STOPPED:
+                return
+            p.state = WAITING
+            p.activity = (why or "waiting")[:160]
+            self._log(pid, "block", p.activity)
+        self._changed()
+
+    def unblock(self, pid):
+        with self._lock:
+            p = self.procs.get(pid)
+            if p is not None and p.state == WAITING and not any(e[1] == pid for e in self._queue):
+                p.state = READY
+        self._changed()
+
+    def drain(self, pid):
+        """Every message waiting for a process, oldest first: [(sender, text)]."""
+        out = []
+        with self._cv:
+            p = self.procs.get(pid)
+            while p is not None and p.mailbox:
+                s, m, _t = p.mailbox.popleft()
+                out.append((s, m))
+        return out
+
     # ── views ──
     # ── capabilities and syscalls ──
     def can(self, pid, cap):
