@@ -35,7 +35,20 @@ MAX_FILES = 2000
 MAX_FINDINGS = 150
 
 
+# Set by the app when the folder is sandboxed or read-only: argv -> argv
+# (bubblewrap around it), or None when it can't be run safely.
+RUN_WRAP = [None]
+
+
+def _wrapped(argv):
+    w = RUN_WRAP[0]
+    return list(argv) if w is None else w(list(argv))
+
+
 def _run(argv, cwd, timeout=120, stdin=None):
+    argv = _wrapped(argv)
+    if argv is None:
+        return 126, "(not run: this folder's access needs bubblewrap)"
     try:
         p = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, errors="replace",
                            timeout=timeout, input=stdin,

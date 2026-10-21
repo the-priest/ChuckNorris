@@ -135,13 +135,26 @@ def path_of(u):
     return urllib.parse.unquote(urllib.parse.urlparse(u).path)
 
 
+# Set by the app when the folder is sandboxed or read-only: argv -> argv
+# (bubblewrap around it), or None when it can't be run safely.
+RUN_WRAP = [None]
+
+
+def _wrapped(argv):
+    w = RUN_WRAP[0]
+    return list(argv) if w is None else w(list(argv))
+
+
 class Client:
     """One language server process."""
 
     def __init__(self, argv, root, lang):
         self.root, self.lang = str(Path(root).resolve()), lang
         self.name = os.path.basename(argv[0])
-        self.proc = subprocess.Popen(argv, cwd=self.root, stdin=subprocess.PIPE,
+        wrapped = _wrapped(argv)
+        if wrapped is None:
+            raise LSPError("this folder's access needs bubblewrap to run a language server")
+        self.proc = subprocess.Popen(wrapped, cwd=self.root, stdin=subprocess.PIPE,
                                      stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                      start_new_session=True)
         self.lock = threading.Lock()

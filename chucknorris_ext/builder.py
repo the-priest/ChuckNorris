@@ -210,6 +210,16 @@ def test_command_str(project):
     return " && ".join(" ".join(c) for c in cmds)
 
 
+# Set by the app when the folder is sandboxed or read-only: argv -> argv
+# (bubblewrap around it), or None when it can't be run safely.
+RUN_WRAP = [None]
+
+
+def _wrapped(argv):
+    w = RUN_WRAP[0]
+    return list(argv) if w is None else w(list(argv))
+
+
 def run_tests(project, timeout=300):
     """Run the project's own tests. Returns (rc, output). rc=-1 means none found.
 
@@ -225,8 +235,13 @@ def run_tests(project, timeout=300):
     for cmd in cmds:
         label = " ".join(cmd)
         try:
-            p = subprocess.run(cmd, cwd=str(root), capture_output=True,
-                               text=True, timeout=budget)
+            argv = _wrapped(cmd)
+            if argv is None:
+                chunks.append(f"$ {label}  -> not run: this folder's access needs bubblewrap")
+                worst = worst or 126
+                continue
+            p = subprocess.run(argv, cwd=str(root), capture_output=True,
+                               text=True, timeout=budget, start_new_session=True)
             rc, out = p.returncode, (p.stdout or "") + (p.stderr or "")
         except subprocess.TimeoutExpired:
             rc, out = 124, f"timed out after {budget}s"

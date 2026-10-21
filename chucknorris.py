@@ -1669,36 +1669,99 @@ def _streamed(proc, input_text, timeout, on_chunk):
 # read-only, only the working folder writable, a private /tmp, no sudo, and
 # no network unless the folder allows it. Module-level, like _WORKDIR, so
 # every runner sees the same policy.
-_SANDBOX = {"on": False, "net": False, "root": None, "writable": []}
+_SANDBOX = {"on": False, "net": False, "root": None, "writable": [], "mode": "full"}
 SANDBOX_NO_BWRAP = ("(not run: this folder is Sandboxed but bubblewrap isn't installed \u2014 "
                     "install bubblewrap, or give the folder Full access with /access)")
 
 
-def _bwrap_argv(argv, env=None):
+# What a sandboxed command must never see: credentials, and Chuck's own config
+# (the API key). They are hidden behind empty tmpfs mounts.
+_SANDBOX_HIDE = (".ssh", ".gnupg", ".aws", ".kube", ".docker", ".password-store",
+                 ".config/gh", ".config/chucknorris", ".local/share/keyrings")
+_SANDBOX_CACHE = DATA_DIR / "sandbox-cache"
+
+
+def _bwrap_argv(argv, env=None, write_root=True, net=None, persistent=False):
+    """bubblewrap around argv: the system read-only, the working folder
+    writable (or read-only, for tools that only look), a private /tmp, /run
+    and /var/tmp (no D-Bus, docker or ssh-agent sockets to escape through),
+    credentials hidden, its own PID namespace (Stop kills everything it
+    started) and, unless allowed, no network."""
     root = _SANDBOX["root"]
+    home = str(Path.home())
     args = [shutil.which("bwrap") or "bwrap", "--ro-bind", "/", "/", "--dev", "/dev",
-            "--proc", "/proc", "--tmpfs", "/tmp", "--ro-bind-try", "/tmp/.X11-unix",
-            "/tmp/.X11-unix", "--die-with-parent", "--new-session"]
-    binds = [root] + list(_SANDBOX.get("writable") or [])
+            "--proc", "/proc", "--tmpfs", "/tmp", "--tmpfs", "/var/tmp", "--tmpfs", "/run",
+            "--unshare-pid", "--new-session"]
+    # --die-with-parent fires when the THREAD that started it exits, so a
+    # process meant to outlive one step (the Python session, a language
+    # server) must not have it: it would die after its first use. Those exit
+    # on their own when Chuck closes their input.
+    if not persistent:
+        args.append("--die-with-parent")
+    try:                                       # DNS: resolv.conf usually points into /run
+        rc = os.path.realpath("/etc/resolv.conf")
+        if rc.startswith("/run/") and os.path.exists(rc):
+            args += ["--ro-bind", rc, rc]
+    except OSError:
+        pass
+    for var in ("DBUS_SESSION_BUS_ADDRESS", "SSH_AUTH_SOCK", "GPG_AGENT_INFO", "DISPLAY",
+                "WAYLAND_DISPLAY", "XAUTHORITY"):
+        args += ["--unsetenv", var]
+    for rel in _SANDBOX_HIDE:
+        p = os.path.join(home, rel)
+        if os.path.isdir(p):
+            args += ["--tmpfs", p]
+    if os.path.isfile(os.path.join(home, ".netrc")):
+        args += ["--ro-bind", "/dev/null", os.path.join(home, ".netrc")]
+    for a in argv:                             # a script Chuck wrote into its config folder
+        if isinstance(a, str) and a.startswith(str(CONFIG_DIR) + os.sep) and os.path.isfile(a):
+            args += ["--ro-bind", a, a]
+    cache = str(_SANDBOX_CACHE)
+    try:
+        os.makedirs(cache, exist_ok=True)
+    except OSError:
+        cache = None
+    binds = [(root, write_root)] + [(w, True) for w in (_SANDBOX.get("writable") or [])]
+    if cache:
+        binds.append((cache, True))
     cwdf = (env or {}).get("CHUCK_CWD_FILE")
     if cwdf:
-        binds.append(cwdf)                    # where the shell reports its `cd`
-    for b in binds:
+        binds.append((cwdf, True))             # where the shell reports its `cd`
+    for b, rw in binds:
         if b and os.path.exists(b):
-            args += ["--bind", b, b]
-    if not _SANDBOX["net"]:
+            args += ["--bind" if rw else "--ro-bind", b, b]
+    if cache:                                  # package managers write their caches here
+        for var, sub in (("XDG_CACHE_HOME", ""), ("npm_config_cache", "npm"),
+                         ("PIP_CACHE_DIR", "pip"), ("CARGO_HOME", "cargo"), ("GOCACHE", "go-build"),
+                         ("GOMODCACHE", "go-mod"), ("YARN_CACHE_FOLDER", "yarn"),
+                         ("BUN_INSTALL_CACHE_DIR", "bun")):
+            args += ["--setenv", var, os.path.join(cache, sub) if sub else cache]
+    if not (_SANDBOX["net"] if net is None else net):
         args.append("--unshare-net")
     return args + ["--"] + list(argv)
 
 
-def _sandboxed(argv, env=None):
+def _sandboxed(argv, env=None, persistent=False):
     """argv as it must run under the current policy, or None when the folder is
     sandboxed and there is no bubblewrap to do it (then it must not run)."""
     if not _SANDBOX["on"]:
         return list(argv)
     if not shutil.which("bwrap"):
         return None
-    return _bwrap_argv(argv, env)
+    return _bwrap_argv(argv, env, persistent=persistent)
+
+
+def _sandboxed_look(argv, persistent=False):
+    """For tools that only LOOK at the project (tests, linters, language
+    servers) but run its code: in a sandboxed folder they get the sandbox; in
+    a read-only one, the project mounted read-only and no network."""
+    mode = _SANDBOX.get("mode", "full")
+    if mode == "full":
+        return list(argv)
+    if not shutil.which("bwrap"):
+        return None
+    return _bwrap_argv(argv, None, write_root=mode != "readonly",
+                       net=mode == "sandbox-net", persistent=persistent)
 
 
 def _guarded_proc(argv, timeout, env, input_text=None):
@@ -4693,7 +4756,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         box.append(sl)
         dlg.present()
 
-    def _save_chat(self, running=None):
+    def _save_chat(self, running=None, light=False):
         """Write this chat to disk. `running` marks a task in progress, so a
         crash mid-task can be offered for resume at the next start."""
         if running is None:
@@ -4704,15 +4767,20 @@ class ChuckWindow(Adw.ApplicationWindow):
             return
         title = next((m["content"][:60] for m in msgs if m["role"] == "user"), "chat")
         try:
-            (CHATS_DIR / f"{self.chat_id}.json").write_text(json.dumps(
+            # atomic: a crash mid-write must not corrupt the chat it's saving
+            path = CHATS_DIR / f"{self.chat_id}.json"
+            tmp = path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(
                 {"title": title, "ts": self.chat_id, "history": self.history,
                  "workspace": str(self.workspace) if self.workspace else "",
                  "usage": self._usage, "compact": self._compact,
                  "checkpoints": self._checkpoints[-200:],
-                 "running": running, "pid": os.getpid()}, indent=2))
+                 "running": running, "pid": os.getpid()}, indent=None if light else 2))
+            os.replace(tmp, path)
         except Exception:
             pass
-        self._refresh_sidebar()
+        if not light:
+            self._refresh_sidebar()
 
     def _on_tts_toggled(self, btn):
         on = btn.get_active()
@@ -6359,7 +6427,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._py = _pysession.PySession(
                 cwd=_cwd(), plots_dir=str(PLOTS_DIR), env=dict(os.environ, **_RUN_ENV),
                 python=shutil.which("python3") or sys.executable, preexec=_sandbox_preexec,
-                wrap=_sandboxed)
+                wrap=lambda a, e=None: _sandboxed(a, e, persistent=True))
         return self._py
 
     def _py_close(self):
@@ -8076,15 +8144,23 @@ class ChuckWindow(Adw.ApplicationWindow):
     def _apply_access(self):
         """Make the module-level sandbox policy match this folder's access."""
         mode = self._folder_access()
-        was = (_SANDBOX["on"], _SANDBOX["net"], _SANDBOX["root"])
+        was = (_SANDBOX["on"], _SANDBOX["net"], _SANDBOX["root"], _SANDBOX.get("mode"))
         _SANDBOX.update(on=mode.startswith("sandbox"), net=mode == "sandbox-net",
                         root=str(self.workspace) if self.workspace else None,
-                        writable=[str(PLOTS_DIR)])
+                        writable=[str(PLOTS_DIR)], mode=mode)
+        wrap = None if mode == "full" else _sandboxed_look
+        for mod in (_builder, _diagnose, _lsp):  # tests, linters and language servers too
+            if mod is not None and hasattr(mod, "RUN_WRAP"):
+                mod.RUN_WRAP[0] = wrap if wrap is None or mod is not _lsp else (
+                    lambda a: _sandboxed_look(a, persistent=True))
+        if getattr(self, "_lsp_m", None) is not None and was != (
+                _SANDBOX["on"], _SANDBOX["net"], _SANDBOX["root"], mode):
+            threading.Thread(target=self._lsp_m.stop_all, daemon=True).start()
         try:
             PLOTS_DIR.mkdir(parents=True, exist_ok=True)
         except OSError:
             pass
-        if was != (_SANDBOX["on"], _SANDBOX["net"], _SANDBOX["root"]) and getattr(self, "_py", None):
+        if was[:3] != (_SANDBOX["on"], _SANDBOX["net"], _SANDBOX["root"]) and getattr(self, "_py", None):
             self._py_close()                     # the Python session restarts under the new rules
         try:
             label = dict((k, l) for k, l, _d in self.ACCESS)[mode]
@@ -8956,7 +9032,7 @@ class ChuckWindow(Adw.ApplicationWindow):
     def _slash(self, text):
         """Run a /command typed in the composer. -> True if it was one. Anything
         that merely starts with a slash (/etc/fstab is broken) is a message."""
-        m = re.match(r"^/([a-z]+)(?:\s+(.*))?$", (text or "").strip(), re.DOTALL)
+        m = re.match(r"^/([a-z][a-z0-9_-]*)(?:\s+(.*))?$", (text or "").strip(), re.DOTALL)
         if not m:
             return False
         cmd, arg = m.group(1), (m.group(2) or "").strip()
@@ -9090,7 +9166,8 @@ class ChuckWindow(Adw.ApplicationWindow):
                 try:
                     head = f.read_text(encoding="utf-8", errors="replace")[:600]
                     m = re.match(r"---\s*\n(.*?)\n---", head, re.S)
-                    dm = re.search(r"(?m)^description:\s*(.+)$", m.group(1)) if m else None
+                    dm = (re.search(r"(?mi)^description:\s*(.+)$", m.group(1)) if m
+                          else re.match(r"\s*description:\s*(.+)", head, re.I))
                     desc = dm.group(1).strip() if dm else next(
                         (ln.strip("# ").strip() for ln in head.splitlines()
                          if ln.strip() and not ln.startswith("---")), "")
@@ -9107,6 +9184,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._sys_note(f"/{name}: couldn't read {path}: {ex}", "danger")
             return
         text = re.sub(r"\A---\s*\n.*?\n---\s*\n", "", text, flags=re.S).strip()
+        text = re.sub(r"\A\s*description:[^\n]*\n?", "", text, flags=re.I).strip()   # metadata, not prompt
         if "$ARGUMENTS" in text:
             text = text.replace("$ARGUMENTS", arg)
         elif arg:
@@ -9357,7 +9435,7 @@ class ChuckWindow(Adw.ApplicationWindow):
 
     def _ask_model(self, vision=False):
         if time.time() - getattr(self, "_last_autosave", 0) > 2:
-            self._save_chat(running=True)       # a crash from here on can be resumed
+            self._save_chat(running=True, light=True)   # a crash from here on can be resumed
         self._deliver_steer()
         cap = self._over_cap()
         if cap:
@@ -10009,6 +10087,9 @@ class ChuckWindow(Adw.ApplicationWindow):
                             + (["runskill"] if (skill_blocks or runskills) else [])
                             + (["runtests"] if runtests else []) + (["package"] if packages else [])
                             + (["undo"] if undo_req else []) + (["kill"] if kills else []))
+            if readonly and videos:
+                plan_blocked.append("video download")
+                videos = []
             codes, writes, edits, bgs, rmfiles, skill_blocks, runskills = [], [], [], [], [], [], []
             runtests = packages = junk = undo_req = False
             kills, projects = [], []

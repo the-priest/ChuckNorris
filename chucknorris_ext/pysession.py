@@ -26,106 +26,133 @@ import threading
 import time
 
 KERNEL = r'''
-import ast, builtins, io, json, linecache, os, sys, traceback
-ctl = os.fdopen(os.dup(0), "r", encoding="utf-8")
-_null = os.open(os.devnull, os.O_RDONLY)
-os.dup2(_null, 0)                                  # child processes can't read the protocol
-sys.stdin = io.StringIO("")
+import ast, builtins, io, json, linecache, os, queue, signal, sys, threading, traceback, types
 
 
-def _no_input(prompt=""):
-    raise EOFError("this Python session has no keyboard: input() can't be answered "
-                   "(pass the value in the code instead)")
+def _kernel():
+    ctl = os.fdopen(os.dup(0), "r", encoding="utf-8")
+    proto = os.dup(1)                  # the protocol's own stdout: code can rebind sys.stdout
+    os.dup2(os.open(os.devnull, os.O_RDONLY), 0)   # child processes can't read the protocol
+    sys.stdin = io.StringIO("")
 
+    def no_input(prompt=""):
+        raise EOFError("this Python session has no keyboard: input() can't be answered "
+                       "(pass the value in the code instead)")
+    builtins.input = no_input
+    # a real __main__ module, so pickle, multiprocessing and typing find what
+    # the code defines; the kernel's own state stays in this function
+    main = types.ModuleType("__main__")
+    main.__dict__["__builtins__"] = builtins
+    sys.modules["__main__"] = main
+    G = main.__dict__
+    plots_dir = os.environ.get("CHUCK_PLOTS", "")
+    reqs = queue.Queue()
+    busy = threading.Event()
 
-builtins.input = _no_input
-G = {"__name__": "__main__", "__builtins__": builtins}
-PLOTS = os.environ.get("CHUCK_PLOTS", "")
+    def reader():
+        # interrupts arrive as messages and the kernel signals ITSELF: that
+        # works inside a sandbox, where a signal from outside can't reach it
+        for line in ctl:
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                continue
+            if msg.get("cmd") == "interrupt":
+                if busy.is_set():
+                    os.kill(os.getpid(), signal.SIGINT)
+                continue
+            reqs.put(msg)
+        reqs.put(None)
+    threading.Thread(target=reader, daemon=True).start()
 
+    def run(code, name):
+        linecache.cache[name] = (len(code), None, code.splitlines(True), name)
+        tree = ast.parse(code, name, "exec")
+        last = None
+        if tree.body and isinstance(tree.body[-1], ast.Expr):
+            last = ast.Expression(tree.body.pop().value)
+        exec(compile(tree, name, "exec"), G)
+        if last is not None:
+            v = eval(compile(last, name, "eval"), G)
+            mod = type(v).__module__ or ""
+            if isinstance(v, list) and v:
+                mod = type(v[0]).__module__ or ""     # plt.plot() returns [Line2D]
+            if v is not None and not mod.startswith("matplotlib"):   # the figure is shown instead
+                G["_"] = v
+                r = repr(v)
+                print(r if len(r) <= 20000 else r[:20000] + " ...")
 
-def _run(code, name):
-    linecache.cache[name] = (len(code), None, code.splitlines(True), name)
-    tree = ast.parse(code, name, "exec")
-    last = None
-    if tree.body and isinstance(tree.body[-1], ast.Expr):
-        last = ast.Expression(tree.body.pop().value)
-    exec(compile(tree, name, "exec"), G)
-    if last is not None:
-        v = eval(compile(last, name, "eval"), G)
-        mod = type(v).__module__ or ""
-        if isinstance(v, list) and v:
-            mod = type(v[0]).__module__ or ""         # plt.plot() returns [Line2D]
-        if v is not None and not mod.startswith("matplotlib"):   # the figure is shown instead
-            G["_"] = v
-            r = repr(v)
-            print(r if len(r) <= 20000 else r[:20000] + " ...")
-
-
-def _plots(seq):
-    out = []
-    plt = sys.modules.get("matplotlib.pyplot")
-    if plt is None or not PLOTS:
+    def plots(seq):
+        out = []
+        plt = sys.modules.get("matplotlib.pyplot")
+        if plt is None or not plots_dir:
+            return out
+        for n in plt.get_fignums():
+            p = os.path.join(plots_dir, ".plot_%d_%d_%d.png" % (os.getpid(), seq, n))
+            try:
+                plt.figure(n).savefig(p, dpi=110, bbox_inches="tight")
+                out.append(p)
+            except Exception as ex:
+                print("couldn't save figure %d: %s" % (n, ex), file=sys.stderr)
+        plt.close("all")
         return out
-    for n in plt.get_fignums():
-        p = os.path.join(PLOTS, ".plot_%d_%d_%d.png" % (os.getpid(), seq, n))
+
+    def trace(et, ev, tb):
+        frames = [f for f in traceback.extract_tb(tb) if f.filename.startswith("<py ")]
+        if issubclass(et, SyntaxError):
+            frames = []                            # where it failed is in the message
+        lines = ["Traceback (most recent call last):\n"] if frames else []
+        sys.stderr.write("".join(lines + traceback.format_list(frames)
+                                 + traceback.format_exception_only(et, ev)))
+
+    seq = 0
+    while True:
         try:
-            plt.figure(n).savefig(p, dpi=110, bbox_inches="tight")
-            out.append(p)
-        except Exception as ex:
-            print("couldn't save figure %d: %s" % (n, ex), file=sys.stderr)
-    plt.close("all")
-    return out
+            req = reqs.get()
+        except KeyboardInterrupt:
+            continue                               # Stop between runs: nothing to stop
+        if req is None:
+            break
+        seq += 1
+        st = {"ok": True}
+        busy.set()
+        try:
+            try:
+                run(req["code"], "<py %d>" % seq)
+            finally:
+                busy.clear()
+        except SystemExit as e:
+            code = e.code
+            st = {"ok": code in (None, 0),
+                  "exit": code if isinstance(code, int) else (0 if code is None else 1)}
+            if code not in (None, 0) and not isinstance(code, int):
+                print(code, file=sys.stderr)
+        except KeyboardInterrupt:
+            st = {"ok": False, "interrupted": True}
+            print("KeyboardInterrupt", file=sys.stderr)
+        except BaseException:
+            st = {"ok": False}
+            trace(*sys.exc_info())
+        try:
+            st["plots"] = plots(seq)
+        except BaseException:
+            st["plots"] = []
+        st["names"] = sorted(k for k in G if not k.startswith("_"))[:200]
+        for f in (sys.stdout, sys.stderr, sys.__stdout__, sys.__stderr__):
+            try:
+                f.flush()
+            except BaseException:
+                pass
+        mark = "\x1eCHUCK %s %s\x1e\n" % (req.get("id", ""), json.dumps(st))
+        while True:
+            try:
+                os.write(proto, mark.encode())
+                break
+            except KeyboardInterrupt:              # a late Stop must not lose the marker
+                continue
 
 
-def _trace(et, ev, tb):
-    frames = [f for f in traceback.extract_tb(tb) if not f.filename.startswith(("<string>", sys.prefix,
-                                                                                    sys.base_prefix))
-              or f.filename.startswith("<py ")]
-    if et is SyntaxError or issubclass(et, SyntaxError):
-        frames = []                                # where it failed is in the message
-    lines = ["Traceback (most recent call last):\n"] if frames else []
-    sys.stderr.write("".join(lines + traceback.format_list(frames)
-                             + traceback.format_exception_only(et, ev)))
-
-
-seq = 0
-while True:
-    try:
-        line = ctl.readline()
-    except KeyboardInterrupt:
-        continue                                   # Stop between runs: nothing to stop
-    if not line:
-        break
-    try:
-        req = json.loads(line)
-    except ValueError:
-        continue
-    seq += 1
-    st = {"ok": True}
-    try:
-        _run(req["code"], "<py %d>" % seq)
-    except SystemExit as e:
-        code = e.code
-        st = {"ok": code in (None, 0), "exit": code if isinstance(code, int) else (0 if code is None else 1)}
-        if code not in (None, 0) and not isinstance(code, int):
-            print(code, file=sys.stderr)
-    except KeyboardInterrupt:
-        st = {"ok": False, "interrupted": True}
-        print("KeyboardInterrupt", file=sys.stderr)
-    except BaseException:
-        st = {"ok": False}
-        _trace(*sys.exc_info())
-    try:
-        st["plots"] = _plots(seq)
-    except BaseException:
-        st["plots"] = []
-    st["names"] = sorted(k for k in G if not k.startswith("_") and k != "In")[:200]
-    try:
-        sys.stdout.flush(); sys.stderr.flush()
-    except Exception:
-        pass
-    sys.stdout.write("\x1eCHUCK %s %s\x1e\n" % (req.get("id", ""), json.dumps(st)))
-    sys.stdout.flush()
+_kernel()
 '''
 
 
@@ -147,6 +174,7 @@ class PySession:
         self.runs = 0
         self.started = 0
         self.lock = threading.Lock()
+        self._wlock = threading.Lock()           # writes to the kernel's stdin
 
     def alive(self):
         return self.proc is not None and self.proc.poll() is None
@@ -196,9 +224,15 @@ class PySession:
                 pass
 
     def interrupt(self):
-        """Ctrl+C the running block (the session survives)."""
+        """Ctrl+C the running block (the session survives). Sent as a message
+        the kernel acts on itself, so it works inside a sandbox too."""
         if self.alive():
-            self._signal(signal.SIGINT)
+            try:
+                with self._wlock:
+                    self.proc.stdin.write(b'{"cmd": "interrupt"}\n')
+                    self.proc.stdin.flush()
+            except (OSError, ValueError):
+                pass
 
     def close(self):
         if self.proc is not None:
@@ -237,8 +271,9 @@ class PySession:
         res = {"ok": False, "out": "", "plots": [], "names": self.names, "restarted": restarted,
                "interrupted": False, "timed_out": False, "died": False, "exit": None}
         try:
-            self.proc.stdin.write((json.dumps({"id": nonce, "code": code}) + "\n").encode())
-            self.proc.stdin.flush()
+            with self._wlock:
+                self.proc.stdin.write((json.dumps({"id": nonce, "code": code}) + "\n").encode())
+                self.proc.stdin.flush()
         except OSError:
             res.update(died=True, out="(the Python session could not be started)")
             self.close()

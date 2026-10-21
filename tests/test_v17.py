@@ -276,7 +276,7 @@ settle()
 
 # ═══════════════════════════════════════════════════════════════════════════
 print("\n--- folder access: sandboxed and read-only ---")
-import socketserver, threading
+import socketserver, threading, subprocess
 ws = tmp / "acc"
 ws.mkdir()
 # not under /tmp: the sandbox gives commands a private /tmp, which would hide
@@ -284,7 +284,7 @@ ws.mkdir()
 outside = Path(tempfile.mkdtemp(prefix="chuck_v17_out_", dir="/var/tmp"))
 (ws / "f.txt").write_text("orig\n")
 srv = socketserver.TCPServer(("127.0.0.1", 0), socketserver.BaseRequestHandler)
-threading.Thread(target=srv.serve_forever, daemon=True).start()
+threading.Thread(target=srv.serve_forever, daemon=True, name="srv-local").start()
 port = srv.server_address[1]
 probe = f"python3 -c \"import socket; socket.create_connection(('127.0.0.1', {port}), 2); print('NET-OK')\""
 if shutil.which("bwrap"):
@@ -298,7 +298,8 @@ if shutil.which("bwrap"):
     check("FOLDER ACCESS: sandboxed, offline" in w.history[0]["content"], "and so does the model's prompt")
     type_and_send(w, "try everything")
     h = hist_text(w)
-    check((ws / "in.txt").exists() and not (outside / "o.txt").exists() and "Read-only file system" in h,
+    check((ws / "in.txt").exists() and not (outside / "o.txt").exists()
+          and ("Read-only file system" in h or "No such file or directory" in h),
           "inside the folder writes work; outside it they fail", h[-1500:])
     check("output:\nNET-OK" not in h and ("unreachable" in h.lower() or "refused" in h.lower()),
           "offline: no network, not even to a local port")
@@ -313,12 +314,67 @@ if shutil.which("bwrap"):
                          f"```py\nopen('{ws}/mine.txt', 'w').write('y')\n```", "ok"]
     type_and_send(w, "python too")
     tail = hist_text(w).split("python too")[-1]
-    check("Read-only file system" in tail and not (outside / "py.txt").exists()
+    check(("Read-only file system" in tail or "No such file or directory" in tail)
+          and not (outside / "py.txt").exists()
           and (ws / "mine.txt").exists(), "the py session is sandboxed too", tail[-600:])
     w.backend.replies = [f"```bg writer\necho bg > {outside}/bg.txt; echo bg > {ws}/bg.txt\n```", "ok"]
     type_and_send(w, "background")
     time.sleep(1.0)
     check((ws / "bg.txt").exists() and not (outside / "bg.txt").exists(), "and so are background jobs")
+    # escapes the reviewers found: host sockets, credentials, leftover processes
+    sockdir = Path(tempfile.mkdtemp(dir="/var/tmp"))
+    import socket as _socket
+    host = _socket.socket(_socket.AF_UNIX); host.bind(str(sockdir / "s")); host.listen(1)
+    (Path.home() / ".ssh").mkdir(exist_ok=True)
+    (Path.home() / ".ssh" / "id_test").write_text("SECRET-KEY")
+    cn.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    (cn.CONFIG_DIR / "settings.json").write_text('{"siliconflow_api_key": "sk-SECRET"}')
+    w.set_access("sandbox")
+    probe2 = ("python3 -c \"import socket,os\n"
+              f"s=socket.socket(socket.AF_UNIX)\ntry:\n s.connect('{sockdir}/s'); print('SOCK-REACHED')\n"
+              "except OSError as e: print('sock blocked', e.errno)\n"
+              "print('DBUS', os.environ.get('DBUS_SESSION_BUS_ADDRESS'))\n"
+              "print('NPMCACHE', os.environ.get('npm_config_cache', ''))\"")
+    w.backend.replies = [f"```bash\n{probe2}\n"
+                         f"cat ~/.ssh/id_test 2>&1; cat {cn.CONFIG_DIR}/settings.json 2>&1; echo end\n```", "ok"]
+    type_and_send(w, "escape attempts")
+    tail = hist_text(w).split("escape attempts")[-1]
+    check("\nSOCK-REACHED" not in tail and "sock blocked" in tail, "host unix sockets can't be reached", tail[-500:])
+    check("DBUS None" in tail, "the session bus address isn't passed in")
+    check("SECRET-KEY" not in tail and "sk-SECRET" not in tail, "credentials and the API key are hidden")
+    check("NPMCACHE " + str(cn.DATA_DIR / "sandbox-cache" / "npm") in tail,
+          "package managers get a writable cache")
+    host.close(); shutil.rmtree(sockdir, ignore_errors=True)
+    w.backend.replies = ["```python\nprint('script ran', 6 * 7)\n```", "ok"]
+    type_and_send(w, "a python block")
+    check("script ran 42" in hist_text(w).split("a python block")[-1],
+          "code blocks still run (their script is let in)")
+    mark = f"chuck-orphan-{os.getpid()}"
+    w.backend.replies = [f"```bash\nbash -c 'exec -a {mark} sleep 60' & sleep 30\n```", "stopped"]
+    w.entry.get_buffer().set_text("spawn and stop")
+    w.on_send()
+    time.sleep(2.0)
+    w.stop_run()
+    time.sleep(1.0)
+    left = subprocess.run(["pgrep", "-f", mark], capture_output=True, text=True).stdout.strip()
+    check(not left, "Stop kills everything the sandboxed command started", left)
+    settle()
+    (ws / "tests").mkdir(exist_ok=True)
+    (ws / "tests" / "test_esc.py").write_text(
+        f"def test_x():\n    open('{outside}/from_tests.txt', 'w').write('x')\n")
+    rc, out = cn._builder.run_tests(ws, timeout=60)
+    check(not (outside / "from_tests.txt").exists(), "runtests runs inside the sandbox too", out[-300:])
+    w.backend.replies = ["```py\nkeep = 41\n```", "```py\nimport time\nwhile True: time.sleep(0.2)\n```", "x"]
+    w.entry.get_buffer().set_text("py in sandbox")
+    w.on_send()
+    time.sleep(4.0)
+    w.stop_run()
+    settle()
+    w.backend.replies = ["```py\nkeep + 1\n```", "42"]
+    type_and_send(w, "still there")
+    check("\n42\n" in hist_text(w).split("still there")[-1],
+          "a sandboxed Python session survives Stop with its variables",
+          hist_text(w).split("py in sandbox")[-1][-1500:])
     w.set_access("full")
     check(cn._SANDBOX["on"] is False and w._ws_lbl.get_label() == "acc", "Full access lifts it")
     w.backend.replies = [f"```bash\necho out > {outside}/o.txt\n```", "ok"]
@@ -339,6 +395,9 @@ type_and_send(w, "change it")
 h = hist_text(w)
 check((ws / "f.txt").read_text() == "orig\n" and not (ws / "new.txt").exists() and "READ-ONLY FOLDER" in h,
       "read-only: nothing runs or changes, and the agent is told why")
+w.backend.replies = ["```video https://example.com/v.mp4```", "No."]
+type_and_send(w, "download it")
+check("video download" in hist_text(w).split("download it")[-1], "read-only also blocks video downloads")
 w.entry.get_buffer().set_text("/access")
 w.on_send()
 texts = [x.get_text() for x in w.msgbox.walk() if isinstance(x.get_text(), str)]
@@ -365,9 +424,11 @@ gl = cn.CONFIG_DIR / "commands"
 gl.mkdir(parents=True, exist_ok=True)
 (gl / "standup.md").write_text("Global version.\n")
 (gl / "everywhere.md").write_text("Say hello from everywhere.\n")
+(ws / ".chuck" / "commands" / "plain.md").write_text("description: no fences\nDo the plain thing to $ARGUMENTS.\n")
+(ws / ".chuck" / "commands" / "fix-tests2.md").write_text("Fix the failing tests.\n")
 w = agent(["Linted.", "Standup.", "Hello."], ws)
 cc = w.custom_commands()
-check(set(cc) == {"fixlint", "standup", "everywhere", "loop"}, "project and global commands are found; built-ins can't be replaced", sorted(cc))
+check(set(cc) == {"fixlint", "standup", "everywhere", "loop", "plain", "fix-tests2"}, "project and global commands are found; built-ins can't be replaced", sorted(cc))
 check(cc["fixlint"][1] == "fix every lint error in a path" and cc["standup"][1] == "Summarise today's commits",
       "the description comes from front matter, else the first line")
 check("Summarise" in cc["standup"][1], "the project's version wins over the global one")
@@ -390,6 +451,13 @@ w.entry.get_buffer().set_text("/help")
 w.on_send()
 texts = [x.get_text() for x in w.msgbox.walk() if isinstance(x.get_text(), str)]
 check("/fixlint" in texts and "fix every lint error in a path" in texts, "/help lists them")
+check(cc["plain"][1] == "no fences", "a description: first line works without --- fences too")
+type_and_send(w, "/plain x")
+check([m["content"] for m in w.history if w._is_real_user(m)][-1] == "Do the plain thing to x.",
+      "and isn't sent as part of the prompt")
+type_and_send(w, "/fix-tests2")
+check([m["content"] for m in w.history if w._is_real_user(m)][-1] == "Fix the failing tests.",
+      "names with digits and dashes run too (/fix-tests2)")
 settle()
 
 # ═══════════════════════════════════════════════════════════════════════════
