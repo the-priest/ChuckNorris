@@ -56,6 +56,15 @@ The third roadmap (`docs/ROADMAP.md`, phases 10–15), with tests in
   retried or edited turn; an old spending-cap card can't start a second
   stream; a settings.json with a stray comma is no longer wiped; deleting a
   running chat really deletes it; a `cd` doesn't leak between chats.
+- Rendering: a link to a path with `__` or `*` in it no longer turns the whole
+  reply into raw markdown; indented, `~~~` and nested code fences are code;
+  reopening a long chat no longer rebuilds every message; Chat-mode code
+  examples survive reopening in Agent mode; mid-task messages come back as
+  your bubbles.
+- runtests really runs pytest-style tests (a failing `assert` used to
+  "pass"), from the project root, with a single time budget; ESLint 9
+  projects are diagnosed; the verifier compiles, not just parses; the
+  ledger redacts secrets; a damaged update download can't jam the updater.
 
 ## 16.0.0 — steer it, trust it, keep it running
 
