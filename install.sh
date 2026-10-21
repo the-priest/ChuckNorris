@@ -129,7 +129,7 @@ else
   # HERE as well — the check below exists because that is easy to forget.
   for f in __init__ config net safety web voice chats pricing \
            skills specs memory codecheck skill_library builder \
-           ledger compress agents browser diagnose mcp crashlog update pysession lsp codesearch checkpoint listen kokoro_server stt_server kernel cow worker daemons governor programs hibernate missions budget palette; do
+           ledger compress agents browser diagnose mcp crashlog update pysession lsp codesearch checkpoint listen kokoro_server stt_server kernel cow worker daemons governor programs hibernate missions budget palette aiwatch; do
     curl -fsSL "https://raw.githubusercontent.com/${REPO}/${BRANCH}/chucknorris_ext/${f}.py" \
       -o "${APP_DIR}/chucknorris_ext/${f}.py" \
       || case "$f" in

@@ -46,6 +46,9 @@ The third roadmap (`docs/ROADMAP.md`, phases 10–15), with tests in
   step and survive a crash or a reboot (Resume at the next start);
   `/replay <pid>` shows a run step by step and `/fork <pid> <step>
   [instruction]` starts a new agent from any step, files as they were then.
+- **`/watch`**: write a comment ending in `AI!` in any editor and save; Chuck
+  does it and removes the marker. `AI?` asks a question. Costs nothing while
+  it waits.
 - **Ctrl+P, the command palette**: every action, running agent, program,
   mission, chat, folder and model in groups, fuzzy-searched; Enter runs it
   or puts what it needs in the composer.

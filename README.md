@@ -84,6 +84,16 @@ Some jobs are too big for one agent. A mission plans the goal as a small graph o
 
 <p align="center"><img src="assets/screenshots/palette.png" alt="The command palette: a search box and the Agent OS group: Activity, Processes, New mission, Missions, Background agent, Daemons, Inbox, Board, Budget, Governor" width="620"></p>
 
+### `/watch`: talk to Chuck from your own editor
+
+Turn on `/watch` and keep coding in VS Code, Neovim, JetBrains, anything. Write a comment ending in `AI!` and save:
+
+```python
+def total(items):   # make this skip None values AI!
+```
+
+Chuck sees it, does it, and removes the marker. End a comment with `AI?` and it answers the question in the chat instead, changing nothing. Every common comment style works (`#`, `//`, `--`, `/* */`, `<!-- -->`). Watching costs nothing: it's a cheap scan of what you saved, with no model call until a marker appears, and each comment is acted on once.
+
 ### The tray: the OS at a glance
 
 When something is going on, a small tray appears in the header: `? 1  ▶ 2  ◎ 1  ✉ 1` means a question is waiting for you, two agents are working, a mission is running, and a daemon left a report. It lights up when an agent is waiting for your answer. Click it (or type `/activity`) for one card with all of it, each with a button to act on it.

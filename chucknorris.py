@@ -129,6 +129,7 @@ _hibernate = _optional("hibernate")
 _missions = _optional("missions")
 _budget = _optional("budget")
 _palette = _optional("palette")
+_aiwatch = _optional("aiwatch")
 if _pricing is None:
     class _pricing:                     # noqa: N801  — the meter, minus prices
         """Stand-in so a partial install still launches: tokens are counted,
@@ -3480,6 +3481,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._turn_no = 0               # which task a change belongs to (for "undo all")
         self._user_notes = []           # things the user did that the model must hear about
         self._steer = []                # messages typed while a task runs, for its next step
+        self._watch = None              # /watch: AI! comments from your editor
         self.plan_mode = False          # investigate read-only, propose, wait for approval
         self._carry_plan = None         # an approved plan card the next turn ticks off
         self._quiet_send = False
@@ -4121,6 +4123,10 @@ class ChuckWindow(Adw.ApplicationWindow):
                 self._toast(f"Not a folder: {path}")
                 return False
         self.workspace = p
+        wt = getattr(self, "_watch", None)
+        if wt is not None and str(p) != wt["root"]:
+            self._watch = None                       # /watch watched the old folder
+            self._sys_note("\U0001F441 stopped watching: the folder changed (/watch to watch this one).", "dim")
         _WORKDIR["path"] = str(p) if p else None
         _SHELL["cwd"] = None                    # a new folder: the shell starts there
         self._refresh_system()                  # that folder's CHUCK.md / AGENTS.md
@@ -10419,6 +10425,9 @@ class ChuckWindow(Adw.ApplicationWindow):
         add("Code", "Write CHUCK.md for this project", lambda: self._slash("/init"), hint="/init",
             keywords="rules instructions")
         add("Code", "Doctor: check the setup", self.run_doctor, hint="/doctor")
+        add("Code", ("Stop watching for AI! comments" if self._watch else
+                     "Watch for AI! comments from your editor"),
+            lambda: self.watch_command(""), hint="/watch", keywords="editor vscode vim comment")
         add("Folder", "Choose a working folder…", self.open_workspace, keys="Ctrl+O")
         for path in (self.settings.get("recent_workspaces") or [])[:8]:
             if path and os.path.isdir(path):
@@ -10605,6 +10614,80 @@ class ChuckWindow(Adw.ApplicationWindow):
             pass
         return True
 
+    # ── /watch: talk to Chuck from your own editor (AI! / AI? comments) ──
+    def watch_command(self, arg=""):
+        """/watch [on|off]: act on AI! comments (and answer AI? ones) as you
+        save files in the working folder, from whatever editor you use."""
+        if _aiwatch is None:
+            self._sys_note("The aiwatch module is missing — reinstall Chuck.", "danger")
+            return False
+        want = (arg or "").strip().lower()
+        on = (self._watch is None) if want not in ("on", "off") else want == "on"
+        if not on:
+            if self._watch is not None:
+                self._watch = None
+                self._sys_note("\U0001F441 stopped watching for AI! comments.", "dim")
+            return True
+        root = self._workroot()
+        if root is None:
+            self._sys_note("Pick a working folder first (/folder): /watch watches it.", "danger")
+            return False
+        if self._watch is not None and self._watch["root"] == str(root):
+            return True
+        w = {"root": str(root), "snap": None, "seen": set(), "busy": True}
+        self._watch = w
+
+        def first():
+            w["snap"] = _aiwatch.snapshot(w["root"])      # what's there now is the baseline
+            w["busy"] = False
+        threading.Thread(target=first, daemon=True, name="watch-init").start()
+        GLib.timeout_add(1500, self._watch_tick, w)
+        if not self.agent_mode:
+            self.set_agent_mode(True, announce=False)
+        self._sys_note(f"\U0001F441 watching {root.name}: write a comment ending in AI! in any file, "
+                       "in any editor, and save; AI? asks a question. /watch off stops.", "ok")
+        return True
+
+    def _watch_tick(self, w):
+        if self._watch is not w or getattr(self, "_closing", False):
+            return False                              # turned off, or another folder
+        if w["busy"] or w["snap"] is None:
+            return True
+        w["busy"] = True
+
+        def scan():
+            try:
+                snap, found = _aiwatch.scan(w["root"], w["snap"])
+            except Exception:
+                snap, found = w["snap"], []
+            GLib.idle_add(self._watch_found, w, snap, found)
+        threading.Thread(target=scan, daemon=True, name="watch-scan").start()
+        return True
+
+    def _watch_found(self, w, snap, found):
+        w["snap"], w["busy"] = snap, False
+        if self._watch is not w:
+            return False
+        new = []
+        for f in found:
+            key = (f[0], f[2], f[3])                  # file, kind, text: each comment once
+            if key not in w["seen"]:
+                w["seen"].add(key)
+                new.append(f)
+        if not new:
+            return False
+        text = _aiwatch.prompt_for(new)
+        self._sys_note(f"\U0001F441 {len(new)} AI comment(s) in "
+                       + ", ".join(sorted({f'{f[0]}:{f[1]}' for f in new}))[:200], "dim")
+        if self._running:
+            self._steer.append(text)                  # heard at its next step
+        else:
+            if not self.agent_mode:
+                self.set_agent_mode(True, announce=False)
+            self.entry.get_buffer().set_text(text)
+            self.on_send()
+        return False
+
     # ── the system tray: the OS at a glance ──
     def _activity(self):
         """What the OS is doing right now, for the tray and its card."""
@@ -10631,6 +10714,9 @@ class ChuckWindow(Adw.ApplicationWindow):
             if a["missions"]:
                 parts.append(f"\u25ce {len(a['missions'])}")
                 tips.append(f"{len(a['missions'])} mission(s)")
+            if getattr(self, "_watch", None) is not None:
+                parts.append("\U0001F441")
+                tips.append("watching for AI! comments (/watch off)")
             if a["unread"]:
                 parts.append(f"\u2709 {a['unread']}")
                 tips.append(f"{a['unread']} daemon report(s) unread")
@@ -12466,6 +12552,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         ("/budget [day|month <$>]", "what everything spent today and this month, and the limits"),
         ("/activity", "everything waiting for you and everything working (the tray in the header)"),
         ("Ctrl+P", "the command palette: every action, agent, chat and model, one search away"),
+        ("/watch [off]", "act on AI! comments you save in any editor (AI? asks a question)"),
         ("/send <pid> <message>", "tell a running agent something; it hears it at its next step"),
         ("/answer <pid> <text>", "answer an agent that asked you a question"),
         ("/board", "the facts agents share with each other"),
@@ -12530,6 +12617,8 @@ class ChuckWindow(Adw.ApplicationWindow):
             self.budget_command(arg)
         elif cmd == "activity":
             self.show_activity()
+        elif cmd == "watch":
+            self.watch_command(arg)
         elif cmd == "missions":
             self.show_missions()
         elif cmd == "send":

@@ -1571,6 +1571,40 @@ ps["run"](ps["rows"]["rows"][0])
 settle()
 check(w._palette_win is None, "running a row closes it")
 
+print("\n--- /watch: AI! comments from your own editor ---")
+wproj = tmp / "watchproj"
+wproj.mkdir()
+(wproj / "calc.py").write_text("def total(items):\n    return sum(items)\n")
+(wproj / "old.py").write_text("x = 1  # this was here before AI!\n")
+w = new_win([], tmp)
+w.set_agent_mode(True, announce=False)
+w.set_workspace(wproj, announce=False)
+w.backend = ScriptedBackend(["Done: total() now skips None.", "Because sum() is O(n); fine here."])
+check(w.watch_command("on") and w._watch is not None, "/watch starts watching the folder")
+settle()
+time.sleep(0.05)
+(wproj / "calc.py").write_text("def total(items):   # make this skip None values AI!\n    return sum(items)\n")
+os.utime(wproj / "calc.py", None)
+w._watch_tick(w._watch); settle()
+sent = [m["content"] for m in w.history if m.get("role") == "user"]
+check(sent and "calc.py:1: make this skip None values" in sent[-1] and "REMOVE the AI! markers" in sent[-1]
+      and "old.py" not in sent[-1],
+      "saving an AI! comment sends it to the agent with its code around it (old markers don't fire)",
+      sent[-1:] if sent else None)
+n_before = len(w.history)
+os.utime(wproj / "calc.py", None)
+w._watch_tick(w._watch); settle()
+check(len(w.history) == n_before, "the same comment isn't acted on twice")
+(wproj / "calc.py").write_text("def total(items):\n    return sum(items)   # AI? why not a loop\n")
+w._watch_tick(w._watch); settle()
+sent = [m["content"] for m in w.history if m.get("role") == "user"]
+check("answer the question(s)" in sent[-1] and "why not a loop" in sent[-1] and "don't change files" in sent[-1],
+      "an AI? comment is a question, answered in the chat")
+w._tray_tick()
+check("\U0001F441" in w._tray_lbl.get_label(), "the tray shows it's watching")
+w.set_workspace(mproj, announce=False)
+check(w._watch is None, "switching folders stops watching the old one")
+
 print(f"\nTOTAL OS FAILURES: {fails}")
 assert fails == 0 and not FAILS, "OS regressions present"
 print("ALL OS TESTS PASSED")
