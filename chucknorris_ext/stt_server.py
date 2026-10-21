@@ -6,12 +6,16 @@ Run by the voice venv's Python (it needs sherpa-onnx and numpy):
 
 The speech model is loaded once. Then, per command line on stdin:
 
-    {"cmd": "listen", "recorder": [argv...], "max_wait": 8, "max_len": 30}
+    {"cmd": "listen", "recorders": [[argv...], ...], "max_wait": 8, "max_len": 30}
     {"cmd": "cancel"}
 
-"listen" starts the recorder (raw 16 kHz mono s16 on its stdout), runs the
+"listen" starts a recorder (raw 16 kHz mono s16 on its stdout), runs the
 Silero voice-activity detector over it, and as soon as you stop talking
-transcribes what you said. Events go to stdout, one JSON object per line:
+transcribes what you said. A recorder that ends before giving any sound
+(pw-record that can't write raw audio to a pipe, parecord with no
+pipewire-pulse, a missing device) is not silence: the next one is tried,
+and only when none works is it an error, naming why each failed. Events go
+to stdout, one JSON object per line:
 
     {"event": "ready"}                       model loaded
     {"event": "listening"}                   the recorder is running
@@ -19,6 +23,7 @@ transcribes what you said. Events go to stdout, one JSON object per line:
     {"event": "speech"}                      you started talking
     {"event": "final", "text": "..."}        what you said
     {"event": "nothing"}                     no speech before max_wait
+    {"event": "recorder", "argv": [...]}     the recorder that worked (if not the first)
     {"event": "error", "error": "..."}
 """
 import json
@@ -102,16 +107,39 @@ def main():
             listen(c, so, np, cfg, window, transcribe, cmds)
 
 
+# a recorder that ends having given less than this much audio never worked
+MIN_AUDIO = RATE * 2 // 5          # 0.2 s of 16-bit samples, in bytes
+
+
 def listen(c, so, np, cfg, window, transcribe, cmds):
-    try:
-        proc = subprocess.Popen(c["recorder"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                stdin=subprocess.DEVNULL)
-    except OSError as ex:
-        emit(event="error", error=f"couldn't start the microphone: {ex}")
-        return
+    recorders = c.get("recorders") or ([c["recorder"]] if c.get("recorder") else [])
+    failed = []
+    told = False
+    for i, argv in enumerate(recorders):
+        try:
+            proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    stdin=subprocess.DEVNULL)
+        except OSError as ex:
+            failed.append(f"{argv[0]}: {ex.strerror or ex}")
+            continue
+        if not told:
+            emit(event="listening")
+            told = True
+        out = _listen_on(proc, c, so, np, cfg, window, transcribe, cmds,
+                         announce=argv if (i or failed) else None)
+        if out[0] != "dead":
+            return
+        failed.append(f"{argv[0]}: {out[1] or 'stopped at once, with no sound'}")
+    emit(event="error", error="no microphone recorder worked (" + "; ".join(failed or ["none found"])
+         + "). Check that a microphone is connected and selected in your sound settings, or "
+           "set Settings \u203a Voice \u203a microphone command.")
+
+
+def _listen_on(proc, c, so, np, cfg, window, transcribe, cmds, announce=None):
+    """One recorder -> ("done",) or ("dead", why) when it gave no sound."""
     vad = so.VoiceActivityDetector(cfg, buffer_size_in_seconds=60)
-    emit(event="listening")
     t0 = time.time()
+    got = 0
     max_wait, max_len = float(c.get("max_wait", 8)), float(c.get("max_len", 30))
     heard = False
     speech_t = None
@@ -129,6 +157,8 @@ def listen(c, so, np, cfg, window, transcribe, cmds):
             if not r:
                 if proc.poll() is not None:
                     err = (proc.stderr.read() or b"").decode("utf-8", "replace").strip()
+                    if got < MIN_AUDIO:
+                        return ("dead", err[-200:])
                     emit(event="error", error="the microphone stopped" + (f": {err[-200:]}" if err else ""))
                     result = "error"
                     break
@@ -137,6 +167,17 @@ def listen(c, so, np, cfg, window, transcribe, cmds):
                     break
                 continue
             data = os.read(fd, 3200)                     # 0.1 s
+            if not data and got < MIN_AUDIO and not heard:
+                # ended before any sound: this recorder doesn't work here
+                try:
+                    proc.wait(timeout=1)
+                except Exception:
+                    pass
+                err = (proc.stderr.read() or b"").decode("utf-8", "replace").strip()
+                return ("dead", err[-200:])
+            if data and got < MIN_AUDIO <= got + len(data) and announce:
+                emit(event="recorder", argv=announce)
+            got += len(data)
             if not data:
                 # the recorder ended (a file being replayed, or a closed device):
                 # whatever was said up to now is the utterance
@@ -187,6 +228,7 @@ def listen(c, so, np, cfg, window, transcribe, cmds):
         emit(event="nothing")
     elif result == "cancel":
         emit(event="cancelled")
+    return ("done",)
 
 
 if __name__ == "__main__":

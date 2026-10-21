@@ -1048,6 +1048,75 @@ L.recorder_argv = real_argv
 settle()
 
 # ═══════════════════════════════════════════════════════════════════════════
+print("\n--- the mic: a recorder that dies at once is not silence ---")
+import importlib.util as _ilu
+_sp = _ilu.spec_from_file_location("stt_server", str(Path(L.__file__).with_name("stt_server.py")))
+SS = _ilu.module_from_spec(_sp)
+_sp.loader.exec_module(SS)
+bind = tmp / "recbin"
+bind.mkdir(exist_ok=True)
+(bind / "deadrec").write_text("#!/bin/sh\necho \"pw-record: can't write raw audio to stdout\" >&2\nexit 1\n")
+(bind / "goodrec").write_text("#!/bin/sh\nhead -c 32000 /dev/urandom\n")
+for f in ("deadrec", "goodrec"):
+    os.chmod(bind / f, 0o755)
+try:
+    import numpy as _np
+except ImportError:
+    _np = None
+if _np is not None:
+    class _VAD:
+        def __init__(self, *a, **k):
+            self.n = 0
+
+        def accept_waveform(self, x):
+            self.n += len(x)
+
+        def is_speech_detected(self):
+            return self.n > 0
+
+        def empty(self):
+            return True
+
+        def flush(self):
+            pass
+
+    class _SO:
+        VoiceActivityDetector = _VAD
+    out = []
+    real_emit = SS.emit
+    SS.emit = lambda **kw: out.append(kw)
+    try:
+        SS.listen({"recorders": [[str(bind / "deadrec")]], "max_wait": 8}, _SO, _np, None, 512,
+                  lambda s: "hello", [])
+        check([e["event"] for e in out] == ["listening", "error"] and "can't write raw audio" in out[-1]["error"],
+              "a recorder that ends at once is an error with its reason, not 'didn't hear'", out)
+        out.clear()
+        t0 = time.time()
+        SS.listen({"recorders": [[str(bind / "deadrec")], [str(bind / "goodrec")]], "max_wait": 8}, _SO, _np,
+                  None, 512, lambda s: "hello", [])
+        ev = [e["event"] for e in out]
+        check("final" in ev and out[ev.index("final")]["text"] == "hello" and "recorder" in ev
+              and out[ev.index("recorder")]["argv"] == [str(bind / "goodrec")] and time.time() - t0 < 5,
+              "the next recorder is tried, it hears you, and it is named so it goes first next time", out)
+    finally:
+        SS.emit = real_emit
+real_recs, real_good = L.RECORDERS, L.EARS.good
+real_mic = L._SETTINGS.get("mic_command")
+L._SETTINGS["mic_command"] = ""
+L.RECORDERS = ([str(bind / "deadrec")], [str(bind / "goodrec")])
+os.environ["PATH"] = str(bind) + os.pathsep + os.environ["PATH"]
+L.EARS.good = [str(bind / "goodrec")]
+check(L.recorder_chain()[0] == [str(bind / "goodrec")], "the recorder that worked last time is tried first")
+ok, det = L.mic_test()
+check(ok and det.startswith(str(bind / "goodrec")) and "sound is coming in" in det, "/doctor's mic test hears sound", det)
+L.RECORDERS = ([str(bind / "deadrec")],)
+L.EARS.good = None
+ok, det = L.mic_test()
+check(not ok and "can't write raw audio" in det, "and names why a recorder gave none", det)
+L.RECORDERS, L.EARS.good = real_recs, real_good
+L._SETTINGS["mic_command"] = real_mic or ""
+
+# ═══════════════════════════════════════════════════════════════════════════
 print("\n--- updating: a failed swap leaves the working copy ---")
 upd = cn._update
 app_dir, src = tmp / "upd_app", tmp / "upd_src"

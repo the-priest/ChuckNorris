@@ -57,6 +57,14 @@ The third roadmap (`docs/ROADMAP.md`, phases 10–15), with tests in
 
 ### Fixed (bug hunts on this cycle)
 
+- **Voice input said "didn't hear anything" the instant the mic was tapped**
+  when the recorder couldn't run (pw-record that can't write raw audio to a
+  pipe, parecord without pipewire-pulse): its instant exit read as silence.
+  Recorders are now tried in turn (parecord, pw-record --raw, pw-record,
+  arecord), the working one is remembered, and if none gives sound the
+  error says why. `/doctor` and Settings › Voice record a real second to
+  prove the mic; a custom microphone command is in Settings.
+
 - Sandbox escapes: switching folders with ```` ```project ````, a repo's own
   git config (`core.fsmonitor`) run by map/find//diff, `~` as the working
   folder uncovering `~/.ssh`, orphaned sandboxed Python kernels, and Chuck's

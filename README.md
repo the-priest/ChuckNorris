@@ -28,6 +28,24 @@ Paste a SiliconFlow key in Settings. Press **Tab** to pick Agent or Chat. Talk t
 
 ---
 
+## What is this, in plain words?
+
+**Chuck is an AI that works on your computer, not just one that talks.** You type (or say) what you want: *"my disk is full"*, *"add tests to this project"*, *"why won't Bluetooth start?"*. Chuck then actually does it. It runs the commands, reads and edits the files, tests what it changed, and tells you what it did and what it cost. The AI's thinking happens on a model you rent online (SiliconFlow). Everything it *does* happens on your machine, where you can see it.
+
+**Why "an operating system"?** A single AI helper is like a single program. Once you have many of them working at the same time, you need what a computer has always needed to run many programs: someone to decide who goes next, who may touch what, who pays for what, and what happens when something crashes. With AI you pay per *token* (roughly, per word read or written), the way people once paid per second of computer time. So Chuck treats tokens like computer time and AI helpers like programs, and it gives them a real operating system:
+
+- **You can see every helper at once** (`/top`), what it's doing, and what it has cost, and pause or stop any of them.
+- **Each helper has a budget.** When it runs out, it is asked to write up what it found and stop. Nothing runs up your bill forever.
+- **Helpers can work in the background** on a *copy* of your project, so they can't break your files. When one finishes, you look at what it changed and click **Merge** if you like it.
+- **Helpers can talk.** You can send one a message while it works, it can ask you a question without stopping the others, and they share a notice board so they don't get in each other's way.
+- **Helpers can wait for something to happen.** "Every morning at 8:30", "when a service fails", "when the disk is 90% full". Waiting costs nothing; they wake up only when it happens, look, and leave you a report.
+- **Nothing is lost.** Every step is saved. If the computer crashes, a helper picks up where it was. You can even go back to any step of a helper's work and try a different direction from there.
+- **Safety stays on.** A helper can do whatever you allow it to, but anything that could wreck your system (wiping a disk, deleting your home folder) always waits for your click.
+
+**Do I need to understand any of that to use it?** No. Install it, open it, and talk to it like a colleague. The OS part works underneath, the way your computer's OS does. The rest of this page is for when you're curious.
+
+---
+
 ## Chuck OS
 
 An agent loop with a prompt and a few tools is a program. Run ten of them and you need what computers needed in 1965: something to decide who runs, who pays, who may touch what, and what happens when one crashes. That layer is Chuck OS. The full design is in [`docs/OS.md`](docs/OS.md).
@@ -234,6 +252,8 @@ He stops early only to ask you something he shouldn't decide alone. That arrives
 - Pick a voice in Settings → Voice and hear it at once. The default is a blend of Kokoro's two clearest male voices; *Heart* is rated its most natural overall.
 
 **Talk to it.** Click the mic, or press **Ctrl+M**, and just talk. It stops when you pause and puts what you said in the composer, or sends it straight away if you turn on hands-free. Recognition is [Moonshine](https://github.com/usefulsensors/moonshine) with a voice-activity detector, all on your machine. Talking over Chuck interrupts him.
+
+**If the mic doesn't hear you:** Chuck records with whichever tool your system has (`parecord`, then `pw-record`, then `arecord`), and if one fails it tries the next and remembers the one that works. If none gives any sound you'll see why, not a vague "didn't hear". `/doctor` and **Settings › Voice › Test the microphone** record one second and tell you whether sound is coming in. If the level is near zero, pick the right input in your desktop's sound settings, or give Chuck your own command under **Microphone command**.
 
 The installer sets both up, about 600 MB. `/voice` installs them later if you skipped it (`CHUCK_VOICE=0`). `/doctor` checks both with a real test.
 

@@ -31,9 +31,15 @@ MODEL_FILES = ("preprocess.onnx", "encode.int8.onnx", "uncached_decode.int8.onnx
                "cached_decode.int8.onnx", "tokens.txt")
 _SERVER = Path(__file__).with_name("stt_server.py")
 _SETTINGS = config.SETTINGS_DATA
+# Tried in this order until one gives sound (stt_server.py). parecord first:
+# it writes raw audio to a pipe reliably, through pipewire-pulse on a
+# PipeWire desktop; pw-record only does with --raw on newer PipeWire, and
+# without it some versions exit at once (which used to read as "didn't
+# hear anything" the instant the mic was tapped).
 RECORDERS = (
-    ["pw-record", "--rate", "16000", "--channels", "1", "--format", "s16", "-"],
     ["parecord", "--raw", "--rate=16000", "--channels=1", "--format=s16le"],
+    ["pw-record", "--rate", "16000", "--channels", "1", "--format", "s16", "--raw", "-"],
+    ["pw-record", "--rate", "16000", "--channels", "1", "--format", "s16", "-"],
     ["arecord", "-q", "-t", "raw", "-f", "S16_LE", "-r", "16000", "-c", "1"],
 )
 
@@ -43,14 +49,75 @@ def ready():
                 and VAD_PATH.exists())
 
 
-def recorder_argv():
+def recorder_chain():
+    """Every recorder worth trying, best first: your own command alone if you
+    set one; else the one that worked last time, then the rest installed."""
     want = (_SETTINGS.get("mic_command") or "").strip()
     if want:
-        return want.split() if not want.startswith("sh -c ") else ["sh", "-c", want[6:]]
-    for argv in RECORDERS:
-        if shutil.which(argv[0]):
-            return argv
-    return None
+        return [want.split() if not want.startswith("sh -c ") else ["sh", "-c", want[6:]]]
+    chain = [list(a) for a in RECORDERS if shutil.which(a[0])]
+    good = EARS.good if "EARS" in globals() else None
+    if good in chain:
+        chain.remove(good)
+        chain.insert(0, good)
+    return chain
+
+
+def recorder_argv():
+    chain = recorder_chain()
+    return chain[0] if chain else None
+
+
+def mic_test(seconds=1.2):
+    """Record a moment from each recorder until one gives sound.
+    -> (ok, detail). For /doctor: proves the mic, not just the software."""
+    tried = []
+    for argv in recorder_chain():
+        try:
+            p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 stdin=subprocess.DEVNULL)
+        except OSError as ex:
+            tried.append(f"{argv[0]}: {ex.strerror or ex}")
+            continue
+        data, end = b"", time.time() + seconds
+        fd = p.stdout.fileno()
+        os.set_blocking(fd, False)
+        try:
+            while time.time() < end and p.poll() is None:
+                try:
+                    chunk = os.read(fd, 6400)
+                except BlockingIOError:
+                    chunk = None
+                if chunk:
+                    data += chunk
+                else:
+                    time.sleep(0.05)
+            while len(data) < 64000:            # what it wrote before it ended
+                try:
+                    chunk = os.read(fd, 6400)
+                except BlockingIOError:
+                    break
+                if not chunk:
+                    break
+                data += chunk
+        finally:
+            p.kill()
+            err = b""
+            try:
+                err = p.communicate(timeout=2)[1] or b""
+            except Exception:
+                pass
+        if len(data) >= 6400:
+            n = len(data) // 2
+            vals = memoryview(data[:n * 2]).cast("h")
+            rms = (sum(v * v for v in vals) / max(1, n)) ** 0.5 / 32768
+            return True, (f"{argv[0]}: sound is coming in (level {rms:.3f}"
+                          + (", very quiet: is the right microphone selected?" if rms < 0.0005 else "")
+                          + ")")
+        tried.append(f"{argv[0]}: " + (err.decode("utf-8", "replace").strip()[-120:]
+                                       or "gave no sound"))
+    return False, "no recorder gave sound \u2014 " + ("; ".join(tried) or "none installed "
+                                                      "(pipewire-pulse, pipewire or alsa-utils)")
 
 
 def status():
@@ -74,6 +141,7 @@ class Ears:
         self.busy = False
         self.cancel_pending = False
         self.listen_sent = False
+        self.good = None                         # the recorder that worked last time
 
     def alive(self):
         return self.proc is not None and self.proc.poll() is None
@@ -103,6 +171,9 @@ class Ears:
                     if not got_ready:
                         got_ready = True
                         first.put(ev)
+                        continue
+                    if ev.get("event") == "recorder" and isinstance(ev.get("argv"), list):
+                        self.good = ev["argv"]          # try it first next time
                         continue
                     if ev.get("event") in ("final", "nothing", "error", "cancelled"):
                         self.busy = False
@@ -158,7 +229,10 @@ class Ears:
             self.cancel_pending = False
             on_event({"event": "cancelled"})
             return False
-        self._send({"cmd": "listen", "recorder": argv, "max_wait": max_wait, "max_len": max_len})
+        chain = recorder_chain() or [argv]
+        if argv not in chain:
+            chain.insert(0, argv)
+        self._send({"cmd": "listen", "recorders": chain, "max_wait": max_wait, "max_len": max_len})
         self.listen_sent = True
         if self.cancel_pending:                 # cancelled while the listen was being sent
             self.cancel_pending = False

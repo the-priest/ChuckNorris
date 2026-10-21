@@ -8429,7 +8429,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         grid = Gtk.Grid(column_spacing=12, row_spacing=6)
         icon = {"ok": ("\u2713", "plan-tick"), "warn": ("!", "doctor-warn"), "fail": ("\u2717", "doctor-fail")}
         api_detail = None
-        voice_row = None
+        voice_row = mic_row = None
         for i, (st, name, detail) in enumerate(rows + [("warn", "API", "checking\u2026")]):
             ic, css = icon[st]
             il = Gtk.Label(label=ic); il.add_css_class(css)
@@ -8441,6 +8441,8 @@ class ChuckWindow(Adw.ApplicationWindow):
                 api_detail, api_icon = dl, il
             if name == "Voice" and st in ("ok", "fail"):
                 voice_row = (dl, il)                 # a failed one is re-tested: it may be fine now
+            if name == "Voice input" and st == "ok":
+                mic_row = (dl, il)                   # installed: prove the microphone gives sound
         body.append(grid)
         self._log_pin(card)
         key, base = self.backend.key(), self.backend.base()
@@ -8467,6 +8469,23 @@ class ChuckWindow(Adw.ApplicationWindow):
                 pass
             return False
         threading.Thread(target=lambda: GLib.idle_add(done, work()), daemon=True).start()
+        if mic_row is not None and _listen is not None:
+            mdl, mil = mic_row
+            mdl.set_text(mdl.get_text() + " \u2014 testing the microphone\u2026")
+
+            def mic_done(res):
+                ok, text = res
+                try:
+                    mdl.set_text(text)
+                    mil.set_text(icon["ok" if ok else "fail"][0])
+                    for c in ("plan-tick", "doctor-warn", "doctor-fail"):
+                        mil.remove_css_class(c)
+                    mil.add_css_class(icon["ok" if ok else "fail"][1])
+                except Exception:
+                    pass
+                return False
+            threading.Thread(target=lambda: GLib.idle_add(mic_done, _listen.mic_test()),
+                             daemon=True, name="mic-test").start()
         if voice_row is not None:
             vdl, vil = voice_row
             vdl.set_text(vdl.get_text() + " \u2014 testing\u2026")
@@ -10282,7 +10301,8 @@ class ChuckWindow(Adw.ApplicationWindow):
                 if self.settings.get("voice_autosend", False) and not self._running:
                     self.on_send()
             elif kind == "nothing":
-                self._toast("Didn't hear anything \u2014 is the right microphone selected?")
+                self._toast(f"Didn't hear anything in {int(float(self.settings.get('mic_wait', 8)))} s "
+                            "\u2014 is the right microphone selected? (/doctor tests it)")
             elif kind == "error":
                 self._sys_note(f"\U0001F399 voice input: {ev.get('error')}", "danger")
                 if _crashlog is not None:
@@ -13885,6 +13905,23 @@ class ChuckWindow(Adw.ApplicationWindow):
             switch(g2, "Send what I say right away", "voice_autosend", False,
                    sub="Off: what you said lands in the composer for a look first.")
             spin(g2, "Give up if nothing is said within (s)", "mic_wait", 3, 30, 1, 8)
+            entry(g2, "Microphone command (blank: automatic \u2014 parecord, pw-record, arecord)",
+                  "mic_command", "")
+            mt = Adw.ActionRow(); mt.set_title("Test the microphone")
+            mt.set_subtitle("Records a second and says whether sound is coming in")
+            mb = Gtk.Button(label="Test"); mb.add_css_class("quick"); mb.set_valign(Gtk.Align.CENTER)
+
+            def mic_check(*_a):
+                mb.set_sensitive(False)
+                mt.set_subtitle("listening for a second\u2026")
+
+                def work():
+                    ok, text = _listen.mic_test()
+                    GLib.idle_add(lambda: (mt.set_subtitle(_html.escape(("\u2713 " if ok else "\u2717 ") + text)),
+                                           mb.set_sensitive(True), False)[2])
+                threading.Thread(target=work, daemon=True, name="mic-test").start()
+            mb.connect("clicked", mic_check)
+            mt.add_suffix(mb); g2.add(mt)
         tr = Adw.ActionRow(); tr.set_title("Test the voice")
         tb = Gtk.Button(label="Play"); tb.add_css_class("quick"); tb.set_valign(Gtk.Align.CENTER)
         tb.connect("clicked", lambda *_a: speak(
