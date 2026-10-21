@@ -75,12 +75,15 @@ def run_worker(brief, call_model, parse, syscalls, max_steps=60, on_event=None,
             return (call_model(msgs) or "").strip() or "(no report)", step + 1
         reply = call_model(msgs) or ""
         calls = parse(reply)
-        mail = inbox() if inbox and not calls else []
-        if not calls and mail and step < max_steps - 1:
+        # mail is only taken when it will be heard (not on the last step)
+        mail = inbox() if inbox and not calls and step < max_steps - 1 else []
+        if not calls and mail:
             # a message arrived as it was about to finish: it hears it first
             msgs.append({"role": "assistant", "content": reply})
             msgs.append({"role": "user", "content": _mail_text(mail)
                          + "\n\nTake this into account, then finish (your REPORT when done)."})
+            if on_step and not (should_stop and should_stop()):
+                on_step(msgs, step + 1)
             continue
         if not calls:
             return reply.strip() or "(the agent returned an empty report)", step + 1

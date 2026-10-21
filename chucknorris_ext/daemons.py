@@ -32,8 +32,8 @@ DAEMON_PROMPT = (
     "read-only to you, and a command that would change something is refused.\n"
     "Tools: put one or several fenced blocks in a reply and you get the results back:\n"
     "```read <path>[:start-end]``` ```grep <regex> [path]``` ```glob <pattern>``` ```map```\n"
-    "```bash\n<read-only command>\n``` (journalctl, systemctl status, df, git log, "
-    "pacman -Q, …) ```search <query>``` ```fetch <url>``` ```board``` (facts other agents "
+    "```bash\n<read-only command>\n``` (journalctl -u <unit>, df, du, git log, "
+    "pacman -Q, …; services can't be reached, so read their journal) ```search <query>``` ```fetch <url>``` ```board``` (facts other agents "
     "shared) ```post <key>: <fact>```\n"
     "Find out what happened and why, briefly. Then reply with no tool block: your REPORT — "
     "the first line a one-line headline (\"nothing to do\" when there is nothing to do), "
@@ -70,9 +70,9 @@ def parse_when(text):
         if n < 60:
             raise DaemonError("the shortest interval is a minute")
         return {"every": n}
-    m = re.fullmatch(r"when\s+(?:the\s+)?disk\s+(\S+)?\s*(?:is\s+)?(?:above|over|>)\s*(\d{1,3})\s*%?", t)
+    m = re.fullmatch(r"when\s+(?:the\s+)?disk\s+(?:([/~]\S*)\s+)?(?:is\s+)?(?:above|over|>)\s*(\d{1,3})\s*%?", t)
     if m:
-        return {"disk": m.group(1) or "/", "above": max(1, min(99, int(m.group(2))))}
+        return {"disk": os.path.expanduser(m.group(1) or "/"), "above": max(1, min(99, int(m.group(2))))}
     if re.fullmatch(r"when\s+(?:a|any)\s+(?:service|unit)\s+fails", t):
         return {"unit_failed": True}
     m = re.fullmatch(r"when\s+`([^`]+)`\s+changes", (text or "").strip(), re.IGNORECASE)
@@ -107,90 +107,174 @@ def describe(trig):
     return "?"
 
 
-# Without bubblewrap a daemon's command runs on the bare system, so only
-# commands that are read-only by nature are let through.
+# What a daemon may run. Every daemon command runs with the whole system
+# read-only and WITHOUT the system bus (no service, power or login control
+# can be reached at all); this check is the second wall, and the only one
+# when there is no bubblewrap. It parses the command like a shell would
+# (quotes, escapes, pipes), refuses anything that would run another command
+# for it (sh -c, xargs, env, nice, timeout, …), and checks each command
+# against what it may do.
 _RO_CMDS = {
     "df", "du", "ls", "cat", "head", "tail", "grep", "egrep", "fgrep", "rg", "wc", "stat",
     "file", "find", "uname", "uptime", "free", "ps", "journalctl", "systemctl", "pacman",
     "checkupdates", "git", "ip", "ss", "lsblk", "findmnt", "sensors", "date", "who", "w",
-    "last", "id", "whoami", "hostname", "hostnamectl", "timedatectl", "sort", "uniq", "cut",
-    "tr", "echo", "printf", "nproc", "lscpu", "lspci", "lsusb", "which", "test", "true",
-    "column", "jq", "diff", "md5sum", "sha256sum", "tree", "readlink", "realpath", "basename",
-    "dirname", "nvidia-smi", "paccache", "pactree", "expac", "loginctl", "busctl", "less",
-    "zcat", "xargs", "env", "printenv", "locale", "lsmod", "dmesg", "inxi", "fastfetch"}
+    "last", "id", "whoami", "hostname", "sort", "uniq", "cut", "tr", "echo", "printf",
+    "nproc", "lscpu", "lspci", "lsusb", "which", "test", "true", "false", "column", "jq",
+    "diff", "md5sum", "sha256sum", "tree", "readlink", "realpath", "basename", "dirname",
+    "nvidia-smi", "paccache", "pactree", "expac", "zcat", "printenv", "locale", "lsmod",
+    "dmesg", "inxi", "fastfetch", "pgrep", "vmstat", "iostat", "top", "pwd", "seq", "awk"}
+_ROOT = {"sudo", "doas", "pkexec", "su", "run0"}
+_RUNS_OTHERS = {"sh", "bash", "zsh", "dash", "ksh", "fish", "xargs", "env", "nice", "ionice",
+                "timeout", "time", "command", "exec", "stdbuf", "setsid", "nohup", "chrt",
+                "taskset", "flock", "watch", "busybox", "unbuffer", "eval", "source", ".",
+                "parallel", "script", "runuser", "systemd-run", "strace", "gdb", "python",
+                "python3", "perl", "ruby", "node", "less", "more", "vi", "vim", "nano"}
+_NEVER = {"loginctl", "busctl", "dbus-send", "gdbus", "qdbus", "shutdown", "reboot", "poweroff",
+          "halt", "kill", "pkill", "killall", "rm", "rmdir", "dd", "chmod", "chown", "chgrp",
+          "mv", "cp", "tee", "truncate", "ln", "install", "rsync", "shred", "mount", "umount",
+          "swapoff", "swapon", "wipefs", "fdisk", "parted", "sed", "crontab", "at", "curl",
+          "wget", "hostnamectl", "timedatectl", "localectl", "nmcli", "rfkill", "udisksctl"}
 _SYSTEMCTL_RO = {"status", "list-units", "list-timers", "list-unit-files", "list-sockets",
                  "list-dependencies", "list-jobs", "list-machines", "is-active", "is-failed",
                  "is-enabled", "is-system-running", "show", "cat", "help", "get-default"}
-_GIT_RO = {"status", "log", "diff", "show", "branch", "rev-parse", "ls-files", "remote",
-           "describe", "blame", "shortlog", "tag", "rev-list", "cat-file", "ls-tree",
-           "reflog", "config", "stash"}
-_LOGIN_RO = {"list-sessions", "list-users", "list-seats", "show-session", "show-user",
-             "session-status", "user-status", "seat-status"}
-_BUS_RO = {"list", "status", "tree", "introspect", "get-property", "--help"}
+_SYSTEMCTL_ARGOPTS = {"-p", "-t", "-H", "-M", "-n", "-o", "-s", "--property", "--type",
+                      "--host", "--machine", "--lines", "--output", "--state", "--signal",
+                      "--kill-whom", "--root", "--what", "--timestamp"}
+_GIT_RO = {"status", "log", "diff", "show", "rev-parse", "ls-files", "describe", "blame",
+           "shortlog", "rev-list", "cat-file", "ls-tree", "branch"}
 
 
-def _verb(words):
-    return next((w for w in words[1:] if not w.startswith("-")), "")
+def _split_shell(cmd):
+    """[[argv], …] per simple command, or a reason it can't be read safely."""
+    import shlex
+    lex = shlex.shlex(cmd, posix=True, punctuation_chars=";&|<>()")
+    lex.whitespace_split = True
+    lex.commenters = ""
+    try:
+        toks = list(lex)
+    except ValueError:
+        return None, "unbalanced quotes"
+    segs, cur, i = [], [], 0
+    while i < len(toks):
+        t = toks[i]
+        if t and set(t) <= set(";&|"):
+            segs.append(cur)
+            cur = []
+        elif t and set(t) <= set("()"):
+            return None, "no subshells"
+        elif t and set(t) <= set("<>&"):
+            if ">" in t:
+                tgt = toks[i + 1] if i + 1 < len(toks) else ""
+                if tgt not in ("/dev/null", "1", "2") or ("&" not in t and tgt in ("1", "2")):
+                    return None, "no writing to files"
+                if cur and cur[-1] in ("1", "2"):
+                    cur.pop()                       # the fd number of 2>/dev/null
+            i += 2
+            continue
+        else:
+            cur.append(t)
+        i += 1
+    segs.append(cur)
+    return [s for s in segs if s], ""
+
+
+def _positional(args, takes_value=()):
+    out, skip = [], False
+    for a in args:
+        if skip:
+            skip = False
+            continue
+        if a in takes_value:
+            skip = True
+            continue
+        if not a.startswith("-"):
+            out.append(a)
+    return out
+
+
+def _argv_problem(argv, strict):
+    while argv and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", argv[0]):
+        argv = argv[1:]                             # FOO=1 cmd
+    if not argv:
+        return ""
+    prog = argv[0].rsplit("/", 1)[-1]
+    args = argv[1:]
+    if prog in _ROOT:
+        return "no root for a daemon"
+    if prog in _RUNS_OTHERS:
+        return f"{prog} runs other commands; run the command itself"
+    if prog in _NEVER or prog.startswith("mkfs"):
+        return f"{prog} isn't read-only"
+    if any(a.startswith("--output") for a in args):
+        return "no writing to files"
+    if prog == "systemctl":
+        bad = [a for a in args if a in _SYSTEMCTL_ARGOPTS]
+        if bad:
+            return f"write it as {bad[0]}=<value>"
+        pos = _positional(args)
+        if pos and pos[0] not in _SYSTEMCTL_RO:
+            return f"systemctl {pos[0]} changes the system"
+        if any(a in ("--user", "--global") for a in args) and pos and pos[0] not in _SYSTEMCTL_RO:
+            return "systemctl may only look"
+    elif prog == "journalctl":
+        if any(re.match(r"--(?:vacuum|rotate|flush|relinquish|sync|setup-keys|update-catalog)", a)
+               for a in args):
+            return "journalctl maintenance changes the journal"
+    elif prog == "find":
+        if any(re.fullmatch(r"-(?:delete|exec|execdir|ok|okdir|fprint\w*|fls)", a) for a in args):
+            return "find may only list"
+    elif prog == "pacman":
+        first = next((a for a in args if a.startswith("-")), "")
+        if not (re.fullmatch(r"-Q\w*|--query", first) or re.fullmatch(r"-S[silg]+", first)
+                or re.fullmatch(r"-F[slx]*", first)):
+            return "pacman may only query"
+    elif prog == "git":
+        pos = _positional(args, ("-C", "-c"))
+        verb = pos[0] if pos else ""
+        if verb and verb not in _GIT_RO:
+            return f"git {verb} changes the repository"
+        if verb == "branch" and (len(pos) > 1 or any(a in ("-d", "-D", "-m", "-M", "-c", "-C", "-f")
+                                                     for a in args)):
+            return "git branch may only list"
+        if "-c" in args:
+            return "no git -c (it can run commands)"
+    elif prog == "sort" and any(a == "-o" or a.startswith("-o") for a in args):
+        return "no writing to files"
+    elif prog == "tree" and "-o" in args:
+        return "no writing to files"
+    elif prog == "uniq" and len(_positional(args)) > 1:
+        return "no writing to files"
+    elif prog == "dmesg" and any(a in ("-c", "-C", "-D", "-E", "-n", "--clear", "--read-clear",
+                                       "--console-off", "--console-on", "--console-level")
+                                 for a in args):
+        return "dmesg may only read"
+    elif prog == "date" and any(a in ("-s", "--set") or a.startswith("--set=") for a in args):
+        return "date may only read"
+    elif prog == "awk" and any("system" in a or "|" in a or ">" in a for a in args):
+        return "awk may only read"
+    elif prog == "top" and "-b" not in args:
+        return "run top as `top -b -n 1`"
+    if strict and prog not in _RO_CMDS:
+        return (f"{prog} isn't on the read-only list (install bubblewrap and a daemon may run "
+                "more)")
+    return ""
 
 
 def read_only_problem(cmd, strict=False):
-    """Why a daemon may NOT run this command ('' when it may). Every daemon
-    command runs with the whole system read-only; what is checked here is
-    what a read-only filesystem doesn't stop (the system bus: services,
-    power) and, with `strict` (no sandbox at all), anything not read-only
-    by nature."""
+    """Why a daemon may NOT run this command ('' when it may). `strict`:
+    there is no sandbox, so only commands on the read-only list run."""
     c = (cmd or "").strip()
     if not c:
         return "an empty command"
-    if strict:
-        if re.search(r"`|\$\(|<\(", c):
-            return "no command substitution without the sandbox"
-        rest = re.sub(r"\d?>\s*/dev/null|2>&1|&>\s*/dev/null", "", c)
-        if ">" in rest:
-            return "no writing to files"
-    for seg in re.split(r"\|\|?|&&|;|\n|&", c):
-        words = seg.split()
-        while words and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=\S*", words[0]):
-            words = words[1:]
-        if not words:
-            continue
-        if words[0] in ("sudo", "doas", "pkexec", "su", "run0"):
-            return "no root for a daemon"
-        prog = words[0].rsplit("/", 1)[-1]
-        if prog == "xargs" or prog == "env":
-            inner = [w for w in words[1:] if not w.startswith("-") and "=" not in w]
-            if inner:
-                why = read_only_problem(" ".join(inner), strict)
-                if why:
-                    return why
-            continue
-        verb = _verb(words)
-        if prog == "systemctl" and verb and verb not in _SYSTEMCTL_RO:
-            return f"systemctl {verb} changes the system"
-        if prog == "loginctl" and verb and verb not in _LOGIN_RO:
-            return f"loginctl {verb} changes the system"
-        if prog == "busctl" and verb and verb not in _BUS_RO:
-            return f"busctl {verb} can change the system"
-        if prog in ("dbus-send", "gdbus", "qdbus", "shutdown", "reboot", "poweroff", "halt",
-                    "kill", "pkill", "killall", "rm", "dd", "mkfs", "chmod", "chown"):
-            return f"{prog} isn't read-only"
-        if prog == "journalctl" and re.search(r"--(?:vacuum|rotate|flush|relinquish|sync)", seg):
-            return "journalctl maintenance changes the journal"
-        if prog == "find" and re.search(r"-(?:delete|exec|execdir|ok|okdir|fprint\w*|fls)\b", seg):
-            return "find may only list"
-        if prog == "pacman" and not re.search(r"(?:^|\s)-(?:Q|S[silg]|F)\w*|--query", seg):
-            return "pacman may only query"
-        if prog == "git" and verb and verb not in _GIT_RO:
-            return f"git {verb} changes the repository"
-        if strict:
-            if prog not in _RO_CMDS:
-                return (f"{prog} isn't on the read-only list (install bubblewrap and a "
-                        "daemon may run anything read-only)")
-            if prog == "git" and verb in ("config", "stash", "tag", "branch", "remote") \
-                    and len([w for w in words[2:] if not w.startswith("-")]) > 0:
-                return f"git {verb} with arguments can change things"
-            if prog == "dmesg" and re.search(r"\s-(?:c|C|-clear|-read-clear)\b", seg):
-                return "dmesg may only read"
+    if re.search(r"`|\$\((?!\()|<\(|>\(|\$\{", c.replace("$((", "")):  # $((1+1)) is only arithmetic
+        return "no command substitution"
+    segs, why = _split_shell(re.sub(r"\$\(\([^()]*\)\)", "0", c))
+    if segs is None:
+        return why
+    for argv in segs:
+        why = _argv_problem(argv, strict)
+        if why:
+            return why
     return ""
 
 
@@ -229,7 +313,12 @@ def check(spec, now, probe):
     if "daily" in trig:
         hh, mm = (int(x) for x in trig["daily"].split(":"))
         lt = probe.localtime(now)
-        target = now - ((lt.tm_hour * 60 + lt.tm_min - (hh * 60 + mm)) * 60 + lt.tm_sec)
+        # today's hh:mm built from the calendar, not "now minus the wall-clock
+        # difference": on the day clocks go back that fired twice
+        try:
+            target = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, hh, mm, 0, 0, 0, -1))
+        except (OverflowError, ValueError):
+            target = now - ((lt.tm_hour * 60 + lt.tm_min - (hh * 60 + mm)) * 60 + lt.tm_sec)
         due = now >= target and last < target
         return due, f"it's {trig['daily']}", st
     if "watch" in trig:
@@ -286,25 +375,39 @@ class Registry:
         self.load()
 
     def load(self):
+        """A damaged file never stops Chuck starting: what can't be read is
+        left out."""
+        self.next_id = 1
         try:
             data = json.loads(self.path.read_text())
-            self.items = [d for d in data if isinstance(d, dict) and d.get("when")]
         except (OSError, ValueError):
-            self.items = []
+            data = []
+        if isinstance(data, dict):                     # {"next_id": n, "items": [...]}
+            try:
+                self.next_id = int(data.get("next_id") or 1)
+            except (TypeError, ValueError):
+                self.next_id = 1
+            data = data.get("items")
+        if not isinstance(data, list):
+            data = []
+        self.items = [d for d in data if isinstance(d, dict) and isinstance(d.get("id"), int)
+                      and isinstance(d.get("when"), dict) and isinstance(d.get("brief"), str)]
+        self.next_id = max([self.next_id] + [d["id"] + 1 for d in self.items])
 
     def save(self):
         with self.lock:
             try:
                 self.path.parent.mkdir(parents=True, exist_ok=True)
                 tmp = self.path.with_suffix(".tmp")
-                tmp.write_text(json.dumps(self.items, indent=1))
+                tmp.write_text(json.dumps({"next_id": self.next_id, "items": self.items}, indent=1))
                 os.replace(tmp, self.path)
             except OSError:
                 pass
 
     def add(self, name, when, brief, folder="", kind="report", quota=150000):
         trig = parse_when(when) if isinstance(when, str) else when
-        nid = max([d["id"] for d in self.items] or [0]) + 1
+        nid = self.next_id                 # never reused: a deleted daemon's run can't
+        self.next_id += 1                  # report under a new daemon's name
         d = {"id": nid, "name": (name or brief.splitlines()[0])[:60], "when": trig,
              "brief": brief.strip(), "folder": str(folder or ""), "kind": kind,
              "quota": int(quota), "enabled": True, "last_run": 0, "runs": 0,
@@ -329,9 +432,11 @@ class Inbox:
     def __init__(self, path, keep=200):
         self.path, self.keep = Path(path), keep
         try:
-            self.items = json.loads(self.path.read_text())
+            data = json.loads(self.path.read_text())
         except (OSError, ValueError):
-            self.items = []
+            data = []
+        self.items = [i for i in data if isinstance(i, dict) and isinstance(i.get("id"), int)] \
+            if isinstance(data, list) else []
 
     def add(self, daemon, why, report, pid=None, extra=None):
         nid = max([i["id"] for i in self.items] or [0]) + 1

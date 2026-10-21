@@ -7,6 +7,8 @@ sys.path.insert(0, _ROOT)
 """Chuck OS (docs/OS.md, roadmap phases 16-21): the agent kernel on its own,
 then wired into the real window on the stub toolkit."""
 import re
+import shutil
+import sys
 import threading
 import time
 from shutil import which as shutil_which
@@ -426,16 +428,15 @@ pr = FakeProbe()
 spec = {"when": {"every": 3600}, "last_run": 1000}
 check(D.check(spec, 1000 + 3599, pr)[0] is False and D.check(spec, 1000 + 3600, pr)[0] is True,
       "an interval fires when it has passed")
-lt = lambda t: time.struct_time((2026, 1, 2, int(t // 3600) % 24, int(t // 60) % 60, int(t) % 60, 4, 2, 0))
-pr.localtime = staticmethod(lt)
-day = {"when": {"daily": "08:30"}, "last_run": 0}
-check(D.check(day, 8 * 3600 + 29 * 60, pr)[0] is False and D.check(day, 8 * 3600 + 31 * 60, pr)[0] is True,
+midnight = time.mktime((2026, 1, 2, 0, 0, 0, 0, 0, -1))
+day = {"when": {"daily": "08:30"}, "last_run": midnight - 86400}
+check(D.check(day, midnight + 8 * 3600 + 29 * 60, pr)[0] is False
+      and D.check(day, midnight + 8 * 3600 + 31 * 60, pr)[0] is True,
       "a daily daemon fires once the time has come")
-day["last_run"] = 8 * 3600 + 31 * 60
-check(D.check(day, 20 * 3600, pr)[0] is False, "and not again the same day")
-check(D.check({"when": {"daily": "08:30"}, "last_run": 0}, 15 * 3600, pr)[0] is True,
+day["last_run"] = midnight + 8 * 3600 + 31 * 60
+check(D.check(day, midnight + 20 * 3600, pr)[0] is False, "and not again the same day")
+check(D.check({"when": {"daily": "08:30"}, "last_run": midnight - 86400}, midnight + 15 * 3600, pr)[0] is True,
       "a run missed while the computer was off happens when it's back")
-pr.localtime = staticmethod(time.localtime)
 w_ = {"when": {"watch": "/x"}, "state": {}}
 due, _, st = D.check(w_, 0, pr)
 check(due is False and st["sig"] == "s0", "a watch records the first state without firing")
@@ -474,8 +475,9 @@ check(all(rop(c) for c in ("systemctl restart nginx", "sudo journalctl", "git pu
                            "find . -delete", "busctl call org.freedesktop.login1 / x PowerOff",
                            "rm x", "xargs rm", "loginctl poweroff", "dbus-send --system x")),
       "changing anything is not")
-check(rop("curl x", strict=True) and rop("echo x > f", strict=True) and rop("echo $(id)", strict=True)
-      and not rop("curl x"), "without a sandbox only read-only-by-nature commands run")
+check(rop("ip -s link", strict=True) == "" and rop("echo x > f", strict=True) and rop("echo $(id)", strict=True)
+      and rop("curl x") and rop("vmtouch x", strict=True) and not rop("vmtouch x"),
+      "without a sandbox only read-only-by-nature commands run (and never curl: there's ```fetch```)")
 reg = D.Registry(tmp / "dm.json")
 d1 = reg.add("", "every 1h", "look at things")
 check(D.Registry(tmp / "dm.json").get(d1["id"])["brief"] == "look at things", "daemons persist")
@@ -1030,6 +1032,166 @@ check(not any(t == "INTERRUPTED AGENTS" for t in [x.get_text() for x in w3.msgbo
 w3.process_command("kill", str(young))
 TimeBackend.hold.set()
 w3.kernel.wait(young, 10); settle()
+
+# ═══════════════════════════════════════════════════════════════════════════
+print("\n--- review fixes: forks, folders, budgets, daemons ---")
+import subprocess as _sp
+from chucknorris_ext import checkpoint as CP
+rt = tmp / "replayt"
+(rt / "w").mkdir(parents=True)
+outside = tmp / "outside.yaml"
+outside.write_text("user's real config\n")
+(rt / "w" / "config").symlink_to(outside)
+(rt / "w" / "run.sh").write_text("echo hi\n")
+(rt / "w" / "foo").mkdir()
+(rt / "w" / "foo" / "bar").write_text("x\n")
+shw = CP.Shadow(rt / "w", rt / "store")
+s0 = shw.snapshot("0")
+(rt / "w" / "config").unlink()
+(rt / "w" / "config").write_text("agent version\n")          # symlink -> regular file
+os.chmod(rt / "w" / "run.sh", 0o755)
+shutil.rmtree(rt / "w" / "foo")
+(rt / "w" / "foo").write_text("now a file\n")                 # folder -> file
+(rt / "w" / "link2").symlink_to("run.sh")
+(rt / "w" / "sub").mkdir()
+_sp.run(["git", "init", "-q", str(rt / "w" / "sub")], check=True)
+(rt / "w" / "sub" / "f").write_text("nested\n")
+_sp.run(["git", "-C", str(rt / "w" / "sub"), "-c", "user.email=a@b", "-c", "user.name=a", "add", "."], check=True)
+_sp.run(["git", "-C", str(rt / "w" / "sub"), "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-qm", "x"], check=True)
+s1 = shw.snapshot("1")
+dest = rt / "dest"
+dest.mkdir()
+(dest / "config").symlink_to(outside)
+(dest / "run.sh").write_text("echo hi\n")
+(dest / "foo").mkdir()
+(dest / "foo" / "bar").write_text("x\n")
+err = None
+try:
+    shw.replay_onto(s0, s1, dest)
+except Exception as ex:
+    err = ex
+check(err is None and outside.read_text() == "user's real config\n"
+      and not (dest / "config").is_symlink() and (dest / "config").read_text() == "agent version\n",
+      "a fork never writes through a symlink to a file outside its copy", err)
+check(os.access(dest / "run.sh", os.X_OK) and (dest / "foo").read_text() == "now a file\n"
+      and os.readlink(dest / "link2") == "run.sh",
+      "a fork keeps executable bits, symlinks, and a folder that became a file")
+check(not (dest / "sub" / "f").exists(), "a nested repository is left alone, not a crash")
+
+w = new_win([], tmp)
+w.set_agent_mode(True, announce=False)
+w.set_workspace(tproj, announce=False)
+w.backend = TimeBackend([])
+pa = w.spawn_background("tt: first window's run")
+w.kernel.wait(pa, 20); settle()
+w2 = new_win([], tmp)
+w2.set_agent_mode(True, announce=False)
+w2.set_workspace(tproj, announce=False)
+w2.backend = TimeBackend([])
+pb = w2.spawn_background("tt: first window's run")
+w2.kernel.wait(pb, 20); settle()
+check(pa == pb and w._bg[pa]["ws"].dir != w2._bg[pb]["ws"].dir and w._bg[pa]["ws"].work.is_dir(),
+      "the same pid in a later session never takes over an earlier run's copy",
+      (w._bg[pa]["ws"].dir.name, w2._bg[pb]["ws"].dir.name))
+rec = {"key": "1-99", "kind": "background", "name": "tt: x", "brief": "tt: x", "root": str(tproj),
+       "program": "", "msgs": [], "steps": [{"step": 1, "tokens": 1000000}]}
+w2.set_access("sandbox")
+e_, _p = w2._new_entry_proc(rec, spent=1000000)
+q = w2.kernel.procs[e_["pid"]].quota
+check(q["tokens"] == 500000 and not w2.kernel.can(e_["pid"], "net"),
+      "a resumed run gets what was left of its budget, and an offline folder keeps it offline", q)
+w2.set_access("full")
+fake = dict(w2._bg[pb])
+fake["program"] = "no-such-program"
+w2._bg[999] = fake
+check(w2.fork_process("999 1 x") is None, "forking a run whose program is gone is refused")
+del w2._bg[999]
+old = w.WORKTREES / "1-1-kept"
+old.mkdir(parents=True, exist_ok=True)
+os.utime(old, (1, 1))
+w._hib.save({"key": "1-77", "msgs": [], "ws_dir": str(old), "status": "finished", "time": time.time()})
+gone = w.WORKTREES / "1-2-stale"
+gone.mkdir(exist_ok=True)
+os.utime(gone, (1, 1))
+w._prune_worktrees()
+check(old.is_dir() and not gone.exists(), "old copies are pruned, but never one a saved run still needs")
+w._hib.remove("1-77")
+check(G.fast_model({}, "my/unknown-model", PR.PRICES, PR.SUGGESTED) == "my/unknown-model"
+      and G.fast_model({}, chat, PR.PRICES, PR.SUGGESTED, lambda m: (0.01, None, 0.01) if m == chat
+                       else PR.PRICES.get(m.lower())) == chat,
+      "the governor never moves work to a model that costs more than yours (unknown or custom prices)")
+
+reg_p = tmp / "dm-bad.json"
+for bad in ("null", "5", '{"items": "x"}', '[{"when": "every 2h", "brief": "x"}, {"id": "3"}]'):
+    reg_p.write_text(bad)
+    r_ = D.Registry(reg_p)
+    check(r_.items == [], f"a damaged daemons file ({bad[:20]}) doesn't stop Chuck starting")
+ib_p = tmp / "ib-bad.json"
+ib_p.write_text('{"a": 1}')
+check(D.Inbox(ib_p).unread() == [], "nor does a damaged inbox")
+reg_p.unlink()
+r_ = D.Registry(reg_p)
+a1 = r_.add("", "every 1h", "one")
+a2 = r_.add("", "every 1h", "two")
+r_.remove(a2["id"])
+a3 = r_.add("", "every 1h", "three")
+check(a3["id"] == a2["id"] + 1 and D.Registry(reg_p).add("", "every 1h", "four")["id"] == a3["id"] + 1,
+      "a deleted daemon's id is never given to a new one")
+check(D.parse_when("when disk is above 90%") == {"disk": "/", "above": 90}
+      and D.parse_when("when disk /home is above 80%") == {"disk": "/home", "above": 80},
+      "'when disk is above 90%' watches /, not a path called 'is'")
+dst = _sp.run([sys.executable, "-c", """
+import os, time, sys
+os.environ['TZ'] = 'America/New_York'; time.tzset()
+sys.path.insert(0, '.')
+from chucknorris_ext import daemons as D
+class P:
+    localtime = staticmethod(time.localtime)
+spec = {'when': {'daily': '00:30'}, 'last_run': 0}
+t = time.mktime((2026, 11, 1, 0, 0, 0, 0, 0, -1))
+fired = []
+for i in range(0, 4 * 3600, 60):
+    due, _w, _s = D.check(spec, t + i, P())
+    if due:
+        fired.append(time.strftime('%H:%M %Z', time.localtime(t + i)))
+        spec['last_run'] = t + i
+print(fired)"""], capture_output=True, text=True)
+check(dst.stdout.strip() == "['00:30 EDT']", "a daily daemon fires once on the day the clocks go back",
+      dst.stdout + dst.stderr)
+rop = D.read_only_problem
+for c in ("echo suspend | xargs systemctl", "systemctl -p status suspend", "nice systemctl suspend",
+          "sh -c 'systemctl suspend'", '"systemctl" suspend', "s\\ystemctl suspend",
+          "(systemctl suspend)", "$(printf systemctl) suspend", "git log --output=/tmp/x",
+          "sort -o ~/.bashrc /dev/null", "git stash", "git reflog expire --all", "loginctl list-users",
+          "awk 'BEGIN{system(\"id\")}'"):
+    check(rop(c) and rop(c, strict=True), f"a daemon may not run: {c}")
+check(not any(rop(c, strict=True) for c in ("systemctl status nginx", "systemctl list-units --state=failed",
+                                             "journalctl -p 3 -b --no-pager 2>&1 | tail -50",
+                                             "git log -5 --oneline", "du -sh ~/x | sort -h")),
+      "and every ordinary look still runs")
+check("/run/dbus/system_bus_socket" not in cn._LOOK_RUN,
+      "a daemon's sandbox has no system bus at all: nothing it runs can reach services or power")
+mail = ["the user: hello"]
+WK.run_worker("x", lambda m: "REPORT", lambda r: [], {}, max_steps=1, inbox=lambda: [mail.pop()] if mail else [])
+check(mail == ["the user: hello"], "mail isn't taken from the mailbox on a step where it can't be heard")
+w3 = new_win([], tmp)
+w3.set_agent_mode(True, announce=False)
+w3.set_workspace(tproj, announce=False)
+w3.backend = TimeBackend([])
+TimeBackend.hold.clear()
+hp = w3.spawn_background("hib: waited for")
+res = w3._t_wait(f"{hp} 0")
+out_ = res() if callable(res) else res
+check("still running" in out_ and not w3._bg[hp].get("waited"),
+      "a wait that times out still lets the report reach the agent later")
+TimeBackend.hold.set()
+w3.kernel.wait(hp, 10); settle()
+check(any("hib: waited for" in n for n in w3._user_notes), "(and it does)")
+d_ = w3.daemon_add("every 1h: x")[0]
+d_["enabled"] = False
+d_["last_run"] = 1
+w3._daemon_action(d_, "on")
+check(d_["last_run"] > time.time() - 5, "resuming a paused daemon doesn't fire it at once")
 
 print(f"\nTOTAL OS FAILURES: {fails}")
 assert fails == 0 and not FAILS, "OS regressions present"

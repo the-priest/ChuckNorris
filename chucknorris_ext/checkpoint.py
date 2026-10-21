@@ -174,20 +174,59 @@ class Shadow:
 
     def replay_onto(self, a, b, dest):
         """Make folder `dest` (a copy of the folder as it was at snapshot a)
-        what the folder was at snapshot b: exactly the files that changed
-        between them are written or deleted; nothing else (an ignored .env,
-        a data folder) is touched."""
+        what the folder was at snapshot b: exactly the entries that changed
+        between them are written or deleted, with their modes (an executable
+        stays executable, a symlink stays a symlink). Nothing is ever written
+        through a symlink or outside dest; nested repositories (gitlinks)
+        are left alone; files the snapshots ignore (.env, build output) stay
+        as they were in the copy."""
         dest = Path(dest)
-        for st, rel in self.delta(a, b):
+        root = os.path.realpath(dest)
+
+        def inside(path):
+            parent = os.path.realpath(os.path.dirname(path))
+            return parent == root or parent.startswith(root + os.sep)
+
+        def remove(p):
+            if os.path.islink(p) or p.is_file():
+                p.unlink()
+            elif p.is_dir():
+                shutil.rmtree(p)
+        changes = self.delta(a, b)
+        # deletions first, deepest first: a folder replaced by a file must be
+        # gone before the file is written
+        for st, rel in sorted((c for c in changes if c[0] == "D"), key=lambda c: -c[1].count("/")):
             p = dest / rel
-            if st == "D":
+            if inside(p) and (os.path.lexists(p)):
                 try:
-                    p.unlink()
+                    remove(p)
                 except OSError:
                     pass
+        modes = {}
+        for ln in self._git("ls-tree", "-r", "-z", b, check=False).split("\0"):
+            meta, _tab, path = ln.partition("\t")
+            if path:
+                modes[path] = meta.split(" ")[0]
+        for st, rel in changes:
+            if st == "D":
                 continue
+            mode = modes.get(rel, "100644")
+            if mode == "160000":
+                continue                            # a nested repository: not ours to write
+            p = dest / rel
             p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_bytes(self.blob(b, rel))
+            if not inside(p):
+                raise CheckpointError(f"refusing to write {rel}: its folder leads outside the copy")
+            if os.path.lexists(p):
+                remove(p)                           # never write THROUGH an old symlink
+            data = self.blob(b, rel)
+            if mode == "120000":
+                os.symlink(os.fsdecode(data), p)
+                continue
+            fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                         0o755 if mode == "100755" else 0o644)
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(data)
 
     def changed_since(self, sha):
         """Paths that differ between the snapshot and the folder now."""

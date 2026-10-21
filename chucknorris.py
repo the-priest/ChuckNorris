@@ -2035,10 +2035,9 @@ def _limit(resource, name, soft_cap):
         pass
 
 
-# what a daemon may see under the private /run: the journal and the system
-# bus (systemctl status); changing anything through the bus is refused by
-# daemons.read_only_problem before a command runs
-_LOOK_RUN = ("/run/dbus/system_bus_socket", "/run/log/journal", "/run/systemd/journal")
+# what a daemon may see under the private /run
+_LOOK_RUN = ("/run/log/journal",)        # the journal only: NO system bus, so nothing a
+                                          # daemon runs can reach services, power or logins
 
 
 def _run_in(root, command, timeout, net=True, write=True):
@@ -2312,7 +2311,8 @@ class Backend:
         if self.pin:
             chat = self.pin
         elif _governor is not None:
-            chat = _governor.pick(self.s, self.role, chat, _pricing.PRICES, _pricing.SUGGESTED)
+            chat = _governor.pick(self.s, self.role, chat, _pricing.PRICES, _pricing.SUGGESTED,
+                                  lambda m: _pricing.price_for(m, self.s))
         if vision and not _pricing.sees_images(chat):
             return (self.s.get("vision_model") or DEFAULT_VISION).strip()
         return chat
@@ -8512,15 +8512,32 @@ class ChuckWindow(Adw.ApplicationWindow):
     # ── background agents (Chuck OS, phase 17) ──
     WORKTREES = DATA_DIR / "worktrees"
 
-    def _prune_worktrees(self, days=7):
-        """Copies left by background agents of earlier sessions (never merged
-        or discarded) go after a week."""
+    def _prune_worktrees(self, days=14):
+        """Copies left by background agents of earlier sessions go after two
+        weeks, unless a hibernated run still points at one (unmerged work or
+        a run to resume is never deleted from under its record)."""
         try:
+            keep = set()
+            if _hibernate is not None:
+                keep = {os.path.realpath(r["ws_dir"]) for r in _hibernate.Store(self.PROCS_DIR).load()
+                        if r.get("ws_dir")}
             cutoff = time.time() - days * 86400
             for d in self.WORKTREES.iterdir():
-                if d.is_dir() and d.stat().st_mtime < cutoff:
+                if (d.is_dir() and d.stat().st_mtime < cutoff
+                        and os.path.realpath(d) not in keep):
+                    self._drop_shadow_of(d)
                     shutil.rmtree(d, ignore_errors=True)
         except OSError:
+            pass
+
+    def _drop_shadow_of(self, ws_dir):
+        """The private snapshot store of a background agent's copy."""
+        if _checkpoint is None or not ws_dir:
+            return
+        try:
+            shutil.rmtree(_checkpoint.Shadow(Path(ws_dir) / "work", self.PROC_SHADOWS).git_dir,
+                          ignore_errors=True)
+        except Exception:
             pass
 
     def _worker_parse(self, reply):
@@ -8666,7 +8683,10 @@ class ChuckWindow(Adw.ApplicationWindow):
             try:
                 if ws is None:
                     kern.note(pid, "copying the folder")
-                    entry["ws"] = _cow.Workspace.create(root, self.WORKTREES, f"{pid}-{slug}")
+                    # named by the run's unique key, never by pid: pids start
+                    # at 1 every session, and a new pid-3 run must not
+                    # overwrite an older, unmerged one's copy
+                    entry["ws"] = _cow.Workspace.create(root, self.WORKTREES, f"{entry['key']}-{slug}")
                 else:
                     entry["ws"] = ws
                 wsp = entry["ws"]
@@ -8948,7 +8968,8 @@ class ChuckWindow(Adw.ApplicationWindow):
         if want.lower() == "chat":
             return chat
         if want.lower() == "fast":
-            return (_governor.fast_model(self.settings, chat, _pricing.PRICES, _pricing.SUGGESTED)
+            return (_governor.fast_model(self.settings, chat, _pricing.PRICES, _pricing.SUGGESTED,
+                                         lambda m: _pricing.price_for(m, self.settings))
                     if _governor is not None else chat)
         return want
 
@@ -9080,8 +9101,9 @@ class ChuckWindow(Adw.ApplicationWindow):
             save_settings(self.settings)
         chat = (self.settings.get("model") or DEFAULT_MODEL).strip()
         mode = _governor.mode_of(self.settings)
-        rows = _governor.table(self.settings, chat, _pricing.PRICES, _pricing.SUGGESTED)
-        sv = _governor.saving(self.settings, chat, _pricing.PRICES, _pricing.SUGGESTED)
+        po = lambda m: _pricing.price_for(m, self.settings)     # noqa: E731
+        rows = _governor.table(self.settings, chat, _pricing.PRICES, _pricing.SUGGESTED, po)
+        sv = _governor.saving(self.settings, chat, _pricing.PRICES, _pricing.SUGGESTED, po)
         card, head, body, foot = self._card_shell(f"GOVERNOR · {mode.upper()}")
         lb = Gtk.Label(label={"performance": "Every call on the chat model.",
                               "balanced": "The chat and background writers on the chat model; "
@@ -9210,7 +9232,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         ev, box = threading.Event(), {}
         self._asks[pid] = (ev, box, question)
         kern.block(pid, "asking you: " + question[:120])
-        GLib.idle_add(self._ask_card, pid, question)
+        GLib.idle_add(self._ask_card, pid, question, box)
         deadline = time.monotonic() + self.cfg("ask_minutes", 30, 1, 1440) * 60
         try:
             while not ev.wait(0.5):
@@ -9218,13 +9240,16 @@ class ChuckWindow(Adw.ApplicationWindow):
                     break
         finally:
             kern.unblock(pid)
-            self._asks.pop(pid, None)
+            if self._asks.get(pid, (None, None))[1] is box:
+                self._asks.pop(pid, None)
+            # its card can't answer a later question from the same agent
+            GLib.idle_add(lambda: (box.get("close", lambda: None)(), False)[1])
         if "answer" in box:
             return f"The user answered: {box['answer']}"
         return ("[no answer (timed out or stopped): decide yourself, and say in your report what "
                 "you assumed]")
 
-    def _ask_card(self, pid, question):
+    def _ask_card(self, pid, question, box=None):
         p = self.kernel.procs.get(pid) if self.kernel else None
         card, head, body, foot = self._card_shell(f"PID {pid} ASKS · {(p.name if p else '')[:40]}",
                                                   lambda: question)
@@ -9240,6 +9265,14 @@ class ChuckWindow(Adw.ApplicationWindow):
                 ent.set_sensitive(False); btn.set_sensitive(False)
         ent.connect("activate", send)
         btn.connect("clicked", send)
+        if box is not None:
+            def close():
+                ent.set_sensitive(False); btn.set_sensitive(False)
+                if "answer" not in box:
+                    ent.set_placeholder_text("(no longer waiting)")
+            box["close"] = close
+            if box.get("done"):
+                close()
         row.append(ent); row.append(btn)
         foot.append(row)
         self._log_pin(card)
@@ -9339,6 +9372,7 @@ class ChuckWindow(Adw.ApplicationWindow):
 
         def result():
             if e["status"] == "running":
+                e["waited"] = False             # not waited for after all: its report comes as a note
                 return (f"[wait {pid}: still running after {mins} min — it reports when done; "
                         "carry on]")
             ch = e.get("changes") or {}
@@ -9352,6 +9386,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             end = time.monotonic() + mins * 60
             while time.monotonic() < end and e["status"] == "running":
                 if self._cancelled or gen != self._gen:
+                    e["waited"] = False
                     return f"[wait {pid}: stopped]"
                 if self.kernel.wait(pid, timeout=0.5) is not None:
                     for _ in range(40):       # its card and report land on the UI thread
@@ -9423,8 +9458,10 @@ class ChuckWindow(Adw.ApplicationWindow):
             shutil.rmtree(sh.git_dir, ignore_errors=True)
             entry["shadow"] = None
 
-    def _new_entry_proc(self, rec, name=None, kind=None, parent_label=""):
-        """A kernel process for a resumed or forked run."""
+    def _new_entry_proc(self, rec, name=None, kind=None, parent_label="", spent=0):
+        """A kernel process for a resumed or forked run. A resumed one gets
+        what was left of its quota (`spent` tokens are gone), not a fresh
+        one: crash-and-resume must never be a way round a budget."""
         prog = self.programs().get(rec.get("program")) if rec.get("program") else None
         kind = kind or rec.get("kind", "background")
         caps = (_programs.caps_of(prog) if prog is not None
@@ -9432,14 +9469,21 @@ class ChuckWindow(Adw.ApplicationWindow):
         quota = ({"tokens": prog["tokens"], "seconds": prog["minutes"] * 60} if prog is not None else
                  {"tokens": self.cfg("background_tokens", 1500000, 20000, 50000000),
                   "seconds": self.cfg("background_minutes", 60, 1, 1440) * 60})
+        if spent:
+            quota["tokens"] = max(5000, quota["tokens"] - int(spent))
+        acc = self.settings.get("folder_access") or {}
+        if (acc.get(str(rec["root"]), "full") if isinstance(acc, dict) else "full") == "sandbox":
+            caps.discard("net")                # an offline-sandboxed folder stays offline
         proc = self.kernel.spawn((name or rec["name"])[:60],
                                  kind="program" if kind == "report" else "background",
                                  brief=rec["brief"], parent=self._pid1, quota=quota, nice=2,
                                  caps=caps, program=rec.get("program", ""))
+        dmn = (self._daemons.get(rec["daemon_id"])
+               if rec.get("daemon_id") is not None and self._daemons is not None else None)
         entry = {"pid": proc.pid, "brief": rec["brief"], "name": name or rec["name"], "ws": None,
                  "report": None, "status": "running", "root": Path(rec["root"]), "changes": {},
-                 "daemon": None, "program": rec.get("program", ""), "kind": kind,
-                 "parent": parent_label}
+                 "daemon": dmn if not parent_label else None, "program": rec.get("program", ""),
+                 "kind": kind, "parent": parent_label}
         return entry, prog
 
     def resume_hibernated(self, rec):
@@ -9456,9 +9500,11 @@ class ChuckWindow(Adw.ApplicationWindow):
             if not rec.get("ws_dir") or not Path(rec["ws_dir"], "work").is_dir():
                 self._sys_note("Can't resume: its copy of the folder is gone.", "danger")
                 self._hib.remove(rec["key"])
+                self._drop_shadow_of(rec.get("ws_dir"))
                 return None
             ws = _cow.Workspace(rec["root"], rec["ws_dir"])
-        entry, prog = self._new_entry_proc(rec)
+        st = rec.get("steps") or [{}]
+        entry, prog = self._new_entry_proc(rec, spent=st[-1].get("tokens", 0))
         entry["key"], entry["steps"], entry["msgs"] = rec["key"], list(rec.get("steps") or []), rec["msgs"]
         entry["base_sha"] = rec.get("base_sha")
         self._bg[entry["pid"]] = entry
@@ -9534,6 +9580,7 @@ class ChuckWindow(Adw.ApplicationWindow):
                 a.set_sensitive(False); d.set_sensitive(False)
                 self._hib.remove(r["key"])
                 if r.get("ws_dir"):
+                    self._drop_shadow_of(r["ws_dir"])
                     shutil.rmtree(r["ws_dir"], ignore_errors=True)
                 self._sys_note(f"Dropped {r['name'][:60]}.", "dim")
             res.connect("clicked", go); drop.connect("clicked", no)
@@ -9607,6 +9654,10 @@ class ChuckWindow(Adw.ApplicationWindow):
         if step > total:
             self._sys_note(f"pid {pid} has {total} steps.", "danger")
             return None
+        if e.get("program") and e["program"] not in self.programs():
+            self._sys_note(f"Can't fork: the program {e['program']!r} isn't available here "
+                           "(a project's program is only found in its folder).", "danger")
+            return None
         msgs = _hibernate.fork_messages(e["msgs"], step, instr)
         rec = {"name": f"fork of {pid}@{step}: {e['name']}"[:60], "brief": e["brief"],
                "root": str(e["root"]), "program": e.get("program", ""), "kind": e.get("kind", "background")}
@@ -9627,7 +9678,8 @@ class ChuckWindow(Adw.ApplicationWindow):
                 return None
             entry, prog = self._new_entry_proc(rec, parent_label=f"{pid}@{step}")
             try:
-                d = self.WORKTREES / f"{entry['pid']}-fork-of-{pid}"
+                entry["key"] = _hibernate.new_key(entry["pid"])
+                d = self.WORKTREES / f"{entry['key']}-fork-of-{pid}"
                 shutil.rmtree(d, ignore_errors=True)
                 shutil.copytree(src.base, d / "base", symlinks=True)
                 shutil.copytree(src.base, d / "work", symlinks=True)
@@ -9702,13 +9754,23 @@ class ChuckWindow(Adw.ApplicationWindow):
 
     def _daemon_tick(self):
         """Every 30 s: is any daemon due? Checked off the main thread, by
-        plain code; an agent is woken only for one that fired."""
+        plain code; an agent is woken only for one that fired. Whatever
+        goes wrong in one tick, the timer lives on."""
         if self._daemons is None:
             return False
+        try:
+            return self._daemon_tick_once()
+        except Exception as ex:
+            self._daemon_checking = False
+            if _crashlog is not None:
+                _crashlog.record("daemon tick", str(ex))
+            return True
+
+    def _daemon_tick_once(self):
         if self._daemon_checking or self.settings.get("daemons_paused"):
             return True
         specs = [dict(d) for d in self._daemons.items
-                 if d.get("enabled") and d["id"] not in self._daemon_live]
+                 if d.get("enabled") and d.get("id") not in self._daemon_live]
         if not specs:
             return True
         self._daemon_checking = True
@@ -9872,6 +9934,8 @@ class ChuckWindow(Adw.ApplicationWindow):
             if not folder:
                 return None, "a relative path needs a working folder (/folder), or give a full path"
             trig["watch"] = str(Path(folder) / trig["watch"])
+        if "disk" in trig and not os.path.exists(trig["disk"]):
+            return None, f"{trig['disk']} doesn't exist"
         if "watch" in trig and not os.path.exists(trig["watch"]):
             return None, f"{trig['watch']} doesn't exist"
         if "command" in trig:
@@ -9920,6 +9984,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             d["enabled"] = verb == "on"
             if verb == "on":
                 d["state"] = {}                 # watch afresh: no stale edge fires at once
+                d["last_run"] = time.time()     # nor a schedule missed while it was paused
             self._daemons.save()
             self._sys_note(f"Daemon {d['id']} {'resumed' if verb == 'on' else 'paused'}.", "dim")
             return True
