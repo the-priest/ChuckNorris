@@ -15,8 +15,10 @@ Servers start on first use, one per (project, language), and stay up for the
 session; the app stops them on close.
 """
 import ast
+import itertools
 import json
 import os
+import queue
 import re
 import shutil
 import subprocess
@@ -157,12 +159,16 @@ class Client:
         self.proc = subprocess.Popen(wrapped, cwd=self.root, stdin=subprocess.PIPE,
                                      stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                      start_new_session=True)
-        self.lock = threading.Lock()
-        self.seq = 0
+        self.seq = itertools.count(1)   # next() is atomic: requests come from many threads
         self.waiting = {}                # id -> [Event, result]
-        self.opened = {}                 # path -> version
+        self.opened = {}                 # path -> [version, (mtime, size)]
         self.dead = False
+        # every write goes through one writer thread, so the reader never
+        # blocks: a server stuck writing to us while we write a big file to
+        # it would otherwise deadlock both sides
+        self.outbox = queue.Queue()
         threading.Thread(target=self._read, daemon=True, name=f"lsp-{self.name}").start()
+        threading.Thread(target=self._write, daemon=True, name=f"lsp-{self.name}-w").start()
         caps = {"textDocument": {
                     "definition": {"linkSupport": False}, "references": {},
                     "rename": {"prepareSupport": False}, "documentSymbol": {
@@ -170,24 +176,56 @@ class Client:
                     "synchronization": {"didSave": False}},
                 "workspace": {"symbol": {}, "workspaceEdit": {"documentChanges": True},
                               "workspaceFolders": True, "configuration": True}}
-        self.request("initialize", {
-            "processId": os.getpid(), "rootUri": uri(self.root), "rootPath": self.root,
-            "capabilities": caps, "clientInfo": {"name": "chuck"},
-            "initializationOptions": _init_options(lang),
-            "workspaceFolders": [{"uri": uri(self.root), "name": Path(self.root).name}]},
-            timeout=60)
+        try:
+            self.request("initialize", {
+                "processId": os.getpid(), "rootUri": uri(self.root), "rootPath": self.root,
+                "capabilities": caps, "clientInfo": {"name": "chuck"},
+                "initializationOptions": _init_options(lang),
+                "workspaceFolders": [{"uri": uri(self.root), "name": Path(self.root).name}]},
+                timeout=60)
+        except LSPError:
+            self._kill()                 # a server that won't start must not linger
+            raise
         self.notify("initialized", {})
 
     # ── wire ──
     def _send(self, msg):
+        if self.dead:
+            raise LSPError(f"{self.name} stopped")
         data = json.dumps(msg).encode()
-        with self.lock:
+        self.outbox.put(b"Content-Length: %d\r\n\r\n" % len(data) + data)
+
+    def _write(self):
+        while True:
+            data = self.outbox.get()
+            if data is None:
+                return
             try:
-                self.proc.stdin.write(b"Content-Length: %d\r\n\r\n" % len(data) + data)
+                self.proc.stdin.write(data)
                 self.proc.stdin.flush()
             except (OSError, ValueError):
-                self.dead = True
-                raise LSPError(f"{self.name} stopped")
+                self._gone()
+                return
+
+    def _gone(self):
+        self.dead = True
+        for w in list(self.waiting.values()):
+            w[0].set()
+
+    def _kill(self):
+        self.outbox.put(None)
+        try:
+            os.killpg(self.proc.pid, 9)
+        except OSError:
+            try:
+                self.proc.kill()
+            except OSError:
+                pass
+        try:
+            self.proc.wait(timeout=3)
+        except Exception:
+            pass
+        self._gone()
 
     def _read(self):
         f = self.proc.stdout
@@ -215,9 +253,8 @@ class Client:
                         w[0].set()
         except (EOFError, OSError, ValueError):
             pass
-        self.dead = True
-        for w in list(self.waiting.values()):
-            w[0].set()
+        self.outbox.put(None)
+        self._gone()
 
     def _answer(self, msg):
         m, params = msg["method"], msg.get("params") or {}
@@ -235,8 +272,7 @@ class Client:
     def request(self, method, params, timeout=30):
         if self.dead:
             raise LSPError(f"{self.name} isn't running")
-        self.seq += 1
-        rid = self.seq
+        rid = next(self.seq)
         w = [threading.Event(), None]
         self.waiting[rid] = w
         self._send({"jsonrpc": "2.0", "id": rid, "method": method, "params": params})
@@ -254,20 +290,39 @@ class Client:
         self._send({"jsonrpc": "2.0", "method": method, "params": params})
 
     def open(self, path):
-        """didOpen (or re-sync after an edit on disk)."""
+        """didOpen, or didChange when the file changed on disk since the
+        server last saw it (nothing when it didn't)."""
         path = str(Path(path).resolve())
-        text = Path(path).read_text(encoding="utf-8", errors="replace")
+        try:
+            st = os.stat(path)
+            with open(path, encoding="utf-8", errors="replace", newline="") as fh:
+                text = fh.read()             # CRLF kept: positions and edits match the file
+        except OSError:
+            if path in self.opened:          # deleted: the server must forget it
+                del self.opened[path]
+                self.notify("textDocument/didClose", {"textDocument": {"uri": uri(path)}})
+            return
+        stamp = (st.st_mtime_ns, st.st_size)
         ext = Path(path).suffix.lower()
         lang_id = LANGS[self.lang][1].get(ext, self.lang)
         if path in self.opened:
-            self.opened[path] += 1
+            ver, seen = self.opened[path]
+            if seen == stamp:
+                return
+            self.opened[path] = [ver + 1, stamp]
             self.notify("textDocument/didChange", {
-                "textDocument": {"uri": uri(path), "version": self.opened[path]},
+                "textDocument": {"uri": uri(path), "version": ver + 1},
                 "contentChanges": [{"text": text}]})
         else:
-            self.opened[path] = 1
+            self.opened[path] = [1, stamp]
             self.notify("textDocument/didOpen", {"textDocument": {
                 "uri": uri(path), "languageId": lang_id, "version": 1, "text": text}})
+
+    def sync(self):
+        """Re-send every open file that changed on disk (Chuck's own edits,
+        a command's, yours), so no answer is about an old version."""
+        for path in list(self.opened):
+            self.open(path)
 
     def close(self):
         try:
@@ -279,11 +334,8 @@ class Client:
         try:
             self.proc.wait(timeout=3)
         except Exception:
-            try:
-                os.killpg(self.proc.pid, 9)
-            except OSError:
-                self.proc.kill()
-        self.dead = True
+            pass
+        self._kill()
 
 
 class Manager:
@@ -352,6 +404,35 @@ def _rel(root, path):
         return str(Path(path).resolve().relative_to(Path(root).resolve()))
     except ValueError:
         return str(path)
+
+
+def _inside(root, p):
+    rootp, pp = Path(root).resolve(), Path(p).resolve()
+    return pp == rootp or rootp in pp.parents        # not /proj-old for /proj
+
+
+def _units(s):
+    """Length of s in UTF-16 code units (what LSP columns count)."""
+    return sum(2 if ord(ch) > 0xFFFF else 1 for ch in s)
+
+
+def _index(line, col16):
+    """A UTF-16 column -> an index into the Python string."""
+    units = 0
+    for i, ch in enumerate(line):
+        if units >= col16:
+            return i
+        units += 2 if ord(ch) > 0xFFFF else 1
+    return len(line)
+
+
+def _name_col(line, leaf, col16):
+    """The UTF-16 column of `leaf` as a whole word at or after col16 (where
+    the server's declaration starts), else anywhere on the line; None if the
+    line doesn't contain it."""
+    rx = re.compile(r"(?<![\w$])" + re.escape(leaf) + r"(?![\w$])")
+    m = rx.search(line, _index(line, col16)) or rx.search(line)
+    return None if m is None else _units(line[:m.start()])
 
 
 def _split(name):
@@ -434,6 +515,7 @@ def definitions(mgr, root, name, timeout=45):
         try:
             # some servers only index what is open: open a few files that
             # mention the name so workspace/symbol has something to search
+            c.sync()
             mentions = _mentions(root, leaf, lang)
             for rel in mentions[:12]:
                 c.open(Path(root) / rel)
@@ -455,7 +537,7 @@ def definitions(mgr, root, name, timeout=45):
             if "range" not in loc:
                 continue
             p = path_of(loc.get("uri", ""))
-            if not str(Path(p).resolve()).startswith(str(Path(root).resolve())):
+            if not _inside(root, p):
                 continue                                  # a library's, not the project's
             st = loc["range"]["start"]
             rel = _rel(root, p)
@@ -502,15 +584,16 @@ def references(mgr, root, name, timeout=45, limit=200):
         c = mgr.client(root, lang_of(d["path"]))
         if c is not None:
             try:
+                c.sync()
                 for rel in _mentions(root, leaf, c.lang)[:200]:
                     c.open(Path(root) / rel)
                 # the position must be ON the name: definitions point at the
                 # start of the declaration line in some servers
-                line_text = _line(root, d["path"], d["line"])
-                col = line_text.find(leaf, d["col"]) if leaf in line_text else d["col"]
+                col = _name_col(_line(root, d["path"], d["line"]), leaf, d["col"])
                 res = c.request("textDocument/references", {
                     "textDocument": {"uri": uri(Path(root) / d["path"])},
-                    "position": {"line": d["line"] - 1, "character": max(col, 0)},
+                    "position": {"line": d["line"] - 1,
+                                 "character": d["col"] if col is None else col},
                     "context": {"includeDeclaration": False}}, timeout=timeout) or []
                 defset = {(x["path"], x["line"]) for x in defs}
                 refs, seen = [], set()
@@ -542,23 +625,31 @@ def references(mgr, root, name, timeout=45, limit=200):
     return refs, "text search (no language server: whole-word matches)", defs
 
 
-def _apply_text_edits(text, edits):
-    """Apply LSP TextEdits. Positions count UTF-16 code units, as the protocol
-    says, so a line with an emoji before the name still lands right."""
-    starts = [0] + [i + 1 for i, ch in enumerate(text) if ch == "\n"]
+def _offset(text, pos, starts=None):
+    """An LSP position -> an index into text. Columns count UTF-16 code units,
+    as the protocol says, so a line with an emoji before the name lands right."""
+    starts = starts or [0] + [i + 1 for i, ch in enumerate(text) if ch == "\n"]
+    ln = pos["line"]
+    if ln >= len(starts):
+        return len(text)
+    idx = starts[ln]
+    end = starts[ln + 1] - 1 if ln + 1 < len(starts) else len(text)
+    units = 0
+    while idx < end and units < pos["character"]:
+        units += 2 if ord(text[idx]) > 0xFFFF else 1
+        idx += 1
+    return idx
 
-    def offset(pos):
-        ln = pos["line"]
-        if ln >= len(starts):
-            return len(text)
-        idx = starts[ln]
-        end = starts[ln + 1] - 1 if ln + 1 < len(starts) else len(text)
-        units = 0
-        while idx < end and units < pos["character"]:
-            units += 2 if ord(text[idx]) > 0xFFFF else 1
-            idx += 1
-        return idx
-    spans = sorted(((offset(e["range"]["start"]), offset(e["range"]["end"]), e["newText"])
+
+def _range_text(text, rng):
+    return text[_offset(text, rng["start"]):_offset(text, rng["end"])]
+
+
+def _apply_text_edits(text, edits):
+    """Apply LSP TextEdits (positions in UTF-16 units)."""
+    starts = [0] + [i + 1 for i, ch in enumerate(text) if ch == "\n"]
+    spans = sorted(((_offset(text, e["range"]["start"], starts),
+                     _offset(text, e["range"]["end"], starts), e["newText"])
                     for e in edits), reverse=True)
     for a, b, new in spans:
         text = text[:a] + new + text[b:]
@@ -584,13 +675,15 @@ def rename(mgr, root, name, new_name, timeout=60):
     d = defs[0]
     c = mgr.client(root, lang_of(d["path"]))
     _cont, leaf = _split(name)
+    c.sync()
     for rel in _mentions(root, leaf, c.lang)[:200]:
         c.open(Path(root) / rel)
-    line_text = _line(root, d["path"], d["line"])
-    col = line_text.find(leaf, d["col"]) if leaf in line_text else d["col"]
+    col = _name_col(_line(root, d["path"], d["line"]), leaf, d["col"])
+    if col is None:
+        raise LSPError(f"{d['path']}:{d['line']} no longer has {leaf} on it: try again")
     edit = c.request("textDocument/rename", {
         "textDocument": {"uri": uri(Path(root) / d["path"])},
-        "position": {"line": d["line"] - 1, "character": max(col, 0)},
+        "position": {"line": d["line"] - 1, "character": col},
         "newName": new_name}, timeout=timeout)
     if not edit:
         raise LSPError(f"{c.name} found nothing to rename")
@@ -609,7 +702,14 @@ def rename(mgr, root, name, new_name, timeout=60):
         rp = Path(p).resolve()
         if rootp not in rp.parents:
             raise LSPError(f"the rename would change {p}, outside the project")
-        before = rp.read_text(encoding="utf-8")
+        with open(rp, encoding="utf-8", newline="") as fh:
+            before = fh.read()
+        for e in edits:
+            # every edit must replace the name itself: anything else means the
+            # server saw a different version of the file than the one on disk
+            if _range_text(before, e["range"]) != leaf:
+                raise LSPError(f"{_rel(root, rp)} changed while renaming (the server and the "
+                               "file disagree): nothing was changed, try again")
         after = _apply_text_edits(before, edits)
         if after != before:
             plan.append((_rel(root, rp), before, after))

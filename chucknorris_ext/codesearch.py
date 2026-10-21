@@ -29,11 +29,26 @@ WINDOW = 60
 
 
 def _stem(w):
-    for suf in ("ization", "ations", "ation", "ings", "ing", "edly", "ers", "ies", "ed", "es",
-                "er", "s"):
-        if w.endswith(suf) and len(w) - len(suf) >= 3:
-            w = w[:-len(suf)] + ("y" if suf == "ies" else "")
-            break
+    """A small suffix stripper. It only has to send a word's forms to the same
+    stem (parse, parses, parsed, parsing, parser -> pars), not make real words."""
+    for suf in ("ization", "ations", "ation", "ings", "ing", "edly", "ers", "ies", "ied", "ure",
+                "ed", "es", "er", "s"):
+        if not w.endswith(suf) or len(w) - len(suf) < 3:
+            continue
+        base = w[:-len(suf)]
+        if suf in ("ies", "ied"):
+            return base + "y"
+        if suf == "es" and not base.endswith(("s", "x", "z", "ch", "sh")):
+            base = w[:-1]                       # files -> file, not fil·es
+        if suf == "s" and base.endswith(("s", "u", "i")):
+            return w                            # process, status, analysis keep their s
+        if suf in ("ing", "ings", "ed", "er", "ers") and len(base) > 3 and \
+                base[-1] == base[-2] and base[-1] not in "lsz":
+            base = base[:-1]                    # running -> run, stopped -> stop
+        w = base
+        break
+    if len(w) > 3 and w.endswith("e"):
+        w = w[:-1]                              # parse and parsing meet at pars
     return w
 
 
@@ -43,7 +58,9 @@ def words(text):
         for part in _PART.findall(ident):
             w = part.lower()
             if len(w) > 1 and w not in _STOP:
-                out.append(_stem(w))
+                st = _stem(w)
+                if st not in _STOP:             # classes -> class, returns -> return
+                    out.append(st)
     return out
 
 

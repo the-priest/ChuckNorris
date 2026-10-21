@@ -11,7 +11,9 @@ os.environ.setdefault("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))
 item, through the REAL window on the stub toolkit, against real language
 servers where they're installed."""
 import shutil
+import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -152,8 +154,62 @@ if has_py:
     w = agent(["```rename make_store 9bad```", "No."], ws)
     type_and_send(w, "bad name")
     check("isn't a valid name" in hist_text(w), "an invalid new name is refused")
+    (ws / "pkg" / "emo.py").write_text('BANNER = "\U0001F389\U0001F389"; counter = 0\ncounter += 1\n')
+    w = agent(["```rename counter tally```", "ok"], ws)
+    type_and_send(w, "rename counter")
+    emo = (ws / "pkg" / "emo.py").read_text()
+    check(emo.startswith('BANNER = "') and "; tally = 0" in emo and "tally += 1" in emo,
+          "an emoji before the name doesn't shift the rename onto another symbol", emo)
+    (ws / "pkg" / "crlf.py").write_bytes(b"def crlf_fn():\r\n    return 1\r\n\r\n\r\nx = crlf_fn()\r\n")
+    w = agent(["```rename crlf_fn crlf_new```", "ok"], ws)
+    type_and_send(w, "rename crlf")
+    raw = (ws / "pkg" / "crlf.py").read_bytes()
+    check(raw == b"def crlf_new():\r\n    return 1\r\n\r\n\r\nx = crlf_new()\r\n",
+          "a Windows-line-ending file keeps its CRLFs", raw)
+    mgr = lsp.Manager()
+    lsp.references(mgr, ws, "make_store")          # the server now has app.py open
+    (ws / "pkg" / "app.py").write_text("from pkg.store import Store\n\nmake = Store()\n")
+    plan, _how = lsp.rename(mgr, ws, "make_store", "build_store")
+    mgr.stop_all()
+    check([r for r, _b, _a in plan] == ["pkg/store.py"] and "def build_store" in plan[0][2],
+          "a file changed on disk since the server read it is re-sent, not edited blind",
+          [(r, a_[:80]) for r, _b, a_ in plan])
 else:
     print("  [SKIP] no Python language server: rename untested here")
+
+check(lsp._name_col('x = "\U0001F600\U0001F600"; total = subtotal + total', "total", 0) == 12
+      and lsp._name_col("def subsave(save):", "save", 0) == 12
+      and lsp._name_col("nothing here", "save", 0) is None,
+      "the name is found as a whole word, in UTF-16 columns")
+check(not lsp._inside("/a/proj", "/a/proj-old/x.py") and lsp._inside("/a/proj", "/a/proj/x.py"),
+      "a sibling folder with the same prefix isn't 'inside' the project")
+fake = [sys.executable, str(Path(_ROOT) / "tests" / "fake_lsp_server.py")]
+try:
+    lsp.Client(fake + ["bad-init"], tmp, "python")
+    bad = None
+except lsp.LSPError as ex:
+    bad = ex
+check(bad is not None, "a server that refuses to initialize is an error")
+time.sleep(0.3)
+alive = subprocess.run(["pgrep", "-f", "fake_lsp_server.py bad-init"], capture_output=True, text=True).stdout
+check(not alive.strip(), "and its process is killed, not left running", alive)
+big = tmp / "big.py"
+big.write_text("x = 1\n" * 200000)                # 1.2 MB: more than a pipe holds
+c = lsp.Client(fake + ["flood"], tmp, "python")
+done = []
+th = threading.Thread(target=lambda: (c.open(big), done.append(c.request("workspace/symbol",
+                                                                        {"query": "x"}, timeout=20))),
+                      daemon=True, name="srv-flood")
+th.start()
+th.join(25)
+check(done == [[]], "a server that floods us while we send a big file doesn't deadlock", done)
+ids = set()
+ths = [threading.Thread(target=lambda: ids.add(next(c.seq)), name="srv-id") for _ in range(50)]
+[t.start() for t in ths]
+[t.join() for t in ths]
+check(len(ids) == 50, "request ids are unique across threads")
+c.close()
+check(c.dead and c.proc.poll() is not None, "close stops it")
 
 if has_ts:
     ws = project("ts")
@@ -176,8 +232,15 @@ first = h.split("best matches by meaning")[1].strip().splitlines()[1] if "best m
 check("pkg/net.py:4" in first and "fetch_with_backoff" in first,
       "the function that retries ranks first, though no line says 'retry a request that failed'", first)
 cs = cn._codesearch
-check(cs.words("retryFailedRequests parse_json") == ["retry", "fail", "request", "parse", "json"],
+check(cs.words("retryFailedRequests parse_json") == ["retry", "fail", "request", "pars", "json"],
       "camelCase and snake_case split into words, stemmed")
+forms = [["parse", "parses", "parsed", "parsing", "parser"], ["file", "files"],
+         ["process", "processes"], ["cache", "caches", "cached"], ["status", "statuses"],
+         ["run", "running", "runs"], ["retry", "retries", "retried"], ["fail", "failure", "failing"]]
+check(all(len({cs._stem(x) for x in f}) == 1 for f in forms),
+      "every form of a word meets at one stem (parse/parsing, process/processes, ...)",
+      [[cs._stem(x) for x in f] for f in forms])
+check(cs.words("classes returns functions") == [], "a stopword's plural is a stopword too")
 (ws / "pkg" / "late.py").write_text("def resend_on_timeout():\n    \"\"\"Retry when the request timed out.\"\"\"\n")
 r = cs.search(ws, "retry request timed out", k=3)
 check(r and r[0][1]["rel"] == "pkg/late.py", "a file added since the last search is found (incremental index)")
@@ -852,6 +915,40 @@ ears.listen(got.append)
 check(got == [{"event": "cancelled"}] and not ears.busy, "cancelling while the model loads is honoured", got)
 L.recorder_argv = real_argv
 settle()
+
+# ═══════════════════════════════════════════════════════════════════════════
+print("\n--- updating: a failed swap leaves the working copy ---")
+upd = cn._update
+app_dir, src = tmp / "upd_app", tmp / "upd_src"
+for d, tag in ((app_dir, "old"), (src, "new")):
+    (d / "chucknorris_ext").mkdir(parents=True)
+    (d / "chucknorris_ext" / "mod.py").write_text(tag + "\n")
+    (d / "chucknorris.py").write_text(tag + "\n")
+real_replace = upd.os.replace
+
+
+def failing_replace(a, b):
+    if str(a).endswith("chucknorris.py.new"):
+        raise OSError("disk full")
+    return real_replace(a, b)
+
+
+upd.os.replace = failing_replace
+try:
+    upd.swap_in(src, app_dir)
+    raised = False
+except OSError:
+    raised = True
+finally:
+    upd.os.replace = real_replace
+check(raised and (app_dir / "chucknorris_ext" / "mod.py").read_text() == "old\n"
+      and (app_dir / "chucknorris.py").read_text() == "old\n"
+      and sorted(p.name for p in app_dir.iterdir()) == ["chucknorris.py", "chucknorris_ext"],
+      "if the app file can't be replaced, the old package comes back and nothing is left over",
+      sorted(p.name for p in app_dir.iterdir()))
+upd.swap_in(src, app_dir)
+check((app_dir / "chucknorris_ext" / "mod.py").read_text() == "new\n"
+      and (app_dir / "chucknorris.py").read_text() == "new\n", "and a normal swap still works")
 
 # ═══════════════════════════════════════════════════════════════════════════
 print(f"\nTOTAL V17 FAILURES: {fails + len(FAILS)}")

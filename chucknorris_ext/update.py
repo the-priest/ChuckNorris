@@ -165,12 +165,25 @@ def swap_in(src, app_dir, asset_dir=None):
     shutil.rmtree(old, ignore_errors=True)
     if ext.exists():
         os.replace(ext, old)
+    swapped = False
     try:
         os.replace(staged, ext)
+        swapped = True
         os.replace(tmp_app, app_dir / "chucknorris.py")
     except OSError:
-        if old.exists() and not ext.exists():
-            os.replace(old, ext)                         # put the working copy back
+        # put the working copy back: a new package beside the old app would
+        # not start at all
+        try:
+            if swapped:
+                shutil.rmtree(ext, ignore_errors=True)
+            if old.exists() and not ext.exists():
+                os.replace(old, ext)
+        finally:
+            shutil.rmtree(staged, ignore_errors=True)
+            try:
+                tmp_app.unlink()
+            except OSError:
+                pass
         raise
     shutil.rmtree(old, ignore_errors=True)
     if asset_dir and (src / "assets").is_dir():
