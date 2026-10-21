@@ -1423,6 +1423,32 @@ if shutil_which("python3.11"):
             bad.append((f, r.stderr.strip().splitlines()[-1:]))
     check(not bad, "every module parses under Python 3.11 (no 3.12-only f-strings)", bad)
 
+print("\n--- the tray: the OS at a glance ---")
+w = new_win([], tmp)
+w._inbox.mark_read()                          # earlier tests' reports
+for m_ in w._missions.values():
+    m_["state"] = "complete"
+w._tray_tick()
+check(not w.tray_btn.get_visible(), "the tray is hidden while nothing is going on", w._tray_lbl.get_label())
+sp_ = w.kernel.spawn("survey", kind="subagent", parent=w._pid1)
+w._asks[sp_.pid] = (threading.Event(), {}, "which port?")
+w._inbox.add("d", "why", "report")
+w._tray_tick()
+check(w.tray_btn.get_visible() and w._tray_lbl.get_label() == "? 1  \u25b6 1  \u2709 1"
+      and w.tray_btn.has_css_class("tray-ask"),
+      "it shows questions waiting, agents working, unread reports; a question lights it up",
+      w._tray_lbl.get_label())
+w.entry.get_buffer().set_text("/activity")
+w.on_send()
+tx = [x.get_text() for x in w.msgbox.walk() if isinstance(x.get_text(), str)]
+check("ACTIVITY" in tx and "WAITING FOR YOUR ANSWER" in tx and any("which port?" in t for t in tx),
+      "/activity (or a click) lists everything waiting for you and everything working")
+w._asks.clear()
+w.kernel.exit(sp_.pid, 0, "")
+w._inbox.mark_read()
+w._tray_tick()
+check(not w.tray_btn.get_visible(), "and it hides again when all is quiet")
+
 print(f"\nTOTAL OS FAILURES: {fails}")
 assert fails == 0 and not FAILS, "OS regressions present"
 print("ALL OS TESTS PASSED")

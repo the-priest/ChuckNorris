@@ -323,6 +323,11 @@ headerbar { background-color: @bg; border-bottom: 1px solid @line; box-shadow: n
 .meter > button:hover, .meter > button:checked { border-color: alpha(@accent, 0.5);
              background-color: @surface2; }
 .meter-cost { color: @accent_hi; font-weight: 700; }
+button.tray { background-color: @surface; border: 1px solid @line; border-radius: 999px;
+             padding: 3px 12px; min-height: 0; color: @body; font-size: 11.5px;
+             font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace; box-shadow: none; }
+button.tray:hover { border-color: alpha(@accent, 0.5); background-color: @surface2; }
+button.tray.tray-ask { border-color: @accent; color: @accent_hi; background-color: @accent_bg; }
 
 /* ── transcript ──────────────────────────────────────────────────────── */
 .chat-scroll, .chat-scroll > viewport { background-color: @bg; }
@@ -3650,6 +3655,17 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._usage_pop.connect("show", lambda *_: self._fill_usage_popover())
         self.meter_btn.set_popover(self._usage_pop)
         header.pack_end(self.meter_btn)
+        # the system tray: what the agent OS is doing, at a glance (hidden
+        # while nothing is); a question waiting for you lights it up
+        self._tray_lbl = Gtk.Label(label="")
+        self.tray_btn = Gtk.Button()
+        self.tray_btn.add_css_class("tray")
+        self.tray_btn.set_child(self._tray_lbl)
+        self.tray_btn.set_valign(Gtk.Align.CENTER)
+        self.tray_btn.set_visible(False)
+        self.tray_btn.connect("clicked", lambda *_a: self.show_activity())
+        header.pack_end(self.tray_btn)
+        GLib.timeout_add(1000, self._tray_tick)
 
         # transcript. No horizontal scrolling at the page level, ever: wide
         # content (code, tables, terminal output) scrolls inside its own block.
@@ -10236,6 +10252,98 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._mission_card(m)
             self._mission_step(m)
 
+    # ── the system tray: the OS at a glance ──
+    def _activity(self):
+        """What the OS is doing right now, for the tray and its card."""
+        kern = self.kernel
+        procs = [r for r in kern.ps() if r["pid"] != self._pid1 and r["kind"] != "mission"] if kern else []
+        missions = [m for m in getattr(self, "_missions", {}).values()
+                    if m["state"] in ("running", "paused", "awaiting approval", "planning")]
+        unread = len(self._inbox.unread()) if getattr(self, "_inbox", None) is not None else 0
+        return {"agents": procs, "asks": dict(getattr(self, "_asks", {})), "missions": missions,
+                "unread": unread}
+
+    def _tray_tick(self):
+        if getattr(self, "_closing", False):
+            return False
+        try:
+            a = self._activity()
+            parts, tips = [], []
+            if a["asks"]:
+                parts.append(f"? {len(a['asks'])}")
+                tips.append(f"{len(a['asks'])} agent(s) waiting for your answer")
+            if a["agents"]:
+                parts.append(f"\u25b6 {len(a['agents'])}")
+                tips.append(f"{len(a['agents'])} agent(s) working")
+            if a["missions"]:
+                parts.append(f"\u25ce {len(a['missions'])}")
+                tips.append(f"{len(a['missions'])} mission(s)")
+            if a["unread"]:
+                parts.append(f"\u2709 {a['unread']}")
+                tips.append(f"{a['unread']} daemon report(s) unread")
+            text = "  ".join(parts)
+            if text != getattr(self, "_tray_last", None):
+                self._tray_last = text
+                self._tray_lbl.set_label(text)
+                self.tray_btn.set_visible(bool(text))
+                self.tray_btn.set_tooltip_text(" \u00b7 ".join(tips) + " \u2014 click for details")
+                if a["asks"]:
+                    self.tray_btn.add_css_class("tray-ask")
+                else:
+                    self.tray_btn.remove_css_class("tray-ask")
+        except Exception:
+            pass
+        return True
+
+    def show_activity(self):
+        """One card: everything waiting for you, and everything working."""
+        a = self._activity()
+        card, head, body, foot = self._card_shell("ACTIVITY")
+
+        def section(title):
+            lb = Gtk.Label(label=title, xalign=0); lb.add_css_class("slash-cmd")
+            body.append(lb)
+
+        def line(text, button=None, fn=None):
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            lb = Gtk.Label(label=text, xalign=0, hexpand=True, wrap=True)
+            _wrap_anywhere(lb); row.append(lb)
+            if button:
+                b = Gtk.Button(label=button); b.add_css_class("quick")
+                b.connect("clicked", lambda *_x: fn())
+                row.append(b)
+            body.append(row)
+        if a["asks"]:
+            section("WAITING FOR YOUR ANSWER")
+            for pid, (_ev, box, q) in a["asks"].items():
+                line(f"pid {pid}: {q[:200]}", "Answer", lambda p=pid, qq=q, bx=box: self._ask_card(p, qq, bx))
+        if a["missions"]:
+            section("MISSIONS")
+            for m in a["missions"]:
+                done, n = _missions.progress(m)
+                line(f"{m['goal'][:90]} \u00b7 {m['state']} \u00b7 {done}/{n}", "Show",
+                     lambda mm=m: self._mission_card(mm))
+        if a["agents"]:
+            section("WORKING")
+            for r in a["agents"][:12]:
+                line(f"{r['pid']} \u00b7 {r['kind']} \u00b7 {r['name'][:60]} \u00b7 {r['state']}"
+                     + (f" \u00b7 {r['activity'][:60]}" if r.get("activity") else ""))
+            line(f"{len(a['agents'])} running", "Open /top", self.show_top)
+        if a["unread"]:
+            section("REPORTS")
+            line(f"{a['unread']} unread daemon report(s)", "Open inbox", self.show_inbox)
+        if getattr(self, "_ledger", None) is not None:
+            section("SPENT")
+            lim = self.cfg("budget_day_usd", 0.0, 0.0, 100000.0, cast=float)
+            line(f"today {_pricing.fmt_usd(self._ledger.today())}"
+                 + (f" of {_pricing.fmt_usd(lim)}" if lim else "")
+                 + f" \u00b7 this month {_pricing.fmt_usd(self._ledger.month())}", "Budget",
+                 lambda: self.budget_command(""))
+        if not (a["asks"] or a["missions"] or a["agents"] or a["unread"]):
+            line("Nothing running and nothing waiting.")
+        self._log_pin(card)
+        return True
+
     # ── daemons (Chuck OS, phase 19) ──
     DAEMONS_FILE = CONFIG_DIR / "daemons.json"
     INBOX_FILE = CONFIG_DIR / "inbox.json"
@@ -12003,6 +12111,7 @@ class ChuckWindow(Adw.ApplicationWindow):
                             "parallel, each tested before it's merged"),
         ("/missions", "your missions and how far they got"),
         ("/budget [day|month <$>]", "what everything spent today and this month, and the limits"),
+        ("/activity", "everything waiting for you and everything working (the tray in the header)"),
         ("/send <pid> <message>", "tell a running agent something; it hears it at its next step"),
         ("/answer <pid> <text>", "answer an agent that asked you a question"),
         ("/board", "the facts agents share with each other"),
@@ -12065,6 +12174,8 @@ class ChuckWindow(Adw.ApplicationWindow):
             self.start_mission(arg)
         elif cmd == "budget":
             self.budget_command(arg)
+        elif cmd == "activity":
+            self.show_activity()
         elif cmd == "missions":
             self.show_missions()
         elif cmd == "send":

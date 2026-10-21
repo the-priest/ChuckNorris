@@ -78,6 +78,12 @@ Some jobs are too big for one agent. A mission plans the goal as a small graph o
 
 <img src="assets/screenshots/os-mission.png" alt="A MISSION card: five tasks with dependencies; three finished (one merged after its tests passed), one running, one waiting, with spend so far and Report / Trace / Replay per task" width="100%">
 
+### The tray: the OS at a glance
+
+When something is going on, a small tray appears in the header: `? 1  ▶ 2  ◎ 1  ✉ 1` means a question is waiting for you, two agents are working, a mission is running, and a daemon left a report. It lights up when an agent is waiting for your answer. Click it (or type `/activity`) for one card with all of it, each with a button to act on it.
+
+<img src="assets/screenshots/os-activity.png" alt="The header tray lit up with a question waiting, and the ACTIVITY card: the question with Answer, the agents working, an unread report, and today's spend" width="100%">
+
 ### `/top`: every agent is a process
 
 <img src="assets/screenshots/os-top.png" alt="/top: the chat as PID 1 and its sub-agents, with state, priority, tokens, cost, tokens per second, run time, what each is doing, and Pause / Continue / Kill per process" width="100%">

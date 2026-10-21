@@ -46,6 +46,9 @@ The third roadmap (`docs/ROADMAP.md`, phases 10–15), with tests in
   step and survive a crash or a reboot (Resume at the next start);
   `/replay <pid>` shows a run step by step and `/fork <pid> <step>
   [instruction]` starts a new agent from any step, files as they were then.
+- **The tray**: a header indicator of questions waiting, agents working,
+  missions and unread reports (lit when an agent waits for you); a click or
+  `/activity` lists them all with a button for each.
 - **One budget for everything** (`/budget`, Settings): a daily and monthly
   limit across every chat, agent, mission and daemon, kept on disk.
 - **Missions** (`/mission <goal>`): a goal planned as a graph of tasks and
