@@ -27,7 +27,6 @@ Three hard rules:
      warm.
 """
 
-import gzip
 import ssl
 import time
 import zlib
@@ -252,16 +251,24 @@ def _cache_put(url, body, headers, status, ttl):
 
 
 # ── the one entry point ─────────────────────────────────────────────────────
-def _decode(body, encoding):
+def _inflate(body, wbits, limit):
+    """Decompress at most `limit` bytes: a 1 MB gzip can unpack to 1 GB."""
+    d = zlib.decompressobj(wbits)
+    out = d.decompress(body, limit)
+    return out
+
+
+def _decode(body, encoding, limit=None):
     enc = (encoding or "").lower()
+    cap = limit if limit else 64 * 1024 * 1024
     try:
         if enc == "gzip":
-            return gzip.decompress(body)
+            return _inflate(body, 16 + zlib.MAX_WBITS, cap)
         if enc == "deflate":
             try:
-                return zlib.decompress(body)
+                return _inflate(body, zlib.MAX_WBITS, cap)
             except zlib.error:
-                return zlib.decompress(body, -zlib.MAX_WBITS)
+                return _inflate(body, -zlib.MAX_WBITS, cap)
     except Exception:
         return body            # a lying Content-Encoding is not worth failing over
     return body
@@ -390,5 +397,5 @@ def _pooled(url, method, data, timeout, hdrs, proxy, max_bytes):
             raise urllib.error.HTTPError(current, status, r.reason,
                                          raw_headers, None)
 
-        body = _decode(body, raw_headers.get("content-encoding"))
+        body = _decode(body, raw_headers.get("content-encoding"), max_bytes)
         return _Resp(body, raw_headers, status, current)

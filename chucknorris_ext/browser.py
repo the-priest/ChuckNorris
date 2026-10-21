@@ -19,11 +19,13 @@ import base64
 import json
 import os
 import re
+import select
 import shutil
 import socket
 import struct
 import subprocess
 import tempfile
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -243,7 +245,7 @@ class _CDP:
         return (r.get("result") or {}).get("value")
 
 
-def _launch(chrome, profile):
+def _launch(chrome, profile, startup=20):
     args = [chrome, "--headless=new", "--remote-debugging-port=0",
             f"--user-data-dir={profile}", "--no-first-run", "--no-default-browser-check",
             "--disable-gpu", "--hide-scrollbars", "--mute-audio",
@@ -258,17 +260,35 @@ def _launch(chrome, profile):
         args.insert(1, "--no-sandbox")            # Chromium refuses to run as root otherwise
     proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                             stderr=subprocess.PIPE, start_new_session=True)
-    end = time.time() + 20
-    line = b""
+    end = time.time() + startup
+    fd, buf = proc.stderr.fileno(), b""
     while time.time() < end:
-        line = proc.stderr.readline()
-        if not line and proc.poll() is not None:
+        # readline() would block past the deadline on a browser that prints
+        # nothing: wait for data with the time that's left
+        ready, _w, _x = select.select([fd], [], [], max(0.0, end - time.time()))
+        if not ready:
+            break
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            proc.wait(timeout=5)
             raise RuntimeError("the browser exited at start")
-        m = re.search(rb"DevTools listening on (ws://\S+)", line)
+        buf = (buf + chunk)[-65536:]
+        m = re.search(rb"DevTools listening on (ws://\S+)", buf)
         if m:
+            # keep reading its log: a full stderr pipe would freeze the browser
+            threading.Thread(target=_drain, args=(proc.stderr,), daemon=True,
+                             name="browser-log").start()
             return proc, m.group(1).decode()
     proc.kill()
-    raise RuntimeError("the browser didn't start within 20s")
+    raise RuntimeError(f"the browser didn't start within {startup}s")
+
+
+def _drain(f):
+    try:
+        while f.read(65536):
+            pass
+    except (OSError, ValueError):
+        pass
 
 
 def _page_ws(browser_ws):

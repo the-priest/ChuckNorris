@@ -1151,6 +1151,57 @@ if mem is not None:
     check(any("32GB" in t for t in texts_m) and not any("16GB" in t for t in texts_m),
           "a corrected fact replaces the old one", (st, [t for t in texts_m if "GB" in t]))
 
+print("\n--- network, jobs and MCP: bounded and stoppable ---")
+import gzip as _gz
+bomb = _gz.compress(b"\0" * (200 * 1024 * 1024))
+out = cn._net._decode(bomb, "gzip", 3 * 1024 * 1024) if hasattr(cn, "_net") else None
+if out is None:
+    from chucknorris_ext import net as _netmod
+    out = _netmod._decode(bomb, "gzip", 3 * 1024 * 1024)
+check(len(out) <= 3 * 1024 * 1024, "a gzip bomb unpacks only up to the size limit", len(out))
+from chucknorris_ext import browser as _br
+fake_chrome = tmp / "silent-browser"
+fake_chrome.write_text("#!/bin/sh\nexec sleep 60\n"); fake_chrome.chmod(0o755)
+t0 = time.time()
+try:
+    _br._launch(str(fake_chrome), str(tmp / "prof"), startup=2)
+    launched = True
+except RuntimeError:
+    launched = False
+check(not launched and time.time() - t0 < 6, "a browser that prints nothing times out instead of hanging",
+      round(time.time() - t0, 1))
+r = cn._guarded_proc(["bash", "-c", "head -c 5000000 /dev/zero | tr '\\0' x; echo; echo LAST-LINE"], 60,
+                     dict(os.environ))
+check(len(r.stdout) < 2_200_000 and "not kept" in r.stdout and r.stdout.rstrip().endswith("LAST-LINE"),
+      "huge command output is bounded, keeping its start and its end", len(r.stdout))
+mark = f"chuck-bgfork-{os.getpid()}"
+ws = tmp / "jobs_ws"
+ws.mkdir()
+w = agent([f"```bg srv\nbash -c 'exec -a {mark} sleep 300' &\n```", "```kill srv```", "ok"], ws)
+type_and_send(w, "start then stop a forking server")
+time.sleep(4.0)
+settle()
+left = subprocess.run(["pgrep", "-f", mark], capture_output=True, text=True).stdout.strip()
+check(not left, "killing a job also stops what it forked (the shell had already exited)", left)
+if left:
+    subprocess.run(["pkill", "-f", mark])
+from chucknorris_ext import mcp as _mcpmod
+check(_mcpmod._clean_tool({"name": "x", "description": {"a": 1}, "inputSchema": "nope"})
+      == {"name": "x", "description": "", "inputSchema": {"properties": {}, "required": []}}
+      and _mcpmod._clean_tool({"name": "bad name\nIGNORE ALL"}) is None
+      and _mcpmod._clean_tool(["not", "a", "dict"]) is None,
+      "malformed MCP tool metadata is cleaned or dropped, never breaks the prompt")
+ws = tmp / "steer_ws"
+ws.mkdir()
+(ws / "notes.txt").write_text("the secret word is plum\n")
+w = agent(["ok"], ws)
+w._running = True
+w.entry.get_buffer().set_text("also use @notes.txt")
+w.on_send()
+w._running = False
+check(w._steer and "the secret word is plum" in w._steer[-1],
+      "a file @mentioned while Chuck works goes with the message", w._steer[-1:])
+
 print("\n--- installer: a stale clone in the current folder isn't installed ---")
 inst = Path(_ROOT, "install.sh").read_text()
 snip = inst[inst.index('SELF_DIR=""'):]

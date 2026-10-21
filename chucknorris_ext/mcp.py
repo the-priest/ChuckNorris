@@ -20,10 +20,10 @@ ping and roots/list; anything else a server asks for is answered with
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import threading
-import time
 
 PROTOCOL = "2025-06-18"
 CALL_TIMEOUT = 120
@@ -146,14 +146,20 @@ class Server:
                 continue                         # a server logging to stdout: ignore it
             if not isinstance(msg, dict):
                 continue
-            if "method" in msg and "id" in msg:      # the server asks US something
-                self._answer(msg)
-            elif "id" in msg:
+            mid = msg.get("id")
+            if not isinstance(mid, (int, str)) or isinstance(mid, bool):
+                continue                         # no id, or one that can't be ours (a list…)
+            try:
+                if "method" in msg:              # the server asks US something
+                    self._answer(msg)
+                    continue
                 with self._lock:
-                    slot = self._waiting.pop(msg["id"], None)
+                    slot = self._waiting.pop(mid, None)
                 if slot:
                     slot[1] = msg
                     slot[0].set()
+            except Exception:
+                continue                         # one bad message must not kill the reader
         with self._lock:                          # stdout closed: wake every waiter
             for slot in self._waiting.values():
                 slot[1] = {"error": {"message": "server exited"
@@ -185,11 +191,13 @@ class Server:
         tools, cursor = [], None
         for _ in range(20):                       # pages
             r = self.request("tools/list", {"cursor": cursor} if cursor else {}, timeout=30)
-            tools += r.get("tools") or []
-            cursor = r.get("nextCursor")
-            if not cursor:
+            got = r.get("tools") if isinstance(r, dict) else None
+            tools += [t for t in (_clean_tool(x) for x in (got if isinstance(got, list) else []))
+                      if t]
+            cursor = r.get("nextCursor") if isinstance(r, dict) else None
+            if not cursor or not isinstance(cursor, str):
                 break
-        return tools
+        return tools[:500]
 
     def call(self, tool, args, timeout=CALL_TIMEOUT):
         return self.request("tools/call", {"name": tool, "arguments": args or {}}, timeout=timeout)
@@ -207,6 +215,29 @@ def load_config(path):
     servers = data.get("mcpServers", data) if isinstance(data, dict) else {}
     return {k: v for k, v in servers.items()
             if isinstance(v, dict) and v.get("command") and not v.get("disabled")}
+
+
+_NAME_OK = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
+
+
+def _clean_tool(t):
+    """A server's tool entry made safe to put in the system prompt: a name
+    that is a name, a short one-line description, plain property names. A
+    malformed entry is dropped instead of breaking every new chat."""
+    if not isinstance(t, dict) or not isinstance(t.get("name"), str):
+        return None
+    name = t["name"].strip()
+    if not _NAME_OK.fullmatch(name):
+        return None
+    desc = t.get("description")
+    desc = " ".join(desc.split())[:400] if isinstance(desc, str) else ""
+    sch = t.get("inputSchema") if isinstance(t.get("inputSchema"), dict) else {}
+    props = sch.get("properties") if isinstance(sch.get("properties"), dict) else {}
+    props = {k: v for k, v in list(props.items())[:30] if isinstance(k, str) and _NAME_OK.fullmatch(k)}
+    req = [r for r in (sch.get("required") if isinstance(sch.get("required"), list) else [])
+           if isinstance(r, str) and r in props]
+    return {"name": name, "description": desc,
+            "inputSchema": dict(sch, properties=props, required=req)}
 
 
 def _sig(tool):
@@ -230,6 +261,7 @@ class Manager:
         self.errors = {}
         self.lock = threading.Lock()
         self.loading = False
+        self.gen = 0                    # bumped by every (re)start: late boots stand down
 
     def start_all(self, wait=False):
         try:
@@ -240,18 +272,29 @@ class Manager:
         self.stop_all()
         if not cfg:
             return
+        with self.lock:
+            self.gen += 1
+            gen = self.gen
 
         def boot(name, spec):
             s = Server(name, spec, self.client_version, self.roots)
             try:
                 s.start()
                 with self.lock:
-                    self.servers[name] = s
-                    self.errors.pop(name, None)
+                    if gen != self.gen:          # reloaded while this was starting
+                        stale = True
+                    else:
+                        stale = False
+                        self.servers[name] = s
+                        self.errors.pop(name, None)
+                if stale:
+                    s.stop()
+                    return
             except Exception as ex:
                 s.stop()
                 with self.lock:
-                    self.errors[name] = str(ex)
+                    if gen == self.gen:
+                        self.errors[name] = str(ex)
             if self.on_change:
                 self.on_change()
 
@@ -274,9 +317,14 @@ class Manager:
 
     def stop_all(self):
         with self.lock:
+            self.gen += 1                         # servers still booting stop themselves
             servers, self.servers = list(self.servers.values()), {}
-        for s in servers:
-            s.stop()
+        # in parallel: one at a time was 2 s per server on the UI thread
+        ts = [threading.Thread(target=s.stop, daemon=True) for s in servers]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join(timeout=3)
 
     def index(self, desc_cap=110, max_tools=80):
         """The tool list for the system prompt ('' when there are none)."""

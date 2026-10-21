@@ -1624,7 +1624,7 @@ def _streamed(proc, input_text, timeout, on_chunk):
     """communicate(), but each chunk of stdout/stderr also goes to on_chunk as
     it arrives. -> (out, err). Raises TimeoutExpired like communicate()."""
     import codecs
-    bufs = {"out": [], "err": []}
+    bufs = {"out": _HeadTail(), "err": _HeadTail()}
 
     def reader(stream, key):
         dec = codecs.getincrementaldecoder("utf-8")("replace")
@@ -1638,14 +1638,15 @@ def _streamed(proc, input_text, timeout, on_chunk):
                 break
             text = dec.decode(data)
             if text:
-                bufs[key].append(text)
-                try:
-                    on_chunk(text)
-                except Exception:
-                    pass
+                bufs[key].add(text)
+                if on_chunk is not None:
+                    try:
+                        on_chunk(text)
+                    except Exception:
+                        pass
         tail = dec.decode(b"", final=True)
         if tail:
-            bufs[key].append(tail)
+            bufs[key].add(tail)
 
     threads = [threading.Thread(target=reader, args=(proc.stdout, "out"), daemon=True),
                threading.Thread(target=reader, args=(proc.stderr, "err"), daemon=True)]
@@ -1661,7 +1662,38 @@ def _streamed(proc, input_text, timeout, on_chunk):
     proc.wait(timeout=timeout)                       # raises TimeoutExpired
     for t in threads:
         t.join(timeout=5)
-    return "".join(bufs["out"]), "".join(bufs["err"])
+    return bufs["out"].text(), bufs["err"].text()
+
+
+class _HeadTail:
+    """A command's output, bounded: the first and the last MB are kept (the
+    model sees 20k characters and the screen 12k), with a note of what was
+    left out between them. `yes` or a chatty build can't fill the memory."""
+    KEEP = 1 << 20
+
+    def __init__(self):
+        self.head, self.tail, self.tail_len, self.dropped = [], [], 0, 0
+        self.head_len = 0
+
+    def add(self, text):
+        if self.head_len < self.KEEP:
+            take = text[:self.KEEP - self.head_len]
+            self.head.append(take)
+            self.head_len += len(take)
+            text = text[len(take):]
+            if not text:
+                return
+        self.tail.append(text)
+        self.tail_len += len(text)
+        while self.tail_len - len(self.tail[0]) >= self.KEEP:
+            gone = self.tail.pop(0)
+            self.tail_len -= len(gone)
+            self.dropped += len(gone)
+
+    def text(self):
+        mid = (f"\n\u2026 [{self.dropped:,} characters of output not kept] \u2026\n"
+               if self.dropped else "")
+        return "".join(self.head) + mid + "".join(self.tail)
 
 
 # A folder's access can be "Sandboxed" (/access, Settings): then commands,
@@ -1785,16 +1817,13 @@ def _guarded_proc(argv, timeout, env, input_text=None):
                             stdin=subprocess.PIPE if input_text is not None
                             else subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=on_chunk is None, errors="replace" if on_chunk is None else None,
                             env=env, preexec_fn=_sandbox_preexec)
     with _LIVE_LOCK:
         _LIVE_PROCS.add(proc)
     try:
         try:
-            if on_chunk is not None:
-                out, err = _streamed(proc, input_text, timeout, on_chunk)
-            else:
-                out, err = proc.communicate(input=input_text, timeout=timeout)
+            # always streamed: bounded buffers, whoever is (or isn't) watching
+            out, err = _streamed(proc, input_text, timeout, on_chunk)
         except subprocess.TimeoutExpired:
             _kill_tree(proc)
             try:
@@ -1806,6 +1835,17 @@ def _guarded_proc(argv, timeout, env, input_text=None):
         with _LIVE_LOCK:
             _LIVE_PROCS.discard(proc)
     return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+
+
+def _group_alive(pgid):
+    """Does any process of this group still exist?"""
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
 
 
 def kill_live_commands():
@@ -5214,9 +5254,11 @@ class ChuckWindow(Adw.ApplicationWindow):
         if getattr(self, "_lsp_m", None) is not None:
             threading.Thread(target=self._lsp_m.stop_all, daemon=True).start()
         # background jobs belong to this session: don't leave a dev server
-        # holding a port after the window that started it is gone
+        # holding a port after the window that started it is gone; nor a
+        # build that was running in the foreground (it has its own session)
         try:
             self._stop_all_jobs()
+            kill_live_commands()
         except Exception:
             pass
         try:
@@ -7180,22 +7222,45 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._tool_feedback.append(f"[job '{name}' {state}. Last output:\n"
                                    f"{self._log_tail(j['log']) or '(empty)'}]")
 
-    def _kill_job(self, name):
+    def _kill_job(self, name, hard=False):
+        """Stop a job and everything it started. The job runs in its own
+        session, so its process group id is its pid: signal the GROUP even when
+        the leader already exited (`server &` leaves the server running under
+        a dead shell). The grace period waits off the UI thread."""
         j = self._jobs.get(name)
         if not j:
             return f"no job '{name}'"
-        if j["proc"].poll() is None:
-            try:
-                os.killpg(os.getpgid(j["proc"].pid), signal.SIGTERM)
+        pgid = j["proc"].pid
+        if j["proc"].poll() is not None and not _group_alive(pgid):
+            return f"'{name}' had already exited (code {j['proc'].poll()})"
+        try:
+            os.killpg(pgid, signal.SIGKILL if hard else signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+        if not hard:
+            def finish():
+                end = time.time() + 3
+                while time.time() < end and _group_alive(pgid):
+                    j["proc"].poll()              # reap the leader: a zombie still counts
+                    time.sleep(0.1)
+                if _group_alive(pgid):
+                    try:
+                        os.killpg(pgid, signal.SIGKILL)
+                    except OSError:
+                        pass
                 try:
-                    j["proc"].wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    os.killpg(os.getpgid(j["proc"].pid), signal.SIGKILL)
-            except (ProcessLookupError, PermissionError, OSError):
+                    j["proc"].wait(timeout=2)
+                except Exception:
+                    pass
+                GLib.idle_add(lambda: (self._update_job_card(j), False)[1])
+            threading.Thread(target=finish, daemon=True, name="job-stop").start()
+        else:
+            try:
+                j["proc"].wait(timeout=1)
+            except Exception:
                 pass
-            self._update_job_card(j)
-            return f"stopped '{name}'"
-        return f"'{name}' had already exited (code {j['proc'].poll()})"
+        self._update_job_card(j)
+        return f"stopped '{name}'"
 
     def _do_kill(self, name):
         name = (name or "").strip()
@@ -7245,7 +7310,7 @@ class ChuckWindow(Adw.ApplicationWindow):
 
     def _stop_all_jobs(self):
         for name in list(self._jobs):
-            self._kill_job(name)
+            self._kill_job(name, hard=True)       # closing: no grace, nothing left behind
 
     _VIEWABLE = re.compile(r"\.(?:html?|png|jpe?g|gif|webp|svg|bmp|pdf|txt|md|csv|json|log|"
                            r"mp4|webm|mkv|mov|mp3|wav|ogg|flac|m4a)$", re.I)
@@ -7802,7 +7867,8 @@ class ChuckWindow(Adw.ApplicationWindow):
 
     def mcp_reload(self):
         if self._mcp is not None:
-            self._mcp.start_all()
+            # stopping the old servers can take seconds: never on the UI thread
+            threading.Thread(target=self._mcp.start_all, daemon=True, name="mcp-reload").start()
             self._sys_note("\U0001F50C reloading MCP servers\u2026", "dim")
 
     @tool("changes", bare=True, cap=1)
@@ -9379,8 +9445,17 @@ class ChuckWindow(Adw.ApplicationWindow):
         if text and not self._attachments and self._slash(text):
             self.entry.get_buffer().set_text("")
             return
-        if self._running and text:
-            self._queue_steer(text)
+        if self._running and (text or self._attachments):
+            self._attach_mentions(text)
+            files = [a for a in self._attachments if a["kind"] != "image"]
+            if not text and not files:
+                return                      # only pictures: they go with the next message
+            self._attachments = [a for a in self._attachments if a["kind"] == "image"]
+            self._refresh_tray()
+            self._queue_steer(text, files)
+            if self._attachments:
+                self._sys_note("\U0001F5BC the picture goes with your next message, once this "
+                               "task is done", "dim")
             return
         self._attach_mentions(text)
         # legacy single-slot attachments (kept for anything that still sets them)
@@ -9421,17 +9496,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             # the model's picture of the files must match what's on disk
             body = "[Since your last reply: " + "; ".join(self._user_notes) + "]\n\n" + body
             self._user_notes = []
-        for a in atts:
-            if a["kind"] == "text":
-                note = (f" (first {len(a['text']):,} characters of {a['size']:,} — the "
-                        f"full file is at {a['path']})" if a.get("cut") else "")
-                body += (f"\n\n--- attached file: {a['name']}{note} ---\n{a['text']}"
-                         "\n--- end ---")
-            elif a["kind"] == "path":
-                body += (f"\n\n[attached file: {a['path']} ({a['size']:,} bytes, binary) \u2014 "
-                         "work with it by path]")
-            else:
-                body += f"\n[image attached: {a['name']}]"
+        body += self._att_text(atts)
         if not self._quiet_send:        # a queued message already has its bubble
             self._user_bubble(text, files=[a["name"] for a in atts if a["kind"] != "image"],
                               images=[a["path"] for a in images if a.get("path")])
@@ -9590,11 +9655,31 @@ class ChuckWindow(Adw.ApplicationWindow):
                 pass
         return False
 
-    def _queue_steer(self, text):
-        """You typed while it works: show it now, deliver it at the next step."""
+    @staticmethod
+    def _att_text(atts):
+        """Attachments as they go into a message's text."""
+        body = ""
+        for a in atts:
+            if a["kind"] == "text":
+                note = (f" (first {len(a['text']):,} characters of {a['size']:,} \u2014 the "
+                        f"full file is at {a['path']})" if a.get("cut") else "")
+                body += (f"\n\n--- attached file: {a['name']}{note} ---\n{a['text']}"
+                         "\n--- end ---")
+            elif a["kind"] == "path":
+                body += (f"\n\n[attached file: {a['path']} ({a['size']:,} bytes, binary) \u2014 "
+                         "work with it by path]")
+            else:
+                body += f"\n[image attached: {a['name']}]"
+        return body
+
+    def _queue_steer(self, text, files=()):
+        """You typed while it works: show it now, deliver it at the next step.
+        Files you attached (or @mentioned) go with it; pictures wait in the
+        tray for your next message, since they can't ride along mid-task."""
         self.entry.get_buffer().set_text("")
-        self._steer.append(text)
-        self._user_bubble(text)
+        atts = [a for a in files if a["kind"] != "image"]
+        self._steer.append((text or "Look at the attached file(s).") + self._att_text(atts))
+        self._user_bubble(text or "(attached files)", files=[a["name"] for a in atts])
         self._sys_note("\u21b3 queued \u2014 Chuck reads it at his next step", "dim")
 
     def _deliver_steer(self):
@@ -10802,7 +10887,9 @@ class ChuckWindow(Adw.ApplicationWindow):
         if (why not in ("blocked", "js") or _browser is None
                 or not self.settings.get("stealth_fetch", True) or cancelled()):
             return "", ("blocked" if why == "blocked" else "")
-        with self._BROWSER_SLOTS:
+        if not self._BROWSER_SLOTS.acquire(timeout=90):
+            return "", "blocked; the browser was busy"
+        try:
             if cancelled():
                 return "", ""
             try:
@@ -10810,6 +10897,8 @@ class ChuckWindow(Adw.ApplicationWindow):
                     url, engine=self.settings.get("browser") or "auto", timeout=45)
             except Exception as ex:                       # no browser, or it failed
                 return "", f"blocked; browser: {str(ex)[:80]}"
+        finally:
+            self._BROWSER_SLOTS.release()
         name = {"brave": "Brave", "brave-browser": "Brave", "chromium": "Chromium",
                 "chromium-browser": "Chromium", "google-chrome": "Chrome",
                 "google-chrome-stable": "Chrome"}.get(eng, eng or "browser")
@@ -10930,15 +11019,18 @@ class ChuckWindow(Adw.ApplicationWindow):
                 ex = ThreadPoolExecutor(max_workers=6)
                 try:
                     futs = {ex.submit(fetch_one, it): it for it in candidates}
-                    for fut in as_completed(futs):
-                        if self._cancelled:
-                            break
-                        try:
-                            r = fut.result()
-                        except Exception:
-                            r = None
-                        if r:
-                            out.append(r); got += 1
+                    try:
+                        for fut in as_completed(futs, timeout=150):
+                            if self._cancelled:
+                                break
+                            try:
+                                r = fut.result()
+                            except Exception:
+                                r = None
+                            if r:
+                                out.append(r); got += 1
+                    except TimeoutError:
+                        pass                      # a page that never ends: answer with the rest
                 finally:
                     ex.shutdown(wait=False, cancel_futures=True)
 
@@ -10969,7 +11061,9 @@ class ChuckWindow(Adw.ApplicationWindow):
                          "genuinely cannot be found, say so plainly and move on — that is a "
                          "complete answer, not a failure.")
             note = "\n".join(lines) + "\n\n"
-            msg = note + "\n\n".join(out)[:16000]
+            # each part keeps its head and tail: a flat [:16000] dropped the
+            # pages whenever a command's output came first
+            msg = note + _clip_feedback(out, 16000)
 
             def deliver():
                 # on the UI thread, and only into the turn that asked
