@@ -1449,6 +1449,85 @@ w._inbox.mark_read()
 w._tray_tick()
 check(not w.tray_btn.get_visible(), "and it hides again when all is quiet")
 
+print("\n--- review fixes: missions and the budget ---")
+k = K.Kernel()
+mq = k.spawn("mission", quota={"tokens": 100})
+c1, c2 = k.spawn("a", parent=mq.pid), k.spawn("b", parent=mq.pid)
+k.charge(c1.pid, 60, 0); k.charge(c2.pid, 60, 0)
+check("quota of pid" in k.over_quota(c1.pid), "a parent's quota caps its whole subtree, not each child alone")
+tk, _n = MS.parse_plan(r'{"tasks": [{"id": "t1", "brief": "echo \"}\" now"}, {"id": "a.b", "brief": "x"},'
+                       r' {"id": "c", "deps": ["a.b"], "brief": "y"}]}')
+check(tk[0]["brief"] == 'echo "}" now' and tk[2]["deps"] == ["ab"], "escaped quotes and odd ids in a plan")
+w = new_win([], tmp)
+w.set_agent_mode(True, announce=False)
+w.set_workspace(mproj, announce=False)
+
+
+class _WS:
+    source, work = mproj, tmp / "fakework"
+
+
+(tmp / "fakework" / ".chuck").mkdir(parents=True, exist_ok=True)
+(tmp / "fakework" / ".chuck" / "test").write_text("true\n")          # the agent's "exam"
+(mproj / ".chuck" / "test").write_text("# a comment first\nfalse\ntrue\n")
+st_, out_ = w._verify_copy(_WS)
+check(st_ == "fail", "the test gate reads .chuck/test from YOUR folder, runs every line, and an agent "
+      "can't rewrite it in its copy", out_[:200])
+(mproj / ".chuck" / "test").write_bytes(b"\xff\xfe broken\n")
+real_inner = w._verify_copy_inner
+w._verify_copy_inner = lambda ws: (_ for _ in ()).throw(PermissionError("denied"))
+check(w._verify_copy(_WS)[0] == "fail", "a test command that can't even be read is a fail, not a hang")
+w._verify_copy_inner = real_inner
+(mproj / ".chuck" / "test").write_text("test ! -f bad.txt || grep -q fixed bad.txt\n")
+mf = MS.new_mission("x", mproj, MS.parse_plan('{"tasks": [{"id": "t1", "kind": "check", "brief": "x"}]}')[0])
+mf["state"], mf["pid"] = MS.ACTIVE, w.kernel.spawn("mission: x", kind="mission", parent=w._pid1).pid
+w._missions[mf["id"]] = mf
+real_rp = w.run_program
+w.run_program = lambda *a, **kw: None
+w._mission_step(mf)
+w.run_program = real_rp
+check(mf["state"] == MS.PAUSED and MS.task(mf, "t1")["state"] == MS.FAILED,
+      "a task that can't start pauses the mission (it doesn't sit 'running' with nothing running)", mf["state"])
+
+
+class LoopBackend(MissionBackend):
+    def stream(self, messages, on_delta, on_done, on_error, vision=False,
+               should_stop=None, attempts=3, on_open=None):
+        if messages and messages[0]["content"].startswith("You are a background agent"):
+            self.last_usage = {"prompt": 100, "completion": 10, "cached": 0, "reasoning": 0}
+            on_delta("```write loop.txt\\nstill going\\n```\\n```bash\\nls\\n```"); on_done(); return
+        super().stream(messages, on_delta, on_done, on_error, vision, should_stop, attempts, on_open)
+
+
+w.backend = LoopBackend([])
+w.settings["background_steps"] = 5
+ml = MS.new_mission("loop", mproj, MS.parse_plan('{"tasks": [{"id": "t1", "title": "loop: never ends", "brief": "x"}]}')[0])
+ml["pid"] = w.kernel.spawn("mission: loop", kind="mission", parent=w._pid1, quota={"tokens": 10 ** 7}).pid
+ml["state"] = MS.ACTIVE
+w._missions[ml["id"]] = ml
+w._mission_step(ml)
+for _ in range(100):
+    if ml["state"] != MS.ACTIVE:
+        break
+    time.sleep(0.1); settle()
+check(MS.task(ml, "t1")["state"] == MS.FAILED and not (mproj / "loop.txt").exists(),
+      "a task cut off at its step limit is not merged as if it were finished", MS.task(ml, "t1"))
+w.settings["background_steps"] = 60
+check(ml.get("spent_tokens", 0) > 0, "a mission's spend is saved as it goes (a restart keeps counting)")
+bp_ = w.spawn_background("plain run, not a task")
+w.kernel.wait(bp_, 10); settle()
+fake_task = dict(w._bg[bp_], mission=("m1", "t1"), status="finished")
+w._bg[9999] = fake_task
+check("nothing to merge" == w.join_background(9999) or w._bg[9999]["status"] != "merged",
+      "a mission's task can't be merged by hand past its test gate")
+del w._bg[9999]
+w.settings["model"] = "some/unpriced-model"
+before = w._ledger.today()
+w._account(4000, 400, usage={"prompt": 1000, "completion": 100, "cached": 0, "reasoning": 0},
+           model="some/unpriced-model")
+check(w._ledger.today() > before, "a model with no known price still counts against the budget")
+w.settings["model"] = cn.DEFAULT_MODEL
+
 print(f"\nTOTAL OS FAILURES: {fails}")
 assert fails == 0 and not FAILS, "OS regressions present"
 print("ALL OS TESTS PASSED")

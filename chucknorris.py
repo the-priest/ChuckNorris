@@ -6050,8 +6050,11 @@ class ChuckWindow(Adw.ApplicationWindow):
             else:
                 tot["cost"] += c
         self._tok_in, self._tok_out = self._usage["prompt"], self._usage["completion"]
-        if c and getattr(self, "_ledger", None) is not None:
-            self._ledger.add(c)
+        if getattr(self, "_ledger", None) is not None:
+            # a model with no known price still counts against the limits: at
+            # the most expensive suggested model's price (set its real price in
+            # Settings to be exact), so an unknown model can't bypass a budget
+            self._ledger.add(c if c is not None else _pricing.cost(u, (1.40, None, 4.40)) or 0.0)
         if self.kernel is not None and not charged:
             self.kernel.charge(pid or self._pid1, int(u.get("prompt") or 0),
                                int(u.get("completion") or 0), c or 0.0)
@@ -8738,9 +8741,11 @@ class ChuckWindow(Adw.ApplicationWindow):
                 if program is not None:
                     table = {t: f for t, f in table.items() if t in program["tools"]}
                 table.update(self._os_calls(pid, can_ask=True))
+                entry["ended"] = {}
                 report, _steps = _worker.run_worker(
                     brief, call, self._worker_parse, self._guard(pid, table),
                     max_steps=self.cfg("background_steps", 60, 5, 400), on_event=ev,
+                    outcome=entry["ended"],
                     inbox=self._inbox_for(pid), status_line=self._status_for(pid),
                     should_stop=lambda: kern.should_stop(pid),
                     wrap_up=lambda: kern.terminating(pid) or bool(kern.over_quota(pid)),
@@ -8917,6 +8922,10 @@ class ChuckWindow(Adw.ApplicationWindow):
             return None
         elif e["status"] in ("merged", "discarded"):
             self._sys_note(f"Background agent {pid}'s work was already {e['status']}.", "dim")
+            return None
+        elif e.get("mission") and not getattr(self, "_mission_merging", False):
+            self._sys_note(f"pid {pid} is a mission's task: the mission merges it once its tests "
+                           "pass (/missions).", "dim")
             return None
         return e
 
@@ -9110,9 +9119,11 @@ class ChuckWindow(Adw.ApplicationWindow):
                 def ev(t):
                     kern.note(pid, t)
                     GLib.idle_add(self._bg_paint, entry)
+                entry["ended"] = {}
                 report, _steps = _worker.run_worker(
                     brief, call, self._worker_parse, syscalls,
                     max_steps=self.cfg("program_steps", 30, 3, 200), on_event=ev,
+                    outcome=entry["ended"],
                     inbox=self._inbox_for(pid), status_line=self._status_for(pid),
                     should_stop=lambda: kern.should_stop(pid),
                     wrap_up=lambda: kern.terminating(pid) or bool(kern.over_quota(pid)),
@@ -9615,7 +9626,8 @@ class ChuckWindow(Adw.ApplicationWindow):
                      ws=_cow.Workspace(rec["root"], rec["ws_dir"]), base_sha=rec.get("base_sha"))
         self.kernel.exit(entry["pid"], 0, rec.get("report"))
         self._bg[entry["pid"]] = entry
-        self._bg_card(entry)
+        if not rec.get("mission"):
+            self._bg_card(entry)
         self._shadow_for(entry)
         self._bg_finished(entry, rec.get("report") or "(no report)", 0, quiet=True)
         return entry["pid"]
@@ -9891,6 +9903,10 @@ class ChuckWindow(Adw.ApplicationWindow):
         return False
 
     def _mission_save(self, m):
+        p = self.kernel.procs.get(m.get("pid")) if self.kernel is not None and m.get("pid") else None
+        if p is not None and m["state"] not in (_missions.COMPLETE, _missions.CANCELLED):
+            m["spent_tokens"] = int(m.get("spent_base", 0)) + p.tokens()   # a restart keeps counting
+            m["spent_usd"] = float(m.get("spent_base_usd", 0.0)) + p.total["usd"]
         if self._mstore is not None:
             self._mstore.save({k: v for k, v in m.items() if not k.startswith("_")})
 
@@ -9935,19 +9951,29 @@ class ChuckWindow(Adw.ApplicationWindow):
             return
         if _missions.is_complete(m):
             return self._mission_complete(m)
+        over = self.kernel.over_quota(m["pid"]) if self.kernel and m.get("pid") else ""
+        if over:
+            return self._mission_pause(m, f"the mission's budget is spent ({over})")
+        for t in _missions.ready(m, self.cfg("mission_parallel", 3, 1, 8)):
+            self._mission_launch(m, t)
+        # after launching: a launch that failed is stuck too
         stuck = _missions.blocked(m)
         busy = any(t["state"] in (_missions.RUNNING, _missions.VERIFYING) for t in m["tasks"])
-        launched = 0
-        for t in _missions.ready(m, self.cfg("mission_parallel", 3, 1, 8)):
-            if self._mission_launch(m, t):
-                launched += 1
-        if stuck and not busy and not launched and not _missions.ready(m, 99):
+        if stuck and not busy and not _missions.ready(m, 99):
             m["state"] = _missions.PAUSED
             _missions.log(m, f"paused: {', '.join(x['id'] for x in stuck)} needs you")
             self._sys_note(f"⚠ mission {m['id'][-5:]} paused: task {stuck[0]['id']} "
                            f"({stuck[0]['title'][:50]}) {stuck[0]['state']} — Retry or Skip it",
                            "danger")
             self._notify(f"Mission paused: {stuck[0]['title'][:60]}", m["goal"][:120])
+        self._mission_save(m)
+        self._mission_paint(m)
+
+    def _mission_pause(self, m, why):
+        m["state"] = _missions.PAUSED
+        _missions.log(m, f"paused: {why}")
+        self._sys_note(f"\u26a0 mission {m['id'][-5:]} paused: {why}", "danger")
+        self._notify("Mission paused", why[:150])
         self._mission_save(m)
         self._mission_paint(m)
 
@@ -9963,6 +9989,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             t["state"], t["note"] = _missions.FAILED, "couldn't start (see the note above)"
             return False
         t["state"], t["pid"] = _missions.RUNNING, pid
+        t["key"] = (self._bg.get(pid) or {}).get("key")      # its checkpoint, after a restart
         t["attempts"] = t.get("attempts", 0) + 1
         _missions.log(m, f"{t['id']} started as pid {pid}")
         return True
@@ -9975,6 +10002,10 @@ class ChuckWindow(Adw.ApplicationWindow):
         if m is None or t is None or m["state"] == _missions.CANCELLED:
             return
         t["report"] = (report or "")[:4000]
+        ended = (entry.get("ended") or {}).get("ended", "report")
+        if status == 0 and ended in ("budget", "steps"):
+            status = 1                       # cut off at its quota or step limit: not finished
+            report = f"(cut off: {'out of budget' if ended == 'budget' else 'out of steps'}) " + (report or "")
         if status != 0:
             if t["attempts"] < self.cfg("mission_attempts", 2, 1, 5) and m["state"] == _missions.ACTIVE:
                 t["state"], t["note"] = _missions.PENDING, "stopped; trying again"
@@ -10017,7 +10048,11 @@ class ChuckWindow(Adw.ApplicationWindow):
                 _missions.log(m, f"{tid}: tests still fail")
                 self._mission_step(m)
             return False
-        msg = self.join_background(entry["pid"])
+        self._mission_merging = True
+        try:
+            msg = self.join_background(entry["pid"])
+        finally:
+            self._mission_merging = False
         r = entry.get("merge_result") or {}
         if r.get("conflicts"):
             t["state"], t["note"] = _missions.CONFLICT, msg[:200]
@@ -10033,11 +10068,23 @@ class ChuckWindow(Adw.ApplicationWindow):
 
     def _verify_copy(self, ws):
         """Run the project's tests on an agent's copy -> ("pass"|"fail"|"none",
-        output). The project's own command (.chuck/test) wins over discovery."""
+        output). Never raises: whatever goes wrong is a "fail" with the reason
+        (a verify that died silently left a mission waiting forever)."""
+        try:
+            return self._verify_copy_inner(ws)
+        except Exception as ex:
+            return "fail", f"(the tests couldn't be run: {ex})"
+
+    def _verify_copy_inner(self, ws):
+        """The project's own check (.chuck/test, a shell script: every line
+        must pass) wins over discovery. It is read from YOUR folder, never
+        from the agent's copy: an agent can't rewrite its own exam."""
         cmd = ""
-        custom = Path(ws.work) / ".chuck" / "test"
+        custom = Path(ws.source) / ".chuck" / "test"
         if custom.is_file():
-            cmd = custom.read_text(errors="replace").strip().splitlines()[0] if custom.read_text().strip() else ""
+            body = custom.read_bytes().decode("utf-8", "replace").strip()
+            if body:
+                cmd = "set -e\n" + body
         if not cmd:
             try:
                 cmd = _builder.test_command_str(ws.work) or ""
@@ -10081,7 +10128,8 @@ class ChuckWindow(Adw.ApplicationWindow):
         m["state"] = _missions.COMPLETE
         p = self.kernel.procs.get(m["pid"]) if self.kernel else None
         if p is not None:
-            m["spent_tokens"], m["spent_usd"] = p.tokens(), p.total["usd"]
+            m["spent_tokens"] = int(m.get("spent_base", 0)) + p.tokens()
+            m["spent_usd"] = float(m.get("spent_base_usd", 0.0)) + p.total["usd"]
         lines = [f"- {t['id']} {t['title']}: {t['state']}"
                  + (f" ({t['note']})" if t.get("note") else "")
                  + (f" — {t['report'].strip().splitlines()[0][:140]}" if t.get("report", "").strip() else "")
@@ -10149,7 +10197,8 @@ class ChuckWindow(Adw.ApplicationWindow):
                                           "paused": "wait"}.get(st, "wait"))
         done, n = _missions.progress(m)
         p = self.kernel.procs.get(m["pid"]) if self.kernel and m.get("pid") else None
-        spend = (f" · {_pricing.fmt_tokens(p.tokens())} tokens · {_pricing.fmt_usd(p.total['usd'])}"
+        spend = (f" · {_pricing.fmt_tokens(int(m.get('spent_base', 0)) + p.tokens())} tokens · "
+                 f"{_pricing.fmt_usd(float(m.get('spent_base_usd', 0.0)) + p.total['usd'])}"
                  if p is not None else "")
         ui["info"].set_text(("planning the tasks…" if st == _missions.PLANNING else
                              f"{done} of {n} tasks finished{spend}")
@@ -10222,8 +10271,10 @@ class ChuckWindow(Adw.ApplicationWindow):
         return True
 
     def _missions_boot(self, recs):
-        """At startup: missions that were running go on. A task whose agent
-        was cut off resumes from its checkpoint; one with none starts over."""
+        """At startup: missions that were running go on. Each task is matched
+        to ITS checkpoint (by key): one cut off mid-run resumes from its step,
+        one that had finished and was being tested is tested again, one with
+        no checkpoint starts over. The mission keeps counting what it spent."""
         if self._mstore is None:
             return
         for m in self._mstore.load():
@@ -10234,21 +10285,50 @@ class ChuckWindow(Adw.ApplicationWindow):
                     self._missions[m["id"]] = m
                 continue
             self._missions[m["id"]] = m
-            proc = self.kernel.spawn(f"mission: {m['goal']}"[:60], kind="mission", brief=m["goal"],
-                                     parent=self._pid1, nice=1,
-                                     quota={"tokens": max(100000, self.cfg("mission_tokens", 5000000, 100000,
-                                                                           100000000) - int(m.get("spent_tokens") or 0))})
-            m["pid"] = proc.pid
             if m["state"] == _missions.PLANNING:
                 m["state"] = _missions.CANCELLED          # its planner is gone; ask again
+                _missions.log(m, "cancelled: Chuck closed while it was being planned")
+                self._mission_save(m)
+                continue
+            spent = int(m.get("spent_tokens") or 0)
+            m["spent_base"], m["spent_base_usd"] = spent, float(m.get("spent_usd") or 0.0)
+            hours = self.cfg("mission_hours", 4, 1, 72) * 3600
+            used_s = max(0, time.time() - m.get("created", time.time()))
+            proc = self.kernel.spawn(
+                f"mission: {m['goal']}"[:60], kind="mission", brief=m["goal"], parent=self._pid1,
+                nice=1, quota={"tokens": max(1, self.cfg("mission_tokens", 5000000, 100000, 100000000) - spent),
+                               "seconds": max(60, hours - used_s)})
+            m["pid"] = proc.pid
+            mine = [r for r in recs if isinstance(r.get("mission"), list) and r["mission"][0] == m["id"]]
             for t in m["tasks"]:
                 if t["state"] not in (_missions.RUNNING, _missions.VERIFYING):
                     continue
-                rec = next((r for r in recs if r.get("mission") == [m["id"], t["id"]]), None)
-                pid = None
+                cands = [r for r in mine if r["mission"][1] == t["id"]]
+                rec = (next((r for r in cands if t.get("key") and r["key"] == t["key"]), None)
+                       or next((r for r in reversed(cands) if r.get("status") == "running"), None)
+                       or (cands[-1] if cands else None))
+                for r in cands:                      # older attempts: their copies are dead weight
+                    if r is not rec:
+                        self._hib.remove(r["key"])
+                        if r.get("ws_dir"):
+                            self._drop_shadow_of(r["ws_dir"])
+                            shutil.rmtree(r["ws_dir"], ignore_errors=True)
                 if rec is not None and rec.get("status") == "running":
                     pid = self.resume_hibernated(rec, parent=m["pid"], mission=(m["id"], t["id"]))
-                t["state"], t["pid"] = ((_missions.RUNNING, pid) if pid else (_missions.PENDING, None))
+                    t["state"], t["pid"] = ((_missions.RUNNING, pid) if pid else (_missions.PENDING, None))
+                elif (rec is not None and rec.get("status") == "finished" and rec.get("ws_dir")
+                      and Path(rec["ws_dir"], "work").is_dir()):
+                    pid = self._restore_finished(rec)       # its work, back as it was
+                    e = self._bg.get(pid) if pid else None
+                    if e is not None:
+                        e["mission"], e["waited"] = (m["id"], t["id"]), True
+                        t["pid"], t["key"] = pid, rec["key"]
+                        self._mission_task_finished(e, rec.get("report") or "", 0)   # test it again
+                    else:
+                        t["state"], t["pid"] = _missions.PENDING, None
+                else:
+                    t["state"], t["pid"] = _missions.PENDING, None
+            self._mission_save(m)
             self._mission_card(m)
             self._mission_step(m)
 
@@ -12456,9 +12536,10 @@ class ChuckWindow(Adw.ApplicationWindow):
 
         def cont(_b):
             go.set_sensitive(False); stop.set_sensitive(False)
-            self._ledger.allow_more(scope, base)
             if self._running or gen_ != self._gen or chat_ != self.chat_id:
-                return
+                return                          # an old card: it changes nothing
+            # `base` more from what has been spent now, not from the old limit
+            self._ledger.allow_more(scope, max(0.0, spent - lim) + base)
             self._start_run()
             self._ask_model(vision)
 
@@ -12808,7 +12889,8 @@ class ChuckWindow(Adw.ApplicationWindow):
         """When what we'd send is nearing the context budget, compact in the
         background so the NEXT request carries a summary instead of losing the
         oldest turns outright."""
-        if self._compacting or not self.settings.get("auto_compact", True) or self._over_cap():
+        if (self._compacting or not self.settings.get("auto_compact", True) or self._over_cap()
+                or self._over_budget()):
             return
         budget = self.cfg("context_chars", SEND_CHAR_BUDGET, 40000, 800000)
         size = sum(len(m["content"]) if isinstance(m.get("content"), str) else 2000
@@ -12822,6 +12904,9 @@ class ChuckWindow(Adw.ApplicationWindow):
         The transcript is never touched: the summary only replaces those turns
         in what is SENT. /compact runs it on demand."""
         if self._compacting:
+            return False
+        if not auto and (self._over_cap() or self._over_budget()):
+            self._sys_note("Not compacting: the spending cap or the budget is reached (/budget).", "danger")
             return False
         if getattr(self, "_cont_prefix", None) is not None:
             # mid-way through a reply that is being continued: its scaffolding

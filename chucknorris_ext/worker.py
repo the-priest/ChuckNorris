@@ -51,12 +51,17 @@ def _mail_text(mail):
 
 def run_worker(brief, call_model, parse, syscalls, max_steps=60, on_event=None,
                should_stop=None, wrap_up=None, context="", prompt=None, resume=None,
-               on_step=None, inbox=None, status_line=None):
+               on_step=None, inbox=None, status_line=None, outcome=None):
     """Run one background agent to its report. -> (report, steps_used).
     resume: a saved conversation to go on from (hibernate, fork).
     on_step(msgs, step): called after every step, to checkpoint it.
     inbox() -> [text]: messages for the agent, delivered with its results.
-    status_line() -> text: the kernel's line (budget left), likewise."""
+    status_line() -> text: the kernel's line (budget left), likewise.
+    outcome: a dict, filled with how it ended: "report" (it decided it was
+    done), "budget" (wrapped up at its quota), "steps" (ran out of steps)
+    or "stopped". A run cut short is not a finished job."""
+    outcome = outcome if outcome is not None else {}
+    outcome["ended"] = "report"
     if resume:
         msgs = [dict(m) for m in resume]
         first = sum(1 for m in msgs if m.get("role") == "assistant")
@@ -67,8 +72,10 @@ def run_worker(brief, call_model, parse, syscalls, max_steps=60, on_event=None,
         first = 0
     for step in range(first, max(first + 1, max_steps)):
         if should_stop and should_stop():
+            outcome["ended"] = "stopped"
             return "(stopped before finishing)", step
         if wrap_up and wrap_up() and step > 0:
+            outcome["ended"] = "budget"
             msgs.append({"role": "user", "content":
                          "You are out of budget. Stop working and write your REPORT now: what "
                          "you changed, what you verified, and what is left."})
@@ -123,5 +130,6 @@ def run_worker(brief, call_model, parse, syscalls, max_steps=60, on_event=None,
         # didn't all run, so resuming from it would be resuming from a lie
         if on_step and not (should_stop and should_stop()):
             on_step(msgs, step + 1)
+    outcome["ended"] = "steps"
     msgs.append({"role": "user", "content": "Step budget spent. Write your REPORT now."})
     return (call_model(msgs) or "").strip() or "(no report)", max_steps

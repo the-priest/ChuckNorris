@@ -50,11 +50,13 @@ class Ledger:
             self.save()
 
     def today(self, now=None):
-        return self.days.get(_day(now), 0.0)
+        with self.lock:
+            return self.days.get(_day(now), 0.0)
 
     def month(self, now=None):
         m = _day(now)[:7]
-        return sum(v for d, v in self.days.items() if d.startswith(m))
+        with self.lock:                    # agents read while the UI thread adds a new day
+            return sum(v for d, v in list(self.days.items()) if d.startswith(m))
 
     def history(self, n=14, now=None):
         """[(day, usd)] for the last n days, oldest first."""
@@ -74,12 +76,14 @@ class Ledger:
         """-> ("day"|"month", limit incl. allowances, spent) when a limit is
         reached, else None. A limit of 0 means none."""
         d = _day(now)
+        with self.lock:
+            extra = dict(self.extra)
         if day_limit and day_limit > 0:
-            lim = day_limit + self.extra.get(d, 0.0)
+            lim = day_limit + extra.get(d, 0.0)
             if self.today(now) >= lim:
                 return ("day", lim, self.today(now))
         if month_limit and month_limit > 0:
-            lim = month_limit + self.extra.get(d[:7], 0.0)
+            lim = month_limit + extra.get(d[:7], 0.0)
             if self.month(now) >= lim:
                 return ("month", lim, self.month(now))
         return None

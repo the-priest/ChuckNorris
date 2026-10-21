@@ -61,11 +61,12 @@ def _json_in(text):
     depth, in_str, esc = 0, False, False
     for i, ch in enumerate(text[start:], start):
         if in_str:
-            esc = (ch == "\\") and not esc
-            if ch == '"' and not esc:
+            if esc:
+                esc = False                     # this character is escaped
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
                 in_str = False
-            elif ch != "\\":
-                esc = False
             continue
         if ch == '"':
             in_str = True
@@ -106,6 +107,7 @@ def parse_plan(text, max_tasks=MAX_TASKS):
         kind = kind if kind in KINDS else "code"
         deps = t.get("deps") or []
         deps = [str(d) for d in deps] if isinstance(deps, list) else [str(deps)]
+        deps = [re.sub(r"[^A-Za-z0-9_-]", "", d)[:20] for d in deps]   # cleaned like ids
         tasks.append({"id": tid, "title": title or tid, "brief": brief or title, "kind": kind,
                       "deps": deps, "state": PENDING, "attempts": 0, "pid": None,
                       "report": "", "verify": "", "note": ""})

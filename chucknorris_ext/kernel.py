@@ -269,10 +269,16 @@ class Kernel:
         return max(0, lim - used)
 
     def _over(self, p):
-        for k, label in (("tokens", "token"), ("usd", "spending"), ("seconds", "time")):
-            left = self._left(p, k)
-            if left is not None and left <= 0:
-                return f"{label} quota reached"
+        """Its own quota, or any ancestor's: a parent's quota caps its whole
+        subtree, however many children spend from it at once."""
+        q, own = p, True
+        while q is not None:
+            for k, label in (("tokens", "token"), ("usd", "spending"), ("seconds", "time")):
+                left = self._left(q, k)
+                if left is not None and left <= 0:
+                    return (f"{label} quota reached" if own
+                            else f"{label} quota of pid {q.pid} ({q.name}) reached")
+            q, own = (self.procs.get(q.ppid) if q.ppid else None), False
         return ""
 
     def over_quota(self, pid):
