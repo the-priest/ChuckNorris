@@ -45,6 +45,17 @@ The third roadmap (`docs/ROADMAP.md`, phases 10–15), with tests in
 - Voice: never silent when the chosen engine is down, never reads code, no
   fake "Kokoro failed" on close; the mic can't get stuck on.
 - The installer no longer installs a stale clone lying in the current folder.
+- The approval gate: `rm -rf ~/`, `"$HOME"`, `/usr`, a command inside
+  `bash -c`/`eval`, `curl … | sudo -E bash`, `sh -c "$(curl …)"`, writes to a
+  block device, and python/node code that deletes home now all wait for a
+  tick; harmless look-alikes (`which shred`, `fdisk -l`) no longer do. Saving
+  a skill no longer runs it unchecked, and its card shows the script.
+- sudo: the password no longer reaches the script's environment (or the chat
+  via `env`), and a sudo fallback no longer runs a script twice.
+- Compaction keeps the current request and plan verbatim and never covers a
+  retried or edited turn; an old spending-cap card can't start a second
+  stream; a settings.json with a stray comma is no longer wiped; deleting a
+  running chat really deletes it; a `cd` doesn't leak between chats.
 
 ## 16.0.0 — steer it, trust it, keep it running
 
