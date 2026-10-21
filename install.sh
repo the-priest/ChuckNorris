@@ -93,8 +93,16 @@ install_tree() {
 }
 SRC_TMP="$(mktemp -d)"
 trap 'rm -rf "$SRC_TMP"' EXIT
-if [ -f chucknorris.py ] && [ -d chucknorris_ext ]; then
-  install_tree "."                                   # running from a clone
+# A local tree only when THIS script was run from a clone (./install.sh):
+# piped from curl, BASH_SOURCE is empty, and a chucknorris.py that merely
+# happens to be in the current folder (an old clone) must not be installed
+# over the latest release.
+SELF_DIR=""
+if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+  SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
+if [ -n "$SELF_DIR" ] && [ -f "$SELF_DIR/chucknorris.py" ] && [ -d "$SELF_DIR/chucknorris_ext" ]; then
+  install_tree "$SELF_DIR"                           # running from a clone
 elif curl -fsSL "https://codeload.github.com/${REPO}/tar.gz/refs/heads/${BRANCH}" \
         -o "${SRC_TMP}/src.tar.gz" \
      && tar -xzf "${SRC_TMP}/src.tar.gz" -C "$SRC_TMP" \

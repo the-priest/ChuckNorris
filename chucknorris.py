@@ -3890,13 +3890,19 @@ class ChuckWindow(Adw.ApplicationWindow):
             rr.set_margin_top(22); rr.set_halign(Gtk.Align.CENTER)
             task = " ".join(hit[1].split())
             short = task if len(task) <= 34 else task[:33].rstrip() + "\u2026"
-            rl = Gtk.Label(label=f"Chuck closed in the middle of \u201c{short}\u201d", xalign=0)
+            rl = Gtk.Label(label=f"Chuck closed mid-task: \u201c{short}\u201d", xalign=0)
             rl.add_css_class("dlg-sub")
             rl.set_tooltip_text(task)
+            # wraps instead of setting a minimum width: in a narrow window the
+            # banner used to push the whole welcome screen off the edge
+            rl.set_wrap(True); rl.set_max_width_chars(72); rl.set_hexpand(True)
+            _wrap_anywhere(rl)
             rb = Gtk.Button(label="Resume"); rb.add_css_class("accent-btn")
             rb.connect("clicked", lambda *_a: self.resume_interrupted())
             db = Gtk.Button(label="Dismiss"); db.add_css_class("ghost")
             db.connect("clicked", lambda *_a: self.dismiss_interrupted())
+            for b_ in (rb, db):
+                b_.set_valign(Gtk.Align.CENTER)
             rr.append(rl); rr.append(rb); rr.append(db)
             box.append(rr)
 
@@ -11234,8 +11240,15 @@ class ChuckWindow(Adw.ApplicationWindow):
         spin(g, "Pitch (espeak-ng)", "voice_pitch", 0, 99, 1, 28)
         spin(g, "Max characters read per reply", "voice_max_chars", 2000, 40000, 1000, 20000)
         entry(g, "Piper voice model (blank = installed voice)", "piper_model")
+        def here(detail):
+            # /doctor's pointers ("— Settings › Voice › Install …") make no
+            # sense on the page that has the button
+            return re.sub(r"\s*\u2014\s*(?:Settings \u203a .*|Install natural voice.*)$", "", detail)
         nv = Adw.ActionRow(); nv.set_title("Natural voice")
-        nv.set_subtitle(_html.escape(voice.voice_status(S)[1]))
+        nv.set_subtitle(_html.escape(
+            here(voice.voice_status(S)[1]) + ("" if voice.kokoro_ready() else
+                                               " \u00b7 Install adds Kokoro, a human-sounding "
+                                               "voice (about 350 MB, runs on this machine)")))
         ib = Gtk.Button(label="Install" if not voice.kokoro_ready() else "Reinstall")
         ib.add_css_class("quick"); ib.set_valign(Gtk.Align.CENTER)
         vt = Gtk.Button(label="Test"); vt.add_css_class("quick"); vt.set_valign(Gtk.Align.CENTER)
@@ -11283,7 +11296,9 @@ class ChuckWindow(Adw.ApplicationWindow):
             g2 = group(pg, "Voice input", "Talk to Chuck with the mic button or Ctrl+M. Speech is "
                        "recognised on this machine (Moonshine); nothing is uploaded.")
             li = Adw.ActionRow(); li.set_title("Speech recognition")
-            li.set_subtitle(_html.escape(_listen.status()[1]))
+            li.set_subtitle(_html.escape(
+                "not installed \u00b7 about 250 MB, runs on this machine" if not _listen.ready()
+                else here(_listen.status()[1])))
             lb = Gtk.Button(label="Install" if not _listen.ready() else "Reinstall")
             lb.add_css_class("quick"); lb.set_valign(Gtk.Align.CENTER)
 

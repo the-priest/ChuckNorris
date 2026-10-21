@@ -759,7 +759,7 @@ path.write_text(_json.dumps(meta))
 w2 = agent(["I checked: the next part still needs doing. Done now."], ws)
 check(w2._interrupted and w2._interrupted[0] == path, "at startup the interrupted task is found")
 texts = [x.get_text() for x in w2._empty_holder.walk() if isinstance(x.get_text(), str)]
-check(any("Chuck closed in the middle of" in t for t in texts) and "Resume" in texts,
+check(any("Chuck closed mid-task" in t for t in texts) and "Resume" in texts,
       "and offered on the welcome screen", [t for t in texts if "closed" in t])
 [b for b in w2._empty_holder.walk() if isinstance(b, cn.Gtk.Button) and b.get_label() == "Resume"][0].emit("clicked")
 settle()
@@ -1079,6 +1079,21 @@ check(raised and (app_dir / "chucknorris_ext" / "mod.py").read_text() == "old\n"
 upd.swap_in(src, app_dir)
 check((app_dir / "chucknorris_ext" / "mod.py").read_text() == "new\n"
       and (app_dir / "chucknorris.py").read_text() == "new\n", "and a normal swap still works")
+
+print("\n--- installer: a stale clone in the current folder isn't installed ---")
+inst = Path(_ROOT, "install.sh").read_text()
+snip = inst[inst.index('SELF_DIR=""'):]
+snip = snip[:snip.index("\nfi\n") + 4] + 'echo "SELF=[$SELF_DIR]"\n'
+elsewhere = tmp / "old_clone"
+(elsewhere / "chucknorris_ext").mkdir(parents=True)
+(elsewhere / "chucknorris.py").write_text("old\n")
+piped = subprocess.run(["bash", "-u"], input=snip, cwd=elsewhere, capture_output=True, text=True).stdout
+(tmp / "snip.sh").write_text(snip)
+as_file = subprocess.run(["bash", "-u", str(tmp / "snip.sh")], cwd=elsewhere, capture_output=True,
+                         text=True).stdout
+check(piped.strip() == "SELF=[]" and as_file.strip() == f"SELF=[{tmp}]",
+      "curl | bash ignores a chucknorris.py lying in the current folder; ./install.sh uses its clone",
+      (piped, as_file))
 
 # ═══════════════════════════════════════════════════════════════════════════
 print(f"\nTOTAL V17 FAILURES: {fails + len(FAILS)}")
