@@ -3867,12 +3867,11 @@ class ChuckWindow(Adw.ApplicationWindow):
             rr = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
             rr.add_css_class("ws-current")
             rr.set_margin_top(22); rr.set_halign(Gtk.Align.CENTER)
-            rl = Gtk.Label(label=f"Chuck closed in the middle of \u201c{hit[1][:48]}\u201d.", xalign=0)
+            task = " ".join(hit[1].split())
+            short = task if len(task) <= 34 else task[:33].rstrip() + "\u2026"
+            rl = Gtk.Label(label=f"Chuck closed in the middle of \u201c{short}\u201d", xalign=0)
             rl.add_css_class("dlg-sub")
-            try:
-                rl.set_ellipsize(Pango.EllipsizeMode.END); rl.set_max_width_chars(46)
-            except Exception:
-                pass
+            rl.set_tooltip_text(task)
             rb = Gtk.Button(label="Resume"); rb.add_css_class("accent-btn")
             rb.connect("clicked", lambda *_a: self.resume_interrupted())
             db = Gtk.Button(label="Dismiss"); db.add_css_class("ghost")
@@ -8312,7 +8311,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             meta = " \u00b7 ".join(x for x in (
                 f"\u201c{cp['ask']}\u201d" if cp.get("ask") else "", ago,
                 "" if n is None else ("no files differ now" if n == 0 else
-                                      f"{n} file{'' if n == 1 else 's'} differ now")) if x)
+                                      "1 file differs now" if n == 1 else f"{n} files differ now")) if x)
             m = Gtk.Label(label=meta, xalign=0, wrap=True); m.add_css_class("dim")
             _wrap_anywhere(m)
             col.append(t); col.append(m)
