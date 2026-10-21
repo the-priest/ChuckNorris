@@ -1717,6 +1717,73 @@ w.remote_command(["--top"], None, said.append)
 check("chuck" in said[-1], "--top prints the process table in the terminal", said[-1][:100])
 check(w.remote_command(["--bogus"], None, said.append) == 2, "an unknown option is an error with a hint")
 
+print("\n--- review fixes: palette keys, /watch, partial merge, /context ---")
+w = new_win([], tmp)
+w.set_agent_mode(True, announce=False)
+w.set_workspace(sproj, announce=False)
+w.open_palette()
+ps = w._palette_state
+ps["search"].set_text("diff")
+ps["fill"]()
+ps["search"].emit("activate")                 # Enter, as the search entry reports it
+settle()
+check(w._palette_win is None and any("git repository" in t or t.startswith("GIT DIFF") for t in notes()),
+      "Enter in the palette's search box runs the selected row (the entry no longer swallows it)")
+w.open_palette()
+w._palette_state["search"].emit("stop-search")  # Esc
+check(w._palette_win is None, "and Esc closes it")
+from chucknorris_ext import aiwatch as AW
+t0w = time.time()
+check(AW.match("a;" * 40000 + "EMAIL AI!") is None and AW.match("a;" * 700 + " # EMAIL AI!", ".py")
+      and time.time() - t0w < 0.5, "a huge minified line can't freeze /watch")
+check(AW.match("See http://example.com/AI!", ".py") is None and AW.match("* Powered by AI!", ".md") is None
+      and AW.match("# Powered by AI!", ".md") is None and AW.match("<!-- fix this AI! -->", ".md"),
+      "URLs, Markdown bullets and headings aren't instructions; an HTML comment in Markdown is")
+(wproj / "calc.py").write_text("def total(items):\n    return sum(items)\n")
+w = new_win([], tmp)
+w.set_agent_mode(True, announce=False)
+w.set_workspace(wproj, announce=False)
+w.backend = ScriptedBackend(["ok", "ok", "ok"])
+w.watch_command("on"); settle()
+w.entry.get_buffer().set_text("my half-written message")
+(wproj / "calc.py").write_text("x = 1  # AI!\ny = 2\n")
+w._watch_tick(w._watch); settle()
+check(w.entry.get_buffer().get_text() == "my half-written message" and w._watch.get("pending"),
+      "an AI comment never overwrites what you're typing: it waits")
+w.entry.get_buffer().set_text("")
+w._watch_tick(w._watch); settle()
+sent = [m["content"] for m in w.history if m.get("role") == "user"]
+check(sent and "calc.py:1" in sent[-1], "and is sent once the draft is gone")
+(wproj / "calc.py").write_text("x = 1\ny = 2\n")
+w._watch_tick(w._watch); settle()
+(wproj / "calc.py").write_text("x = 1  # AI!\ny = 2\n")
+n0 = len(w.history)
+w._watch_tick(w._watch); settle()
+check(len(w.history) > n0, "a comment removed and written again is acted on again")
+w.watch_command("off")
+w = new_win([], tmp)
+w.set_agent_mode(True, announce=False)
+w.set_workspace(sproj, announce=False)
+(sproj / "a.txt").unlink(missing_ok=True); (sproj / "b.txt").unlink(missing_ok=True)
+w.backend = TimeBackend([])
+sp4 = w.spawn_background("tt: two files again")
+w.kernel.wait(sp4, 20); settle()
+w.join_background(sp4, only=["a.txt"])
+check((sproj / "a.txt").exists() and not (sproj / "b.txt").exists() and w._bg[sp4]["ws"].work.is_dir()
+      and w._bg[sp4]["changes"] == {"b.txt": "added"}, "after a partial merge, what you left out stays in its copy")
+w.join_background(sp4)
+check((sproj / "b.txt").exists(), "and can still be merged later")
+w = new_win([], tmp)
+w.set_agent_mode(True, announce=False)
+w.backend = ScriptedBackend([])
+w.settings["auto_compact"] = True
+w.history += [{"role": "user", "content": "go"}] + [
+    m_ for i in range(30) for m_ in ({"role": "assistant", "content": f"```read f{i}.py```"},
+                                    {"role": "user", "content": "TOOL RESULTS (continue):\n\n" + "x" * 20000})]
+w.context_map()
+check(not w._compacting and not any("trimmed" in t for t in notes()),
+      "/context only looks: it never starts a (paid) compaction or posts notes")
+
 print(f"\nTOTAL OS FAILURES: {fails}")
 assert fails == 0 and not FAILS, "OS regressions present"
 print("ALL OS TESTS PASSED")

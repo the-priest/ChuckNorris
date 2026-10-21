@@ -21,11 +21,26 @@ SKIP = {".git", "node_modules", ".venv", "venv", "__pycache__", ".mypy_cache", "
         ".chuck-conflicts", ".idea", ".vscode"}
 MAX_FILES = 8000
 MAX_BYTES = 1_000_000
-# a comment, with AI! or AI? at its end or its start
-_COMMENT = r"(?:#|//|--|;|%|/\*|<!--|\*)"
-MARK = re.compile(
-    r"(?:" + _COMMENT + r"\s*(?P<a>.*?)\s*\bAI(?P<k1>[!?])\s*(?:\*/|-->)?\s*$"
-    r"|" + _COMMENT + r"\s*AI(?P<k2>[!?])\s+(?P<b>.*?)\s*(?:\*/|-->)?\s*$)")
+MAX_LINE = 1500                  # longer lines are minified code, not comments
+# a comment: # // -- ; /* <!-- at the start of the line or after whitespace
+# (so http://x/AI! and a+b--c don't count), with AI! or AI? at its end or
+# right after the comment mark
+_C = r"(?:^|(?<=\s))(?:#|//|--|;|/\*|<!--)"
+END = re.compile(_C + r"\s*(?P<t>[^\n]{0,400}?)\s*\bAI(?P<k>[!?])\s*(?:\*/|-->)?\s*$")
+START = re.compile(_C + r"\s*AI(?P<k>[!?])\s+(?P<t>[^\n]{0,400}?)\s*(?:\*/|-->)?\s*$")
+# where # starts a heading, not a comment: only <!-- --> counts there
+_PROSE = {".md", ".markdown", ".rst", ".txt"}
+
+
+def match(line, suffix=""):
+    """(kind, text) if this line is an AI comment, else None."""
+    if len(line) > MAX_LINE or ("AI!" not in line and "AI?" not in line):
+        return None
+    for rx in (END, START):
+        m = rx.search(line)
+        if m and (suffix not in _PROSE or "<!--" in line[:m.end()]):
+            return m.group("k"), m.group("t").strip()
+    return None
 
 
 def _files(root):
@@ -33,6 +48,8 @@ def _files(root):
     for dp, dns, fns in os.walk(root):
         dns[:] = [d for d in dns if d not in SKIP and not d.startswith(".")]
         for f in fns:
+            if ".min." in f:
+                continue                                 # minified: no comments for us
             n += 1
             if n > MAX_FILES:
                 return
@@ -62,15 +79,13 @@ def markers_in(path, root, context=3):
         return []                                    # binary
     lines = data.decode("utf-8", "replace").splitlines()
     rel = os.path.relpath(path, root)
+    suffix = os.path.splitext(path)[1].lower()
     out = []
     for i, ln in enumerate(lines):
-        if "AI" not in ln:
+        got = match(ln, suffix)
+        if not got:
             continue
-        m = MARK.search(ln)
-        if not m:
-            continue
-        kind = m.group("k1") or m.group("k2")
-        text = (m.group("a") if m.group("k1") else m.group("b")) or ""
+        kind, text = got
         lo, hi = max(0, i - context), min(len(lines), i + context + 1)
         ctx = "\n".join(f"{n + 1:>5}  {lines[n]}" for n in range(lo, hi))
         out.append((rel, i + 1, kind, text.strip(), ctx))
@@ -79,13 +94,13 @@ def markers_in(path, root, context=3):
 
 def scan(root, before):
     """What changed since `before` (a snapshot) -> (new snapshot, markers in
-    the changed files)."""
+    the changed files, the changed files relative to root)."""
     now = snapshot(root)
     changed = [p for p, t in now.items() if before.get(p) != t]
     found = []
     for p in changed:
         found += markers_in(p, root)
-    return now, found
+    return now, found, [os.path.relpath(p, root) for p in changed]
 
 
 def prompt_for(found):

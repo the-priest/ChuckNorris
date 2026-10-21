@@ -9005,17 +9005,24 @@ class ChuckWindow(Adw.ApplicationWindow):
         except Exception as ex:
             self._sys_note(f"\u2717 couldn't merge: {ex}", "danger")
             return f"merge failed: {ex}"
-        e["status"] = "merged"
         e["merge_result"] = r
-        e["ws"].remove()
-        self._hib_drop(e)
+        if r.get("skipped"):
+            # what you left out stays in its copy: Merge or Discard it later
+            e["status"] = "finished"
+            e["changes"] = {k: v for k, v in (e.get("changes") or {}).items() if k in r["skipped"]}
+            self._hib_save(e)
+        else:
+            e["status"] = "merged"
+            e["ws"].remove()
+            self._hib_drop(e)
         parts = []
         if r["applied"] or r["merged"]:
             parts.append(f"{len(r['applied']) + len(r['merged'])} file(s) merged")
         if r["merged"]:
             parts.append(f"{len(r['merged'])} combined with your own edits")
         if r.get("skipped"):
-            parts.append(f"{len(r['skipped'])} left out as you chose")
+            parts.append(f"{len(r['skipped'])} left out as you chose (still in its copy: Merge or "
+                         "Discard them later)")
         if r["conflicts"]:
             parts.append(f"{len(r['conflicts'])} CONFLICT(S) not written ({', '.join(r['conflicts'][:5])}"
                          " \u2014 its versions are in .chuck-conflicts/)")
@@ -9958,6 +9965,8 @@ class ChuckWindow(Adw.ApplicationWindow):
         if p is not None and m["state"] not in (_missions.COMPLETE, _missions.CANCELLED):
             m["spent_tokens"] = int(m.get("spent_base", 0)) + p.tokens()   # a restart keeps counting
             m["spent_usd"] = float(m.get("spent_base_usd", 0.0)) + p.total["usd"]
+            # its time limit counts while Chuck runs it, not the night it was closed
+            m["spent_seconds"] = float(m.get("spent_base_seconds", 0.0)) + (self.kernel.clock() - p.started)
         if self._mstore is not None:
             self._mstore.save({k: v for k, v in m.items() if not k.startswith("_")})
 
@@ -10053,6 +10062,9 @@ class ChuckWindow(Adw.ApplicationWindow):
         if m is None or t is None or m["state"] == _missions.CANCELLED:
             return
         t["report"] = (report or "")[:4000]
+        pp = self.kernel.procs.get(entry["pid"]) if self.kernel else None
+        if pp is not None:
+            t["spent"] = int(t.get("spent", 0)) + pp.tokens()      # every attempt, for the estimates
         ended = (entry.get("ended") or {}).get("ended", "report")
         if status == 0 and ended in ("budget", "steps"):
             status = 1                       # cut off at its quota or step limit: not finished
@@ -10246,10 +10258,11 @@ class ChuckWindow(Adw.ApplicationWindow):
         learned = dict(self.settings.get("mission_task_tokens") or {})
         for t in m["tasks"]:
             p = self.kernel.procs.get(t.get("pid")) if self.kernel and t.get("pid") else None
-            if p is None or t["state"] not in (_missions.MERGED, _missions.DONE):
+            spent = int(t.get("spent") or 0) or (p.tokens() if p is not None else 0)
+            if not spent or t["state"] not in (_missions.MERGED, _missions.DONE):
                 continue
             avg, n = (learned.get(t["kind"]) or [0, 0])[:2]
-            learned[t["kind"]] = [int((avg * n + p.tokens()) / (n + 1)), min(n + 1, 50)]
+            learned[t["kind"]] = [int((avg * n + spent) / (n + 1)), min(n + 1, 50)]
         self.settings["mission_task_tokens"] = learned
         save_settings(self.settings)
 
@@ -10387,7 +10400,8 @@ class ChuckWindow(Adw.ApplicationWindow):
             spent = int(m.get("spent_tokens") or 0)
             m["spent_base"], m["spent_base_usd"] = spent, float(m.get("spent_usd") or 0.0)
             hours = self.cfg("mission_hours", 4, 1, 72) * 3600
-            used_s = max(0, time.time() - m.get("created", time.time()))
+            used_s = float(m.get("spent_seconds") or 0.0)
+            m["spent_base_seconds"] = used_s
             proc = self.kernel.spawn(
                 f"mission: {m['goal']}"[:60], kind="mission", brief=m["goal"], parent=self._pid1,
                 nice=1, quota={"tokens": max(1, self.cfg("mission_tokens", 5000000, 100000, 100000000) - spent),
@@ -10671,14 +10685,29 @@ class ChuckWindow(Adw.ApplicationWindow):
             if keyval in (Gdk.KEY_Up, getattr(Gdk, "KEY_KP_Up", -1)):
                 move(-1); return True
             if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
-                row = lb.get_selected_row() or (state["rows"][0] if state["rows"] else None)
-                if row is not None:
-                    run_row(row)
+                enter()
                 return True
             return False
         kc = Gtk.EventControllerKey()
+        try:
+            # before the search entry: it would eat Enter (activate) and Esc
+            kc.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        except Exception:
+            pass
         kc.connect("key-pressed", on_key)
         win.add_controller(kc)
+
+        def enter(*_x):
+            row = lb.get_selected_row()
+            if getattr(row, "_item", None) is None:          # nothing selected: the best match
+                row = state["rows"][0] if state["rows"] else None
+            if row is not None:
+                run_row(row)
+        try:
+            search.connect("activate", enter)
+            search.connect("stop-search", close)
+        except Exception:
+            pass
         search.connect("search-changed", fill)
         lb.connect("row-activated", lambda _l, row: run_row(row))
         win.connect("close-request", lambda *_x: (setattr(self, "_palette_win", None), False)[1])
@@ -10732,29 +10761,43 @@ class ChuckWindow(Adw.ApplicationWindow):
             return False                              # turned off, or another folder
         if w["busy"] or w["snap"] is None:
             return True
+        if w.get("pending") and not self._running and not self._get_entry().strip():
+            self._watch_found(w, w["snap"], [], [])  # the draft is gone: send what waited
+            return True
         w["busy"] = True
 
         def scan():
             try:
-                snap, found = _aiwatch.scan(w["root"], w["snap"])
+                snap, found, changed = _aiwatch.scan(w["root"], w["snap"])
             except Exception:
-                snap, found = w["snap"], []
-            GLib.idle_add(self._watch_found, w, snap, found)
+                snap, found, changed = w["snap"], [], []
+            GLib.idle_add(self._watch_found, w, snap, found, changed)
         threading.Thread(target=scan, daemon=True, name="watch-scan").start()
         return True
 
-    def _watch_found(self, w, snap, found):
+    def _watch_found(self, w, snap, found, changed=()):
         w["snap"], w["busy"] = snap, False
         if self._watch is not w:
             return False
-        new = []
-        for f in found:
-            key = (f[0], f[2], f[3])                  # file, kind, text: each comment once
-            if key not in w["seen"]:
-                w["seen"].add(key)
-                new.append(f)
+        # each comment is acted on once: keyed by file, kind, text and the code
+        # around it; a comment that's gone from a changed file is forgotten,
+        # so writing it again later works again
+        keys = {(f[0], f[2], f[3], f[4]) for f in found}
+        gone = set(changed)
+        w["seen"] = {k for k in w["seen"] if k[0] not in gone or k in keys}
+        new = [f for f in found if (f[0], f[2], f[3], f[4]) not in w["seen"]]
+        w["seen"] |= {(f[0], f[2], f[3], f[4]) for f in new}
+        new = w.pop("pending", []) + new
         if not new:
             return False
+        if not self._running and (self._get_entry().strip() or getattr(self, "_attachments", None)):
+            w["pending"] = new                        # you're typing: never overwrite a draft
+            if not w.get("told"):
+                w["told"] = True
+                self._sys_note("\U0001F441 an AI comment is waiting: it's sent once your draft is "
+                               "sent or cleared.", "dim")
+            return False
+        w["told"] = False
         text = _aiwatch.prompt_for(new)
         self._sys_note(f"\U0001F441 {len(new)} AI comment(s) in "
                        + ", ".join(sorted({f'{f[0]}:{f[1]}' for f in new}))[:200], "dim")
@@ -10771,7 +10814,7 @@ class ChuckWindow(Adw.ApplicationWindow):
     def context_map(self):
         """What the next model call would send, by what takes the room ->
         (rows [(label, chars)], total chars, budget chars, paged-out chars)."""
-        sent = self._trim_for_send(list(self.history)) if self.history else []
+        sent = self._trim_for_send(list(self.history), dry=True) if self.history else []
         rows = {}
         paged_saved = 0
 
@@ -10781,7 +10824,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             c = m.get("content")
             text = c if isinstance(c, str) else " ".join(
                 x.get("text", "") for x in (c or []) if isinstance(x, dict))
-            n = len(text)
+            n = len(text) if isinstance(c, str) else 2000   # as the send budget counts it
             if i == 0 and m.get("role") == "system":
                 base = len(SYSTEM_PROMPT if self.agent_mode else CHAT_PROMPT)
                 add("system prompt", min(n, base))
@@ -13627,7 +13670,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         threading.Thread(target=work, daemon=True).start()
         return True
 
-    def _trim_for_send(self, messages):
+    def _trim_for_send(self, messages, dry=False):
         """Bound the conversation actually sent to the model.
 
         Never mutates self.history — the user keeps their whole transcript on
@@ -13642,7 +13685,9 @@ class ChuckWindow(Adw.ApplicationWindow):
         c = self._compact
         if c and c.get("anchor") and not (1 < c["upto"] <= len(self.history)
                                          and _msg_key(self.history[c["upto"] - 1]) == c["anchor"]):
-            self._compact = c = None             # what it summarised is no longer there
+            c = None                             # what it summarised is no longer there
+            if not dry:
+                self._compact = None
         if c and 1 < c["upto"] < len(messages) - 1:
             # the summary stands in for every turn it covers — but never for
             # the request being worked on, or its plan: those go verbatim
@@ -13669,7 +13714,8 @@ class ChuckWindow(Adw.ApplicationWindow):
             messages = (messages[:1] + [{"role": "user", "content":
                         "CONVERSATION SUMMARY (earlier turns, compacted — the work so far):\n"
                         + c["text"] + extra}] + messages[c["upto"]:])
-        self._maybe_auto_compact(messages)
+        if not dry:                              # /context only looks: never compacts (a paid call)
+            self._maybe_auto_compact(messages)
         # Compress BEFORE deciding what fits. The old order dropped whole blobs
         # the moment the budget was tight, which threw away the middle of a
         # research chain entirely; squeezing them first means more of the chain
@@ -13678,7 +13724,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         if _compress is not None:
             messages, saved = _compress.compress_history(
                 messages, keep_recent=4, budget_chars=4000)
-            if saved > 2000:
+            if saved > 2000 and not dry:
                 self._sys_note(f"✂ trimmed {saved // 1000}k chars of older tool "
                                "output to save context", "dim")
         sys_msgs = [m for m in messages if m.get("role") == "system"]
