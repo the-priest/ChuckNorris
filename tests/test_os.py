@@ -1652,6 +1652,23 @@ sent = [m["content"] for m in w.history if m.get("role") == "user"]
 check(sent and "gh pr create" in sent[-1] and "adds the parser tests" in sent[-1],
       "/pr asks the agent for a branch, commit, push and a pull request")
 
+print("\n--- /context: the context window's memory map ---")
+w = new_win([], tmp)
+w.set_agent_mode(True, announce=False)
+w.history += [{"role": "user", "content": "fix the parser"},
+              {"role": "assistant", "content": "```read parser.py```"},
+              {"role": "user", "content": "TOOL RESULTS (continue):\n\n" + "line\n" * 3000},
+              {"role": "assistant", "content": "Fixed."}]
+rows_, total_, budget_, _paged = w.context_map()
+lab = dict(rows_)
+check(lab.get("system prompt", 0) > 3000 and lab.get("tool results", 0) > 10000 and lab.get("your messages", 0) > 0
+      and lab.get("replies", 0) > 0 and total_ == sum(lab.values()),
+      "it accounts for every character the next call sends, by kind", rows_)
+w.entry.get_buffer().set_text("/context")
+w.on_send()
+tx = [x.get_text() for x in w.msgbox.walk() if isinstance(x.get_text(), str)]
+check("CONTEXT" in tx and any("The next model call sends" in t for t in tx), "/context shows it")
+
 print(f"\nTOTAL OS FAILURES: {fails}")
 assert fails == 0 and not FAILS, "OS regressions present"
 print("ALL OS TESTS PASSED")

@@ -178,6 +178,8 @@ Unattended means **it looks, it never changes**: no file writes; commands run wi
 
 ### Virtual memory for the context window
 
+`/context` is `free` for the model's RAM: what the next call will send, by what takes the room (system prompt, project rules, tool output, the page table, the summary, your messages), against the context budget.
+
 Long sessions don't forget; they page. Once a conversation is big, tool output older than the newest few results is swapped out of what is sent for a one-line page-table entry (`[p17 · npm test · 12k chars · FAILED in auth.test.ts:41]`). The model pages it back **exactly** with ```` ```page p17 ````, a line range, or a search inside it. Lossless comes before lossy: summarising only happens when even the page table no longer fits, and the summary carries the page table with it.
 
 ### The one thing it won't do

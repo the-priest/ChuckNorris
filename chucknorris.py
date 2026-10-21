@@ -10485,6 +10485,8 @@ class ChuckWindow(Adw.ApplicationWindow):
         add("Chat", "Switch Agent / Chat mode", self.toggle_mode, keys="Tab")
         add("Chat", "Plan mode on/off", lambda: self.set_plan_mode(not self.plan_mode),
             hint="/plan", keywords="approve")
+        add("Chat", "Context: what the model is sent", self.show_context, hint="/context",
+            keywords="memory tokens window ram")
         add("Chat", "Compact the conversation", self.compact_now, hint="/compact",
             keywords="summarise context")
         add("Chat", "Export this chat", self.export_chat, hint="/export", keywords="markdown save")
@@ -10761,6 +10763,82 @@ class ChuckWindow(Adw.ApplicationWindow):
             self.entry.get_buffer().set_text(text)
             self.on_send()
         return False
+
+    # ── /context: the context window's memory map (`free` for the model's RAM) ──
+    def context_map(self):
+        """What the next model call would send, by what takes the room ->
+        (rows [(label, chars)], total chars, budget chars, paged-out chars)."""
+        sent = self._trim_for_send(list(self.history)) if self.history else []
+        rows = {}
+        paged_saved = 0
+
+        def add(label, n):
+            rows[label] = rows.get(label, 0) + n
+        for i, m in enumerate(sent):
+            c = m.get("content")
+            text = c if isinstance(c, str) else " ".join(
+                x.get("text", "") for x in (c or []) if isinstance(x, dict))
+            n = len(text)
+            if i == 0 and m.get("role") == "system":
+                base = len(SYSTEM_PROMPT if self.agent_mode else CHAT_PROMPT)
+                add("system prompt", min(n, base))
+                rest = text[base:]
+                mcp = re.search(r"\n\nMCP TOOLS.*?(?=\n\n[A-Z]|\Z)", rest, re.DOTALL)
+                osl = re.search(r"\n\nAGENT OS:.*?(?=\n\n|\Z)", rest, re.DOTALL)
+                if mcp:
+                    add("MCP tools", len(mcp.group(0)))
+                if osl:
+                    add("agent OS & programs", len(osl.group(0)))
+                add("machine, folder & project rules",
+                    max(0, len(rest) - (len(mcp.group(0)) if mcp else 0) - (len(osl.group(0)) if osl else 0)))
+            elif text.startswith("CONVERSATION SUMMARY"):
+                add("summary of earlier turns", n)
+            elif text.startswith("[PAGED OUT"):
+                add("page table (paged-out output)", n)
+                mm = re.search(r"([\d,]+) chars of earlier", text)
+                if mm:
+                    paged_saved += int(mm.group(1).replace(",", ""))
+            elif m.get("role") == "user" and text.startswith(self._PAGEABLE + ("I ran ",)):
+                add("tool results", n)
+            elif m.get("role") == "user" and text.startswith(self._INTERNAL):
+                add("Chuck's notes to the model", n)
+            elif m.get("role") == "user":
+                add("your messages", n)
+            else:
+                add("replies", n)
+        total = sum(rows.values())
+        budget = self.cfg("context_chars", SEND_CHAR_BUDGET, 40000, 800000)
+        return sorted(rows.items(), key=lambda r: -r[1]), total, budget, paged_saved
+
+    def show_context(self):
+        rows, total, budget, paged = self.context_map()
+
+        def text():
+            return "\n".join(f"{lbl:<34} {n:>9,} chars  ~{n // 4:,} tokens" for lbl, n in rows)
+        card, head, body, foot = self._card_shell("CONTEXT", text)
+        pct = min(100, round(100 * total / max(1, budget)))
+        top = Gtk.Label(xalign=0, wrap=True)
+        top.set_text(f"The next model call sends {total:,} characters (~{total // 4:,} tokens): "
+                     f"{pct}% of the {budget:,}-character context budget."
+                     + (f" {paged:,} characters of old tool output are paged out (```page``` brings "
+                        "any back exactly)." if paged else ""))
+        body.append(top)
+        block = "█"
+        width = 30
+        lines = []
+        for lbl, n in rows:
+            bar = block * max(1 if n else 0, round(width * n / max(1, total)))
+            lines.append(f"{lbl[:32]:<32} {bar:<{width}} {n // 4:>8,} tk")
+        bl = Gtk.Label(label="\n".join(lines) or "(nothing yet)", xalign=0, selectable=True)
+        bl.add_css_class("cmd-text")
+        body.append(bl)
+        tip = Gtk.Label(xalign=0, wrap=True)
+        tip.add_css_class("dim"); _wrap_anywhere(tip)
+        tip.set_text("Every step of an agent re-sends all of this. /compact summarises old turns; "
+                     "the context budget is in Settings › Agent.")
+        body.append(tip)
+        self._log_pin(card)
+        return True
 
     # ── the system tray: the OS at a glance ──
     def _activity(self):
@@ -12637,6 +12715,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         ("/activity", "everything waiting for you and everything working (the tray in the header)"),
         ("Ctrl+P", "the command palette: every action, agent, chat and model, one search away"),
         ("/watch [off]", "act on AI! comments you save in any editor (AI? asks a question)"),
+        ("/context", "what the next model call sends, by what takes the room"),
         ("/send <pid> <message>", "tell a running agent something; it hears it at its next step"),
         ("/answer <pid> <text>", "answer an agent that asked you a question"),
         ("/board", "the facts agents share with each other"),
@@ -12703,6 +12782,8 @@ class ChuckWindow(Adw.ApplicationWindow):
             self.show_activity()
         elif cmd == "watch":
             self.watch_command(arg)
+        elif cmd in ("context", "mem"):
+            self.show_context()
         elif cmd == "missions":
             self.show_missions()
         elif cmd == "send":
