@@ -245,3 +245,14 @@ The mission card is the whole view: each task's state, pid, test result,
 and its Report, Trace (strace) and Replay. When it completes, the chat and
 the agent get a summary with the spend.
 
+## One budget for everything (phase 24)
+
+A per-chat cap stops one conversation; it doesn't stop twenty background
+agents, a mission and three daemons each spending a little. `budget.py`
+keeps a ledger of real cost per day on disk (every call goes through
+`_account`, which books it), so a daily and a monthly limit hold across
+everything the OS runs and across restarts. Over a limit the chat pauses
+before its next call (Allow more raises today's or this month's limit by
+the base amount); every agent process is refused its next model call at
+`_sub_call`, so it ends with a report saying why; daemons don't wake.
+

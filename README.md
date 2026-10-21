@@ -35,7 +35,7 @@ Paste a SiliconFlow key in Settings. Press **Tab** to pick Agent or Chat. Talk t
 **Why "an operating system"?** A single AI helper is like a single program. Once you have many of them working at the same time, you need what a computer has always needed to run many programs: someone to decide who goes next, who may touch what, who pays for what, and what happens when something crashes. With AI you pay per *token* (roughly, per word read or written), the way people once paid per second of computer time. So Chuck treats tokens like computer time and AI helpers like programs, and it gives them a real operating system:
 
 - **You can see every helper at once** (`/top`), what it's doing, and what it has cost, and pause or stop any of them.
-- **Each helper has a budget.** When it runs out, it is asked to write up what it found and stop. Nothing runs up your bill forever.
+- **Each helper has a budget, and so does everything together.** When a helper's runs out, it is asked to write up what it found and stop. Set a daily or monthly limit for *all* of it (`/budget day 2`) and Chuck stops and asks before going past it. Nothing runs up your bill forever.
 - **Helpers can work in the background** on a *copy* of your project, so they can't break your files. When one finishes, you look at what it changed and click **Merge** if you like it.
 - **Helpers can talk.** You can send one a message while it works, it can ask you a question without stopping the others, and they share a notice board so they don't get in each other's way.
 - **Give it a whole project-sized job** (`/mission …`). It splits the job into steps, hands them to several helpers working at once, checks each piece by running your project's tests, and only then puts it into your folder.
@@ -53,7 +53,7 @@ An agent loop with a prompt and a few tools is a program. Run ten of them and yo
 
 | a computer has | Chuck OS has |
 |---|---|
-| CPU time | **tokens and dollars**, metered per process and charged up the tree |
+| CPU time | **tokens and dollars**, metered per process and charged up the tree; one daily/monthly limit for all of it |
 | processes | **agents**: a pid, a parent, a quota, a state, a journal |
 | a scheduler | **model-call slots**, granted by priority with ageing, never past a quota |
 | RAM and virtual memory | **the context window**, with old tool output *paged out* and paged back exactly |

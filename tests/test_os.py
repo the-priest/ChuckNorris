@@ -1367,6 +1367,62 @@ check(w._missions[m5["id"]] is m5 and m5["pid"] == pid5,
       "a mission started in this session isn't taken over by the startup resume")
 w.mission_action(m5["id"], "cancel")
 
+# ═══════════════════════════════════════════════════════════════════════════
+print("\n--- the budget: one limit for everything the OS runs ---")
+from chucknorris_ext import budget as BU
+lp = tmp / "spend.json"
+L_ = BU.Ledger(lp)
+t0_ = time.mktime((2026, 3, 10, 12, 0, 0, 0, 0, -1))
+L_.add(0.40, t0_); L_.add(0.70, t0_ + 3600); L_.add(0.25, t0_ - 86400)
+check(abs(L_.today(t0_) - 1.10) < 1e-9 and abs(L_.month(t0_) - 1.35) < 1e-9, "spend is booked by day and month")
+check(L_.over(1.0, 0, t0_)[0] == "day" and L_.over(2.0, 0, t0_) is None and L_.over(0, 1.2, t0_)[0] == "month",
+      "a daily or monthly limit is reached; 0 means none")
+L_.allow_more("day", 1.0, t0_)
+check(L_.over(1.0, 0, t0_) is None, "'allow more' lifts today's limit by that much")
+L_.save()
+L2_ = BU.Ledger(lp)
+check(abs(L2_.today(t0_) - 1.10) < 1e-9 and L2_.over(1.0, 0, t0_) is None, "the ledger survives a restart")
+lp.write_text('{"days": {"2026-03-10": "lots"}, "extra": 5}')
+check(BU.Ledger(lp).today(t0_) == 0, "a damaged ledger is read as empty, not a crash")
+check([d for d, _v in L2_.history(3, t0_)] == ["2026-03-08", "2026-03-09", "2026-03-10"], "and the last days, oldest first")
+w = new_win([], tmp)
+w.set_agent_mode(True, announce=False)
+w.set_workspace(tproj, announce=False)
+w.settings["budget_day_usd"] = 0.000001
+w._ledger.add(0.01)
+w.backend = TimeBackend(["should not run"])
+type_and_send(w, "anything")
+texts = [x.get_text() for x in w.msgbox.walk() if isinstance(x.get_text(), str)]
+check("BUDGET" in texts and not any("should not run" in str(m.get("content")) for m in w.history),
+      "over the daily limit the chat pauses before the next model call and asks")
+bp = w.spawn_background("tt: over budget")
+w.kernel.wait(bp, 10); settle()
+check("budget" in str(w._bg[bp]["report"]), "a background agent is refused its call, and says why",
+      w._bg[bp]["report"])
+w._daemons.add("", "every 1h", "x")["last_run"] = 0
+w._daemon_probe = FakeProbe()
+w._daemon_tick(); settle()
+check(not any(r["kind"] == "daemon" for r in w.kernel.ps(all=True)), "daemons don't wake while over budget")
+w.entry.get_buffer().set_text("/budget")
+w.on_send()
+check(any(t.startswith("Today $") or t.startswith("Today") for t in [x.get_text() for x in w.msgbox.walk()
+                                                                     if isinstance(x.get_text(), str)]),
+      "/budget shows today, the month and the last two weeks")
+w.entry.get_buffer().set_text("/budget day 5")
+w.on_send()
+check(w.settings["budget_day_usd"] == 5.0 and w._over_budget() is None, "/budget day 5 sets the limit")
+w.settings["budget_day_usd"] = 0.0
+
+print("\n--- the code runs on every Python Chuck supports ---")
+import glob as _glob
+if shutil_which("python3.11"):
+    bad = []
+    for f in ["chucknorris.py"] + sorted(_glob.glob("chucknorris_ext/*.py")):
+        r = _sp.run(["python3.11", "-c", f"import ast; ast.parse(open({f!r}).read())"], capture_output=True, text=True)
+        if r.returncode:
+            bad.append((f, r.stderr.strip().splitlines()[-1:]))
+    check(not bad, "every module parses under Python 3.11 (no 3.12-only f-strings)", bad)
+
 print(f"\nTOTAL OS FAILURES: {fails}")
 assert fails == 0 and not FAILS, "OS regressions present"
 print("ALL OS TESTS PASSED")

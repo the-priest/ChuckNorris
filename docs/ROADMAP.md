@@ -313,3 +313,13 @@ and an agent is a process. The design is in `docs/OS.md`; tests in
 - [x] The same gate for any background agent: when one finishes, its copy is
       tested and the card says pass or fail before you merge.
 
+### Phase 24 — one budget for everything
+
+- [x] Every model call's real cost is booked by day on disk (`budget.py`),
+      across chats, agents, programs, missions and daemons, and restarts.
+- [x] A daily and a monthly limit (`/budget day 2.50`, Settings). Over one,
+      the chat pauses before its next call and asks (Allow more / Stop);
+      background agents, programs and missions are refused their next call
+      and report why; daemons don't wake.
+- [x] `/budget`: today, this month, the last two weeks as bars.
+

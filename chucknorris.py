@@ -127,6 +127,7 @@ _governor = _optional("governor")
 _programs = _optional("programs")
 _hibernate = _optional("hibernate")
 _missions = _optional("missions")
+_budget = _optional("budget")
 if _pricing is None:
     class _pricing:                     # noqa: N801  — the meter, minus prices
         """Stand-in so a partial install still launches: tokens are counted,
@@ -3485,6 +3486,9 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._daemon_probe = self._Probe()
         self._pending_daemon = None
         self._asks = {}                 # pid -> (event, answer box, question): agents asking you
+        # what the whole OS may spend (docs/OS.md, phase 24): every call's
+        # cost, by day, on disk, across chats and restarts
+        self._ledger = _budget.Ledger(DATA_DIR / "spend.json") if _budget is not None else None
         self._missions = {}             # id -> mission (docs/OS.md, phase 23)
         self._mstore = _missions.Store(self.MISSIONS_DIR) if _missions is not None else None
         # hibernate (docs/OS.md, phase 21): every step of a background agent
@@ -5504,6 +5508,8 @@ class ChuckWindow(Adw.ApplicationWindow):
         except Exception:
             pass
         self._closing = True                    # running agents stay hibernated for next time
+        if getattr(self, "_ledger", None) is not None:
+            self._ledger.save()
         if self.kernel is not None:             # every agent process ends with the window
             for r in self.kernel.ps():
                 if r["pid"] != self._pid1:
@@ -6028,6 +6034,8 @@ class ChuckWindow(Adw.ApplicationWindow):
             else:
                 tot["cost"] += c
         self._tok_in, self._tok_out = self._usage["prompt"], self._usage["completion"]
+        if c and getattr(self, "_ledger", None) is not None:
+            self._ledger.add(c)
         if self.kernel is not None and not charged:
             self.kernel.charge(pid or self._pid1, int(u.get("prompt") or 0),
                                int(u.get("completion") or 0), c or 0.0)
@@ -7307,6 +7315,10 @@ class ChuckWindow(Adw.ApplicationWindow):
                 # sub-agents spend real money too: eight of them must not run
                 # on past the cap while the main loop waits to ask
                 raise RuntimeError("the chat's spending cap is reached")
+            over = self._over_budget()
+            if over:
+                raise RuntimeError(f"the {'daily' if over[0] == 'day' else 'monthly'} budget "
+                                   f"({_pricing.fmt_usd(over[1])}) is spent \u2014 /budget")
             if kern is not None:
                 kern.acquire(pid)               # raises ProcessKilled when it may not go on
                 try:
@@ -10282,7 +10294,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             return True
 
     def _daemon_tick_once(self):
-        if self._daemon_checking or self.settings.get("daemons_paused"):
+        if self._daemon_checking or self.settings.get("daemons_paused") or self._over_budget():
             return True
         specs = [dict(d) for d in self._daemons.items
                  if d.get("enabled") and d.get("id") not in self._daemon_live]
@@ -11990,6 +12002,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         ("/mission <goal>", "a goal too big for one agent: planned as tasks, run by agents in "
                             "parallel, each tested before it's merged"),
         ("/missions", "your missions and how far they got"),
+        ("/budget [day|month <$>]", "what everything spent today and this month, and the limits"),
         ("/send <pid> <message>", "tell a running agent something; it hears it at its next step"),
         ("/answer <pid> <text>", "answer an agent that asked you a question"),
         ("/board", "the facts agents share with each other"),
@@ -12050,6 +12063,8 @@ class ChuckWindow(Adw.ApplicationWindow):
             self.show_replay(arg)
         elif cmd == "mission":
             self.start_mission(arg)
+        elif cmd == "budget":
+            self.budget_command(arg)
         elif cmd == "missions":
             self.show_missions()
         elif cmd == "send":
@@ -12298,6 +12313,98 @@ class ChuckWindow(Adw.ApplicationWindow):
         spent = (getattr(self, "_usage", None) or {}).get("cost", 0) or 0
         return cap if spent >= cap + getattr(self, "_cap_extra", 0.0) else 0
 
+    def _over_budget(self):
+        """The OS-wide daily or monthly limit, if reached -> (scope, limit,
+        spent), else None."""
+        if getattr(self, "_ledger", None) is None:
+            return None
+        return self._ledger.over(self.cfg("budget_day_usd", 0.0, 0.0, 100000.0, cast=float),
+                                 self.cfg("budget_month_usd", 0.0, 0.0, 1000000.0, cast=float))
+
+    def _budget_pause(self, over, vision):
+        """Stop before the next model call and ask: the limit is the user's."""
+        scope, lim, spent = over
+        base = self.cfg("budget_day_usd" if scope == "day" else "budget_month_usd", 0.0, 0.0,
+                        1000000.0, cast=float)
+        card, head, cbody, foot = self._card_shell("BUDGET")
+        card.add_css_class("ask-card")
+        ql = Gtk.Label(xalign=0, wrap=True, hexpand=True)
+        ql.add_css_class("prose")
+        ql.set_text(f"{'Today' if scope == 'day' else 'This month'} everything Chuck ran (every chat, "
+                    f"agent, mission and daemon) has spent {_pricing.fmt_usd(spent)}: your "
+                    f"{'daily' if scope == 'day' else 'monthly'} limit is {_pricing.fmt_usd(lim)}. "
+                    "Paused before the next model call; agents in the background are paused too.")
+        cbody.append(ql)
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        go = Gtk.Button(label=f"Allow {_pricing.fmt_usd(base)} more {'today' if scope == 'day' else 'this month'}")
+        go.add_css_class("quick")
+        stop = Gtk.Button(label="Stop here"); stop.add_css_class("ghost")
+        row.append(go); row.append(stop)
+        foot.append(row)
+        gen_, chat_ = self._gen, self.chat_id
+
+        def cont(_b):
+            go.set_sensitive(False); stop.set_sensitive(False)
+            self._ledger.allow_more(scope, base)
+            if self._running or gen_ != self._gen or chat_ != self.chat_id:
+                return
+            self._start_run()
+            self._ask_model(vision)
+
+        def halt(_b):
+            go.set_sensitive(False); stop.set_sensitive(False)
+            self._sys_note("Stopped at the budget (/budget to change it).", "dim")
+        go.connect("clicked", cont)
+        stop.connect("clicked", halt)
+        self._log_pin(card)
+        self._end_run()
+
+    def budget_command(self, arg):
+        """/budget [day|month <usd>]: what everything has spent, and the limits."""
+        if self._ledger is None:
+            self._sys_note("The budget module is missing \u2014 reinstall Chuck.", "danger")
+            return False
+        m = re.match(r"\s*(day|daily|month|monthly)\s+\$?([\d.]+)\s*$", arg or "")
+        if m:
+            key = "budget_day_usd" if m.group(1).startswith("da") else "budget_month_usd"
+            try:
+                self.settings[key] = max(0.0, float(m.group(2)))
+            except ValueError:
+                self._sys_note("/budget day 2.50  \u00b7  /budget month 40  (0 = no limit)", "dim")
+                return False
+            save_settings(self.settings)
+        elif (arg or "").strip():
+            self._sys_note("/budget day 2.50  \u00b7  /budget month 40  (0 = no limit)", "dim")
+            return False
+        L = self._ledger
+        day_l = self.cfg("budget_day_usd", 0.0, 0.0, 100000.0, cast=float)
+        mon_l = self.cfg("budget_month_usd", 0.0, 0.0, 1000000.0, cast=float)
+        hist = L.history(14)
+        card, head, body, foot = self._card_shell(
+            "BUDGET", lambda: "\n".join(f"{d}  {_pricing.fmt_usd(v)}" for d, v in hist))
+        top = Gtk.Label(xalign=0, wrap=True)
+        top.set_text(f"Today {_pricing.fmt_usd(L.today())}"
+                     + (f" of {_pricing.fmt_usd(day_l)}" if day_l else " (no daily limit)")
+                     + f"  \u00b7  this month {_pricing.fmt_usd(L.month())}"
+                     + (f" of {_pricing.fmt_usd(mon_l)}" if mon_l else " (no monthly limit)"))
+        body.append(top)
+        sub = Gtk.Label(xalign=0, wrap=True)
+        sub.add_css_class("dim"); _wrap_anywhere(sub)
+        sub.set_text("Everything counts: every chat, sub-agent, background agent, program, mission and "
+                     "daemon. Over a limit, the chat asks before going on and agents are refused "
+                     "their next call. Set them with /budget day 2.50 or /budget month 40 "
+                     "(0 = no limit), or in Settings.")
+        body.append(sub)
+        peak = max([v for _d, v in hist] + [1e-9])
+        block = "\u2588"
+        bars = "\n".join(f"{d[5:]}  {block * max(0, round(v / peak * 24)):<24}  {_pricing.fmt_usd(v)}"
+                         for d, v in hist)
+        bl = Gtk.Label(label=bars, xalign=0, selectable=True)
+        bl.add_css_class("cmd-text")
+        body.append(bl)
+        self._log_pin(card)
+        return True
+
     def _cost_pause(self, cap, vision):
         """Stop before the next model call and ask: the cap is the user's money."""
         spent = self._usage.get("cost", 0)
@@ -12489,6 +12596,10 @@ class ChuckWindow(Adw.ApplicationWindow):
         cap = self._over_cap()
         if cap:
             self._cost_pause(cap, vision)
+            return
+        over = self._over_budget()
+        if over:
+            self._budget_pause(over, vision)
             return
         imgs, self._tool_images = list(self._tool_images), []
         last = self.history[-1] if self.history else None
@@ -14251,6 +14362,11 @@ class ChuckWindow(Adw.ApplicationWindow):
              sub="Tool rounds each sub-agent may take before it must report.")
         spin(g, "Spending cap per chat ($)", "cost_cap", 0, 1000, 0.05, 0, digits=2,
              sub="Pause and ask before spending more than this in one chat. 0 = no cap.")
+        spin(g, "Daily budget for everything ($)", "budget_day_usd", 0, 10000, 0.5, 0, digits=2,
+             sub="Every chat, agent, mission and daemon together. Over it, the chat asks and "
+                 "agents stop. 0 = no limit. /budget shows the spend.")
+        spin(g, "Monthly budget for everything ($)", "budget_month_usd", 0, 100000, 5, 0, digits=2,
+             sub="The same, per calendar month. 0 = no limit.")
         spin(g, "Context sent per request (characters)", "context_chars", 40000, 800000,
              10000, SEND_CHAR_BUDGET,
              sub="How much conversation and file content rides along. More sees more "
