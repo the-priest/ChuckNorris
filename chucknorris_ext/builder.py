@@ -463,10 +463,13 @@ def _project_files(root, limit=2000):
     is honoured), else a walk that skips the usual build and vendor dirs."""
     root = Path(root)
     if (root / ".git").exists() and shutil.which("git"):
+        # the repo's config could run a command (core.fsmonitor): off, and in
+        # the folder's sandbox when it has one
+        argv = _wrapped(["git", "-c", "core.fsmonitor=false", "-C", str(root), "ls-files",
+                         "-co", "--exclude-standard"])
         try:
-            p = subprocess.run(["git", "-C", str(root), "ls-files", "-co", "--exclude-standard"],
-                               capture_output=True, text=True, timeout=20)
-            if p.returncode == 0:
+            p = subprocess.run(argv, capture_output=True, text=True, timeout=20) if argv else None
+            if p is not None and p.returncode == 0:
                 return [f for f in p.stdout.splitlines() if f][:limit]
         except Exception:
             pass

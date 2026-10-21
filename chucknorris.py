@@ -1707,15 +1707,6 @@ def _bwrap_argv(argv, env=None, write_root=True, net=None, persistent=False):
     for var in ("DBUS_SESSION_BUS_ADDRESS", "SSH_AUTH_SOCK", "GPG_AGENT_INFO", "DISPLAY",
                 "WAYLAND_DISPLAY", "XAUTHORITY"):
         args += ["--unsetenv", var]
-    for rel in _SANDBOX_HIDE:
-        p = os.path.join(home, rel)
-        if os.path.isdir(p):
-            args += ["--tmpfs", p]
-    if os.path.isfile(os.path.join(home, ".netrc")):
-        args += ["--ro-bind", "/dev/null", os.path.join(home, ".netrc")]
-    for a in argv:                             # a script Chuck wrote into its config folder
-        if isinstance(a, str) and a.startswith(str(CONFIG_DIR) + os.sep) and os.path.isfile(a):
-            args += ["--ro-bind", a, a]
     cache = str(_SANDBOX_CACHE)
     try:
         os.makedirs(cache, exist_ok=True)
@@ -1730,6 +1721,22 @@ def _bwrap_argv(argv, env=None, write_root=True, net=None, persistent=False):
     for b, rw in binds:
         if b and os.path.exists(b):
             args += ["--bind" if rw else "--ro-bind", b, b]
+    # credentials are hidden AFTER the binds: bwrap mounts in order, so a
+    # working folder of ~ bound later would bring ~/.ssh back
+    hidden = []
+    for rel in _SANDBOX_HIDE:
+        p = os.path.join(home, rel)
+        if os.path.isdir(p):
+            args += ["--tmpfs", p]
+            hidden.append(p)
+    if os.path.isfile(os.path.join(home, ".netrc")):
+        args += ["--ro-bind", "/dev/null", os.path.join(home, ".netrc")]
+    for b, rw in binds[1:]:                    # Chuck's own folders that live under a hidden one
+        if b and os.path.exists(b) and any(b.startswith(h + os.sep) for h in hidden):
+            args += ["--bind" if rw else "--ro-bind", b, b]
+    for a in argv:                             # a script Chuck wrote into its config folder
+        if isinstance(a, str) and a.startswith(str(CONFIG_DIR) + os.sep) and os.path.isfile(a):
+            args += ["--ro-bind", a, a]
     if cache:                                  # package managers write their caches here
         for var, sub in (("XDG_CACHE_HOME", ""), ("npm_config_cache", "npm"),
                          ("PIP_CACHE_DIR", "pip"), ("CARGO_HOME", "cargo"), ("GOCACHE", "go-build"),
@@ -3212,7 +3219,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         self.workspace = None
         _WORKDIR["path"] = None
         self.agent_mode = bool(self.settings.get("agent_mode", True))
-        self.chat_id = datetime.now().strftime("%Y%m%d-%H%M%S")
+        self.chat_id = self._new_chat_id()
         self._new_history()
 
         self._build_ui()
@@ -3791,6 +3798,20 @@ class ChuckWindow(Adw.ApplicationWindow):
     def _new_history(self):
         self.history = [{"role": "system", "content": self._system_text()}]
 
+    _ISSUED_IDS = set()                         # ids handed out in this process (any window)
+
+    @classmethod
+    def _new_chat_id(cls):
+        """A timestamp id no other chat has: two chats started in the same
+        second used to share one file, and the later save overwrote the first."""
+        base = datetime.now().strftime("%Y%m%d-%H%M%S")
+        cid, n = base, 1
+        while cid in cls._ISSUED_IDS or (CHATS_DIR / f"{cid}.json").exists():
+            n += 1
+            cid = f"{base}-{n}"
+        cls._ISSUED_IDS.add(cid)
+        return cid
+
     def new_chat(self):
         # Cancel first. Without this the in-flight stream's _finalise appended
         # the OLD question's answer to the NEW history — leaving a chat whose
@@ -3804,7 +3825,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._py_close()                        # and Python starts empty
         self._compact = None
         self._checkpoints = []
-        self.chat_id = datetime.now().strftime("%Y%m%d-%H%M%S")
+        self.chat_id = self._new_chat_id()
         self._new_history()
         self._reset_meter()
         self._clear_msgs()
@@ -4780,6 +4801,7 @@ class ChuckWindow(Adw.ApplicationWindow):
                  "checkpoints": self._checkpoints[-200:],
                  "running": running, "pid": os.getpid()}, indent=None if light else 2))
             os.replace(tmp, path)
+            self._disk_running = (self.chat_id, running)   # what the file on disk says now
         except Exception:
             pass
         if not light:
@@ -4917,7 +4939,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             # the open chat is gone: start fresh without re-saving it
             if self._running:
                 self.stop_run(auto=True)
-            self.chat_id = datetime.now().strftime("%Y%m%d-%H%M%S")
+            self.chat_id = self._new_chat_id()
             self._new_history()
             self._reset_meter()
             self._clear_msgs()
@@ -5087,6 +5109,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         if i is None:
             return False
         self._edit_at = i
+        self._edit_msg = self.history[i]        # so a switch to another chat can't misapply it
         self.entry.get_buffer().set_text(self._typed_text(self.history[i].get("content")))
         self._toast("Editing your last message \u2014 Enter resends from there, Esc cancels")
         return True
@@ -5095,6 +5118,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._save_chat(running=False)          # closing mid-task is a choice, not a crash
         self._py_close()
         try:                                    # the mic, the ears and the voice go too
+            stop_speaking()                     # first: then Kokoro's exit isn't a "failure"
             if _listen is not None:
                 _listen.EARS.cancel()
                 _listen.EARS.stop()
@@ -7137,6 +7161,9 @@ class ChuckWindow(Adw.ApplicationWindow):
         for name in list(self._jobs):
             self._kill_job(name)
 
+    _VIEWABLE = re.compile(r"\.(?:html?|png|jpe?g|gif|webp|svg|bmp|pdf|txt|md|csv|json|log|"
+                           r"mp4|webm|mkv|mov|mp3|wav|ogg|flac|m4a)$", re.I)
+
     def _do_open(self, target):
         """Hand the user something: a URL in the browser, a file or folder in
         its default app."""
@@ -7150,6 +7177,14 @@ class ChuckWindow(Adw.ApplicationWindow):
             full = os.path.expanduser(t)
             if not os.path.isabs(full):
                 full = str((self._workroot() or Path.home()) / full)
+            if (self.agent_mode and self._folder_access() != "full" and os.path.isfile(full)
+                    and (os.access(full, os.X_OK) or not self._VIEWABLE.search(full))):
+                # the desktop opens files OUTSIDE the sandbox: a .desktop file
+                # or a script would run unconfined
+                self._tool_feedback.append(f"[open: not opened: {full} isn't a page, picture, "
+                                           "document or media file, and this folder is "
+                                           "restricted (/access)]")
+                return
             ok = os.path.exists(full) and _open_path(full)
             t = full
         self._sys_note(("\u2197 opened " if ok else "\u2717 couldn't open ") + t,
@@ -8100,7 +8135,9 @@ class ChuckWindow(Adw.ApplicationWindow):
         try:
             meta = json.loads(Path(path).read_text())
             meta["running"] = value
-            Path(path).write_text(json.dumps(meta, indent=2))
+            tmp = Path(str(path) + ".tmp")
+            tmp.write_text(json.dumps(meta, indent=2))
+            os.replace(tmp, path)               # a crash here must not leave half a chat
         except Exception:
             pass
 
@@ -8476,8 +8513,13 @@ class ChuckWindow(Adw.ApplicationWindow):
         root = self._workroot()
         if root is None:
             return 128, "no working folder"
+        # a repo's own config can run commands (core.fsmonitor, diff drivers,
+        # filters): outside a fully trusted folder git runs in the sandbox too
+        argv = _sandboxed_look(["git", "-c", "core.fsmonitor=false", *args])
+        if argv is None:
+            return 126, SANDBOX_NO_BWRAP
         try:
-            p = subprocess.run(["git", *args], cwd=str(root), capture_output=True, text=True,
+            p = subprocess.run(argv, cwd=str(root), capture_output=True, text=True,
                                errors="replace", timeout=timeout, stdin=subprocess.DEVNULL,
                                env=dict(os.environ, **_RUN_ENV))
             return p.returncode, (p.stdout or "") + (p.stderr or "")
@@ -9255,14 +9297,18 @@ class ChuckWindow(Adw.ApplicationWindow):
         atts = list(self._attachments)
         if not text and not atts:
             return
+        stop_speaking()                         # the last answer stops reading over the new one
         self.entry.get_buffer().set_text("")
         self._attachments = []
         self._refresh_tray()
         if self._edit_at is not None:
             # an edited message replaces the original and everything after it
             at, self._edit_at = self._edit_at, None
-            if at < len(self.history):
+            # only if it's still THAT message: after a chat switch the index
+            # would cut someone else's conversation
+            if at < len(self.history) and self.history[at] is getattr(self, "_edit_msg", None):
                 self._rewind_to(at)
+            self._edit_msg = None
         self._reset_turn_state()
         self._scroll_down(force=True)       # you asked: you see the answer
         self._start_run()
@@ -9468,7 +9514,8 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._sys_note("\u21b3 delivered", "dim")
 
     def _ask_model(self, vision=False):
-        if time.time() - getattr(self, "_last_autosave", 0) > 2:
+        if (getattr(self, "_disk_running", None) != (self.chat_id, True)
+                or time.time() - getattr(self, "_last_autosave", 0) > 2):
             self._save_chat(running=True, light=True)   # a crash from here on can be resumed
         self._deliver_steer()
         cap = self._over_cap()
@@ -10121,7 +10168,7 @@ class ChuckWindow(Adw.ApplicationWindow):
                             + (["runskill"] if (skill_blocks or runskills) else [])
                             + (["runtests"] if runtests else []) + (["package"] if packages else [])
                             + (["undo"] if undo_req else []) + (["kill"] if kills else []))
-            if readonly and videos:
+            if videos:
                 plan_blocked.append("video download")
                 videos = []
             codes, writes, edits, bgs, rmfiles, skill_blocks, runskills = [], [], [], [], [], [], []
@@ -10130,6 +10177,9 @@ class ChuckWindow(Adw.ApplicationWindow):
             reg_calls = [c for c in reg_calls if not _TOOL_REG[c[0]]["acts"]]
             if plans and not readonly:
                 self._asked = True               # a proposed plan waits for the user
+        proj_refused = bool(projects and self.agent_mode and self._folder_access() != "full")
+        if proj_refused:
+            projects = []                       # leaving would leave this folder's sandbox behind
         if fence_clash or self._step_forced:
             reg_calls = [c for c in reg_calls if not _TOOL_REG[c[0]]["acts"]]
         acting = bool(searches or fetches or images or vid_searches or videos or junk
@@ -10137,7 +10187,7 @@ class ChuckWindow(Adw.ApplicationWindow):
                       or projects or writes or edits or trees or packages or runtests
                       or rmfiles or ledger_req or plans or globs or maps or shots or looks
                       or briefs or bgs or logss or kills or undo_req or opens or asks
-                      or reg_calls)
+                      or reg_calls or proj_refused)
         # Chuck's own narration is what shows in chat — never swallow it.
         # a step that is only tool blocks says nothing: its cards are the story
         # ("Working on it…" used to stay there long after the step was done)
@@ -10308,6 +10358,10 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._tool_feedback.append(
                 "[PLAN MODE: not run: " + ", ".join(plan_blocked[:8]) + ". Investigate with "
                 "read-only tools, then post the ```plan```; the user approves it before you act.]")
+        if proj_refused:
+            self._tool_feedback.append(
+                "[project NOT opened: this folder's access is restricted (/access), so Chuck "
+                "can't move itself to another folder. Work here, or ask the user to open it.]")
         for rtag, rbody in reg_calls:
             self._run_registered(rtag, rbody)
         if held_see:

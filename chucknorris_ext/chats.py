@@ -12,7 +12,7 @@ from . import config
 CHAT_TTL_HOURS = config.CHAT_TTL_HOURS
 
 # ── saved-chat retention ────────────────────────────────────────────────────
-_CHAT_NAME = re.compile(r"^\d{8}-\d{6}\.json$")   # exactly the ids we write
+_CHAT_NAME = re.compile(r"^\d{8}-\d{6}(?:-\d+)?\.json$")   # exactly the ids we write
 
 
 def chat_files(chats_dir=None):

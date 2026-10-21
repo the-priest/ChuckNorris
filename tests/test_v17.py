@@ -510,6 +510,46 @@ if shutil.which("bwrap"):
     check("\n42\n" in hist_text(w).split("still there")[-1],
           "a sandboxed Python session survives Stop with its variables",
           hist_text(w).split("py in sandbox")[-1][-1500:])
+    # the agent can't walk out of its sandbox by opening another folder
+    w.backend.replies = ["```project esc```", f"```bash\necho pwned > {outside}/esc.txt\n```", "ok"]
+    type_and_send(w, "switch folders")
+    check(cn._SANDBOX["on"] is True and w.workspace == ws and not (outside / "esc.txt").exists()
+          and "project NOT opened" in hist_text(w), "a ```project``` block can't leave the sandbox")
+    # a repo's own config can run a command whenever git looks at it
+    subprocess.run(["git", "init", "-q", str(ws)])
+    subprocess.run(["git", "-C", str(ws), "config", "core.fsmonitor", f"touch {outside}/fsm; false"])
+    cn._builder._project_files(ws)
+    w._git("status", "--short")
+    check(not (outside / "fsm").exists(), "map/find/def and /diff don't run the repo's git hooks")
+    subprocess.run(["git", "-C", str(ws), "config", "--unset", "core.fsmonitor"])
+    (ws / "run.desktop").write_text("[Desktop Entry]\nExec=touch /tmp/x\n")
+    opened = []
+    real_open = cn._open_path
+    cn._open_path = lambda p: opened.append(p) or True
+    w._tool_feedback = []
+    w._do_open("run.desktop")
+    w._do_open("f.txt")
+    cn._open_path = real_open
+    check(opened == [str(ws / "f.txt")], "a restricted folder can open documents but not launchers", opened)
+    # Stop on a Python block that ignores Ctrl+C: the kernel inside bwrap dies too
+    w.backend.replies = ["```py\nimport signal\nsignal.signal(signal.SIGINT, signal.SIG_IGN)\n"
+                         "while True:\n    pass\n```", "x"]
+    w.entry.get_buffer().set_text("stubborn")
+    w.on_send()
+    time.sleep(3.0)
+    kids = cn._pysession._descendants(w._py.proc.pid) if getattr(w, "_py", None) and w._py.proc else []
+    w.stop_run()
+    time.sleep(5.0)
+    settle()
+
+    def running(pid):
+        try:
+            with open(f"/proc/{pid}/stat") as fh:
+                return fh.read().split(")")[-1].split()[0] != "Z"
+        except OSError:
+            return False
+    check(kids and not [k for k in kids if running(k)],
+          "a sandboxed kernel that ignores Ctrl+C is really killed, not orphaned", kids)
     w.set_access("full")
     check(cn._SANDBOX["on"] is False and w._ws_lbl.get_label() == "acc", "Full access lifts it")
     w.backend.replies = [f"```bash\necho out > {outside}/o.txt\n```", "ok"]
@@ -522,6 +562,13 @@ if shutil.which("bwrap"):
     w2.set_workspace(ws, announce=False)
     check(cn._SANDBOX["on"] is True, "and it comes back with the folder")
     w2.set_access("full")
+    w3 = agent(["```bash\ncat ~/.ssh/id_test; echo x >> ~/.ssh/authorized_keys; echo end\n```", "ok"],
+               Path.home())
+    w3.set_access("sandbox")
+    type_and_send(w3, "home folder")
+    check("SECRET-KEY" not in hist_text(w3) and not (Path.home() / ".ssh" / "authorized_keys").exists(),
+          "with ~ as the folder, ~/.ssh is still hidden", hist_text(w3)[-400:])
+    w3.set_access("full")
 else:
     print("  [SKIP] bubblewrap not installed: sandbox untested here")
 w = agent(["```bash\necho changed > f.txt\n```", "```write new.txt\nx\n```", "I'd change f.txt."], ws)
@@ -533,6 +580,11 @@ check((ws / "f.txt").read_text() == "orig\n" and not (ws / "new.txt").exists() a
 w.backend.replies = ["```video https://example.com/v.mp4```", "No."]
 type_and_send(w, "download it")
 check("video download" in hist_text(w).split("download it")[-1], "read-only also blocks video downloads")
+w = agent(["```video https://example.com/v.mp4```", "Plan."], ws)
+w.set_plan_mode(True)
+type_and_send(w, "plan a download")
+check("video download" in hist_text(w), "plan mode blocks video downloads too (they write files)")
+w.set_plan_mode(False)
 w.entry.get_buffer().set_text("/access")
 w.on_send()
 texts = [x.get_text() for x in w.msgbox.walk() if isinstance(x.get_text(), str)]
@@ -544,6 +596,20 @@ check(w._folder_access() == "full", "one click changes it")
 srv.shutdown()
 shutil.rmtree(outside, ignore_errors=True)
 settle()
+
+w = agent(["b1", "b2", "b3", "a1", "b-new"], tmp / "resume")
+for q in ("chat B q1", "chat B q2", "chat B q3"):
+    type_and_send(w, q)
+w._save_chat()
+b_path = cn.CHATS_DIR / f"{w.chat_id}.json"
+n_b = len(w.history)
+w.new_chat()
+type_and_send(w, "chat A question")
+w.edit_last()                                  # ↑ in chat A...
+w._load_chat(b_path)                           # ...then open chat B and send
+type_and_send(w, "chat B q4")
+check(len(w.history) > n_b and all(f"chat B q{i}" in hist_text(w) for i in (1, 2, 3, 4)),
+      "a leftover ↑-edit from another chat never cuts this one", len(w.history))
 
 # ═══════════════════════════════════════════════════════════════════════════
 print("\n--- custom commands ---")
@@ -809,6 +875,28 @@ try:
           "and is set aside for a while, with /doctor saying why", v.voice_status({}))
     v.KOKORO.synth = lambda text, voice_, speed, out, timeout=120: 24000   # a second of audio
     check(v.test_kokoro()[0] and v.engine_for({}) == "kokoro", "a passing test brings it straight back")
+    told.clear(); fell.clear()
+
+    def cut_by_close(*a, **k):
+        v.KOKORO.stop()                          # the window closes mid-sentence
+        raise RuntimeError("Kokoro stopped")
+    v.KOKORO.synth = cut_by_close
+    v.speak = lambda text, s=None: fell.append(text)
+    v._speak_kokoro("Hello there. How are you? " * 6, v._TTS_GEN[0], {})
+    v.speak = real_speak
+    check(not told and not fell and v._KOKORO_DOWN[0] == 0.0,
+          "stopping Kokoro on purpose (closing, reinstalling) isn't a failure and no robot voice takes over",
+          (told, fell))
+    v._KOKORO_DOWN[0] = time.time() + 300        # Kokoro broke a minute ago...
+    used = []
+    real_synth_fn, real_have = v._synth, v._have
+    v._have = lambda name: name == "espeak-ng"     # this machine may have no other voice
+    v._synth = lambda chunk, gen, s: used.append(s.get("voice_engine"))
+    v.speak("Hello there.", {"voice_engine": "kokoro"})   # ...and Kokoro is what Settings says
+    time.sleep(0.5)
+    v._synth, v._have = real_synth_fn, real_have
+    check(used and used[0] in ("piper", "espeak"), "asking for an engine that's down speaks with one that works",
+          used)
 finally:
     v.kokoro_ready, v.KOKORO.synth = real[0], real[1]
     v._SETTINGS["voice_player"] = real[2] or ""
@@ -821,6 +909,17 @@ check("ls la grep x wc" in c and "greater than 5" in c and "5 times 3" in c and 
       and "link. Then" in c and "et cetera. Then" in c, "pipelines, comparisons and sentence ends survive", c)
 check(v.tts_chunks("Dr. Smith agrees. The U.S. team too.", 420, first=10)[0].startswith("Dr. Smith"),
       "no pause after 'Dr.' or 'U.S.'")
+c = v.tts_clean("````md\n```python\nsecret = 1\n```\n````\nAfter that.\n~~~\nrm -rf x\n~~~\nDone.")
+check(c == "After that.\nDone.", "code inside a 4-backtick or ~~~ fence is never read out", c)
+check(v.tts_clean("Look:\n```python\nimport os\nos.remove(1)") == "Look:",
+      "nor is code in a fence a cut-off reply never closed")
+c = v.tts_clean("As the error says\n\n> ModuleNotFoundError: x\nSee <https://example.com/a>.")
+check("greater" not in c and "less" not in c and "ModuleNotFoundError" in c and "See link." in c,
+      "quotes and <links> aren't read as greater-than / less-than", c)
+check(v.tts_clean("2024. That was a good year.") == "2024. That was a good year.",
+      "a year starting a line isn't dropped as a list number")
+check(v.tts_clean("Run `pip install --upgrade some-long-package-name-here` then restart.")
+      == "Run the command shown then restart.", "long inline code leaves a sentence that still makes sense")
 import http.server as _hs
 
 
@@ -913,6 +1012,37 @@ def slow_start(timeout=90):
 ears.start = slow_start
 ears.listen(got.append)
 check(got == [{"event": "cancelled"}] and not ears.busy, "cancelling while the model loads is honoured", got)
+ears2 = L.Ears()
+got2 = []
+
+
+def loading_start(timeout=90):                    # the server is up, still loading the model
+    ears2.proc = subprocess.Popen(["sleep", "5"], stdin=subprocess.PIPE, text=True)
+    ears2.cancel()
+ears2.start = loading_start
+L.recorder_argv = lambda: ["true"]
+check(ears2.listen(got2.append) is False and got2 == [{"event": "cancelled"}],
+      "a cancel while the (running) server loads is honoured, not dropped", got2)
+ears2.stop()
+fake_srv = tmp / "fake_stt.py"
+fake_srv.write_text("import sys, json\nprint(json.dumps({'event': 'ready'}), flush=True)\n"
+                    "for line in sys.stdin:\n    pass\n")
+real_srv, real_py = L._SERVER, L._voice.voice_python
+L._SERVER, L._voice.voice_python = fake_srv, lambda: sys.executable
+ears3 = L.Ears()
+ears3.listen(lambda ev: None)
+check(ears3.busy, "(listening)")
+ears3.stop()                                       # reinstall / close while listening
+time.sleep(0.5)
+check(not ears3.busy, "stopping the listener mid-utterance frees the mic")
+L._SERVER, L._voice.voice_python = real_srv, real_py
+w = agent(["ok"], tmp / "resume")
+stops = []
+real_stop = cn.stop_speaking
+cn.stop_speaking = lambda: stops.append(1)
+type_and_send(w, "next question")
+cn.stop_speaking = real_stop
+check(stops, "sending a new message stops the last answer being read")
 L.recorder_argv = real_argv
 settle()
 

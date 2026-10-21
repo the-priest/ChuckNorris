@@ -109,6 +109,7 @@ class _KokoroEngine:
         self.lock = threading.Lock()
         self.error = ""
         self.seq = 0
+        self.epoch = 0                  # bumped by every stop(): a synth cut by one isn't a crash
 
     def alive(self):
         return self.proc is not None and self.proc.poll() is None
@@ -169,6 +170,7 @@ class _KokoroEngine:
             return msg.get("samples", 0)
 
     def stop(self):
+        self.epoch += 1
         if self.proc is not None:
             try:
                 self.proc.kill()
@@ -261,12 +263,15 @@ def _install_kokoro(progress, opener):
             _download(KOKORO_URLS[dest.name], dest, progress, opener, label)
     except Exception as ex:
         return False, f"{ex.__class__.__name__}: {ex}"
+    stop_speaking()                         # a reply mid-sentence is cut, not "broken"
     KOKORO.stop()
     _KOKORO_DOWN[0] = 0.0
     progress("testing the voice")
     ok, why = test_kokoro()
-    if not ok:
-        # whatever is on disk doesn't work: don't keep it, so a retry downloads afresh
+    if not ok and re.search(r"protobuf|invalid|corrupt|load model|zip|pickle|npz|"
+                            r"unexpected end|truncat", why, re.I):
+        # the files themselves are bad: don't keep them, so a retry downloads
+        # afresh (a slow start or a missing library keeps the 350 MB download)
         for f in (KOKORO_MODEL, KOKORO_VOICES):
             try:
                 f.unlink()
@@ -625,8 +630,12 @@ def _say_code(m):
     """Short inline code is part of the sentence ("run `make test` first"):
     keep its words, drop the symbols nobody says aloud."""
     code = m.group(1).strip()
-    if not code or len(code) > 32 or "\n" in code:
+    if not code:
         return " "
+    if len(code) > 32 or "\n" in code:
+        return " the command shown " if re.match(r"(?:sudo |pip|npm|git|apt|pacman|cargo|"
+                                                 r"python|make|docker|curl|cd )", code) \
+            else " the code shown "
     code = re.sub(r"^.*/", "", code) if "/" in code and " " not in code else code
     return " " + re.sub(r"[-_=<>{}()\[\];$`\\|]+", " ", code).strip() + " "
 
@@ -637,10 +646,15 @@ def tts_clean(text):
     voice reads it like a person would."""
     if not isinstance(text, str):
         return ""
-    s = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)     # code blocks
+    # code blocks: a fence closes only with one as long (```` holds ```), and
+    # one left open (a reply cut short) runs to the end
+    s = re.sub(r"(?ms)^[ \t]*(`{3,}|~{3,}).*?(?:^[ \t]*\1[ \t]*$|\Z)", " ", text)
+    s = re.sub(r"```.*?```", " ", s, flags=re.DOTALL)        # ...and inline ones
     s = re.sub(r"`([^`]*)`", _say_code, s)                     # inline code (pipes and all)
     s = re.sub(r"(?m)^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$", "", s)   # table rules
     s = re.sub(r"(?m)^\s*\|.*\|\s*$", "", s)                  # table rows: | a | b |
+    s = re.sub(r"(?m)^[ \t]*>+[ \t]?", "", s)                 # quote marks (not "greater than")
+    s = re.sub(r"<((?:https?|ftp)://[^>\s]+)>", r"\1", s)        # <https://autolinks>
     s = re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", s)               # images
     s = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", s)            # links -> label
     s = _URL_RE.sub(lambda m: " link" + re.search(r"[.,;:!?)\]]*$", m.group(0)).group(0) + " ",
@@ -649,7 +663,7 @@ def tts_clean(text):
         m.group(0).rstrip("/").rsplit("/", 1)[-1]) + " ", s)  # paths: just the name
     # headings and bullets end in a pause, not run into the next line
     s = re.sub(r"(?m)^\s*#{1,6}\s*(.+?)\s*$", lambda m: m.group(1).rstrip(".:") + ".", s)
-    s = re.sub(r"(?m)^\s*(?:[-*+]|\d+[.)])\s+(.+?)\s*$",
+    s = re.sub(r"(?m)^\s*(?:[-*+]|\d{1,3}[.)])\s+(.+?)\s*$",
                lambda m: m.group(1) + ("" if m.group(1)[-1:] in ".!?:;" else "."), s)
     for pat, rep_ in _ABBR:
         s = re.sub(pat, rep_, s, flags=re.I)
@@ -658,10 +672,10 @@ def tts_clean(text):
     s = re.sub(r"(?<=\s)~(?=\d)", "about ", s)
     s = re.sub(r"\bv(\d+(?:\.\d+)+)\b", r"version \1", s)
     s = _EMOJI.sub(" ", s)
-    s = re.sub(r"(?<=[\w)])\s+>=\s+(?=[\w(])", " at least ", s)
-    s = re.sub(r"(?<=[\w)])\s+<=\s+(?=[\w(])", " at most ", s)
-    s = re.sub(r"(?<=[\w)])\s+>\s+(?=[\w(])", " greater than ", s)
-    s = re.sub(r"(?<=[\w)])\s+<\s+(?=[\w(])", " less than ", s)
+    s = re.sub(r"(?<=[\w)])[ \t]+>=[ \t]+(?=[\w(])", " at least ", s)
+    s = re.sub(r"(?<=[\w)])[ \t]+<=[ \t]+(?=[\w(])", " at most ", s)
+    s = re.sub(r"(?<=[\w)])[ \t]+>[ \t]+(?=[\w(])", " greater than ", s)
+    s = re.sub(r"(?<=[\w)])[ \t]+<[ \t]+(?=[\w(])", " less than ", s)
     s = re.sub(r"(?<=\d)\s*[*\u00d7]\s*(?=\d)", " times ", s)
     s = re.sub(r"\b([CF])#", r"\1 sharp", s)
     s = re.sub(r"(\*\*|__|~~)(.+?)\1", r"\2", s)               # bold, strike
@@ -672,7 +686,7 @@ def tts_clean(text):
     s = re.sub(r"\s+([.,!?;:)])", r"\1", s)
     s = re.sub(r"\(\s+", "(", s)
     s = re.sub(r"[ \t]+", " ", s)
-    s = re.sub(r"\n{2,}", "\n", s)
+    s = re.sub(r"[ \t]*\n\s*", "\n", s)                       # blank and space-only lines
     return s.strip()
 
 
@@ -784,10 +798,14 @@ def speak(text, settings=None):
         _TTS_GEN[0] += 1
         gen = _TTS_GEN[0]
 
-    if engine_for(s) == "kokoro":
+    eng = engine_for(s)
+    if eng == "kokoro":
         threading.Thread(target=_speak_kokoro, args=(clean, gen, s), daemon=True,
                          name="speak").start()
         return
+    # the engine that CAN speak (asked for Kokoro while it's down -> Piper),
+    # or _synth would try only the one asked for and say nothing
+    s = dict(s, voice_engine=eng or "auto")
 
     def worker():
         chunks = tts_chunks(clean)
@@ -885,6 +903,7 @@ def _speak_kokoro(clean, gen, s):
             if gen != _TTS_GEN[0]:
                 break
             out = str(CONFIG_DIR / f".say-{gen}-{n}.pcm")
+            epoch = KOKORO.epoch
             try:
                 KOKORO.synth(ch, voice, speed, out)
                 with open(out, "rb") as fh:
@@ -898,6 +917,8 @@ def _speak_kokoro(clean, gen, s):
                     os.unlink(out)
                 except OSError:
                     pass
+            if pcm is None and (epoch != KOKORO.epoch or gen != _TTS_GEN[0]):
+                break                   # stopped on purpose (closing, reinstalling): not broken
             if pcm is None:
                 # broken: stop here rather than restart it for every chunk, and
                 # let the other voices speak for a few minutes

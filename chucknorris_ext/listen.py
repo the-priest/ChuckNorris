@@ -73,6 +73,7 @@ class Ears:
         self.on_event = None
         self.busy = False
         self.cancel_pending = False
+        self.listen_sent = False
 
     def alive(self):
         return self.proc is not None and self.proc.poll() is None
@@ -112,6 +113,8 @@ class Ears:
                         except Exception:
                             pass
                 if self.proc is not me:
+                    if self.proc is None:
+                        self.busy = False           # stopped mid-utterance: the mic is free
                     return                          # replaced (reinstall, stop): not an error
                 was_busy, self.busy = self.busy, False
                 if not got_ready:
@@ -142,6 +145,7 @@ class Ears:
             on_event({"event": "error", "error": status()[1]})
             return False
         self.cancel_pending = False
+        self.listen_sent = False
         self.on_event = on_event
         self.busy = True                        # from here a cancel counts, even mid-load
         try:
@@ -155,10 +159,16 @@ class Ears:
             on_event({"event": "cancelled"})
             return False
         self._send({"cmd": "listen", "recorder": argv, "max_wait": max_wait, "max_len": max_len})
+        self.listen_sent = True
+        if self.cancel_pending:                 # cancelled while the listen was being sent
+            self.cancel_pending = False
+            self._send({"cmd": "cancel"})
         return True
 
     def cancel(self):
-        if self.busy and not self.alive():
+        if self.busy and not self.listen_sent:
+            # still loading the model (the server would drop a cancel that
+            # arrives before the listen): listen() honours this once it's up
             self.cancel_pending = True
             return
         if self.alive() and self.busy:

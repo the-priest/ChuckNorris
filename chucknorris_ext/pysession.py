@@ -157,6 +157,31 @@ _kernel()
 
 
 
+def _descendants(pid):
+    """Every process started under pid (children, theirs, ...), from /proc."""
+    kids = {}
+    try:
+        names = os.listdir("/proc")
+    except OSError:
+        return []
+    for name in names:
+        if not name.isdigit():
+            continue
+        try:
+            with open(f"/proc/{name}/stat", "rb") as fh:
+                stat = fh.read()
+            ppid = int(stat[stat.rindex(b")") + 2:].split()[1])   # after "(comm) S"
+        except (OSError, ValueError, IndexError):
+            continue
+        kids.setdefault(ppid, []).append(int(name))
+    out, todo = [], [pid]
+    while todo:
+        for k in kids.get(todo.pop(), []):
+            out.append(k)
+            todo.append(k)
+    return out
+
+
 class PySession:
     """A persistent interpreter. Thread-safe: runs are serialised."""
 
@@ -237,6 +262,13 @@ class PySession:
     def close(self):
         if self.proc is not None:
             if self.proc.poll() is None:
+                # inside a sandbox the kernel is in its own session and PID
+                # namespace: killing bubblewrap's group alone orphans it
+                for pid in _descendants(self.proc.pid):
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except OSError:
+                        pass
                 self._signal(signal.SIGKILL)
                 try:
                     self.proc.wait(timeout=3)
