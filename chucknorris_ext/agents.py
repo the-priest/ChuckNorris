@@ -47,12 +47,14 @@ def _clip(text, limit):
 
 
 def run_subagent(brief, call_model, tools, max_steps=8, on_event=None,
-                 should_stop=None, context=""):
+                 should_stop=None, context="", wrap_up=None):
     """Run one sub-agent to completion. Returns its report (a string).
 
     call_model(messages) -> str     one blocking model call
     tools[name](arg) -> str         read-only tool implementations
     on_event(text)                  progress ("grep TODO src/") for the UI
+    wrap_up() -> bool               the kernel asked it to finish (TERM, or its
+                                    quota is spent): its next call writes the report
     """
     msgs = [{"role": "system", "content": SUB_PROMPT + ("\n\n" + context if context else "")},
             {"role": "user", "content": brief}]
@@ -60,6 +62,11 @@ def run_subagent(brief, call_model, tools, max_steps=8, on_event=None,
     for step in range(max(1, max_steps)):
         if should_stop and should_stop():
             return "(stopped before finishing)"
+        if wrap_up and wrap_up() and step > 0:
+            msgs.append({"role": "user", "content":
+                         "You are out of budget. Write your REPORT now from what you have "
+                         "found so far; say what you could not finish."})
+            return (call_model(msgs) or "").strip() or "(no report)"
         reply = call_model(msgs) or ""
         calls = TOOL_RE.findall(reply)
         if not calls:

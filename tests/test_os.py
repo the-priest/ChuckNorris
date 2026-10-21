@@ -1,0 +1,227 @@
+import os, sys
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+os.chdir(_ROOT)
+sys.path.insert(0, os.path.join(_ROOT, "tests"))
+sys.path.insert(0, _ROOT)
+
+"""Chuck OS (docs/OS.md, roadmap phases 16-21): the agent kernel on its own,
+then wired into the real window on the stub toolkit."""
+import threading
+import time
+
+from chucknorris_ext import kernel as K
+
+fails = 0
+
+
+def check(cond, label, detail=""):
+    global fails
+    if cond:
+        print(f"  [OK]   {label}")
+    else:
+        fails += 1
+        print(f"  [FAIL] {label}  {str(detail)[:300]}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+print("\n--- the kernel: processes, quotas, accounting ---")
+k = K.Kernel(slots=2)
+root = k.spawn("chuck", kind="chat", quota={"tokens": 10000})
+child = k.spawn("survey", parent=root.pid, quota={"tokens": 50000})
+check(child.quota["tokens"] == 10000, "a child's quota is clipped to what its parent has left",
+      child.quota)
+grand = k.spawn("deeper", parent=child.pid)
+check(grand.quota["tokens"] == 10000, "and a grandchild inherits the limit")
+k.charge(grand.pid, prompt=1000, completion=200, usd=0.01)
+check(grand.tokens() == 1200 and child.tokens() == 1200 and root.tokens() == 1200
+      and abs(root.total["usd"] - 0.01) < 1e-9 and root.own["calls"] == 0,
+      "a call is charged to the process and every ancestor")
+child2 = k.spawn("later", parent=root.pid)
+check(child2.quota["tokens"] == 8800, "a later child gets only what's left")
+
+# ═══════════════════════════════════════════════════════════════════════════
+print("\n--- the scheduler ---")
+k = K.Kernel(slots=1)
+holder = k.spawn("holder")
+k.acquire(holder.pid)
+order = []
+procs = [k.spawn(n, nice=nv) for n, nv in (("low", 5), ("normal", 0), ("high", -5))]
+
+
+def ask(p):
+    k.acquire(p.pid)
+    order.append(p.name)
+    time.sleep(0.05)
+    k.release(p.pid)
+
+
+ths = []
+for p in procs:
+    t = threading.Thread(target=ask, args=(p,), name="srv-ask")
+    t.start()
+    ths.append(t)
+    time.sleep(0.05)
+k.release(holder.pid)
+for t in ths:
+    t.join(5)
+check(order == ["high", "normal", "low"], "slots go to the highest priority first", order)
+
+k = K.Kernel(slots=1)
+a, b = k.spawn("a"), k.spawn("b")
+k.signal(b.pid, K.STOP)
+got = []
+t = threading.Thread(target=lambda: (k.acquire(b.pid), got.append("b")), name="srv-b")
+t.start()
+time.sleep(0.4)
+check(not got and b.state == K.STOPPED, "a stopped process never gets a slot", b.state)
+k.signal(b.pid, K.CONT)
+t.join(3)
+check(got == ["b"], "CONT lets it run again")
+k.release(b.pid)
+
+k = K.Kernel(slots=1)
+p = k.spawn("busy")
+k.acquire(p.pid)
+k.signal(p.pid, K.STOP)
+check(p.state == K.RUNNING, "STOP lets a call in flight finish")
+k.release(p.pid)
+check(p.state == K.STOPPED, "and parks the process when it does")
+
+# ═══════════════════════════════════════════════════════════════════════════
+print("\n--- quotas: TERM, one last call, then KILL ---")
+k = K.Kernel(slots=2)
+p = k.spawn("spender", quota={"tokens": 1000})
+k.acquire(p.pid); k.charge(p.pid, 900, 200); k.release(p.pid)
+check(k.over_quota(p.pid) == "token quota reached", "over its quota", k.over_quota(p.pid))
+ok = k.acquire(p.pid)
+check(ok and k.terminating(p.pid), "it gets one more call, flagged TERM, to write its report")
+k.release(p.pid)
+try:
+    k.acquire(p.pid)
+    killed = False
+except K.ProcessKilled:
+    killed = True
+check(killed and p.state == K.KILLED, "and is killed if it asks for another")
+
+k = K.Kernel(slots=1)
+h = k.spawn("h")
+k.acquire(h.pid)
+w = k.spawn("waiter")
+res = []
+
+
+def wait_slot():
+    try:
+        k.acquire(w.pid)
+        res.append("granted")
+    except K.ProcessKilled:
+        res.append("killed")
+t = threading.Thread(target=wait_slot, name="srv-w")
+t.start()
+time.sleep(0.3)
+k.signal(w.pid, K.KILL)
+t.join(3)
+check(res == ["killed"], "KILL wakes a process waiting for a slot and stops it", res)
+
+k = K.Kernel()
+par = k.spawn("parent")
+kids = [k.spawn(f"kid{i}", parent=par.pid) for i in range(3)]
+k.signal(par.pid, K.KILL)
+check(all(c.state == K.KILLED for c in kids), "KILL takes the children with it")
+info = k.signal(kids[0].pid, K.INFO)
+check(info["state"] == "killed" and info["name"] == "kid0", "INFO answers without a model call")
+
+# ═══════════════════════════════════════════════════════════════════════════
+print("\n--- IPC, wait, the journal ---")
+k = K.Kernel()
+a, b = k.spawn("a"), k.spawn("b")
+k.send(b.pid, "found the bug in auth.py:41", sender=a.pid)
+m = k.recv(b.pid)
+check(m and m[0] == a.pid and "auth.py:41" in m[1] and k.recv(b.pid) is None,
+      "mailboxes deliver once, in order")
+k.post("api-base", "https://api.example.com", by=a.pid)
+check(k.read("api-base") == "https://api.example.com", "the blackboard is shared")
+threading.Timer(0.2, lambda: k.exit(b.pid, 0, "REPORT")).start()
+check(k.wait(b.pid, timeout=3) == (0, "REPORT"), "wait() returns the exit status and result")
+check(any(e[2] == "exit" for e in k.events(b.pid)), "and the journal recorded it")
+check([r["pid"] for r in k.ps()] == [a.pid], "ps lists the live processes")
+
+# ═══════════════════════════════════════════════════════════════════════════
+print("\n--- in the app: the chat is PID 1, sub-agents are processes ---")
+import tempfile
+from pathlib import Path
+from sim import cn, new_win, type_and_send, settle, ScriptedBackend, FAILS
+
+tmp = Path(tempfile.mkdtemp(prefix="chuck_os_"))
+ws = tmp / "proj"
+ws.mkdir()
+(ws / "app.py").write_text("print('hello')\n")
+
+
+class SubBackend(ScriptedBackend):
+    """Main replies come from the script; sub-agents answer by their brief:
+    'loop' never stops calling tools (a runaway), others report at once."""
+    def stream(self, messages, on_delta, on_done, on_error, vision=False,
+               should_stop=None, attempts=3, on_open=None):
+        sysmsg = messages[0]["content"] if messages else ""
+        if sysmsg.startswith("You are a sub-agent"):
+            brief = messages[1]["content"]
+            if "out of budget" in str(messages[-1].get("content")):
+                on_delta("REPORT (partial): stopped at the budget")
+            elif brief.startswith("loop"):
+                on_delta("```grep x\n```\n" + "padding " * 400)
+            elif brief.startswith("slow"):
+                time.sleep(1.5)
+                on_delta("REPORT: slow one done")
+            else:
+                on_delta(f"REPORT: {brief} found in app.py")
+            self.last_usage = {"prompt": 1000, "completion": 200, "cached": 0, "reasoning": 0}
+            on_done()
+            return
+        super().stream(messages, on_delta, on_done, on_error, vision, should_stop,
+                       attempts, on_open)
+
+
+w = new_win([], tmp)
+w.set_agent_mode(True, announce=False)
+w.set_workspace(ws, announce=False)
+check(w.kernel is not None and w.kernel.procs[w._pid1].name == "chuck", "the chat is PID 1")
+w.backend = SubBackend(["```task\nfind hello\n```\n```task\nfind print\n```", "Both reported."])
+type_and_send(w, "survey in parallel")
+subs = [r for r in w.kernel.ps(all=True) if r["kind"] == "subagent"]
+check(len(subs) == 2 and all(r["state"] == "done" for r in subs) and all(r["tokens"] >= 1200 for r in subs),
+      "each sub-agent ran as its own process, charged for its calls", subs)
+root = w.kernel.procs[w._pid1]
+check(root.tokens() >= sum(r["tokens"] for r in subs) and root.own["calls"] >= 1,
+      "PID 1's total includes its children's tokens and its own calls")
+w.settings["subagent_tokens"] = 5000
+w.backend = SubBackend(["```task\nloop forever\n```", "ok"])
+type_and_send(w, "runaway")
+r = [x for x in w.kernel.ps(all=True) if x["name"].startswith("loop")][-1]
+h = " ".join(str(m.get("content")) for m in w.history)
+check(r["state"] in ("done", "failed", "killed") and "REPORT (partial)" in h,
+      "a runaway sub-agent hits its quota, is asked to wrap up, and reports what it has", r)
+w.settings["subagent_tokens"] = 250000
+w.entry.get_buffer().set_text("/top")
+w.on_send()
+texts = [x.get_text() for x in w.msgbox.walk() if isinstance(x.get_text(), str)]
+check("TOP" in texts and "PID" in texts and "chuck" in texts and any("model slots" in t for t in texts),
+      "/top shows the process table", [t for t in texts if "slots" in t])
+w.backend = SubBackend(["```task\nslow one\n```\n```task\nslow two\n```", "ok"])
+w.entry.get_buffer().set_text("two slow ones")
+w.on_send()
+time.sleep(0.5)
+live = [x for x in w.kernel.ps() if x["kind"] == "subagent"]
+check(len(live) == 2, "while they run, both are live processes", live)
+check(w.process_command("kill", str(live[0]["pid"])) and w.kernel.procs[live[0]["pid"]].state == "killed",
+      "/kill ends one sub-agent")
+w.stop_run()
+time.sleep(0.3)
+check(all(x["state"] != "running" for x in w.kernel.ps() if x["kind"] == "subagent"),
+      "and Stop ends the rest of the turn's sub-agents")
+settle()
+check(w.process_command("kill", str(w._pid1)) is False, "PID 1 can't be killed from /kill (Esc stops a turn)")
+
+print(f"\nTOTAL OS FAILURES: {fails}")
+assert fails == 0 and not FAILS, "OS regressions present"
+print("ALL OS TESTS PASSED")

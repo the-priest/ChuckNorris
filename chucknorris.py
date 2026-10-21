@@ -119,6 +119,7 @@ _lsp = _optional("lsp")
 _checkpoint = _optional("checkpoint")
 _listen = _optional("listen")
 _codesearch = _optional("codesearch")
+_kernel = _optional("kernel")
 if _pricing is None:
     class _pricing:                     # noqa: N801  — the meter, minus prices
         """Stand-in so a partial install still launches: tokens are counted,
@@ -3412,6 +3413,11 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._acted_since_nudge = False
         self._jobs = {}                 # background jobs: name -> {proc, log, cmd, card}
         self._py = None                 # the ```py``` session, started on first use
+        # the agent kernel (docs/OS.md): this chat is PID 1; every sub-agent
+        # is a scheduled, metered process under it
+        self.kernel = (_kernel.Kernel(slots=self.cfg("agent_slots", 4, 1, 16))
+                       if _kernel is not None else None)
+        self._pid1 = self.kernel.spawn("chuck", kind="chat").pid if self.kernel else None
         # MCP servers from ~/.config/chucknorris/mcp.json, started in the
         # background; when their tool lists arrive the system prompt is rebuilt
         self.MCP_CONFIG = CONFIG_DIR / "mcp.json"
@@ -5404,6 +5410,10 @@ class ChuckWindow(Adw.ApplicationWindow):
             kill_live_commands()
         except Exception:
             pass
+        if self.kernel is not None:             # every agent process ends with the window
+            for r in self.kernel.ps():
+                if r["pid"] != self._pid1:
+                    self.kernel.signal(r["pid"], _kernel.KILL)
         try:
             if self._mcp is not None:
                 self._mcp.stop_all()
@@ -5647,6 +5657,10 @@ class ChuckWindow(Adw.ApplicationWindow):
             return
         self._cancelled = True
         self._gen += 1
+        if self.kernel is not None:             # Stop ends this turn's sub-agents too
+            for r in self.kernel.ps():
+                if r["ppid"] == self._pid1 and r["kind"] == "subagent":
+                    self.kernel.signal(r["pid"], _kernel.KILL)
         # reset the tool-loop so nothing re-fires.
         # This said `self._hops = MAX_TOOL_HOPS` and claimed to block further
         # hops — but the cap it is compared against is cfg('research_hops'),
@@ -5895,8 +5909,9 @@ class ChuckWindow(Adw.ApplicationWindow):
         characters per token, the usual rule of thumb."""
         return max(0, int(chars / 4))
 
-    def _account(self, sent_chars, recv_chars, vision=False, usage=None, model=None):
-        """Book one model call into this chat's and this session's totals."""
+    def _account(self, sent_chars, recv_chars, vision=False, usage=None, model=None, pid=None):
+        """Book one model call into this chat's and this session's totals, and
+        into the kernel: to the process that made it and its ancestors."""
         u = usage if usage is not None else getattr(self.backend, "last_usage", None)
         est = not u
         if est:
@@ -5918,6 +5933,9 @@ class ChuckWindow(Adw.ApplicationWindow):
             else:
                 tot["cost"] += c
         self._tok_in, self._tok_out = self._usage["prompt"], self._usage["completion"]
+        if self.kernel is not None:
+            self.kernel.charge(pid or self._pid1, int(u.get("prompt") or 0),
+                               int(u.get("completion") or 0), c or 0.0)
         self._paint_meter()
 
     def _meter(self, sent_chars=0, recv_chars=0):
@@ -7181,16 +7199,28 @@ class ChuckWindow(Adw.ApplicationWindow):
         return {"search": search, "fetch": fetch, "read": read, "grep": grep,
                 "glob": glob, "map": map_}
 
-    def _sub_call(self):
+    def _sub_call(self, pid=None):
         """A blocking model call for a sub-agent. Each gets its own Backend so
-        concurrent calls never overwrite each other's usage record."""
+        concurrent calls never overwrite each other's usage record. With a
+        kernel pid, each call waits for a scheduler slot (and may be told to
+        stop) and is charged to that process."""
         gen = self._gen
+        kern = self.kernel if pid is not None else None
 
         def call(messages):
             if self._over_cap():
                 # sub-agents spend real money too: eight of them must not run
                 # on past the cap while the main loop waits to ask
                 raise RuntimeError("the chat's spending cap is reached")
+            if kern is not None:
+                kern.acquire(pid)               # raises ProcessKilled when it may not go on
+                try:
+                    return model_call(messages)
+                finally:
+                    kern.release(pid)
+            return model_call(messages)
+
+        def model_call(messages):
             b = Backend(self.settings) if isinstance(self.backend, Backend) else self.backend
             out, err = [], []
             stale = lambda: self._cancelled or gen != self._gen   # noqa: E731
@@ -7213,7 +7243,8 @@ class ChuckWindow(Adw.ApplicationWindow):
             u, txt = getattr(b, "last_usage", None) or {}, "".join(out)
             # the model that ANSWERED: a fallback is priced as itself
             mdl = getattr(b, "last_model", None) or (b.model() if hasattr(b, "model") else None)
-            GLib.idle_add(lambda: (self._account(sent, len(txt), usage=u, model=mdl), False)[1])
+            GLib.idle_add(lambda: (self._account(sent, len(txt), usage=u, model=mdl, pid=pid),
+                                   False)[1])
             self._note_progress()
             return txt
         return call
@@ -7226,26 +7257,52 @@ class ChuckWindow(Adw.ApplicationWindow):
         steps = self.cfg("subagent_steps", 8, 2, 20)
         ctx = _now_line() + (f"\nWorking folder: {self.workspace}" if self.workspace else "")
         tools = self._sub_tools()
-        call = self._sub_call()
         gen = self._gen
+        kern = self.kernel
+        quota = {"tokens": self.cfg("subagent_tokens", 250000, 5000, 5000000)}
+        procs = [kern.spawn(b.strip().splitlines()[0][:60] if b.strip() else "sub-agent",
+                            kind="subagent", brief=b, parent=self._pid1, quota=quota)
+                 if kern is not None else None for b in briefs]
+        for row, pr in zip(rows, procs):
+            if pr is not None:
+                row["pid"] = pr.pid
         self._busy(True)
 
         def one(i, brief):
+            pr = procs[i]
+            pid = pr.pid if pr is not None else None
+            call = self._sub_call(pid)
             GLib.idle_add(self._sub_update, rows[i], "running", "starting")
 
             def ev(txt):
                 self._note_progress()
+                if kern is not None:
+                    kern.note(pid, txt)
                 GLib.idle_add(self._sub_update, rows[i], "running", txt)
+
+            def stop():
+                return (self._cancelled or gen != self._gen
+                        or (kern is not None and kern.should_stop(pid)))
             try:
                 rep = _agents.run_subagent(
                     brief, call, tools, max_steps=steps, on_event=ev, context=ctx,
-                    should_stop=lambda: self._cancelled or gen != self._gen)
-                stopped = self._cancelled or gen != self._gen
+                    should_stop=stop,
+                    # asked to finish, or already past its quota: the next
+                    # call (its last) writes the report
+                    wrap_up=(lambda: kern.terminating(pid) or bool(kern.over_quota(pid)))
+                    if kern is not None else None)
+                stopped = stop()
                 # stopped part-way: what it has is a partial report, not "done"
                 GLib.idle_add(self._sub_update, rows[i], "stopped" if stopped else "done", "", rep)
+                if kern is not None:
+                    kern.exit(pid, 0 if not stopped else 1, rep)
             except Exception as ex:
-                rep = f"(sub-agent failed: {ex})"
-                GLib.idle_add(self._sub_update, rows[i], "fail", str(ex)[:80], rep)
+                killed = _kernel is not None and isinstance(ex, _kernel.ProcessKilled)
+                rep = (f"(stopped: {ex})" if killed else f"(sub-agent failed: {ex})")
+                GLib.idle_add(self._sub_update, rows[i], "stopped" if killed else "fail",
+                              str(ex)[:80], rep)
+                if kern is not None:
+                    kern.exit(pid, 1, rep)
             return rep
 
         def work():
@@ -8327,6 +8384,122 @@ class ChuckWindow(Adw.ApplicationWindow):
                 kvoice) if use_kokoro else voice.test_piper()),
                 daemon=True).start()
         return rows
+
+    # ── the kernel: /top and process control ──
+    _SIG = {"kill": "KILL", "stop": "STOP", "cont": "CONT", "term": "TERM"}
+
+    def process_command(self, cmd, arg):
+        if self.kernel is None:
+            self._sys_note("The kernel module is missing \u2014 reinstall Chuck.", "danger")
+            return False
+        parts = arg.split()
+        try:
+            pid = int(parts[0])
+        except (IndexError, ValueError):
+            self._sys_note(f"/{cmd} needs a process id \u2014 /top lists them.", "dim")
+            return False
+        if pid == self._pid1 and cmd != "nice":
+            self._sys_note("PID 1 is this chat \u2014 use Stop (Esc) to stop a turn.", "dim")
+            return False
+        if cmd == "nice":
+            try:
+                ok = self.kernel.renice(pid, int(parts[1]))
+            except (IndexError, ValueError):
+                self._sys_note("/nice <pid> <priority from -10 to 10>", "dim")
+                return False
+        else:
+            ok = self.kernel.signal(pid, self._SIG[cmd])
+        p = self.kernel.procs.get(pid)
+        self._sys_note((f"\u25a0 {cmd} {pid} ({p.name}) \u2192 {p.state}" if ok and p
+                        else f"No process {pid}."), "dim" if ok else "danger")
+        return bool(ok)
+
+    def show_top(self):
+        """/top: every agent process, live: state, priority, tokens, spend,
+        rate, run time and what it is doing, with Stop / Kill per process."""
+        if self.kernel is None:
+            self._sys_note("The kernel module is missing \u2014 reinstall Chuck.", "danger")
+            return False
+        card, head, body, foot = self._card_shell("TOP", lambda: self._top_text())
+        summary = Gtk.Label(xalign=0, wrap=True); summary.add_css_class("dim")
+        body.append(summary)
+        grid = Gtk.Grid(column_spacing=14, row_spacing=4)
+        body.append(grid)
+        self._log_pin(card)
+        live = {"rows": []}
+
+        def paint():
+            if self.kernel is None:
+                return False
+            rows = self.kernel.ps(all=True)
+            rows = [r for r in rows if r["state"] in _kernel.LIVE] + \
+                [r for r in rows if r["state"] not in _kernel.LIVE][-12:]
+            running = sum(1 for r in rows if r["state"] == "running")
+            k = self.kernel
+            tot = k.procs[self._pid1].info(k.clock()) if self._pid1 in k.procs else {}
+            summary.set_text(f"{sum(1 for r in rows if r['state'] in _kernel.LIVE)} live \u00b7 "
+                             f"{running} running \u00b7 model slots {len(k._running)}/{k.slots} "
+                             f"\u00b7 {_pricing.fmt_tokens(tot.get('tokens', 0))} tokens \u00b7 "
+                             f"{_pricing.fmt_usd(tot.get('usd', 0))} this session")
+            child = grid.get_first_child()
+            while child is not None:
+                nxt = child.get_next_sibling()
+                grid.remove(child)
+                child = nxt
+            for c, h in enumerate(("PID", "NAME", "STATE", "NI", "TOKENS", "COST", "TOK/S",
+                                   "TIME", "DOING", "")):
+                hl = Gtk.Label(label=h, xalign=0); hl.add_css_class("card-kind")
+                grid.attach(hl, c, 0, 1, 1)
+            for i, r in enumerate(rows, 1):
+                cells = [str(r["pid"]), r["name"], r["state"] + (" \u23f3" if r["terminating"]
+                                                                     else ""),
+                         str(r["nice"]), _pricing.fmt_tokens(r["tokens"]),
+                         _pricing.fmt_usd(r["usd"]), f"{r['rate']:.0f}",
+                         f"{int(r['seconds']) // 60}:{int(r['seconds']) % 60:02d}",
+                         r["activity"] or ""]
+                for c, txt in enumerate(cells):
+                    lb = Gtk.Label(label=txt, xalign=0)
+                    lb.add_css_class("dim" if r["state"] not in _kernel.LIVE else "mono")
+                    if c == 2:                  # the state, at a glance
+                        lb.add_css_class({"running": "ok", "killed": "danger",
+                                          "failed": "danger"}.get(r["state"], "dim"))
+                    if c in (1, 8):             # long names and activities never widen the card
+                        try:
+                            lb.set_ellipsize(Pango.EllipsizeMode.END)
+                            lb.set_max_width_chars(22 if c == 1 else 30)
+                            lb.set_tooltip_text(r["name"] if c == 1 else r["activity"])
+                        except Exception:
+                            pass
+                        if c == 8:
+                            lb.set_hexpand(True)
+                    grid.attach(lb, c, i, 1, 1)
+                if r["state"] in _kernel.LIVE and r["pid"] != self._pid1:
+                    acts = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+                    paused = r["state"] == "stopped"
+                    for lab, cmd_ in (("Continue" if paused else "Pause",
+                                       "cont" if paused else "stop"), ("Kill", "kill")):
+                        b = Gtk.Button(label=lab); b.add_css_class("quick")
+                        b.connect("clicked", lambda _b, p=r["pid"], c_=cmd_: (
+                            self.process_command(c_, str(p)), paint()))
+                        acts.append(b)
+                    grid.attach(acts, 9, i, 1, 1)
+            live["rows"] = rows
+            return True
+
+        def tick():
+            # live while any agent is: then one last paint, and it rests
+            paint()
+            return any(r["state"] in _kernel.LIVE and r["pid"] != self._pid1
+                       for r in live["rows"])
+        paint()
+        GLib.timeout_add(1000, tick)
+        return True
+
+    def _top_text(self):
+        if self.kernel is None:
+            return ""
+        return "\n".join(f"{r['pid']:>4} {r['name'][:24]:<24} {r['state']:<8} {r['tokens']:>8} "
+                         f"${r['usd']:.4f} {r['activity'][:40]}" for r in self.kernel.ps(all=True))
 
     # ── voice input: talk to Chuck ──
     def toggle_listen(self):
@@ -9496,6 +9669,9 @@ class ChuckWindow(Adw.ApplicationWindow):
         ("/export", "save this chat as Markdown"),
         ("/mcp [reload]", "MCP servers and their tools"),
         ("/doctor", "check your setup: key, model, browser, tools, errors"),
+        ("/top", "every agent process: state, tokens, spend, what it's doing"),
+        ("/kill /stop /cont <pid>", "end, pause or resume an agent process"),
+        ("/nice <pid> <-10..10>", "an agent's priority for the model (lower runs first)"),
         ("/update", "install the newest Chuck (then restart)"),
     ]
 
@@ -9527,6 +9703,10 @@ class ChuckWindow(Adw.ApplicationWindow):
             self.show_git_diff()
         elif cmd == "doctor":
             self.run_doctor()
+        elif cmd in ("top", "ps"):
+            self.show_top()
+        elif cmd in ("kill", "stop", "cont", "nice"):
+            self.process_command(cmd, arg)
         elif cmd == "rewind":
             self.show_rewind()
         elif cmd == "access":

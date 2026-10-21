@@ -186,3 +186,50 @@ reaches only local servers.
       they're installed.
 - [ ] README, CHANGELOG, screenshots on real GTK.
 - [ ] Prompt budget re-checked.
+
+## v18 — Chuck OS: an operating system for agents
+
+Tokens are the new CPU time, the context window is RAM, tools are syscalls
+and an agent is a process. The design is in `docs/OS.md`; tests in
+`tests/test_os.py`.
+
+### Phase 16 — the kernel
+
+- [x] **Processes.** Every agent is a process with a PID, a parent, a
+      priority and a quota of tokens, dollars and seconds; what it spends is
+      charged to it and every ancestor. The chat is PID 1; ```task```
+      sub-agents are processes under it.
+- [x] **A token scheduler.** Model calls take slots, granted by priority with
+      ageing (no starvation), never to a stopped process.
+- [x] **Quotas that end cleanly.** Past its quota a process is sent TERM and
+      gets one last call to report what it has, then KILL.
+- [x] **Signals, IPC, journal.** STOP/CONT/TERM/KILL/INFO, mailboxes, a shared
+      blackboard, an event journal per process.
+- [x] **`/top`**, `/kill`, `/stop`, `/cont`, `/nice`: a live process table.
+
+### Phase 17 — background agents and copy-on-write
+
+- [ ] `/spawn` a full agent that works in the background while you chat.
+- [ ] Each writer in its own git worktree; `/join` shows its diff and merges it
+      three-way, reporting conflicts.
+
+### Phase 18 — virtual memory for context
+
+- [ ] Long tool output paged out to a page store, with a page table in the
+      context; ```page``` brings it back exactly. Compaction only as a last resort.
+
+### Phase 19 — daemons
+
+- [ ] Agents that wake on a schedule, a file change, a failed unit, a disk
+      threshold or a changed command output, report to an inbox, and sleep.
+
+### Phase 20 — capabilities, programs, governor
+
+- [ ] Per-process capabilities checked at every syscall (children get subsets).
+- [ ] Installable agent programs (`/run reviewer …`).
+- [ ] A model governor: the cheapest model that can do each call.
+
+### Phase 21 — hibernate, replay, time travel
+
+- [ ] Every process checkpoints and survives a crash.
+- [ ] Replay a run from the journal; fork it from any step; `/strace`.
