@@ -38,12 +38,13 @@ cn._pic_from_file = lambda p, w=-1, h=-1: (gtkstub.Widget(),
                                            type("PB", (), {"get_height": lambda s: 100})())
 w = new_win(["```images\ncats\n```", "done"], tmp)
 t0 = time.time(); type_and_send(w, "show me cats"); el = time.time() - t0
-imgs = [e for e in w._log if e["kind"] == "image"]
-print(f"  downloads={len(where)} on-ui-thread={any(where)} bubbles={len(imgs)} in {el:.2f}s")
+imgs = [e for e in w._log if e["kind"] == "gallery"]      # pictures that come together share a card
+n_pics = sum(len(e["data"]["items"]) for e in imgs)
+print(f"  downloads={len(where)} on-ui-thread={any(where)} pictures={n_pics} cards={len(imgs)} in {el:.2f}s")
 if any(where):
     fail("image downloads ran on the UI thread — the window would freeze")
-if len(imgs) != 5:
-    fail(f"expected 5 image bubbles, got {len(imgs)}")
+if n_pics != 5 or len(imgs) != 1:
+    fail(f"expected 5 pictures in one card, got {n_pics} in {len(imgs)}")
 if el > 0.25:
     fail(f"downloads look serial ({el:.2f}s for 5 x 0.05s)")
 check_finished(w, "images")
@@ -62,7 +63,7 @@ print("--- a local image path is shown, not refused as binary ---")
 shot = _png(tmp / "screenshot.png")
 w2 = new_win([f"```read\n{shot}\n```", "that's it"], tmp)
 type_and_send(w2, "show me that screenshot")
-if not [e for e in w2._log if e["kind"] == "image"]:
+if not [e for e in w2._log if e["kind"] == "gallery"]:
     fail("local image path was not displayed")
 if not [m for m in w2.history
         if isinstance(m.get("content"), str) and "showed the image" in m["content"]]:

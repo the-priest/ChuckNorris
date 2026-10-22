@@ -358,6 +358,7 @@ window.palette { background-color: transparent; }
                border-radius: 16px 16px 4px 16px; padding: 10px 14px; }
 .user-bubble label { color: @ink; }
 .bot-bubble  { background: transparent; padding: 0; }
+.bot-bubble.waiting label { color: @mute; font-style: italic; }
 .prose       { color: @body; }
 .byline      { color: @ink; font-size: 12.5px; font-weight: 700; }
 .byline-meta { color: @faint; font-size: 11px; }
@@ -423,6 +424,9 @@ expander title:hover { color: @mute; }
 .thumb-btn { padding: 0; border-radius: 10px; border: 1px solid @line2; background: @surface;
              box-shadow: none; }
 .thumb-btn:hover { border-color: alpha(@accent, 0.45); }
+.gal-flow  { padding: 12px 13px 13px 13px; }
+.gal-flow > flowboxchild { padding: 0; background: none; }
+.gal-cap   { color: @mute; font-size: 11.5px; font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace; }
 .model-btn > button { background: transparent; border: none; box-shadow: none; color: @faint;
              font-size: 11.5px; padding: 2px 8px; min-height: 26px; border-radius: 8px; }
 .model-btn > button:hover, .model-btn > button:checked { color: @ink; background-color: @surface3; }
@@ -904,6 +908,9 @@ def _split_row(line):
     cells = [c.replace("\\|", "|").strip()
              for c in re.findall(r"(?:`[^`]*`|\\\||[^|`])+|(?<=\|)(?=\|)|^(?=\|)", line)]
     return cells if cells else [""]
+
+
+_PLACEHOLDERS = ("Thinking\u2026", "Working\u2026")
 
 
 def md_segments(text):
@@ -4479,6 +4486,8 @@ class ChuckWindow(Adw.ApplicationWindow):
             return _lane(self._build_plan(d.get("items") or [], e))
         if k == "image":
             return _lane(self._build_image_widget(d.get("path"), d.get("src")))
+        if k == "gallery":
+            return _lane(self._build_gallery(e))
         if k == "fold":
             return _lane(self._build_fold(d))
         return Gtk.Label(label="")
@@ -4565,7 +4574,8 @@ class ChuckWindow(Adw.ApplicationWindow):
         row.append(copy)
         w.append(row)
         e["tools_w"] = row
-        row.set_visible(bool((d.get("text") or "").strip()))
+        row.set_visible(bool((d.get("text") or "").strip()) and d.get("text") not in _PLACEHOLDERS
+                        and not d.get("after"))
         last = next((x for x in reversed(self._log) if x.get("kind") == "bot"), None)
         if last is e:
             prev = getattr(self, "_latest_tools", None)
@@ -4589,10 +4599,12 @@ class ChuckWindow(Adw.ApplicationWindow):
             return
         d = e["data"]
         txt = d.get("text", "") or ""
+        waiting = txt in _PLACEHOLDERS                # "Thinking…": nothing to read or copy yet
         try:
             content.set_visible(bool(txt.strip()))   # no empty prose box leaving a gap
             if e.get("tools_w") is not None:          # nothing to read aloud or copy
-                e["tools_w"].set_visible(bool(txt.strip()))
+                e["tools_w"].set_visible(bool(txt.strip()) and not waiting and not d.get("after"))
+            (content.add_css_class if waiting else content.remove_css_class)("waiting")
         except Exception:
             pass
         segs = md_segments(txt) if d.get("rich") else [("plain", txt)]
@@ -6031,10 +6043,32 @@ class ChuckWindow(Adw.ApplicationWindow):
         # a lone ``` left at the end (the model's stray closing fence) is noise
         return re.sub(r"\n?[ \t]*```[ \t]*$", "", shown).rstrip()
 
+    def _split_after_tools(self, text, agent=None):
+        """(what Chuck said BEFORE his last tool block, what he said AFTER it),
+        both as shown. "Written. Now let's render it." after a ```write block
+        belongs under the card it talks about, not above the work."""
+        if not text or "```" not in text:
+            return self._display_text(text, partial=True, agent=agent), ""
+        agent = self.agent_mode if agent is None else agent
+        tags = self._tool_tags(agent)
+        ends = [b["end"] for b in file_blocks(text)] if agent else []
+        for rx in (r"````(?:" + tags + r")(?![A-Za-z]).*?````",
+                   r"```(?:" + tags + r")(?![A-Za-z]).*?```"):
+            ends += [m.end() for m in re.finditer(rx, text, flags=re.DOTALL)]
+        if not ends:
+            return self._display_text(text, partial=True, agent=agent), ""
+        cut = max(ends)
+        return (self._display_text(text[:cut], partial=True, agent=agent),
+                self._display_text(text[cut:], partial=True, agent=agent))
+
     def _visible_stream_text(self):
         """The narration to show mid-stream, with tool blocks (closed or still
-        open) removed. Short-circuits for the common reply with no fences."""
-        return self._display_text(self._bot_text, partial=True)
+        open) removed. Short-circuits for the common reply with no fences.
+        What follows a finished tool block waits: it is shown under that
+        block's card, so it never flashes up above it first."""
+        if "```" not in (self._bot_text or ""):
+            return self._display_text(self._bot_text, partial=True)
+        return self._split_after_tools(self._bot_text)[0]
 
     def _paint_stream(self):
         self._paint_pending = False
@@ -6079,8 +6113,79 @@ class ChuckWindow(Adw.ApplicationWindow):
         except Exception:
             return Gtk.Label(label="[image unavailable]", xalign=0)
 
-    def _image_bubble(self, path, src_url=None):
-        self._log_add("image", {"path": path, "src": src_url})
+    def _image_bubble(self, path, src_url=None, label=None):
+        """Show a picture Chuck looked at or found. Pictures that arrive
+        together share ONE card, side by side and labelled, instead of a
+        stack of full-size images each with its own "looking at" line."""
+        item = {"path": path, "src": src_url,
+                "label": label or (None if src_url else os.path.basename(str(path)))}
+        last = self._log[-1] if self._log else None
+        if last is not None and last["kind"] == "gallery" and len(last["data"]["items"]) < 12:
+            last["data"]["items"].append(item)
+            flow = last.get("flow")
+            if flow is not None and last.get("w") is not None:
+                flow.append(self._gallery_thumb(item, len(last["data"]["items"])))
+                self._gallery_title(last)
+                return
+            last["w"] = None              # not on screen: rebuilt whole when it is
+            return
+        self._log_add("gallery", {"items": [item]})
+
+    def _gallery_title(self, e):
+        n = len(e["data"]["items"])
+        searched = any(it.get("src") for it in e["data"]["items"])
+        txt = ("FOUND" if searched else "LOOKED AT") + (f" \u00b7 {n}" if n > 1 else "")
+        if e.get("kind_w") is not None:
+            e["kind_w"].set_label(txt)
+        return txt
+
+    def _gallery_thumb(self, item, n):
+        """One picture in a gallery: a thumbnail you can click to open full
+        size, with its name under it."""
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+        box.add_css_class("gal-item")
+        path, src = item.get("path"), item.get("src")
+        try:
+            pic, _pb = _pic_from_file(path, 300, 210)
+        except Exception:
+            pic = Gtk.Label(label="image unavailable", xalign=0)
+            pic.add_css_class("dim")
+        btn = Gtk.Button(); btn.add_css_class("thumb-btn"); btn.set_child(pic)
+        btn.set_halign(Gtk.Align.START)
+        btn.set_tooltip_text("Open in Brave" if src else "Open full size")
+        btn.connect("clicked", lambda *_: open_in_brave(src) if src else _open_path(path))
+        box.append(btn)
+        cap = item.get("label")
+        if cap:
+            cl = Gtk.Label(label=cap, xalign=0)
+            cl.add_css_class("gal-cap")
+            try:
+                cl.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+                cl.set_max_width_chars(36)
+            except Exception:
+                pass
+            box.append(cl)
+        return box
+
+    def _build_gallery(self, e):
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        card.add_css_class("cmd-card"); card.add_css_class("gal-card")
+        head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        head.add_css_class("card-head")
+        kl = Gtk.Label(label="", xalign=0, hexpand=True)
+        kl.add_css_class("card-kind")
+        head.append(kl)
+        card.append(head)
+        e["kind_w"] = kl
+        self._gallery_title(e)
+        flow = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, homogeneous=False,
+                           column_spacing=12, row_spacing=12, max_children_per_line=6)
+        flow.add_css_class("gal-flow")
+        for i, it in enumerate(e["data"]["items"], 1):
+            flow.append(self._gallery_thumb(it, i))
+        card.append(flow)
+        e["flow"] = flow
+        return card
 
 
     # ── the meter ────────────────────────────────────────────────────────────
@@ -7299,8 +7404,7 @@ class ChuckWindow(Adw.ApplicationWindow):
                             "folder's access (/access) keeps hidden]")
             return
         if _is_image_path(spec) and os.path.isfile(full):
-            self._sys_note(f"\U0001F5BC {os.path.basename(full)}")
-            self._image_bubble(full)
+            self._image_bubble(full)            # the card names it
             self._tool_done(f"[showed the image {spec} to the user]")
             return
         rng = f":{start}-{end or ''}" if start else ""
@@ -7858,20 +7962,26 @@ class ChuckWindow(Adw.ApplicationWindow):
         root = self._workroot()
         if not os.path.isabs(full) and root is not None:
             full = str(root / full)
-        self._sys_note(f"\U0001F441 looking at {spec}"); self._busy(True)
+        shown = os.path.isfile(full)
+        if shown:
+            self._image_bubble(full, label=os.path.basename(spec))
+        else:
+            self._sys_note(f"\U0001F441 no image at {spec}")
+        self._busy(True)
 
         def work():
             if not os.path.isfile(full):
                 return f"[look: no such image: {spec}]"
-            return self._see(full, spec)
+            return self._see(full, spec, show=not shown)
         self._tool_thread(work, "look")
 
-    def _see(self, path, label):
+    def _see(self, path, label, show=True):
         pay = image_payload(path)
         if not pay:
             return f"[look: couldn't read {label} as an image]"
         self._tool_images.append(pay)
-        GLib.idle_add(self._image_bubble, path)
+        if show:
+            GLib.idle_add(self._image_bubble, path)
         return (f"[IMAGE of {label} is attached to this message \u2014 look at it carefully and "
                 "say what you see before deciding the next step]")
 
@@ -8415,7 +8525,9 @@ class ChuckWindow(Adw.ApplicationWindow):
         btn.set_visible(not same)
         head.append(btn)
         if diff and len(diff) > 2:
-            foot.append(self._diff_view(diff[2:], expanded=len(diff) <= 40))
+            # a small change to a file opens, so you see what changed; a NEW
+            # file is all "+" lines, the whole file: folded, one click away
+            foot.append(self._diff_view(diff[2:], expanded=len(diff) <= 40 and ch["before"] is not None))
         info = {"btn": btn, "pill": pill}
         btn.connect("clicked", lambda _b, c=ch: self._revert(c, by_user=True))
         self._log_pin(card)
@@ -12596,7 +12708,15 @@ class ChuckWindow(Adw.ApplicationWindow):
         path, before = self._snapshot(p, rel)
         ok, msg = _builder.edit_file(p, rel, blocks)
         if not ok:
-            self._sys_note("\u2717 " + msg, "danger")
+            # the model gets the exact reason; you get what it means
+            if "not found in" in msg:
+                self._sys_note(f"\u21bb {rel}: the lines to change weren't where Chuck expected "
+                               "\u2014 nothing was changed; he'll re-read it and retry", "dim")
+            elif "places in" in msg:
+                self._sys_note(f"\u21bb {rel}: the lines to change appear more than once "
+                               "\u2014 nothing was changed; he'll be more specific", "dim")
+            else:
+                self._sys_note("\u2717 " + msg, "danger")
             self._tool_feedback.append(f"[edit failed, nothing was changed: {msg}]")
             return
         try:
@@ -14586,7 +14706,8 @@ class ChuckWindow(Adw.ApplicationWindow):
         # Chuck's own narration is what shows in chat — never swallow it.
         # a step that is only tool blocks says nothing: its cards are the story
         # ("Working on it…" used to stay there long after the step was done)
-        self._set_bot_text(disp or ("" if acting else "Done."), rich=True)
+        shown, tail = (self._split_after_tools(text) if acting else (disp, ""))
+        self._set_bot_text(shown or ("" if acting else "Done."), rich=True)
         if blocked_agent:
             self._sys_note("Chat mode is on \u2014 nothing was run. Press Tab for Agent "
                            "mode to let Chuck act.", "dim")
@@ -14786,6 +14907,11 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._do_look(pth)
         for u in videos:                     # fire-and-forget download; not gated
             self._do_video(u)
+
+        if tail and not self._cancelled:
+            # what he said after the tools goes under their cards
+            self._log_add("bot", {"text": tail, "rich": True, "meta": "", "cont": True,
+                                  "after": True})
 
         # Dispatch is over: release the guard and decide the loop exactly once.
         self._dispatching = False

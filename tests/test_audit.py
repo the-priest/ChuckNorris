@@ -362,6 +362,58 @@ check(prose and not any("drawBoard" in b or "<html" in b for b in prose),
 check("couldn't tell" not in shown and "send it again" in shown, "a calm note, not an alarm")
 check((ws / "tetris.html").read_text() == page + "\n", "the resend is written whole")
 check_finished(w, "stray before")
+print("\n--- the chat reads in order and stays tidy ---")
+import struct, zlib
+
+
+def tiny_png(path):
+    raw = b"\x00\xff\x00\x00"
+    png = (b"\x89PNG\r\n\x1a\n" + b"".join(
+        struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xffffffff)
+        for t, d in ((b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)),
+                     (b"IDAT", zlib.compress(raw)), (b"IEND", b""))))
+    Path(path).write_bytes(png)
+
+
+ws = folder("layout")
+tiny_png(ws / "wide.png"); tiny_png(ws / "narrow.png")
+folds = []
+w = agent([f"Building it.\n```write page.html\n{page}\n```\nWritten. Now looking at it.",
+           "```look wide.png```\n```look narrow.png```", "Both look right."], ws)
+real_diff = w._diff_view
+w._diff_view = lambda lines, expanded=True, **k: (folds.append(expanded), real_diff(lines, expanded, **k))[1]
+type_and_send(w, "make a page")
+kinds = [(e["kind"], (e["data"] or {}).get("text", "")[:30]) for e in w._log
+         if e["kind"] in ("bot", "pinned", "gallery")]
+i_card = next((i for i, k in enumerate(kinds) if k[0] == "pinned"), -1)
+i_head = next((i for i, k in enumerate(kinds) if k[1].startswith("Building it.")), -1)
+i_tail = next((i for i, k in enumerate(kinds) if k[1].startswith("Written. Now looking")), -1)
+check(-1 < i_head < i_card < i_tail, "what Chuck says after a file block shows UNDER its card",
+      str(kinds))
+check(not any("Written. Now" in t for k, t in kinds[:max(i_card, 0)]), "and not above it")
+gal = [e for e in w._log if e["kind"] == "gallery"]
+check(len(gal) == 1 and [it["label"] for it in gal[0]["data"]["items"]] == ["wide.png", "narrow.png"],
+      "two looks share ONE labelled gallery card", str([e["data"] for e in gal]))
+check(not any(e["kind"] == "note" and "looking at" in str(e["data"].get("text", "")) for e in w._log),
+      "no separate 'looking at' lines")
+check(folds and folds[0] is False, "a NEW file's diff starts folded (no wall of code)")
+check_finished(w, "layout")
+e = w._log_add("bot", {"text": "Thinking\u2026", "rich": False, "meta": "", "cont": True})
+w._collapse_window(scroll=False)
+check(e.get("tools_w") is not None and not e["tools_w"].get_visible(),
+      "no play/copy buttons under a 'Thinking…' placeholder")
+w._bot_entry = e
+w._set_bot_text("A real answer.", rich=True)
+check(e["tools_w"].get_visible(), "they come back once there is a real answer")
+ws = folder("edit-miss")
+(ws / "a.py").write_text("x = 1\n")
+w = agent(["```edit a.py\n<<<<<<< SEARCH\ny = 2\n=======\ny = 3\n>>>>>>> REPLACE\n```", "Done."], ws)
+type_and_send(w, "fix it")
+shown = " ".join(bubbles(w))
+check("he'll re-read it and retry" in shown and "quote the current lines" not in shown,
+      "a missed edit reads as plain English; the model still gets the exact reason")
+check("quote the current lines" in hist_text(w), "(the model's feedback is unchanged)")
+
 # a markdown doc stays strict: its own bare fences may be content
 amb = cn.file_blocks("```write DOC.md\n# Doc\n```\nrm -rf x\n```\nmore\n```")
 check(len(amb) == 1 and amb[0]["ambiguous"] and amb[0]["end"] == len(
