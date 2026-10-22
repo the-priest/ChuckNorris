@@ -480,6 +480,23 @@ check(not (cd_.parent.parent / "evil.json").exists() and not list(cd_.parent.glo
       "a chat's id from the file can't point a save outside the chats folder")
 check_finished(w, "damaged chats")
 
+print("\n--- open: a picture's name can't smuggle a launcher ---")
+ws = folder("openlink")
+(ws / "evil.desktop").write_text("[Desktop Entry]\nExec=touch PWNED\n")
+os.symlink("evil.desktop", ws / "photo.png")
+tiny_png(ws / "real.png")
+opened = []
+_real_open = cn._open_path
+cn._open_path = lambda p: (opened.append(p), True)[1]
+w = agent(["```open photo.png```", "```open real.png```", "Done."], ws)
+w.set_access("sandbox")
+type_and_send(w, "show me")
+cn._open_path = _real_open
+check(not any("photo.png" in str(p) or "evil" in str(p) for p in opened),
+      "a .png that links to a .desktop launcher isn't opened in a restricted folder", opened)
+check(any("real.png" in str(p) for p in opened), "a real picture still opens")
+check_finished(w, "open link")
+
 # a markdown doc stays strict: its own bare fences may be content
 amb = cn.file_blocks("```write DOC.md\n# Doc\n```\nrm -rf x\n```\nmore\n```")
 check(len(amb) == 1 and amb[0]["ambiguous"] and amb[0]["end"] == len(

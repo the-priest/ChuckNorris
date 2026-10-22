@@ -8061,8 +8061,11 @@ class ChuckWindow(Adw.ApplicationWindow):
             full = os.path.expanduser(t)
             if not os.path.isabs(full):
                 full = str((self._workroot() or Path.home()) / full)
-            if (self.agent_mode and self._folder_access() != "full" and os.path.isfile(full)
-                    and (os.access(full, os.X_OK) or not self._VIEWABLE.search(full))):
+            real = os.path.realpath(full)       # judge what a link points at, not its name
+            if (self.agent_mode and self._folder_access() != "full" and os.path.exists(full)
+                    and (not os.path.isfile(real) or os.access(real, os.X_OK)
+                         or not self._VIEWABLE.search(real))
+                    and not (os.path.isdir(real) and not os.path.islink(full))):
                 # the desktop opens files OUTSIDE the sandbox: a .desktop file
                 # or a script would run unconfined
                 self._tool_feedback.append(f"[open: not opened: {full} isn't a page, picture, "
