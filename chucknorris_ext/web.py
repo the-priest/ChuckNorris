@@ -2,6 +2,7 @@
 
 Part of Chuck Norris — split out of the original single file.
 """
+import bisect
 import html as _html
 import json
 import random
@@ -193,11 +194,21 @@ def _drop_tags(raw):
     tag left open: a broken page cost minutes of CPU."""
     low = raw.lower()
     out, pos = [], 0
+    # where each tag's closing tags are, found ONCE per tag name: searching
+    # forward from every open tag was n² on a page of 30k unclosed <nav>s
+    closes = {}
+
+    def next_close(tag, after):
+        lst = closes.get(tag)
+        if lst is None:
+            lst = closes[tag] = [i.start() for i in re.finditer(re.escape("</" + tag), low)]
+        k = bisect.bisect_left(lst, after)
+        return lst[k] if k < len(lst) else -1
     for m in _DROP_OPEN.finditer(raw):
         if m.start() < pos:
             continue                                # inside a block already dropped
         out.append(raw[pos:m.start()])
-        end = low.find("</" + m.group(1).lower(), m.end())
+        end = next_close(m.group(1).lower(), m.end())
         if end < 0:
             pos = m.end()                           # never closed: drop just the tag
             continue

@@ -44,6 +44,8 @@ Paste a SiliconFlow key in Settings. Press **Tab** to pick Agent or Chat. Talk t
 - **Nothing is lost.** Every step is saved. If the computer crashes, a helper picks up where it was. You can even go back to any step of a helper's work and try a different direction from there.
 - **Safety stays on.** A helper can do whatever you allow it to, but anything that could wreck your system (wiping a disk, deleting your home folder) always waits for your click.
 
+**Do I need to learn commands?** No. Just tell Chuck what you want, in your own words: *"fix the failing tests"*, *"what are my agents doing?"*, *"stop that one"*, *"every morning, tell me what went wrong in the journal"*, *"remind me at 5 to call the bank"*, *"keep my spending under $2 a day"*. Chuck decides how to do it: itself, with several helpers at once, in the background, or as a mission. It decides what goes first and which model each part runs on, and only asks you when something is really your call (raising a spending limit, a big mission, a risky command). The slash commands are still there for people who like them; nobody needs them.
+
 **Do I need to understand any of that to use it?** No. Install it, open it, and talk to it like a colleague. The OS part works underneath, the way your computer's OS does. The rest of this page is for when you're curious.
 
 ---

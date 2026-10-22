@@ -172,7 +172,7 @@ SYSTEM_PROMPT = """You are Chuck: a senior engineer-agent on the user's Linux de
 
 TOOLS: one short line on what you'll do, then the fenced block; the app runs it, returns the real result.
 Read-only (batch them): ```search <query>``` ```fetch <url>``` ```map``` (every file + what it defines) ```glob <pattern>``` ```grep <regex> [path]``` ```read <path>[:start-end]``` ```def <name>``` / ```refs <name>``` (by meaning) ```find <what code does>``` ```tree``` ```screenshot``` / ```look <image>``` (you SEE it) ```images <subject>``` ```videos <subject>```
-Parallel: ```task <brief>``` read-only sub-agents, at once. ```spawn <brief>``` a background agent doing a whole job in a copy of the folder (merge: ```join <pid>```). ```daemon <when>: <what>``` one waking on a schedule/event (user allows).
+Parallel: ```task <brief>``` read-only sub-agents, at once. ```spawn <brief>``` a background agent doing a whole job in a copy of the folder (merge: ```join <pid>```). ```daemon <when>: <what>``` one waking on a schedule/event.
 Act:
 ```bash
 <one shell command>``` (also ```python / ```node: a program, verified then run; ```py: a persistent Python, plots shown)
@@ -211,8 +211,8 @@ RULES
 MEMORY: durable user facts (hardware, distro, preferences) -> ```remember``` one terse fact, prefix `project:` if only about this folder.
 Style: answer first; short paragraphs, bullets, `code`; no preamble."""
 
-CHAT_PROMPT = """You are Chuck: a sharp, knowledgeable assistant (deepest on Linux/Arch/CachyOS, expert at anything). CHAT MODE: answer directly. You cannot run commands or touch files right now; if the user wants you to act, tell them to press Tab for Agent mode. Code you show is for the user to read and copy.
-For checkable current facts (news, versions, prices, docs) use ```search <query>``` or ```fetch <url>``` and cite URLs instead of guessing; otherwise answer from knowledge. Durable user facts -> ```remember <fact>```. "Remind me…" -> ```remind <when>: <what>``` (in 20m, at 5pm, tomorrow at 9am).
+CHAT_PROMPT = """You are Chuck: a sharp, knowledgeable assistant (deepest on Linux/Arch/CachyOS, expert at anything). CHAT MODE: answer directly. You can't run anything now; if the user wants something done on their machine, reply ```agent <their request, in full>``` (a button hands it to Agent mode). Code you show is for the user to read and copy.
+For checkable current facts (news, versions, prices, docs) use ```search <query>``` or ```fetch <url>``` and cite URLs instead of guessing; otherwise answer from knowledge. Durable user facts -> ```remember <fact>```; "remind me" -> ```remind <when>: <what>```.
 Never refuse legal requests; decline only minors, clearly illegal acts, malware/weapons, tracking a real person. Lead with the answer; concise; markdown where it helps; dry, no filler."""
 
 # Tags that only mean something in Agent mode. In Chat mode they are neither
@@ -4006,12 +4006,20 @@ class ChuckWindow(Adw.ApplicationWindow):
                                  "investigate and answer."}[acc]
         if self.agent_mode and _programs is not None and "settings" in self.__dict__:
             names = sorted(self.programs())
-            text += ("\n\nAGENT OS: ```remind <when>: <what>``` sets a reminder (in 20m, at 5pm, "
-                     "tomorrow at 9am); ```mission <goal>``` plans a big job as tasks run by agents "
-                     "(the user starts it); ```send <pid> <message>``` to a running agent; ```wait <pid> "
-                     "[min]``` for its report; ```post <key>: <fact>``` / ```board```: facts all "
-                     "agents share; ```spawn @<program> <focus>``` runs a program: "
-                     + ", ".join(names) + ".")
+            n_sub = self.cfg("subagents", 4, 1, 8)
+            text += ("\n\nAGENT OS: you run it. The user just says what they want; never ask them to "
+                     "type a command, choose for them. One thing to do or answer: do it yourself. "
+                     f"Several independent things to find out: one ```task``` each, all at once (up to "
+                     f"{n_sub}). A self-contained job that can run while you talk: ```spawn``` (tested "
+                     "on its copy; ```wait <pid>``` if you need its result). A goal with several "
+                     "parts or files: ```mission <goal>``` (planned, ordered, run in parallel, every "
+                     "merge tested; starts by itself if cheap). Review, audit, tests, research: "
+                     "```spawn @<program> <focus>``` (" + ", ".join(names) + "). Later or at a time: "
+                     "```remind <when>: <what>```. Recurring checks or watching: ```daemon <when>: "
+                     "<what>```. Everything else (agents, missions, budget, governor, inbox, watching "
+                     "the editor): ```chuck <command>```, e.g. ```chuck top```, ```chuck kill 4```, "
+                     "```chuck budget```. ```send <pid> <msg>``` steers a running agent; ```post "
+                     "<key>: <fact>``` / ```board``` share facts between agents.")
         if self.agent_mode and getattr(self, "_mcp", None) is not None:
             tools = self._mcp.index()          # costs nothing when no server is set up
             if tools:
@@ -4085,9 +4093,9 @@ class ChuckWindow(Adw.ApplicationWindow):
             ph.set_label("Plan mode \u2014 describe the task; Chuck proposes a plan before "
                          "changing anything")
         elif self.agent_mode:
-            ph.set_label("Ask Chuck to do something\u2026" + (
+            ph.set_label("Tell Chuck what you want\u2026" + (
                 f"  (in {self.workspace.name})" if self.workspace else "")
-                + "   \u00b7  / commands  \u00b7  @ files")
+                + "   \u00b7  Ctrl+P everything  \u00b7  @ files")
         else:
             ph.set_label("Ask anything\u2026   \u00b7  / commands")
         try:
@@ -9515,12 +9523,12 @@ class ChuckWindow(Adw.ApplicationWindow):
     def _t_mission(self, body):
         """```mission <goal>``` — plan a multi-agent mission; it starts only
         when the user presses Start."""
-        m = self.start_mission(body, autostart=False)
+        m = self.start_mission(body, autostart="auto")
         if m is None:
             return "[mission: not started (see the note above)]"
-        return ("[mission planning: a card shows its tasks; it starts when the user presses Start. "
-                "Its tasks' work is tested and merged into the folder one by one; you'll hear when "
-                "it completes.]")
+        return ("[mission planning: a card shows its tasks. If its estimate is under the user's "
+                "auto-start limit it starts by itself; otherwise it waits for their Start. Each "
+                "task's work is tested and merged one by one; you'll hear when it completes.]")
 
     @tool("send", cap=4)
     def _t_send(self, body):
@@ -9931,8 +9939,9 @@ class ChuckWindow(Adw.ApplicationWindow):
                                  quota={"tokens": self.cfg("mission_tokens", 5000000, 100000, 100000000),
                                         "seconds": self.cfg("mission_hours", 4, 1, 72) * 3600})
         m["pid"] = proc.pid
-        m["autostart"] = bool(self.settings.get("mission_autostart", False) if autostart is None
-                              else autostart)
+        m["autostart"] = (autostart if autostart == "auto" else
+                          bool(self.settings.get("mission_autostart", False) if autostart is None
+                               else autostart))
         self._missions[m["id"]] = m
         _missions.log(m, "planning")
         self._mission_save(m)
@@ -9985,7 +9994,22 @@ class ChuckWindow(Adw.ApplicationWindow):
             m["state"] = _missions.AWAITING
             _missions.log(m, f"planned {len(tasks)} tasks")
             self.kernel.note(m["pid"], "waiting for you to start it")
-            if m.get("autostart"):
+            if m.get("autostart") == "auto":
+                # the agent started it: it runs by itself when it's cheap,
+                # and waits for one click when it isn't
+                tok, usd = self._mission_estimate(m)
+                lim = self.cfg("mission_auto_usd", 0.50, 0.0, 1000.0, cast=float)
+                cheap = (usd is not None and usd <= lim) or (usd is None and tok <= 1500000)
+                if cheap and not self._over_budget():
+                    m["state"] = _missions.ACTIVE
+                    m["notes"] = ((m.get("notes") or "") + f"\nStarted by itself: estimated "
+                                  f"{_pricing.fmt_usd(usd) if usd is not None else _pricing.fmt_tokens(tok) + ' tokens'}"
+                                  " (under your auto-start limit). Pause or Cancel any time.").strip()
+                else:
+                    m["notes"] = ((m.get("notes") or "") + "\nWaiting for Start: estimated "
+                                  f"{_pricing.fmt_usd(usd) if usd is not None else _pricing.fmt_tokens(tok) + ' tokens'}"
+                                  f", above the {_pricing.fmt_usd(lim)} it may start by itself.").strip()
+            elif m.get("autostart"):
                 m["state"] = _missions.ACTIVE
         self._mission_save(m)
         self._mission_paint(m)
@@ -10988,6 +11012,161 @@ class ChuckWindow(Adw.ApplicationWindow):
             out("sent")
         return 0
 
+    # ── the agent runs the OS: the user never needs a command ──
+    OS_COMMANDS = ("top", "kill <pid>", "stop <pid>", "cont <pid>", "nice <pid> <n>", "missions",
+                   "mission start|pause|resume|cancel <id>", "daemons",
+                   "daemon run|on|off|rm <id>", "reminders", "inbox", "board",
+                   "budget [day|month <$>]", "governor [performance|balanced|powersave]",
+                   "watch on|off", "activity", "context", "programs", "strace <pid>",
+                   "replay <pid>", "discard <pid>")
+
+    def os_text(self, spec):
+        """Run one OS command for the agent -> what it says, as text (the
+        user's slash commands, made readable for the model)."""
+        words = (spec or "").strip().lstrip("/").split(None, 1)
+        if not words:
+            return "commands: " + " · ".join(self.OS_COMMANDS)
+        cmd, arg = words[0].lower(), (words[1].strip() if len(words) > 1 else "")
+        K_ = self.kernel
+        if cmd in ("top", "ps", "processes"):
+            return self._top_text() or "(no processes besides this chat)"
+        if cmd in ("kill", "stop", "cont", "nice"):
+            ok = self.process_command(cmd, arg)
+            p = K_.procs.get(int(arg.split()[0])) if ok and K_ and arg.split()[0].isdigit() else None
+            return f"pid {arg.split()[0] if arg else '?'}: {p.state if p else 'not done (no such process, or pid 1)'}"
+        if cmd == "missions":
+            if not self._missions:
+                return "(no missions)"
+            out = []
+            for m in sorted(self._missions.values(), key=lambda x: -x.get("created", 0))[:10]:
+                done, n = _missions.progress(m)
+                out.append(f"{m['id'][-5:]} [{m['state']}] {done}/{n} {m['goal'][:80]}"
+                           + "".join(f"\n   {t['id']} {t['state']}: {t['title'][:60]}" for t in m["tasks"]))
+            return "\n".join(out)
+        if cmd == "mission":
+            parts = arg.split()
+            if len(parts) < 2 or parts[0] not in ("start", "pause", "resume", "cancel"):
+                return "write it as: mission start|pause|resume|cancel <id> (see: missions)"
+            m = next((x for x in self._missions.values() if x["id"].endswith(parts[1])), None)
+            if m is None:
+                return f"no mission {parts[1]}"
+            ok = self.mission_action(m["id"], parts[0])
+            return f"mission {m['id'][-5:]}: {m['state']}" + ("" if ok else " (nothing to do)")
+        if cmd == "daemons" or cmd == "reminders":
+            items = [d for d in (self._daemons.items if self._daemons else [])
+                     if (d.get("kind") == "remind") == (cmd == "reminders")]
+            return "\n".join(f"{d['id']} [{'on' if d.get('enabled') else 'paused'}] "
+                             f"{_daemons.describe(d['when'])}: {d['brief'][:80]}" for d in items) or f"(no {cmd})"
+        if cmd == "daemon":
+            self.daemon_command(arg)
+            return self.os_text("daemons")
+        if cmd == "inbox":
+            items = self._inbox.unread() if self._inbox is not None else []
+            if self._inbox is not None:
+                self._inbox.mark_read()
+            return "\n\n".join(f"[{i['daemon']}] {i['why']}\n{i['report'][:1500]}" for i in items) or "(nothing unread)"
+        if cmd == "board":
+            return self._board_text() or "(the board is empty)"
+        if cmd == "budget":
+            m = re.match(r"(day|daily|month|monthly)\s+\$?([\d.]+)$", arg)
+            if m:
+                key = "budget_day_usd" if m.group(1).startswith("da") else "budget_month_usd"
+                new, cur = float(m.group(2)), self.cfg(key, 0.0, 0.0, 1000000.0, cast=float)
+                if new == 0 or (cur and new > cur):
+                    # a looser limit is the user's call, never the agent's
+                    self._confirm_card("BUDGET", f"Chuck wants to set your {m.group(1)} budget to "
+                                       f"{'no limit' if new == 0 else _pricing.fmt_usd(new)} (now "
+                                       f"{_pricing.fmt_usd(cur) if cur else 'no limit'}).",
+                                       "Allow", lambda: self.budget_command(arg))
+                    return "asked the user to confirm (raising a limit is theirs to approve)"
+                self.budget_command(arg)
+            L = self._ledger
+            if L is None:
+                return "(no budget module)"
+            return (f"today {_pricing.fmt_usd(L.today())} (limit "
+                    f"{_pricing.fmt_usd(self.cfg('budget_day_usd', 0.0, 0.0, 1e5, cast=float)) or 'none'}), "
+                    f"this month {_pricing.fmt_usd(L.month())} (limit "
+                    f"{_pricing.fmt_usd(self.cfg('budget_month_usd', 0.0, 0.0, 1e6, cast=float)) or 'none'})")
+        if cmd == "governor":
+            if arg:
+                self.governor_command(arg)
+            if _governor is None:
+                return "(no governor module)"
+            chat = (self.settings.get("model") or DEFAULT_MODEL).strip()
+            return f"mode {_governor.mode_of(self.settings)}: " + "; ".join(
+                f"{r} -> {mm}" for r, mm in _governor.table(self.settings, chat, _pricing.PRICES, _pricing.SUGGESTED))
+        if cmd == "watch":
+            self.watch_command(arg or "on")
+            return "watching for AI! comments" if self._watch else "not watching"
+        if cmd == "activity":
+            a = self._activity()
+            return (f"{len(a['asks'])} question(s) waiting, {len(a['agents'])} agent(s) working, "
+                    f"{len(a['missions'])} mission(s), {a['unread']} unread report(s)")
+        if cmd == "context":
+            rows, total, budget, paged = self.context_map()
+            return (f"{total:,} of {budget:,} chars; " + ", ".join(f"{lb} {n:,}" for lb, n in rows)
+                    + (f"; {paged:,} paged out" if paged else ""))
+        if cmd == "programs":
+            return "\n".join(f"{n} ({p['mode']}): {p['description']}" for n, p in sorted(self.programs().items()))
+        if cmd == "strace" and arg.split() and arg.split()[0].isdigit():
+            calls = K_.strace(int(arg.split()[0])) if K_ else []
+            return "\n".join(f"{tool} {a} {ms:.0f}ms {size}b" + (" DENIED" if den else "")
+                             for _t, tool, a, ms, size, den in calls[-40:]) or "(no syscalls)"
+        if cmd == "replay" and arg.split() and arg.split()[0].isdigit():
+            e = self._bg.get(int(arg.split()[0]))
+            if not e or not e.get("msgs"):
+                return "(no recorded run)"
+            return "\n".join(f"step {n}: {_hibernate.tool_labels(a) or a[:80]}"
+                             for n, a, _r in _hibernate.steps_of(e["msgs"]))
+        if cmd == "discard":
+            return "discarded" if self.discard_background(arg) else "not discarded"
+        return f"unknown: {cmd}. commands: " + " · ".join(self.OS_COMMANDS)
+
+    def _confirm_card(self, kind, text, yes_label, on_yes):
+        """A one-click question for something only the user may decide."""
+        card, head, body, foot = self._card_shell(kind)
+        card.add_css_class("ask-card")
+        lb = Gtk.Label(label=text, xalign=0, wrap=True); _wrap_anywhere(lb)
+        body.append(lb)
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        yes = Gtk.Button(label=yes_label); yes.add_css_class("quick"); yes.add_css_class("accent-btn")
+        no = Gtk.Button(label="No"); no.add_css_class("ghost")
+
+        def pick(ok):
+            yes.set_sensitive(False); no.set_sensitive(False)
+            if ok:
+                on_yes()
+        yes.connect("clicked", lambda *_a: pick(True))
+        no.connect("clicked", lambda *_a: pick(False))
+        row.append(yes); row.append(no)
+        foot.append(row)
+        self._log_pin(card)
+        self._pending_confirm = (pick, card)
+        return card
+
+    @tool("agent", agent_only=False, cap=1)
+    def _t_agent(self, body):
+        """```agent <request>``` (Chat mode) — this needs to act on the
+        machine: one click hands it to Agent mode."""
+        req = (body or "").strip()
+        if self.agent_mode or not req:
+            return "[agent: already in Agent mode \u2014 just do it]" if req else "[agent: what should be done?]"
+
+        def go():
+            self.set_agent_mode(True, announce=False)
+            self._prefill(req)
+            self.on_send()
+        self._confirm_card("AGENT MODE", f"This needs Chuck to act on your machine: \u201c{req[:300]}\u201d. "
+                           "Agent mode runs commands and edits files (risky ones still ask you).",
+                           "Do it in Agent mode", go)
+        return "[a button lets the user hand this to Agent mode; don't repeat the request]"
+
+    @tool("chuck", cap=6)
+    def _t_chuck(self, body):
+        """```chuck <command>``` — the agent drives the OS (what /commands do)
+        and reads the result."""
+        return f"[chuck {(body or '').strip()[:60]}]\n" + clip_output(self.os_text(body), 8000)
+
     # ── the system tray: the OS at a glance ──
     def _activity(self):
         """What the OS is doing right now, for the tray and its card."""
@@ -11562,6 +11741,29 @@ class ChuckWindow(Adw.ApplicationWindow):
             trig = _daemons.parse_when(m.group(1).strip())
         except _daemons.DaemonError as ex:
             return f"[daemon: {ex}]"
+        if kind == "report":
+            # one that only looks and reports can't change anything: it is
+            # created at once, with an Undo; one that acts still asks first
+            d, why = self.daemon_add(spec, kind)
+            if d is None:
+                return f"[daemon: not created: {why}]"
+            card, head, cbody, foot = self._card_shell("DAEMON")
+            lb = Gtk.Label(label=f"{_daemons.describe(d['when'])}: {d['brief'][:600]}\nIt looks and "
+                                 "reports to the inbox; it changes nothing, and costs nothing "
+                                 "while it waits.", xalign=0, wrap=True)
+            _wrap_anywhere(lb); cbody.append(lb)
+            undo = Gtk.Button(label="Undo"); undo.add_css_class("quick")
+
+            def take_back(*_a, did=d["id"]):
+                undo.set_sensitive(False)
+                self._daemon_action(self._daemons.get(did) or {"id": did}, "rm")
+                self._user_notes.append(f"the user removed daemon {did}")
+            undo.connect("clicked", take_back)
+            foot.append(undo)
+            self._log_pin(card)
+            self._daemon_undo = take_back
+            return (f"[daemon {d['id']} created: {_daemons.describe(d['when'])}. It reports to the "
+                    "inbox; the user can undo it.]")
         card, head, cbody, foot = self._card_shell("DAEMON · PROPOSED")
         lb = Gtk.Label(label=f"{_daemons.describe(trig)}: {m.group(2).strip()[:600]}\n"
                              + ("It will work on a copy of the folder; you merge what it does."

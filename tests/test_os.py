@@ -592,15 +592,15 @@ check("port 80" in w.entry.get_buffer().get_text() and w.agent_mode,
 w.entry.get_buffer().set_text("")
 slash("/daemon rm 1")
 check(w._daemons.get(1) is None, "/daemon rm deletes one")
-w.backend = DaemonBackend(["```daemon\ndaily 08:30: summarise the journal's new errors\n```\nProposed.", "ok"])
+w.backend = DaemonBackend(["```daemon\nact daily 08:30: update the dependencies\n```\nProposed.", "ok"])
 w.backend.seen, w.backend.results = [], []
 n0 = len(w._daemons.items)
-type_and_send(w, "watch my journal every morning")
+type_and_send(w, "update my dependencies every morning")
 check("DAEMON · PROPOSED" in notes() and len(w._daemons.items) == n0,
-      "the agent can only PROPOSE a daemon: nothing exists until the user allows it")
+      "a daemon that would CHANGE code is only proposed: nothing exists until the user allows it")
 w._pending_daemon[0](True)
-check(len(w._daemons.items) == n0 + 1 and w._daemons.items[-1]["when"] == {"daily": "08:30"},
-      "Allow creates it")
+check(len(w._daemons.items) == n0 + 1 and w._daemons.items[-1]["when"] == {"daily": "08:30"}
+      and w._daemons.items[-1]["kind"] == "act", "Allow creates it")
 slash("/daemon act every 1h: zeta: add a file")
 da = w._daemons.items[-1]
 check(da["kind"] == "act" and da["folder"] == str(proj), "an acting daemon belongs to a folder")
@@ -1783,6 +1783,65 @@ w.history += [{"role": "user", "content": "go"}] + [
 w.context_map()
 check(not w._compacting and not any("trimmed" in t for t in notes()),
       "/context only looks: it never starts a (paid) compaction or posts notes")
+
+print("\n--- no commands needed: Chuck runs the OS for you ---")
+w = new_win([], tmp)
+w.set_agent_mode(True, announce=False)
+w.set_workspace(mproj, announce=False)
+check("never ask them to type a command" in w.history[0]["content"] and "```chuck <command>```" in w.history[0]["content"],
+      "the agent is told it runs the OS and how to choose between its tools")
+sp5 = w.kernel.spawn("survey the auth module", kind="subagent", parent=w._pid1)
+w.backend = ScriptedBackend(["```chuck top```", f"```chuck kill {sp5.pid}```", "Stopped it."])
+type_and_send(w, "what are my agents doing? stop the auth survey")
+h = " ".join(str(m.get("content")) for m in w.history)
+check("survey the auth" in h and w.kernel.procs[sp5.pid].state == "killed",
+      "'what are my agents doing / stop that one' works in plain words (the agent uses ```chuck```)")
+w.settings["budget_day_usd"] = 2.0
+w.backend = ScriptedBackend(["```chuck budget day 50```", "Asked you."])
+type_and_send(w, "raise my budget to 50 a day")
+check(w.settings["budget_day_usd"] == 2.0 and "BUDGET" in notes(),
+      "raising a spending limit is never the agent's call: it asks the user with one click")
+w._pending_confirm[0](True)
+check(w.settings["budget_day_usd"] == 50.0, "(and Allow applies it)")
+w.backend = ScriptedBackend(["```chuck budget day 1```", "Done."])
+type_and_send(w, "lower my budget to 1 a day")
+check(w.settings["budget_day_usd"] == 1.0, "lowering a limit is applied at once")
+w.settings["budget_day_usd"] = 0.0
+w.settings.pop("mission_task_tokens", None)
+w.settings["mission_auto_usd"] = 50.0
+w.backend = MissionBackend(["```mission build a and b```\nOn it.", "ok"])
+w.backend.seen, w.backend.results = [], []
+type_and_send(w, "build a and b with tests")
+settle()
+mm_ = sorted(w._missions.values(), key=lambda x: -x["created"])[0]
+check(mm_["state"] in (MS.ACTIVE, MS.COMPLETE, MS.PAUSED) and "Started by itself" in mm_["notes"],
+      "a mission the agent starts runs by itself when its estimate is under the auto-start limit",
+      (mm_["state"], mm_["notes"][-120:]))
+w.mission_action(mm_["id"], "cancel")
+w.settings["mission_auto_usd"] = 0.0
+w.backend = MissionBackend(["```mission build a and b again```\nOn it.", "ok"])
+w.backend.seen, w.backend.results = [], []
+type_and_send(w, "again")
+settle()
+mm2 = sorted(w._missions.values(), key=lambda x: -x["created"])[0]
+check(mm2["state"] == MS.AWAITING and "Waiting for Start" in mm2["notes"],
+      "and waits for one click when it isn't", mm2["state"])
+w.mission_action(mm2["id"], "cancel")
+w.backend = ScriptedBackend(["```daemon daily 08:30: summarise new journal errors```", "Set."])
+n_d = len(w._daemons.items)
+type_and_send(w, "every morning tell me what went wrong in the journal")
+check(len(w._daemons.items) == n_d + 1 and "DAEMON" in notes(),
+      "a daemon that only looks is created straight away")
+w._daemon_undo()
+check(len(w._daemons.items) == n_d, "and Undo takes it back")
+w.set_agent_mode(False, announce=False)
+w.backend = ScriptedBackend(["That needs to run on your machine.\n```agent update my system safely```", "Updating."])
+type_and_send(w, "update my system")
+check("AGENT MODE" in notes() and not w.agent_mode, "Chat mode offers a one-click handoff instead of 'press Tab'")
+w._pending_confirm[0](True)
+settle()
+check(w.agent_mode and any(m.get("content") == "update my system safely" for m in w.history),
+      "one click and it's done in Agent mode")
 
 print(f"\nTOTAL OS FAILURES: {fails}")
 assert fails == 0 and not FAILS, "OS regressions present"

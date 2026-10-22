@@ -46,6 +46,15 @@ The third roadmap (`docs/ROADMAP.md`, phases 10–15), with tests in
   step and survive a crash or a reboot (Resume at the next start);
   `/replay <pid>` shows a run step by step and `/fork <pid> <step>
   [instruction]` starts a new agent from any step, files as they were then.
+- **No commands needed.** Say what you want; Chuck runs the OS for you: it
+  picks between doing it itself, parallel sub-agents, a background agent, a
+  mission, a program, a reminder or a daemon (orchestration rules in its
+  prompt), and drives everything else with ```` ```chuck <command>``` ````
+  (processes, missions, budget, governor, inbox, watching the editor),
+  reading the result. Missions it starts run by themselves under your
+  auto-start limit; read-only daemons are created with an Undo; raising a
+  spending limit always asks you. In Chat mode, "do it" requests get a
+  one-click handoff to Agent mode.
 - **A shell for the OS**: with Chuck open, `chucknorris "…"`, `--here`,
   `--mission`, `--spawn`, `--run`, `--remind`, `--daemon`, `--top`,
   `--budget`, `--inbox` reach the running window and answer in your terminal.
