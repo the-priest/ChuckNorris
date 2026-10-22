@@ -1600,6 +1600,19 @@ w._watch_tick(w._watch); settle()
 sent = [m["content"] for m in w.history if m.get("role") == "user"]
 check("answer the question(s)" in sent[-1] and "why not a loop" in sent[-1] and "don't change files" in sent[-1],
       "an AI? comment is a question, answered in the chat")
+n_before = len(w.history)
+w.backend = ScriptedBackend(["```write GUIDE.md\nEnd a comment with AI! to ask:\n<!-- like this AI! -->\n```", "Written."])
+type_and_send(w, "document the watch feature")
+w._watch_tick(w._watch); settle()
+check(not any("GUIDE.md" in str(m.get("content")) and "left instructions" in str(m.get("content"))
+              for m in w.history[n_before:]),
+      "a comment CHUCK wrote is never taken for yours")
+time.sleep(0.02)
+(wproj / "GUIDE.md").write_text("End a comment with AI! to ask:\n<!-- add an example here AI! -->\n")
+w.backend = ScriptedBackend(["Added."])
+w._watch_tick(w._watch); settle()
+check(any("add an example here" in str(m.get("content")) for m in w.history[n_before:]),
+      "but once you edit that file, your comment counts")
 w._tray_tick()
 check("\U0001F441" in w._tray_lbl.get_label(), "the tray shows it's watching")
 w.set_workspace(mproj, announce=False)

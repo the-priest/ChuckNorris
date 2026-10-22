@@ -8259,6 +8259,13 @@ class ChuckWindow(Adw.ApplicationWindow):
             return path, None
 
     def _record_change(self, path, rel, before, after, kind):
+        w = getattr(self, "_watch", None)
+        if w is not None and path is not None:
+            # /watch acts on YOUR comments: a file as Chuck just wrote it is his
+            try:
+                w.setdefault("own", {})[os.path.realpath(str(path))] = os.stat(str(path)).st_mtime_ns
+            except OSError:
+                pass
         ch = {"path": str(path), "rel": rel, "before": before, "after": after,
               "kind": kind, "turn": self._turn_no, "reverted": False, "card": None}
         self._changes.append(ch)
@@ -11152,6 +11159,15 @@ class ChuckWindow(Adw.ApplicationWindow):
         # each comment is acted on once: keyed by file, kind, text and the code
         # around it; a comment that's gone from a changed file is forgotten,
         # so writing it again later works again
+        own = w.get("own") or {}
+
+        def mine(rel):
+            fp = os.path.realpath(os.path.join(str(w["root"]), rel))
+            try:
+                return own.get(fp) == os.stat(fp).st_mtime_ns
+            except OSError:
+                return False
+        found = [f for f in found if not mine(f[0])]   # untouched since Chuck wrote it
         keys = {(f[0], f[2], f[3], f[4]) for f in found}
         gone = set(changed)
         w["seen"] = {k for k in w["seen"] if k[0] not in gone or k in keys}
