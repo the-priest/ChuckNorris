@@ -4,10 +4,11 @@
 
 ### The operating system for AI agents.
 
-**In the mainframe era you rented the CPU by the second. Now you rent the model by the token.**
-Tokens are the new cycles, the context window is the new RAM, tools are the new syscalls, and an agent is the new process.
-Every other agent is one program running on bare metal. Chuck is the OS underneath: a kernel that schedules tokens, isolates agents, lets them talk, puts them to sleep, wakes them on events, and rewinds them in time.
-On your Linux desktop, today.
+**Tell it what you want. It plans the work, runs the agents, tests what they change, and keeps to your budget.**
+
+A Linux desktop app where AI agents work on your machine the way programs run on an OS:
+as processes with budgets and permissions, in parallel, on safe copies of your code,
+asleep until something needs them, and never out of your sight.
 
 ![version](https://img.shields.io/badge/version-17_·_Chuck_OS-8b5cf6?style=flat-square&labelColor=0c0c10)
 ![gtk](https://img.shields.io/badge/GTK4-libadwaita-8b5cf6?style=flat-square&labelColor=0c0c10)
@@ -16,7 +17,7 @@ On your Linux desktop, today.
 ![deps](https://img.shields.io/badge/runtime_deps-stdlib_+_GTK-2ea043?style=flat-square&labelColor=0c0c10)
 ![licence](https://img.shields.io/badge/licence-MIT-8b5cf6?style=flat-square&labelColor=0c0c10)
 
-<img src="assets/screenshots/welcome.png" alt="Chuck's welcome screen: a woven field of tiny code glyphs struck by a click, its uneven wavefront and echo spreading under the welcome card" width="100%">
+<img src="assets/screenshots/welcome.png" alt="Chuck's welcome screen: a field of code glyphs under the welcome card, with quick starts and the agent OS one click away" width="100%">
 
 </div>
 
@@ -24,329 +25,207 @@ On your Linux desktop, today.
 curl -fsSL https://raw.githubusercontent.com/the-priest/ChuckNorris/main/install.sh | bash && chucknorris
 ```
 
-Paste a SiliconFlow key in Settings. Press **Tab** to pick Agent or Chat. Talk to it. Then type `/top`.
+Paste a SiliconFlow API key in Settings, pick a folder, and say what you want.
 
 ---
 
-## What is this, in plain words?
+## What is Chuck?
 
-**Chuck is an AI that works on your computer, not just one that talks.** You type (or say) what you want: *"my disk is full"*, *"add tests to this project"*, *"why won't Bluetooth start?"*. Chuck then actually does it. It runs the commands, reads and edits the files, tests what it changed, and tells you what it did and what it cost. The AI's thinking happens on a model you rent online (SiliconFlow). Everything it *does* happens on your machine, where you can see it.
+**Chuck is an AI that does the work on your computer, not just one that talks about it.** You say *"my disk is full"*, *"add tests to this project"* or *"why won't Bluetooth start?"*. Chuck runs the commands, reads and edits the files, tests what it changed, and tells you what it did and what it cost. The thinking happens on a model you rent online (SiliconFlow). Everything it *does* happens on your machine, in front of you.
 
-**Why "an operating system"?** A single AI helper is like a single program. Once you have many of them working at the same time, you need what a computer has always needed to run many programs: someone to decide who goes next, who may touch what, who pays for what, and what happens when something crashes. With AI you pay per *token* (roughly, per word read or written), the way people once paid per second of computer time. So Chuck treats tokens like computer time and AI helpers like programs, and it gives them a real operating system:
+One assistant is easy. The hard part starts when you want several of them working at once, for hours, on real code: something has to decide who goes first, who may touch what, who pays for what, and what happens when one crashes. Computers solved that decades ago with an operating system. Chuck brings the same idea to AI agents:
 
-- **You can see every helper at once** (`/top`), what it's doing, and what it has cost, and pause or stop any of them.
-- **Each helper has a budget, and so does everything together.** When a helper's runs out, it is asked to write up what it found and stop. Set a daily or monthly limit for *all* of it (`/budget day 2`) and Chuck stops and asks before going past it. Nothing runs up your bill forever.
-- **Helpers can work in the background** on a *copy* of your project, so they can't break your files. When one finishes, you look at what it changed and click **Merge** if you like it.
-- **Helpers can talk.** You can send one a message while it works, it can ask you a question without stopping the others, and they share a notice board so they don't get in each other's way.
-- **Give it a whole project-sized job** (`/mission …`). It splits the job into steps, hands them to several helpers working at once, checks each piece by running your project's tests, and only then puts it into your folder.
-- **Reminders.** "Remind me in 20 minutes to take the pizza out" (or `/remind at 5pm: call the bank`, `/remind every day at 8:30: stand-up`). You get a note, a desktop notification, and it's read aloud. No AI is woken for it, so it costs nothing.
-- **Helpers can wait for something to happen.** "Every morning at 8:30", "when a service fails", "when the disk is 90% full". Waiting costs nothing; they wake up only when it happens, look, and leave you a report.
-- **Nothing is lost.** Every step is saved. If the computer crashes, a helper picks up where it was. You can even go back to any step of a helper's work and try a different direction from there.
-- **Safety stays on.** A helper can do whatever you allow it to, but anything that could wreck your system (wiping a disk, deleting your home folder) always waits for your click.
-
-**Do I need to learn commands?** No. Just tell Chuck what you want, in your own words: *"fix the failing tests"*, *"what are my agents doing?"*, *"stop that one"*, *"every morning, tell me what went wrong in the journal"*, *"remind me at 5 to call the bank"*, *"keep my spending under $2 a day"*. Chuck decides how to do it: itself, with several helpers at once, in the background, or as a mission. It decides what goes first and which model each part runs on, and only asks you when something is really your call (raising a spending limit, a big mission, a risky command). The slash commands are still there for people who like them; nobody needs them.
-
-**Do I need to understand any of that to use it?** No. Install it, open it, and talk to it like a colleague. The OS part works underneath, the way your computer's OS does. The rest of this page is for when you're curious.
-
----
-
-## Chuck OS
-
-An agent loop with a prompt and a few tools is a program. Run ten of them and you need what computers needed in 1965: something to decide who runs, who pays, who may touch what, and what happens when one crashes. That layer is Chuck OS. The full design is in [`docs/OS.md`](docs/OS.md).
-
-| a computer has | Chuck OS has |
+| a computer has | Chuck has |
 |---|---|
-| CPU time | **tokens and dollars**, metered per process and charged up the tree; one daily/monthly limit for all of it |
-| processes | **agents**: a pid, a parent, a quota, a state, a journal |
-| a scheduler | **model-call slots**, granted by priority with ageing, never past a quota |
-| RAM and virtual memory | **the context window**, with old tool output *paged out* and paged back exactly |
-| syscalls and permissions | **tools**, each checked against the process's **capabilities** |
-| fork, copy-on-write | **background agents** in their own copy of your folder, merged three-way |
-| signals and IPC | **STOP / CONT / TERM / KILL**, mailboxes, a shared **blackboard** |
-| init and systemd | **daemons** that sleep for free and wake on a schedule or an event |
-| packages | **agent programs**: a prompt, tools, a model and a quota in one Markdown file |
-| a CPU governor | **a model governor**: cheap work on a cheap model |
+| CPU time | **tokens and dollars**, metered per agent, with one daily or monthly limit for everything |
+| processes | **agents**, each with an id, a parent, a budget and a live status |
+| a scheduler | **model-call slots**, granted by priority, never past a budget |
+| permissions | **capabilities** (`read`, `write`, `exec`, `net`, `spawn`) checked on every tool call |
+| fork and copy-on-write | **background agents**, each working in its own copy of your folder, merged when you say so |
+| `make` and CI | **missions**: a big goal split into a task graph, every merge gated on your tests |
+| cron and systemd | **daemons** that sleep for free and wake on a schedule or an event |
+| hibernate | **checkpoints** after every step: agents survive a crash and resume |
+| RAM and swap | **the context window**, with old tool output paged out and paged back exactly |
 | `top`, `strace` | **`/top`** and **`/strace`**, live |
-| hibernate | **every step checkpointed**: agents survive a crash and resume |
-| (nothing) | **time travel**: replay any run and fork it from any step |
-| `make` + CI | **missions**: a goal as a task graph, every merge gated on the tests |
 
-### Missions: give it the whole job
+You don't need to know any of that to use it. It works underneath, the way your computer's OS does.
+
+## Just say what you want
+
+There are no commands to learn. Chuck understands what you mean and picks the right tool for the job: it does it itself, hands it to helpers that work at the same time, runs it in the background, or turns it into a mission. It decides what goes first and which model each part runs on. It only stops to ask when the decision is really yours.
+
+| you say | Chuck |
+|---|---|
+| *"the tests in auth are failing, fix them"* | reads the failure, fixes the code, runs the tests until they pass |
+| *"add type hints everywhere, with mypy passing"* | plans a mission, runs the tasks in parallel, merges each one only after its tests pass |
+| *"keep working on the parser in the background"* | starts a background agent in its own copy of the folder; you keep talking |
+| *"every morning, tell me what went wrong in the journal"* | sets up a daemon that wakes at 8:30, reads the journal and leaves you a report |
+| *"remind me at 5 to call the bank"* | a reminder, with a desktop notification; no AI is woken for it, so it costs nothing |
+| *"what are my agents doing?"* · *"stop that one"* | shows the activity, or stops the agent |
+| *"keep my spending under $2 a day"* | sets the limit. Raising a limit always waits for your click. |
+
+Slash commands, the **Ctrl+P** palette and buttons are all there too, for when you'd rather click.
+
+## Watch it work
+
+<img src="assets/screenshots/agent-build.png" alt="Chuck building a Tetris page: a NEW FILE card with the diff folded, a headless Chromium command rendering it at two widths, a LOOKED AT card with both screenshots side by side, and the final summary" width="100%">
+
+Everything the machine does hangs on the *work lane*, the rail under Chuck's name: files written (with a diff and a **Revert** button), commands with their real output and exit code, screenshots it looked at. What Chuck *says* stays in the main column, in the order it happened. Here it wrote a game, rendered it in a real browser at two widths, looked at both, and only then said it was done.
+
+---
+
+## Agents that do real coding work
+
+**Two modes, one key.** **Agent** works on your machine: commands, files, tests, packages. **Chat** only answers, and nothing touches your system. **Tab** switches between them.
+
+**A working folder.** Click the folder chip (or **Ctrl+O**) and point the session at a project. Commands run there and file paths resolve there.
+
+**The tools a good engineer uses:**
+
+| tool | what it does |
+|---|---|
+| `map` · `find` | A map of every file and what it defines. `find` locates code by what it *does* ("where do we retry failed requests?"), even when no line uses your words. |
+| `read` · `grep` · `glob` | Files of any size, read in pages; regex search (ripgrep when installed). Output is capped so a search never floods the context. |
+| `edit` · `write` · `patch` | Search/replace edits that send only the changed lines, whole new files, and multi-file diffs, all applied all-or-nothing and checkpointed. |
+| `bash` · `python` · `node` | Run one step at a time, checked for real defects before running, with live output and the real exit code. `cd` carries over like a terminal. |
+| `py` | One Python session per chat, notebook-style: load data once, keep using it, get plots back as images. |
+| `def` · `refs` · `rename` | Code navigation through a real language server (pyright, tsc, rust-analyzer, gopls, clangd): rename a symbol across files without touching comments and strings. |
+| `browse` · `look` · `screenshot` | A real headless browser: load a page, click, type, run JavaScript, and get back errors, failed requests and a screenshot that Chuck looks at. |
+| `diagnose` · `runtests` · `changes` | Linters and type checkers, the project's own tests, and the net diff of the whole task for self-review. |
+| `task` | Read-only helpers that research in parallel; only their summaries enter the conversation. |
+| `search` · `fetch` | Web research with sources. Pages that block plain requests are read through the browser. |
+| `mcp` | Any [Model Context Protocol](https://modelcontextprotocol.io) server's tools, configured in the same format Claude Desktop uses. |
+
+**It finishes the job.** Before Chuck says "done" it checks that it did what it said it would, that its plan is complete, and that the code it changed was actually run, tested or looked at. Ask for a game and you get a game, played in a browser, not *"I'll write the game now"*.
+
+**You stay in charge while it works.**
+- **Steer mid-task.** Type while it works; your message reaches it at its next step.
+- **Plan mode.** Chuck investigates read-only and proposes a plan. Nothing changes until you press **Approve & run**.
+- **Undo anything.** Every change is a checkpoint. `/rewind` puts the files *and* the conversation back to before any step, including what a command changed. Your own `.git` is never touched.
+- **Git built in.** `/diff`, `/commit` (message written from the diff), `/review` (a bug hunt on your uncommitted changes) and `/pr` (branch, commit, tests, push and a written pull request).
+
+<table>
+<tr>
+<td width="50%"><img src="assets/screenshots/plan-mode.png" alt="Plan mode: a proposed four-step plan card with Approve & run and Revise"></td>
+<td width="50%"><img src="assets/screenshots/browse.png" alt="A BROWSER card: an uncaught error with its line, the key presses, a JavaScript result and a screenshot of the game"></td>
+</tr>
+</table>
+
+## Many agents at once
+
+### Missions: hand over the whole job
 
 ```text
 /mission make the API return proper 4xx errors everywhere, with tests
 ```
 
-Some jobs are too big for one agent. A mission plans the goal as a small graph of tasks with dependencies, shows you the plan, and once you press **Start** runs it the way `make` runs a build. Every task whose dependencies are finished starts as its own agent, several at once. Each code task works in a fresh copy of your folder that already holds the earlier tasks' work. **Nothing is merged until the project's tests pass on that copy.** If they fail, the same agent is sent back with the failure to fix it. A task that still fails pauses the mission and asks you: Retry or Skip. The whole mission is one process group with one budget (Cancel ends every agent in it), and it survives a restart. Before you press Start, the card estimates what the plan will cost. The estimate learns from what your past missions' tasks really spent.
+A mission turns a goal that's too big for one agent into a small graph of tasks and shows you the plan, with a cost estimate. Then it runs it the way `make` runs a build. Each task starts as soon as the tasks it depends on are finished, several at a time, each in a fresh copy of your folder that already holds the earlier work. **Nothing is merged until the project's tests pass on that copy.** A task that fails its tests is sent back with the failure to fix it; if it still fails, the mission pauses and asks you to retry or skip. The whole mission has one budget, **Cancel** stops every agent in it, and it carries on after a restart. When you ask in plain words, a mission estimated under your auto-start limit ($0.50 by default) begins straight away; bigger ones, and any you start with `/mission`, wait for **Start**.
 
-<img src="assets/screenshots/os-mission.png" alt="A MISSION card: five tasks with dependencies; three finished (one merged after its tests passed), one running, one waiting, with spend so far and Report / Trace / Replay per task" width="100%">
-
-### Ctrl+P: everything, one search away
-
-**Ctrl+P** (or Ctrl+K) opens the command palette: every action Chuck has, organised in groups. That's the agent OS (activity, processes, missions, daemons, inbox, board, budget, governor), each running agent (Kill, Trace, Replay, Message), your programs, chat and code actions (diff, commit, review, rewind), folders and folder access, models, voice, recent chats and settings. Type a few letters (`nmis` finds *New mission*), move with the arrows, press Enter. An action that needs more, like a mission's goal, is put in the composer for you to finish.
-
-<p align="center"><img src="assets/screenshots/palette.png" alt="The command palette: a search box and the Agent OS group: Activity, Processes, New mission, Missions, Background agent, Daemons, Inbox, Board, Budget, Governor" width="620"></p>
-
-### `/watch`: talk to Chuck from your own editor
-
-Turn on `/watch` and keep coding in VS Code, Neovim, JetBrains, anything. Write a comment ending in `AI!` and save:
-
-```python
-def total(items):   # make this skip None values AI!
-```
-
-Chuck sees it, does it, and removes the marker. End a comment with `AI?` and it answers the question in the chat instead, changing nothing. Every common comment style works (`#`, `//`, `--`, `/* */`, `<!-- -->`). Watching costs nothing: it's a cheap scan of what you saved, with no model call until a marker appears, and each comment is acted on once.
-
-### A shell for the OS
-
-While Chuck is open, running `chucknorris` again from any terminal talks to it instead of opening a second window. That makes Chuck scriptable from your shell, cron, git hooks and editor tasks:
-
-```bash
-chucknorris --here "the tests in auth are failing, fix them"   # this dir becomes the folder
-chucknorris --mission "add type hints everywhere, with mypy passing"
-chucknorris --remind "in 20m: stretch"
-chucknorris --run "reviewer the last commit"
-chucknorris --top            # the agent processes, printed right here
-chucknorris --budget         # today's and this month's spend
-chucknorris --inbox          # unread daemon reports
-```
-
-### The tray: the OS at a glance
-
-When something is going on, a small tray appears in the header: `? 1  ▶ 2  ◎ 1  ✉ 1` means a question is waiting for you, two agents are working, a mission is running, and a daemon left a report. It lights up when an agent is waiting for your answer. Click it (or type `/activity`) for one card with all of it, each with a button to act on it.
-
-<img src="assets/screenshots/os-activity.png" alt="The header tray lit up with a question waiting, and the ACTIVITY card: the question with Answer, the agents working, an unread report, and today's spend" width="100%">
-
-### `/top`: every agent is a process
-
-<img src="assets/screenshots/os-top.png" alt="/top: the chat as PID 1 and its sub-agents, with state, priority, tokens, cost, tokens per second, run time, what each is doing, and Pause / Continue / Kill per process" width="100%">
-
-The chat you are talking to is PID 1. Every sub-agent, background agent, program and daemon is a process under it, with a quota of tokens, money and time. A child can never spend more than its parent was allowed. Past its quota, a process is sent **TERM** and gets exactly one more call to write up what it has, then **KILL**. No runaway loop ever eats your balance. `/kill`, `/stop`, `/cont` and `/nice` work on any pid.
+<img src="assets/screenshots/os-mission.png" alt="A MISSION card with a progress bar and five tasks: three finished (one merged after its tests passed), one running, one waiting for it, each with Trace and Replay" width="100%">
 
 ### Background agents: fork, then merge
 
-```text
-/spawn add tests for the parser and fix what they find
-```
-
-A full agent that writes, runs and tests code works **in its own copy of your folder** while you keep talking to Chuck. Its commands are jailed to that copy by bubblewrap. Run five at once; none can trample another. When one finishes, the project's tests run on its copy and the card says whether they pass. **Show diff** lets you tick exactly which files to take, and **Merge** brings it home three-way: your edits and its edits to the same file are combined; overlapping edits are never forced, but set aside for you. The merge is checkpointed, so `/rewind` undoes it.
+A background agent writes, runs and tests code **in its own copy of your folder** while you keep talking to Chuck. Run several; none can trample another. When one finishes, your tests run on its copy and the card tells you whether they pass. **Show diff** lets you pick exactly which files to take, and **Merge** brings them home three-way: your edits and its edits to the same file are combined, and overlapping edits are set aside for you instead of overwritten.
 
 <img src="assets/screenshots/os-background.png" alt="A background agent's card: done, two files changed in its copy, its report, and Show diff / Merge into folder / Discard / Trace / Replay" width="100%">
 
-### Agents that talk, ask, share, and know their budget
+### Agents that talk to each other, and to you
 
-What an agent needs from its OS is what any colleague needs:
+- **Messages.** Tell a working agent something (*"also keep the old port as a fallback"*) and it arrives with its next results.
+- **Questions without stopping the world.** A background agent can ask you something in a card and wait, while every other agent keeps going.
+- **A shared board** where agents leave notes for each other (*"the tests need Postgres on :5432"*).
+- **They know their budget.** Every result tells an agent how many steps, tokens and minutes it has left, so it paces itself instead of being cut off mid-thought.
 
-- **To be told things.** `/send 4 also keep the old port as a fallback` reaches pid 4 with its next results. The main agent does it with ```` ```send ````.
-- **To ask without stopping the world.** A background agent's ```` ```ask ```` pops a card and a notification and waits, *WAITING* in `/top`, while every other agent keeps working.
-- **Shared memory.** A blackboard every agent reads and writes: *"pid 3 is rewriting auth.py"*, *"the tests need Postgres on :5432"*. ```` ```post ````, ```` ```board ````, `/board`.
-- **To see its own budget.** Every result ends with a `[kernel]` line (`step 7 of 60 · tokens 212k of 1.5M · 41 min left`), so an agent paces itself instead of being cut off mid-thought.
-- **To wait for its children.** The main agent's ```` ```wait 4 ```` returns a background agent's report as a tool result.
+<img src="assets/screenshots/os-ask.png" alt="A background agent asks a question in a card with an answer box while the rest of the session carries on" width="100%">
 
-<img src="assets/screenshots/os-ask.png" alt="A running background agent asks a question in a card with an answer box while it waits; the rest of the session carries on" width="100%">
+## Always on, for free
 
-### Time travel: replay and fork any run
-
-Every step of a background agent is checkpointed: its conversation and, in a private git store, its copy of the folder. So:
-
-- **It survives anything.** Close Chuck, crash it, reboot: the next start offers **Resume**, and the agent goes on from the step it was on, in the same copy. Finished work you never merged comes back, ready to merge.
-- **`/replay <pid>`** walks through a run step by step: what it did, what it got back, what it had spent.
-- **`/fork <pid> <step> [instruction]`** starts a *new* agent from any step, with the conversation up to there and the files **exactly as they were at that step**. *"At step 3 you went for a rewrite. Patch it instead."* The original is untouched; fork the fork as often as you like.
-
-<img src="assets/screenshots/os-replay.png" alt="REPLAY: each step of a background agent's run with the tools it called, what came back, the kernel line, and a Fork here button" width="100%">
-
-### Daemons: agents that sleep for free
-
-An agent that polls *"is the disk full yet?"* burns tokens on every look. A Chuck daemon's trigger is plain code (a clock, a file's mtime, `systemctl --failed`, the disk, a command's output), checked every 30 seconds **for zero tokens**. Only when it fires is an agent woken, as a metered process told what fired and what was seen.
+### Daemons: agents that sleep until they're needed
 
 ```text
 /daemon daily 08:30: summarise new errors in the journal since yesterday
 /daemon when a service fails: find out why and propose a fix
 /daemon when disk / is above 90%: find what's filling it and what's safe to delete
-/daemon when `checkupdates` changes: say which updates are worth taking
-/daemon act every day at 3am: update the dependencies and run the tests
 ```
 
-Unattended means **it looks, it never changes**: no file writes; commands run with the whole system read-only; nothing that restarts a service, powers off or installs a package gets through, even on the system bus. Reports land in `/inbox` with a desktop notification (and quietly, with none, when there's nothing to do). **Act on it** hands one to the agent. A daemon that should change code (`/daemon act …`) is a background agent in a copy you merge.
+An agent that keeps checking *"is the disk full yet?"* pays for every look. A daemon's trigger is plain code (a clock, a file changing, a failed service, disk usage, a command's output), checked every 30 seconds **at no cost**. Only when it fires is an agent woken, told what happened, and asked to report. Unattended daemons **look but never change anything**: the whole system is read-only to them. Reports land in your inbox with a notification, and **Act on it** hands one to the agent.
 
 <table>
 <tr>
-<td width="50%"><img src="assets/screenshots/os-daemons.png" alt="DAEMONS: four daemons with their triggers, state and run counts, each with Run now / Pause / Delete"></td>
-<td width="50%"><img src="assets/screenshots/os-inbox.png" alt="INBOX: daemon reports with their reasons, and Act on it"></td>
+<td width="50%"><img src="assets/screenshots/os-daemons.png" alt="DAEMONS: four daemons with what they do, their trigger, state and run count, each with Run now / Pause / Delete"></td>
+<td width="50%"><img src="assets/screenshots/os-inbox.png" alt="INBOX: two daemon reports with when and why, each with Act on it"></td>
 </tr>
 </table>
 
-### Programs, capabilities, the governor, strace
+### Talk to it from your editor
 
-- **Agent programs** are packages: one Markdown file with a mode, tools, a model, a quota and a prompt. Six ship built in (`reviewer`, `tester`, `auditor`, `checkup`, `researcher`, `explainer`); add your own in `~/.config/chucknorris/programs/` or a project's `.chuck/programs/`. `/run reviewer the parser`, or the agent's ```` ```spawn @reviewer ````.
-- **Capabilities.** Every process holds `read`, `write`, `exec`, `net` and `spawn`, clipped to its parent's. Every tool call goes through one guard that checks, times and logs it. A program without `fetch` never reaches the network; an offline-sandboxed folder takes `net` away from everything that works in it.
-- **The model governor.** *Performance* runs everything on your chat model. *Balanced* moves read-only sub-agents, daemons, report programs and summaries to the fast model (here about 39% cheaper). *Powersave* runs everything on it. `/governor`, or Settings.
-- **`/strace <pid>`**: every syscall a process made, its latency, its size, and what its capabilities refused.
+Turn on `/watch` and keep coding in VS Code, Neovim, JetBrains or anything else. Write a comment that ends in `AI!` and save:
 
-<table>
-<tr>
-<td width="50%"><img src="assets/screenshots/os-programs.png" alt="PROGRAMS: the six built-in programs with their mode, capabilities, model and quota"></td>
-<td width="50%"><img src="assets/screenshots/os-governor.png" alt="GOVERNOR · BALANCED: which model each kind of agent runs on, and the saving"></td>
-</tr>
-<tr>
-<td colspan="2"><img src="assets/screenshots/os-strace.png" alt="STRACE: a program's syscalls with timing, size, and a denied write"></td>
-</tr>
-</table>
-
-### Virtual memory for the context window
-
-`/context` is `free` for the model's RAM: what the next call will send, by what takes the room (system prompt, project rules, tool output, the page table, the summary, your messages), against the context budget.
-
-Long sessions don't forget; they page. Once a conversation is big, tool output older than the newest few results is swapped out of what is sent for a one-line page-table entry (`[p17 · npm test · 12k chars · FAILED in auth.test.ts:41]`). The model pages it back **exactly** with ```` ```page p17 ````, a line range, or a search inside it. Lossless comes before lossy: summarising only happens when even the page table no longer fits, and the summary carries the page table with it.
-
-### The one thing it won't do
-
-Inside Chuck OS an agent can do anything you grant it. One gate stays, by design: commands that can destroy the machine (disk wipes, `rm -rf ~`, `curl | sh`, removing core packages) wait for your tick, and agents running unattended never get sudo. That gate is what lets you leave twenty agents working overnight and come back to a machine you still own.
-
----
-
-## Two modes, one key
-
-**Agent** runs on your machine: shell commands, file edits, tests, packages. **Chat** answers only, and nothing touches your system. **Tab** flips between them from anywhere in the window, and the switch sits in the composer so you always know which one you're in.
-
-<table>
-<tr>
-<td width="50%"><img src="assets/screenshots/agent-commands.png" alt="Agent mode: a reply, then a command card on the work lane"></td>
-<td width="50%"><img src="assets/screenshots/chat-mode.png" alt="Chat mode: a formatted answer with a table and a copyable code block"></td>
-</tr>
-<tr>
-<td><b>Agent.</b> Everything the machine did hangs on the <i>work lane</i>, a rail off Chuck's avatar. What he <i>said</i> and what <i>ran</i> never blur together. Every command shows its real exit code and output.</td>
-<td><b>Chat.</b> Markdown, real tables, and code blocks with a copy button that scroll sideways instead of overflowing. Code in Chat mode is shown, never executed.</td>
-</tr>
-</table>
-
-## A working folder for the session
-
-Click the folder chip (or **Ctrl+O**) to point the session at a project. Commands run there. `read`, `grep`, `glob`, `write` and `edit` resolve relative paths there. Each request carries a one-line map of the folder's top level, so the model starts oriented. Choose **no folder** for questions and system work. Recent folders and Chuck's own `~/ChuckProjects` are one click away.
-
-## Built for real coding work
-
-| tool | what it does |
-|---|---|
-| `map` | Every file in the repo with the classes and functions it defines (real AST for Python, patterns for JS/TS, Go, Rust, C/C++, Java, Ruby, PHP, Lua, shell). Honours `.gitignore`. |
-| `glob` · `grep` | Find files by pattern, search by regex. Uses ripgrep when installed, pure Python when not. Output is capped so a search never floods the context. |
-| `read path:120-400` | Reads any size of file in **pages**. Each page ends with the exact `read` for the next one. Nothing is silently cut. |
-| `edit` | Aider-style `SEARCH/REPLACE` blocks. Only the changed lines are sent, so it's cheap on output tokens. All-or-nothing, whitespace-tolerant, re-verified after the edit. |
-| `write` | New files of any length. A reply that hits the output limit is **continued automatically** and stitched (repeated overlap trimmed) before the file is written. |
-| `bash` · `python` · `node` | One step at a time, auto-verified before it runs (real defects only, never style), real exit code back. Output streams live into the card. `cd` carries to the next command, like a terminal. |
-| `py` | **One Python that lives as long as the chat**, notebook-style: load data once and keep using it, see the last value, get matplotlib figures back as images. |
-| `patch` | A multi-file unified diff, applied all-or-nothing. Hunks are found by their context, so wrong line numbers don't matter. |
-| `browse` | A real headless Chromium. Load a page or file, click, type, press keys, run JS. Back come uncaught errors with file and line, failed requests, the page text and a screenshot. |
-| `def` · `refs` · `rename` | **By meaning, through a real language server** (pyright, TypeScript 7's `tsc`, typescript-language-server, rust-analyzer, gopls, clangd): where `Store.save` is defined, every call to *that* `save` and not `Cache.save`, and a rename across files that leaves comments and strings alone, checkpointed like any edit. Without a server, `def`/`refs` fall back to syntax and say so. |
-| `find` | **Code by what it does:** *"where do we retry failed requests?"* ranks functions, classes and doc sections by their names, docstrings, comments and identifiers (BM25, camelCase/snake_case aware), even when no line uses your words. |
-| `diagnose` | LSP-lite: lint and type-check files on disk with whatever is installed (ruff, mypy, pyright, tsc, eslint, shellcheck, cargo, go vet). |
-| `changes` | The net diff of everything this task changed, for self-review before it reports. |
-| `plan` | A live checklist card that ticks itself off as the work proceeds. |
-| `undo` | Every write and edit is a checkpoint with its diff and a **Revert** button. `undo` reverts the last one; `undo all` reverts the whole task. |
-| `/rewind` | Before every step that acts, the whole folder is snapshotted into a private shadow repository (your own `.git` is never touched). `/rewind` puts the files **and** the conversation back to before any step, including what a *command* changed. A rewind can itself be undone. |
-| `bg` · `logs` · `kill` | Dev servers and watchers run in the background with a live card. Chuck reads their logs and stops them, and they stop when the window closes. |
-| `ask` | A question with one-click answers, for decisions that are really yours. The task waits for your answer. |
-| `open` | Hands you the result in your browser or default app. |
-| `runtests` · `package` · `tree` | Run the project's own tests, zip the result, show what was built. |
-| `screenshot` · `look` | Chuck **sees**: the screen, or any image (a page rendered with headless Chromium, a plot, a mockup). Build a UI, look at it, fix it. |
-| `task` | **Parallel sub-agents.** Each `task` block is a read-only sub-agent with its own model loop. Several run at once and report back; only their summaries enter the main context. |
-| `search` · `fetch` | Live web research across SearXNG instances, with sources cited. A page that blocks a plain fetch (a bot check, or nothing until JavaScript runs) is read through the browser instead. |
-| `remember` · `forget` | Long-term memory (below). |
-| `mcp` | Any Model Context Protocol server's tools (below). |
-
-<img src="assets/screenshots/agent-subagents.png" alt="Three sub-agents running in parallel, each with a done badge and a folded report" width="100%">
-
-**Sub-agents are read-only by design.** They survey, research and report, many at once, and only their summaries enter the main context. Parallel *writers* exist too: they are [background agents](#background-agents-fork-then-merge), each in its own copy of the folder, so they never trample each other's edits.
-
-## Steer it, plan it, retry it
-
-- **Talk while it works.** Press Enter mid-task and your message is queued and delivered at the agent's next step. A *"not that file"* lands without waiting for the run to finish.
-- **Plan mode.** Toggle **Plan** in the composer (or `/plan`). Chuck investigates read-only and proposes a plan card. Nothing changes until you press **Approve & run**, and **Revise** sends it back.
-- **Retry and edit.** **Ctrl+R** asks the last question again. **↑** in an empty composer edits your last message and resends from there.
-
-<img src="assets/screenshots/plan-mode.png" alt="Plan mode: Chuck read the game, then proposed a four-step plan card with Approve & run and Revise" width="100%">
-
-## The workflow around the code
-
-- **Git.** `/diff` shows the working tree as a card. `/commit` has Chuck stage the right changes and write the message from the diff. `/review` has him review the uncommitted diff for bugs before you push. `/pr` goes all the way: a branch, a commit, the tests, a push, and a pull request with a written description (via `gh`).
-- **Hooks.** Settings → Agent takes a command to run after every file write (a formatter, with `{path}`, optionally only for matching files) and one he must pass before he may finish (`pytest -q`, a linter). Their results go back to the model, so he fixes what they find.
-- **A Python session.** ```` ```py ```` blocks share one interpreter per chat. Load a dataset once, then explore it block by block. Stop interrupts a long loop and keeps the variables, and a figure comes back as an image he can look at. ```` ```python ```` stays a fresh one-shot script.
-
-<img src="assets/screenshots/python-session.png" alt="Two PYTHON SESSION cards: the first loads a CSV, the second plots it, with the chart shown in the card" width="100%">
-
-## It plays what it builds
-
-Web pages and games get opened in a real browser and *played*: arrow keys pressed, buttons clicked, state read back with JavaScript. The BROWSER card shows you what it found, so a typo that throws on every frame never ships as "done".
-
-<img src="assets/screenshots/browse.png" alt="A BROWSER card: one uncaught ReferenceError with its line, the key presses and JS result, and a screenshot of the game" width="100%">
-
-**Which browser:** Brave if you have it, otherwise Chromium or Chrome. They all speak the DevTools protocol Chuck drives directly, with no extra dependencies. Or choose **[Camoufox](https://camoufox.com)**, a Firefox build that websites can't fingerprint, in Settings → Agent → Browser. It's for research on sites that block automation. Research also falls back to the browser by itself: a page that refuses a plain fetch is read in it, after its bot check has cleared. Install Camoufox with `CHUCK_CAMOUFOX=1 ./install.sh`, or `pip install --user -U 'camoufox[geoip]' && python3 -m camoufox fetch`.
-
-Long builds stream into their card while they run, with a clock, and a finished log opens on its last lines, where the errors are.
-
-<img src="assets/screenshots/live-output.png" alt="A command card with a LIVE output panel streaming build lines" width="100%">
-
-## It finishes the job
-
-Ask for a game and you get a game, not *"I'll write the game now"* and silence. Before Chuck ends a task he checks three things:
-
-- **Did I promise something I didn't do?** A reply that announces an action without one is sent back to act.
-- **Is the plan finished?** Unchecked steps on his plan card mean he isn't done.
-- **Did I run what I changed?** Code written since the last run gets run, tested or screenshotted before the final report.
-
-He stops early only to ask you something he shouldn't decide alone. That arrives as a question card with one-click answers. All of it is bounded by the step budget (60 by default) and none of it happens in Chat mode.
-
-## It talks, and it listens
-
-**A natural voice.** Chuck speaks with [Kokoro](https://github.com/thewh1teagle/kokoro-onnx), the most natural of the open local text-to-speech models. It runs on your CPU, faster than real time, and nothing is uploaded.
-- Speech starts about half a second after a reply arrives: the first sentence is spoken while the rest is still being rendered.
-- The whole reply streams through one player, so there are no gaps or clicks between sentences.
-- What people write but never say is spoken the way a person would. `e.g.` becomes "for example", `->` becomes "then", and `v16.0.0` becomes "version 16.0.0". Paths are read by name, code and tables are skipped, and bullets and headings get real pauses.
-- Pick a voice in Settings → Voice and hear it at once. The default is a blend of Kokoro's two clearest male voices; *Heart* is rated its most natural overall.
-
-**Talk to it.** Click the mic, or press **Ctrl+M**, and just talk. It stops when you pause and puts what you said in the composer, or sends it straight away if you turn on hands-free. Recognition is [Moonshine](https://github.com/usefulsensors/moonshine) with a voice-activity detector, all on your machine. Talking over Chuck interrupts him.
-
-**If the mic doesn't hear you:** Chuck records with whichever tool your system has (`parecord`, then `pw-record`, then `arecord`), and if one fails it tries the next and remembers the one that works. If none gives any sound you'll see why, not a vague "didn't hear". `/doctor` and **Settings › Voice › Test the microphone** record one second and tell you whether sound is coming in. If the level is near zero, pick the right input in your desktop's sound settings, or give Chuck your own command under **Microphone command**.
-
-The installer sets both up, about 600 MB. `/voice` installs them later if you skipped it (`CHUCK_VOICE=0`). `/doctor` checks both with a real test.
-
-## Context it always has
-
-- **Project rules.** Put conventions in `CHUCK.md`, `AGENTS.md` or `CLAUDE.md` in the project (or `~/.config/chucknorris/CHUCK.md` for everything) and they ride along with every request, in the cached part of the prompt. `/init` has Chuck survey the project and write its `CHUCK.md` for you.
-- **`@file`** in a message attaches that file from the working folder.
-- **Your own commands.** Put a prompt in `.chuck/commands/<name>.md` (in the project, or `~/.config/chucknorris/commands/` for every project) and it becomes `/name`. `$ARGUMENTS` takes what you type after it, and a `description:` line shows it in `/help`.
-- **Slash commands** for everything you'd otherwise click:
-
-<img src="assets/screenshots/commands.png" alt="The /help card listing every slash command" width="100%">
-
-## MCP: every tool the ecosystem ships
-
-Chuck is a [Model Context Protocol](https://modelcontextprotocol.io) client. Servers go in `~/.config/chucknorris/mcp.json`, in the same format Claude Desktop uses, so any server's README snippet pastes straight in:
-
-```json
-{"mcpServers": {
-  "github": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"],
-             "env": {"GITHUB_PERSONAL_ACCESS_TOKEN": "..."}}
-}}
+```python
+def total(items):   # make this skip None values AI!
 ```
 
-They start in the background and their tools are listed to the model, which calls them like any other tool. Settings → Agent shows each server's state; `/mcp reload` picks up edits. With no servers configured it costs nothing.
+Chuck sees it, does it, and removes the marker. End a comment with `AI?` and it answers in the chat instead, changing nothing. Watching costs nothing until a marker appears.
 
-## Attach anything
+### Or from your terminal
 
-Click the paperclip, **drag files onto the window**, or **paste an image** (Ctrl+V straight from your screenshot tool or a browser). Everything lands in a tray above the composer, where you can review it and remove it before sending.
+While Chuck is open, running `chucknorris` again talks to the running app, so it works from scripts, cron and git hooks:
 
-- **Images** go to the model *as images*. With a text-only chat model (DeepSeek), they're routed to the vision model automatically.
-- **Text files** go as their contents, up to 400k characters. Larger ones say where the rest is.
-- **Other files** go by path, so in Agent mode Chuck can still work with them.
+```bash
+chucknorris --here "the tests in auth are failing, fix them"
+chucknorris --mission "add type hints everywhere, with mypy passing"
+chucknorris --remind "in 20m: stretch"
+chucknorris --top        # what every agent is doing, printed right here
+```
 
-Images are paid for once: they ride with the request that needs them, and history keeps only text.
+## Always in control
 
-<img src="assets/screenshots/attachments.png" alt="Composer with an image thumbnail and a file chip in the attachment tray" width="100%">
+- **Ctrl+P** opens a command palette with every action Chuck has: agents, missions, daemons, chats, models, folders and settings. Type a few letters, press Enter.
+- **The tray** in the header shows what's going on at a glance: a question waiting for you, agents working, a mission running, a new report. Click it for one card with all of it.
+- **`/top`** lists every agent like processes: state, tokens, cost, speed and what each is doing, with Pause, Continue and Kill.
+- **Budgets everywhere.** Every agent has a budget, a helper can never spend more than the agent that started it, and a daily or monthly limit (`/budget`) covers everything together. At the limit, Chuck pauses and asks.
+- **Replay and fork.** Every step of a background agent is saved. `/replay` walks through a run step by step; `/fork` starts a new agent from any step, with the files exactly as they were then.
+- **The governor** runs cheap work (read-only helpers, daemons, summaries) on a faster, cheaper model, with your chat model kept for the work that matters.
 
-## Models, pricing, and what you spent
+<table>
+<tr>
+<td width="50%"><img src="assets/screenshots/os-top.png" alt="/top: every agent with state, priority, tokens, cost, tokens per second, run time and what it is doing, with Pause / Continue / Kill"></td>
+<td width="50%"><img src="assets/screenshots/os-activity.png" alt="The header tray lit up with a question waiting, and the ACTIVITY card listing it with the working agents, an unread report and today's spend"></td>
+</tr>
+<tr>
+<td><img src="assets/screenshots/palette.png" alt="The command palette with the Agent OS group: Activity, Processes, New mission, Missions, Background agent, Daemons, Inbox, Board, Budget, Governor"></td>
+<td><img src="assets/screenshots/os-replay.png" alt="REPLAY: each step of a background agent's run with the tools it called and a Fork here button"></td>
+</tr>
+</table>
 
-The header meter shows **this chat's cost and tokens**, from the usage the API actually reports: prompt, cache hits, completion and reasoning tokens. A click opens the breakdown, the session total and your live account balance.
+## Safe by design
+
+An agent that can do real work can also do real damage, so safety is built into the layers underneath, not bolted on:
+
+- **Per-folder access** (shown on the folder chip): *Full access*; *Sandboxed*, where everything runs under [bubblewrap](https://github.com/containers/bubblewrap) with the system read-only and only the project writable; *Sandboxed, offline*, the same with no network; or *Read-only*. Give an unfamiliar repository the sandbox and let it work.
+- **Your secrets stay hidden** from sandboxed agents: SSH and GPG keys, cloud credentials, browser profiles, token files and Chuck's own API key.
+- **Nothing escapes through git.** In a sandboxed folder, agents can't plant git hooks or settings that would run code later, when *you* use git.
+- **The critical gate.** Commands that could wreck the machine (disk wipes, `rm -rf ~`, `curl … | sh`, removing core packages) arrive disarmed and wait for your click. Agents running unattended never get sudo.
+- **Everything is reversible.** Checkpoints before every step that changes anything, `/rewind` for files and conversation, and background agents that only touch your folder when you merge.
+- **A tamper-evident log.** Every command lands in a hash-chained ledger you can verify in Settings.
+
+## Voice
+
+**Chuck talks** with [Kokoro](https://github.com/thewh1teagle/kokoro-onnx), a natural-sounding voice that runs locally on your CPU. Speech starts about half a second after a reply arrives, and code, paths and tables are read the way a person would read them, or skipped.
+
+**And listens.** Click the mic or press **Ctrl+M** and just talk; it stops when you pause. Recognition is [Moonshine](https://github.com/usefulsensors/moonshine), also fully local. Talking over Chuck interrupts him. **Settings › Voice › Test the microphone** checks your input in one second.
+
+## Context and memory
+
+- **Project rules.** Put your conventions in `CHUCK.md`, `AGENTS.md` or `CLAUDE.md` and they go with every request. `/init` writes one for you.
+- **Memory you can trust.** Durable facts persist across chats; a new fact replaces the old one instead of contradicting it, and project facts stay with their project. Everything is visible and editable in the Memory panel.
+- **Long sessions don't forget.** Old tool output is paged out of the context and paged back exactly when needed; summarising only happens when even that no longer fits. `/context` shows what the next request will send.
+- **Attach anything.** Drag in files, paste screenshots, or `@file` from the project. Images reach the model as images.
+- **Your own commands.** A prompt in `.chuck/commands/<name>.md` becomes `/name`.
+
+## Models and costs
+
+The header meter shows this chat's cost and tokens, from the usage the API actually reports. A click opens the breakdown, the session total and your account balance.
 
 | model | input / 1M | output / 1M | sees images |
 |---|---|---|---|
@@ -356,67 +235,31 @@ The header meter shows **this chat's cost and tokens**, from the usage the API a
 | `zai-org/GLM-5.3` | $1.40 ($0.26 cached) | $4.40 | yes |
 | **Free:** `Qwen/Qwen3-8B`, `THUDM/GLM-4-9B-0414`, `deepseek-ai/DeepSeek-R1-0528-Qwen3-8B` | $0 | $0 | no |
 
-List prices as of October 2026. Switch models from the composer's model menu. **Settings → Fetch** pulls the live list your key can use; SiliconFlow's free tier rotates. A model the table doesn't know shows tokens without inventing a price, and you can set a custom price in Settings.
+List prices as of October 2026. **Settings → Fetch** pulls the live list your key can use, and you can set a custom price for any model. Chuck is careful with tokens: small prompts, a cache-friendly layout, cheap edits that send only changed lines, and batched read-only tools.
 
-<p align="center"><img src="assets/screenshots/usage.png" alt="Usage popover: cost, input with cache hits, output with reasoning, price, session total, balance" width="320"></p>
+<p align="center"><img src="assets/screenshots/usage.png" alt="Usage popover: cost, input with cache hits, output with reasoning, price, session total and balance" width="320"></p>
 
-## Efficient by construction
+## When something goes wrong
 
-Every hop of an agent loop re-sends the system prompt, so its size is paid per tool call, not per chat.
-
-- **Prompts:** agent under 4k characters (v13 was 5.7k while documenting far fewer tools); chat 0.7k.
-- **Playbooks** (debugging, TDD, review, git, UI, performance, security, Arch, building…) are injected only when the task triggers them, at most two at a time, and never in Chat mode.
-- **Cache-friendly:** the volatile part (date, memory, folder) is appended *last*, so the long prefix stays cacheable on the API side.
-- **Context control:** older tool output is compressed extractively (head, tail and every error line kept). A long session is summarised by the model instead of forgetting its oldest turns, and `/compact` does it on demand. The context budget is a setting.
-- **Batching:** read-only tools batch into one round trip, and four of them cost one model call, not four.
-
-## Memory you can trust
-
-Durable facts persist across chats and only the few relevant ones are sent with a question, never the store. Two upgrades in the spirit of [supermemory](https://github.com/supermemoryai/supermemory):
-
-- **Updates supersede.** "GPU is an RTX 4090" replaces "GPU is an RTX 3080" instead of sitting beside it. The old fact is archived, not destroyed.
-- **Project scope.** Facts saved as `project:` belong to the working folder and are recalled only there, so one repo's conventions never leak into another's answers.
-
-All of it is visible, searchable, addable and deletable in the Memory panel.
-
-## When things go wrong
-
-- **A model is down?** After its retries, that request is answered by a fallback model (automatic, or your choice in Settings), and the chat says so.
-- **Watching spend?** Set a per-chat spending cap. When a chat reaches it, the task pauses and asks before spending more.
-- **Esc** stops the turn *and* the command it was running, whole process tree included.
-- **Crashed or lost power mid-task?** The chat is saved as each step starts. The next time Chuck opens, the welcome screen offers to **Resume** it, and the agent checks the current state before carrying on.
-- **`/doctor`** checks your setup in one card: key and balance, model, browser, linters, screenshots, voice, MCP servers, disk, and recent errors, each with the fix.
-- **A crash log.** Errors on the UI thread, in worker threads and in tools are written to `~/.local/state/chucknorris/chuck.log` with their tracebacks (never keys or chats), so a bug report has something in it. Settings opens it.
-- **Updates.** Once a day Chuck checks GitHub for a newer version and offers it. `/update` installs it without sudo. A git clone gets a fast-forward pull, and an installed copy is downloaded, checked and swapped in whole. **Restart now** reopens your chat.
-
-<img src="assets/screenshots/doctor.png" alt="The DOCTOR card: a row per check with a green tick or an amber warning and the fix" width="100%">
-
-## Safety that doesn't get in your way
-
-**Per-folder access** (`/access`, shown on the folder chip): *Full access*; *Sandboxed*, where commands, code, the Python session and background jobs run under [bubblewrap](https://github.com/containers/bubblewrap) with the system read-only, only the project writable, a private `/tmp` and no sudo; *Sandboxed, offline*, the same with no network; or *Read-only*, where nothing runs or changes. Give an unfamiliar repo the sandbox and let it work.
-
-Commands run on their own; that's the point of an agent. **CRITICAL** ones (disk wipes, `rm -rf /`, `curl | sh`, removing core packages) arrive disarmed and wait for your tick, and so do saved skills whose *body* is critical. Commands run in their own process group with resource limits, and a timeout kills the whole tree. `pacman -S` is rewritten to `-Syu`. sudo authenticates once per chat, in memory only. Every command lands in a hash-chained ledger you can re-verify in Settings.
+- **A model is down?** The request goes to a fallback model, and the chat says so.
+- **Closed or crashed mid-task?** Chats are saved at every step, and background agents and missions resume where they were.
+- **Esc** stops the current run and everything it started.
+- **`/doctor`** checks your setup in one card (key, balance, model, browser, voice, MCP servers, disk) and tells you how to fix each problem.
+- **Updates** are offered when a new version is out; `/update` installs it without sudo.
 
 ## Keyboard
 
 | key | action |
 |---|---|
 | **Tab** | switch Agent / Chat |
-| **Enter** · **Shift+Enter** | send (or, while it works, steer) · new line |
-| **Ctrl+R** · **↑** | retry the last answer · edit your last message |
-| **Ctrl+M** | talk to Chuck (local speech recognition) |
-| **Ctrl+V** | paste text, an image, or copied files |
-| **Ctrl+P** · **Ctrl+K** | the command palette: every action, agent, chat and model |
+| **Enter** · **Shift+Enter** | send (or steer while it works) · new line |
+| **Ctrl+P** · **Ctrl+K** | command palette |
+| **Ctrl+M** | talk to Chuck |
 | **Ctrl+O** | working folder |
+| **Ctrl+R** · **↑** | retry the last answer · edit your last message |
 | **Ctrl+N** · **Ctrl+B** · **Ctrl+,** | new chat · chats sidebar · settings |
-| **Esc** | stop the current run (and its command) |
+| **Esc** | stop the current run |
 | **/** · **@** | commands · attach a file |
-
-## The window
-
-Dark neutral surfaces with one violet accent, used only for edges, focus and what's live. The welcome screen is woven from code glyphs. Move the pointer and a soft lens of that fabric surfaces under it, with an outline that breathes and an edge that dissolves glyph by glyph. Click and the fabric is struck. Each strike rolls out with its own uneven, lobed front plus a slower echo, so no two spread alike. The net really moves: glyphs are pushed out at the crest, pulled back behind it and woven sideways, threads light up between neighbours where it flexes, and a cool white edge gives way to a violet crest and an indigo wake of characters still decoding. It costs nothing at rest, thins itself out on slow machines to hold 60 fps, and respects your desktop's reduce-animation setting. The transcript follows new output only while you're at the bottom: scroll up to read and it stays put, with a *Jump to latest* button to come back. Wide code and tables scroll inside their own block, and the page never scrolls sideways.
-
-<img src="assets/screenshots/settings.png" alt="Settings: account, model, and the models and pricing list" width="100%">
 
 ## Install
 
@@ -424,13 +267,13 @@ Dark neutral surfaces with one violet accent, used only for edges, focus and wha
 curl -fsSL https://raw.githubusercontent.com/the-priest/ChuckNorris/main/install.sh | bash
 ```
 
-Or read it first, which you should:
+Or read the installer first:
 
 ```bash
 git clone https://github.com/the-priest/ChuckNorris.git && cd ChuckNorris && ./install.sh
 ```
 
-Arch / CachyOS first-class; apt and dnf supported. The installer handles GTK4 + libadwaita (with the PyGObject cairo bridge), a screenshot tool, polkit, voice (Piper, espeak-ng fallback), `yt-dlp`, and the verifier linters. Runtime needs nothing beyond the standard library and GTK; everything optional degrades gracefully.
+Arch and CachyOS are first-class; apt and dnf are supported. The installer sets up GTK4 and libadwaita, bubblewrap, a screenshot tool, the local voice models (about 600 MB, skip with `CHUCK_VOICE=0`) and the linters Chuck uses to check code. At runtime Chuck needs only Python's standard library and GTK; everything optional degrades gracefully when it's missing.
 
 ## Tests
 
@@ -438,15 +281,15 @@ Arch / CachyOS first-class; apt and dnf supported. The installer handles GTK4 + 
 ./run_tests.sh
 ```
 
-Twenty-four suites run headless against a stubbed toolkit and drive the real window end to end. They cover whole conversations, both modes, edits in a real folder, paged reads of a 12,000-line file, a file written across two cut-off replies, parallel sub-agents, images reaching the model as images, cache-hit pricing, memory updates and scopes, an agent that stops early or never stops, late streams from a stopped turn, undo and background jobs, the kernel's scheduler and quotas, background agents merging three-way, paging, daemons that only look, capabilities and programs, a crash mid-run resumed and a run forked from a past step with its files as they were, agents asking and messaging each other, steering mid-task, plan approval, git and hooks, a Python session that survives Stop, bot walls on a local site read through real Chromium, updates that refuse a broken download, renames through real pyright and TypeScript servers, rewinding what commands changed, real bubblewrap sandboxes that block writes outside the project and the network, a README whose example must not run, the critical gate, sudo storms, orphaned processes, and the ledger chain. `test_deep.py` runs whole sessions with real processes and ports, plus 180 seeded random model replies that must never hang the app, run something they shouldn't, or write outside the folder. The UI itself was checked by rendering every screen on real GTK 4.14 / libadwaita 1.5. The screenshots above are those renders.
+Twenty-four suites drive the real application end to end against a stubbed toolkit: whole conversations in both modes, real edits in real folders, background agents merging three-way, missions gated on tests, daemons that must only look, crashes resumed and runs forked from past steps, real bubblewrap sandboxes that must block writes and network, real language servers, and the safety gate against destructive commands. One suite feeds the app 180 random model replies that must never hang it, run something they shouldn't, or write outside the folder. The screenshots on this page are renders of the real app on GTK 4, driven by scripted model replies so they can be reproduced.
 
-## Being straight with you
+## Good to know
 
-- **The model is remote.** Your prompts, attached files and screenshots go to SiliconFlow.
-- **It's a personal project,** cleaned up to share, not a product with an SLA.
-- **Prices drift.** The table is a snapshot; set a custom price if yours differs.
-- **The `DeepSeek-V4.1-Flash` model ID** follows SiliconFlow's naming convention. If your account lists it differently, **Fetch** in Settings shows the exact ID.
-- **A regex risk classifier is a safety net, not a proof.** Read the CRITICAL cards.
+- **The model runs in the cloud.** Your prompts, attached files and screenshots go to SiliconFlow. Everything else stays on your machine.
+- **Chuck is as good as the model behind it.** Planning, orchestration and code quality depend on the model you choose; the OS makes it safe, metered and recoverable.
+- **The safety gate is a net, not a proof.** It catches the destructive commands that matter, and the sandbox is the real wall. Read the cards that ask for your confirmation.
+- **Prices change.** The table is a snapshot; set a custom price in Settings if yours differs.
+- **It's a personal project,** built with care and shared freely, not a product with an SLA.
 
 ---
 
