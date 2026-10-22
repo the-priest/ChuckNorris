@@ -1860,6 +1860,33 @@ settle()
 check(w.agent_mode and any(m.get("content") == "update my system safely" for m in w.history),
       "one click and it's done in Agent mode")
 
+print("\n--- damaged mission files never stop Chuck from starting ---")
+import json as _json
+_md = cn.ChuckWindow.MISSIONS_DIR
+_md.mkdir(parents=True, exist_ok=True)
+for _i, _bad in enumerate([{"id": "m91", "tasks": [None], "state": "running"},
+                           {"id": "m92", "tasks": [{"id": "t1"}]},
+                           {"id": "m93", "goal": "g", "state": "running", "created": "yesterday",
+                            "tasks": [{"id": "t1", "state": "running", "deps": None}]},
+                           {"id": "m94", "goal": 5, "state": "warp", "tasks": [{"id": "a", "deps": ["a", "zz"]}]},
+                           "not even a mission"]):
+    (_md / f"m9{_i + 1}.json").write_text(_json.dumps(_bad))
+(_md / "m99.json").write_text(_json.dumps({"id": "m99", "goal": "the good one", "state": "paused",
+                                           "created": time.time(), "tasks": [
+                                               {"id": "t1", "title": "fine", "brief": "fine", "kind": "code",
+                                                "deps": [], "state": "pending"}]}))
+w = new_win([], tmp)
+w.offer_hibernated()
+settle()
+check("m99" in w._missions and w._missions["m99"]["goal"] == "the good one",
+      "a good mission next to damaged ones still comes back")
+check(all(isinstance(t.get("title"), str) for m in w._missions.values() for t in m["tasks"]),
+      "every mission that loads is whole (missing fields filled in)")
+import gtkstub as _gs
+check(not _gs.GLibNS.errors, "and nothing threw", str(_gs.GLibNS.errors[:1]))
+for _f in _md.glob("m9*.json"):
+    _f.unlink()
+
 print(f"\nTOTAL OS FAILURES: {fails}")
 assert fails == 0 and not FAILS, "OS regressions present"
 print("ALL OS TESTS PASSED")

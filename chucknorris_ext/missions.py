@@ -203,6 +203,58 @@ def progress(m):
     return done, n
 
 
+_TASK_STATES = (PENDING, RUNNING, VERIFYING, MERGED, DONE, FAILED, SKIPPED, CONFLICT)
+_MISSION_STATES = (PLANNING, AWAITING, ACTIVE, PAUSED, COMPLETE, CANCELLED)
+
+
+def normalize(m):
+    """A mission read from disk, every field present and of the right type,
+    or None when it can't be one (a damaged file must never stop Chuck from
+    starting, nor take the other missions down with it)."""
+    if not isinstance(m, dict) or not isinstance(m.get("id"), str) or not re.fullmatch(r"m\d+", m["id"]):
+        return None
+    raw = m.get("tasks")
+    if not isinstance(raw, list):
+        return None
+
+    def num(v, d, kind=float):
+        return kind(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else d
+    tasks, seen = [], set()
+    for t in raw:
+        if not isinstance(t, dict):
+            continue
+        tid = re.sub(r"[^A-Za-z0-9_-]", "", str(t.get("id") or ""))[:20]
+        if not tid or tid in seen:
+            continue
+        seen.add(tid)
+        title = str(t.get("title") or t.get("brief") or tid)[:80]
+        deps = t.get("deps") if isinstance(t.get("deps"), list) else []
+        pid = t.get("pid")
+        tasks.append({**t, "id": tid, "title": title, "brief": str(t.get("brief") or title),
+                      "kind": t.get("kind") if t.get("kind") in KINDS else "code",
+                      "deps": [str(d) for d in deps], "pid": pid if isinstance(pid, int) and not isinstance(pid, bool) else None,
+                      "state": t.get("state") if t.get("state") in _TASK_STATES else PENDING,
+                      "attempts": num(t.get("attempts"), 0, int),
+                      "report": str(t.get("report") or ""), "verify": str(t.get("verify") or ""),
+                      "note": str(t.get("note") or "")})
+    for t in tasks:                                  # a dependency on a task that's gone
+        t["deps"] = [d for d in t["deps"] if d in seen and d != t["id"]]
+    try:
+        order(tasks)
+    except MissionError:
+        for t in tasks:
+            t["deps"] = []                            # a cycle can't be resumed as is
+    state = m.get("state") if m.get("state") in _MISSION_STATES else CANCELLED
+    log_ = [e for e in m.get("log") or [] if isinstance(e, (list, tuple)) and len(e) == 2] \
+        if isinstance(m.get("log"), list) else []
+    return {**m, "goal": str(m.get("goal") or "(no goal)"), "folder": str(m.get("folder") or ""),
+            "tasks": tasks, "notes": str(m.get("notes") or ""), "state": state,
+            "created": num(m.get("created"), time.time()), "pid": None,
+            "spent_tokens": num(m.get("spent_tokens"), 0, int), "spent_usd": num(m.get("spent_usd"), 0.0),
+            "spent_seconds": num(m.get("spent_seconds"), 0.0),
+            "log": log_}
+
+
 class Store:
     """Missions on disk, one JSON file each: a mission outlives the window."""
 
@@ -228,10 +280,10 @@ class Store:
             return out
         for f in files:
             try:
-                m = json.loads(f.read_text())
+                m = normalize(json.loads(f.read_text()))
             except (OSError, ValueError):
                 continue
-            if isinstance(m, dict) and m.get("id") and isinstance(m.get("tasks"), list):
+            if m is not None:
                 out.append(m)
         return out
 

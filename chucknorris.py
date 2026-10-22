@@ -10721,60 +10721,72 @@ class ChuckWindow(Adw.ApplicationWindow):
         if self._mstore is None:
             return
         for m in self._mstore.load():
-            if m["id"] in self._missions:
-                continue                    # started in this session: it's live, not a leftover
-            if m["state"] in (_missions.COMPLETE, _missions.CANCELLED):
-                if time.time() - m.get("created", 0) < 7 * 86400:
-                    self._missions[m["id"]] = m
+            try:
+                self._mission_boot_one(m, recs)
+            except Exception:                   # one damaged mission never stops the rest
+                self._missions.pop(m.get("id"), None)
+                if _crashlog is not None:
+                    try:
+                        _crashlog.record("mission boot", traceback.format_exc())
+                    except Exception:
+                        pass
+
+    def _mission_boot_one(self, m, recs):
+        if m["id"] in self._missions:
+            return                      # started in this session: it's live, not a leftover
+        if m["state"] in (_missions.COMPLETE, _missions.CANCELLED):
+            if time.time() - m.get("created", 0) < 7 * 86400:
+                self._missions[m["id"]] = m
+            return
+        self._missions[m["id"]] = m
+        if m["state"] == _missions.PLANNING:
+            m["state"] = _missions.CANCELLED          # its planner is gone; ask again
+            _missions.log(m, "cancelled: Chuck closed while it was being planned")
+            self._mission_save(m)
+            return
+        spent = int(m.get("spent_tokens") or 0)
+        m["spent_base"], m["spent_base_usd"] = spent, float(m.get("spent_usd") or 0.0)
+        hours = self.cfg("mission_hours", 4, 1, 72) * 3600
+        used_s = float(m.get("spent_seconds") or 0.0)
+        m["spent_base_seconds"] = used_s
+        proc = self.kernel.spawn(
+            f"mission: {m['goal']}"[:60], kind="mission", brief=m["goal"], parent=self._pid1,
+            nice=1, quota={"tokens": max(1, self.cfg("mission_tokens", 5000000, 100000, 100000000) - spent),
+                           "seconds": max(60, hours - used_s)})
+        m["pid"] = proc.pid
+        mine = [r for r in recs if isinstance(r.get("mission"), list) and len(r["mission"]) == 2
+                and r["mission"][0] == m["id"] and r.get("key")]
+        for t in m["tasks"]:
+            if t["state"] not in (_missions.RUNNING, _missions.VERIFYING):
                 continue
-            self._missions[m["id"]] = m
-            if m["state"] == _missions.PLANNING:
-                m["state"] = _missions.CANCELLED          # its planner is gone; ask again
-                _missions.log(m, "cancelled: Chuck closed while it was being planned")
-                self._mission_save(m)
-                continue
-            spent = int(m.get("spent_tokens") or 0)
-            m["spent_base"], m["spent_base_usd"] = spent, float(m.get("spent_usd") or 0.0)
-            hours = self.cfg("mission_hours", 4, 1, 72) * 3600
-            used_s = float(m.get("spent_seconds") or 0.0)
-            m["spent_base_seconds"] = used_s
-            proc = self.kernel.spawn(
-                f"mission: {m['goal']}"[:60], kind="mission", brief=m["goal"], parent=self._pid1,
-                nice=1, quota={"tokens": max(1, self.cfg("mission_tokens", 5000000, 100000, 100000000) - spent),
-                               "seconds": max(60, hours - used_s)})
-            m["pid"] = proc.pid
-            mine = [r for r in recs if isinstance(r.get("mission"), list) and r["mission"][0] == m["id"]]
-            for t in m["tasks"]:
-                if t["state"] not in (_missions.RUNNING, _missions.VERIFYING):
-                    continue
-                cands = [r for r in mine if r["mission"][1] == t["id"]]
-                rec = (next((r for r in cands if t.get("key") and r["key"] == t["key"]), None)
-                       or next((r for r in reversed(cands) if r.get("status") == "running"), None)
-                       or (cands[-1] if cands else None))
-                for r in cands:                      # older attempts: their copies are dead weight
-                    if r is not rec:
-                        self._hib.remove(r["key"])
-                        if r.get("ws_dir"):
-                            self._drop_shadow_of(r["ws_dir"])
-                            shutil.rmtree(r["ws_dir"], ignore_errors=True)
-                if rec is not None and rec.get("status") == "running":
-                    pid = self.resume_hibernated(rec, parent=m["pid"], mission=(m["id"], t["id"]))
-                    t["state"], t["pid"] = ((_missions.RUNNING, pid) if pid else (_missions.PENDING, None))
-                elif (rec is not None and rec.get("status") == "finished" and rec.get("ws_dir")
-                      and Path(rec["ws_dir"], "work").is_dir()):
-                    pid = self._restore_finished(rec)       # its work, back as it was
-                    e = self._bg.get(pid) if pid else None
-                    if e is not None:
-                        e["mission"], e["waited"] = (m["id"], t["id"]), True
-                        t["pid"], t["key"] = pid, rec["key"]
-                        self._mission_task_finished(e, rec.get("report") or "", 0)   # test it again
-                    else:
-                        t["state"], t["pid"] = _missions.PENDING, None
+            cands = [r for r in mine if r["mission"][1] == t["id"]]
+            rec = (next((r for r in cands if t.get("key") and r["key"] == t["key"]), None)
+                   or next((r for r in reversed(cands) if r.get("status") == "running"), None)
+                   or (cands[-1] if cands else None))
+            for r in cands:                      # older attempts: their copies are dead weight
+                if r is not rec:
+                    self._hib.remove(r["key"])
+                    if r.get("ws_dir"):
+                        self._drop_shadow_of(r["ws_dir"])
+                        shutil.rmtree(r["ws_dir"], ignore_errors=True)
+            if rec is not None and rec.get("status") == "running":
+                pid = self.resume_hibernated(rec, parent=m["pid"], mission=(m["id"], t["id"]))
+                t["state"], t["pid"] = ((_missions.RUNNING, pid) if pid else (_missions.PENDING, None))
+            elif (rec is not None and rec.get("status") == "finished" and rec.get("ws_dir")
+                  and Path(rec["ws_dir"], "work").is_dir()):
+                pid = self._restore_finished(rec)       # its work, back as it was
+                e = self._bg.get(pid) if pid else None
+                if e is not None:
+                    e["mission"], e["waited"] = (m["id"], t["id"]), True
+                    t["pid"], t["key"] = pid, rec["key"]
+                    self._mission_task_finished(e, rec.get("report") or "", 0)   # test it again
                 else:
                     t["state"], t["pid"] = _missions.PENDING, None
-            self._mission_save(m)
-            self._mission_card(m)
-            self._mission_step(m)
+            else:
+                t["state"], t["pid"] = _missions.PENDING, None
+        self._mission_save(m)
+        self._mission_card(m)
+        self._mission_step(m)
 
     # ── the command palette (Ctrl+P): everything Chuck can do, one search away ──
     def palette_items(self):
