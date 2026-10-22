@@ -497,6 +497,18 @@ check(not any("photo.png" in str(p) or "evil" in str(p) for p in opened),
 check(any("real.png" in str(p) for p in opened), "a real picture still opens")
 check_finished(w, "open link")
 
+print("\n--- privacy: the crash log and Chuck's folders ---")
+from chucknorris_ext import crashlog as _cl
+_cl.record("api", "HTTP 401 with Authorization: Bearer sk-abcdefghijklmnop1234 at /v1?api_key=SECRET1")
+_logtxt = _cl.log_path().read_text()
+check("sk-abcdefghijklmnop1234" not in _logtxt and "SECRET1" not in _logtxt and "[redacted]" in _logtxt,
+      "a key or token in an error never reaches the crash log")
+check(os.stat(_cl.log_path()).st_mode & 0o077 == 0, "and the log is readable by you only")
+os.chmod(cn.DATA_DIR, 0o755)
+cn._private_dirs()
+check(os.stat(cn.DATA_DIR).st_mode & 0o077 == 0 and os.stat(cn.CONFIG_DIR).st_mode & 0o077 == 0,
+      "Chuck's data and config folders (chats, memory, checkpoints) are private at startup")
+
 # a markdown doc stays strict: its own bare fences may be content
 amb = cn.file_blocks("```write DOC.md\n# Doc\n```\nrm -rf x\n```\nmore\n```")
 check(len(amb) == 1 and amb[0]["ambiguous"] and amb[0]["end"] == len(

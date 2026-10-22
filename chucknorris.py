@@ -16325,8 +16325,22 @@ class ChuckApp(Adw.Application):
         win.present()
 
 
+def _private_dirs():
+    """Chuck's own folders hold your conversations, agents' checkpoints and
+    memory: readable by you only, whatever the umask (on a shared machine
+    another account must not read your chats)."""
+    for d in (DATA_DIR, CONFIG_DIR):
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            if not d.is_symlink():
+                os.chmod(d, 0o700)
+        except OSError:
+            pass
+
+
 def main():
     Adw.init()
+    _private_dirs()
     return ChuckApp().run(sys.argv)
 
 

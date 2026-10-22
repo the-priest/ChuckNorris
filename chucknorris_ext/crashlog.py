@@ -11,6 +11,7 @@ with a timestamp, Chuck's version and the traceback; the file rotates at
 prompts or keys. /doctor shows the latest entries and Settings opens the file.
 """
 import os
+import re
 import sys
 import threading
 import time
@@ -27,6 +28,15 @@ def log_path():
     return Path(base) / "chucknorris" / "chuck.log"
 
 
+# anything shaped like a credential is blanked before it reaches the disk
+_SECRET = re.compile(r"(?i)(sk-[A-Za-z0-9_-]{8,}|(?<=bearer )[A-Za-z0-9._~+/=-]{8,}"
+                     r"|(?<=api_key=)[^\s&\"']+|(?<=token=)[^\s&\"']+|(?<=password=)[^\s&\"']+)")
+
+
+def redact(text):
+    return _SECRET.sub("[redacted]", str(text))
+
+
 def record(kind, text):
     """Append one entry. Never raises: logging must not become the crash."""
     try:
@@ -36,8 +46,13 @@ def record(kind, text):
             if p.exists() and p.stat().st_size > MAX_BYTES:
                 os.replace(p, p.with_suffix(".log.1"))
             stamp = time.strftime("%Y-%m-%d %H:%M:%S")
-            with open(p, "a", encoding="utf-8") as fh:
-                fh.write(f"=== {stamp}  v{_VERSION[0]}  {kind}\n{text.rstrip()}\n\n")
+            fd = os.open(str(p), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)   # yours only
+            try:
+                os.fchmod(fd, 0o600)            # and an older log made before this, too
+            except OSError:
+                pass
+            with os.fdopen(fd, "a", encoding="utf-8") as fh:
+                fh.write(f"=== {stamp}  v{_VERSION[0]}  {redact(kind)}\n{redact(text).rstrip()}\n\n")
     except Exception:
         pass
 
