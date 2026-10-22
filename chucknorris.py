@@ -477,6 +477,22 @@ expander title:hover { color: @mute; }
 .ghost { background: transparent; border: none; box-shadow: none; color: @mute; padding: 2px 6px;
          min-width: 0; min-height: 0; border-radius: 7px; font-size: 11px; }
 .ghost:hover { background-color: @surface3; color: @ink; }
+/* mission card: a task list, not a wall of buttons */
+.m-progress trough { min-height: 4px; border-radius: 4px; background-color: @surface3; }
+.m-progress progress { min-height: 4px; border-radius: 4px; background-color: @accent; }
+.m-tasks   { margin-top: 4px; }
+.m-task    { padding: 8px 0; border-top: 1px solid @line; }
+.m-tasks > .m-task:first-child { border-top: none; padding-top: 2px; }
+.m-icon    { min-width: 14px; color: @mute; font-weight: 700; }
+.m-merged, .m-done { color: @good; }
+.m-running, .m-verifying { color: @accent_hi; }
+.m-failed, .m-conflict { color: #F87171; }
+.m-title   { color: @ink; font-size: 13px; }
+.m-kind    { color: @mute; font-size: 10.5px; font-weight: 700; letter-spacing: 0.5px;
+             padding: 1px 7px; border-radius: 6px; background-color: @surface2; }
+.m-sub     { color: @mute; font-size: 11.5px; margin-left: 22px; }
+.m-body    { color: @body; font-size: 12.5px; margin-left: 22px; margin-top: 2px; }
+.ghost-accent { color: @accent_hi; }
 
 /* ── composer ────────────────────────────────────────────────────────── */
 .composer { background-color: @surface; border: 1px solid @line2; border-radius: 18px;
@@ -10568,13 +10584,16 @@ class ChuckWindow(Adw.ApplicationWindow):
             f"MISSION · {m['goal'][:70]}", lambda: m.get("summary") or self._mission_text(m))
         pill = self._pill(m["state"], "run")
         head.insert_child_after(pill, head.get_first_child())
+        bar = Gtk.ProgressBar(); bar.add_css_class("m-progress")
+        body.append(bar)
         info = Gtk.Label(xalign=0, wrap=True); info.add_css_class("dim"); _wrap_anywhere(info)
         body.append(info)
-        rows = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        rows = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        rows.add_css_class("m-tasks")
         body.append(rows)
         btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         foot.append(btns)
-        m["_ui"] = {"pill": pill, "info": info, "rows": rows, "btns": btns}
+        m["_ui"] = {"pill": pill, "info": info, "rows": rows, "btns": btns, "bar": bar}
         self._log_pin(card)
         self._mission_paint(m)
 
@@ -10610,37 +10629,57 @@ class ChuckWindow(Adw.ApplicationWindow):
                             + ("\nEach code task runs in its own copy of the folder; its tests must pass "
                                "on that copy before it is merged. Tasks without a dependency between "
                                "them run at once." if st == _missions.AWAITING else ""))
+        if ui.get("bar") is not None:
+            ui["bar"].set_fraction(done / n if n else 0.0)
+            ui["bar"].set_visible(bool(n) and st != _missions.PLANNING)
         clear(ui["rows"])
         for t in m["tasks"]:
-            row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-            tl = Gtk.Label(label=f"{self._MISSION_ICON.get(t['state'], '?')} {t['id']} · {t['kind']} · "
-                                 f"{t['title']}" + (f"  (after {', '.join(t['deps'])})" if t["deps"] else ""),
-                           xalign=0, wrap=True)
-            tl.add_css_class("slash-cmd"); _wrap_anywhere(tl)
-            row.append(tl)
-            sub = t["state"] + (f" · pid {t['pid']}" if t.get("pid") else "") + \
-                (f" · {t['note']}" if t.get("note") else "")
-            sl = Gtk.Label(label=sub, xalign=0, wrap=True); sl.add_css_class("dim"); _wrap_anywhere(sl)
-            row.append(sl)
-            tb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            # one tidy row per task: state, title and its actions on one line,
+            # what it's doing underneath, its report folded away
+            row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+            row.add_css_class("m-task")
+            top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            ic = Gtk.Label(label=self._MISSION_ICON.get(t["state"], "?"))
+            ic.add_css_class("m-icon"); ic.add_css_class("m-" + t["state"].replace(" ", "-"))
+            ic.set_valign(Gtk.Align.START)
+            top.append(ic)
+            tl = Gtk.Label(label=t["title"], xalign=0, wrap=True, hexpand=True)
+            tl.add_css_class("m-title"); _wrap_anywhere(tl)
+            top.append(tl)
+            kind = Gtk.Label(label=t["kind"]); kind.add_css_class("m-kind")
+            kind.set_valign(Gtk.Align.START)
+            top.append(kind)
+            acts = []
             if t["state"] in (_missions.FAILED, _missions.CONFLICT):
-                for label, verb in (("Retry", "retry"), ("Skip", "skip")):
-                    b = Gtk.Button(label=label); b.add_css_class("quick")
-                    b.connect("clicked", lambda _b, v=verb, i=t["id"]: self.mission_action(m["id"], v, i))
-                    tb.append(b)
+                acts += [("Retry", lambda _b, i=t["id"]: self.mission_action(m["id"], "retry", i)),
+                         ("Skip", lambda _b, i=t["id"]: self.mission_action(m["id"], "skip", i))]
             e = self._bg.get(t.get("pid")) if t.get("pid") else None
             if e is not None:
-                if e.get("report") and t["state"] not in (_missions.RUNNING,):
-                    b = Gtk.Button(label="Report"); b.add_css_class("quick")
-                    b.connect("clicked", lambda _b, ee=e: self._sys_note(
-                        f"{ee['name'][:60]}:\n{ee.get('report')}", "dim"))
-                    tb.append(b)
-                for label, fn in (("Trace", self.show_strace), ("Replay", self.show_replay)):
-                    b = Gtk.Button(label=label); b.add_css_class("quick")
-                    b.connect("clicked", lambda _b, f=fn, p=t["pid"]: f(str(p)))
-                    tb.append(b)
-            if tb.get_first_child() is not None:
-                row.append(tb)
+                acts += [("Trace", lambda _b, p=t["pid"]: self.show_strace(str(p))),
+                         ("Replay", lambda _b, p=t["pid"]: self.show_replay(str(p)))]
+            for label, fn in acts:
+                b = Gtk.Button(label=label); b.add_css_class("ghost")
+                b.set_valign(Gtk.Align.START)
+                b.connect("clicked", fn)
+                top.append(b)
+            row.append(top)
+            sub = [t["id"], t["state"]]
+            if t["deps"]:
+                sub.append("after " + ", ".join(t["deps"]))
+            if t.get("pid"):
+                sub.append(f"pid {t['pid']}")
+            if t.get("note"):
+                sub.append(t["note"])
+            sl = Gtk.Label(label=" \u00b7 ".join(sub), xalign=0, wrap=True)
+            sl.add_css_class("m-sub"); _wrap_anywhere(sl)
+            row.append(sl)
+            if e is not None and e.get("report") and t["state"] != _missions.RUNNING:
+                exp = Gtk.Expander(label="Report"); exp.add_css_class("think")
+                rl = Gtk.Label(label=e["report"][:6000], xalign=0, wrap=True, selectable=True)
+                rl.add_css_class("think-body"); _wrap_anywhere(rl); rl.set_margin_top(4)
+                exp.set_child(rl)
+                exp.set_margin_start(22)
+                row.append(exp)
             ui["rows"].append(row)
         clear(ui["btns"])
         spec = {_missions.AWAITING: [("Start", "start"), ("Cancel", "cancel")],
@@ -11862,46 +11901,56 @@ class ChuckWindow(Adw.ApplicationWindow):
                                  "is woken only when it fires", xalign=0, wrap=True)
             sm.add_css_class("dim"); _wrap_anywhere(sm)
             body.append(sm)
+        rows = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        rows.add_css_class("m-tasks")
+        body.append(rows)
         for d in items:
-            body.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+            # one row per daemon: what it does and its actions on one line,
+            # when it wakes and how it's been doing underneath
             row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
-            last = (time.strftime("%d %b %H:%M", time.localtime(d["last_run"]))
-                    if d.get("runs") else "never")
-            t = Gtk.Label(label="", xalign=0, wrap=True)
-            t.add_css_class("slash-cmd"); _wrap_anywhere(t)
-            row.append(t)
-            b = Gtk.Label(label=d["brief"][:300], xalign=0, wrap=True); _wrap_anywhere(b)
-            row.append(b)
-            meta = Gtk.Label(label=f"ran {d.get('runs', 0)}× · last {last}"
-                                   + (f" · {d['folder']}" if d.get("folder") else ""),
-                             xalign=0, wrap=True)
-            meta.add_css_class("dim"); _wrap_anywhere(meta)
-            row.append(meta)
-            btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            row.add_css_class("m-task")
+            top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            ic = Gtk.Label(label=""); ic.add_css_class("m-icon"); ic.set_valign(Gtk.Align.START)
+            top.append(ic)
+            tl = Gtk.Label(label=d["brief"][:300], xalign=0, wrap=True, hexpand=True)
+            tl.add_css_class("m-title"); _wrap_anywhere(tl)
+            top.append(tl)
             run_b, pause_b, del_b = (Gtk.Button(label=x) for x in ("Run now", "Pause", "Delete"))
+            for bt in (run_b, pause_b, del_b):
+                bt.add_css_class("ghost"); bt.set_valign(Gtk.Align.START)
+                top.append(bt)
+            row.append(top)
+            t = Gtk.Label(label="", xalign=0, wrap=True)
+            t.add_css_class("m-sub"); _wrap_anywhere(t)
+            row.append(t)
 
-            def paint(dd=d, t=t, run_b=run_b, pause_b=pause_b, del_b=del_b):
+            def paint(dd=d, t=t, ic=ic, run_b=run_b, pause_b=pause_b, del_b=del_b):
                 gone = self._daemons.get(dd["id"]) is None
                 state = ("deleted" if gone else "running" if dd["id"] in self._daemon_live
                          else "on" if dd.get("enabled") else "paused")
-                t.set_text(f"{dd['id']} \u00b7 {_daemons.describe(dd['when'])} \u00b7 "
-                           f"{ {'act': 'acts in a copy', 'remind': 'reminds you'}.get(dd.get('kind'), 'reports')} "
-                           f"\u00b7 {state}")
+                last = (time.strftime("%d %b %H:%M", time.localtime(dd["last_run"]))
+                        if dd.get("runs") else "never")
+                kind = {"act": "acts in a copy", "remind": "reminds you"}.get(dd.get("kind"), "reports")
+                t.set_text(" \u00b7 ".join(
+                    [f"#{dd['id']}", _daemons.describe(dd["when"]), kind, state,
+                     f"ran {dd.get('runs', 0)}\u00d7, last {last}"]
+                    + ([_short_path(dd["folder"])] if dd.get("folder") else [])))
+                ic.set_label({"running": "\u25d4", "on": "\u25cf", "paused": "\u25cb"}.get(state, "\u2013"))
+                for c in ("m-running", "m-done", "m-skipped"):
+                    ic.remove_css_class(c)
+                ic.add_css_class({"running": "m-running", "on": "m-done"}.get(state, "m-skipped"))
                 pause_b.set_label("Pause" if dd.get("enabled") else "Resume")
-                for b in (run_b, pause_b, del_b):
-                    b.set_sensitive(not gone)
+                for bt in (run_b, pause_b, del_b):
+                    bt.set_sensitive(not gone)
 
             def act(which, dd=d, paint=paint):
                 verb = ("off" if dd.get("enabled") else "on") if which == "pause" else which
                 self._daemon_action(dd, verb)
                 paint()
-            for b, which in ((run_b, "run"), (pause_b, "pause"), (del_b, "rm")):
-                b.add_css_class("quick")
-                b.connect("clicked", lambda _b, w_=which, a=act: a(w_))
-                btns.append(b)
+            for bt, which in ((run_b, "run"), (pause_b, "pause"), (del_b, "rm")):
+                bt.connect("clicked", lambda _b, w_=which, a=act: a(w_))
             paint()
-            row.append(btns)
-            body.append(row)
+            rows.append(row)
         self._log_pin(card)
         return True
 
@@ -11917,30 +11966,40 @@ class ChuckWindow(Adw.ApplicationWindow):
                            xalign=0, wrap=True)
             lb.add_css_class("dim")
             body.append(lb)
-        for n, it in enumerate(items):
-            if n:
-                body.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
-            row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        rows = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        rows.add_css_class("m-tasks")
+        body.append(rows)
+        for it in items:
+            # a report reads like a message: who and why on top, the report,
+            # then what you can do about it
+            row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+            row.add_css_class("m-task")
             when = time.strftime("%d %b %H:%M", time.localtime(it.get("time") or 0))
-            t = Gtk.Label(label=("● " if it.get("unread") else "") + f"{when} · "
-                          f"{it['daemon']} · {it['why']}", xalign=0, wrap=True)
-            t.add_css_class("slash-cmd"); _wrap_anywhere(t)
-            row.append(t)
+            top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            ic = Gtk.Label(label="\u25cf" if it.get("unread") else "\u25cb")
+            ic.add_css_class("m-icon"); ic.add_css_class("m-running" if it.get("unread") else "m-skipped")
+            ic.set_valign(Gtk.Align.START)
+            top.append(ic)
+            t = Gtk.Label(label=it["daemon"], xalign=0, wrap=True, hexpand=True)
+            t.add_css_class("m-title"); _wrap_anywhere(t)
+            top.append(t)
+            if it.get("bg_pid") is not None and it["bg_pid"] in self._bg:
+                bt = Gtk.Button(label="Show diff"); bt.add_css_class("ghost"); bt.set_valign(Gtk.Align.START)
+                bt.connect("clicked", lambda _b, p=it["bg_pid"]: self.show_bg_diff(p))
+                top.append(bt)
+            bt = Gtk.Button(label="Act on it"); bt.add_css_class("ghost"); bt.add_css_class("ghost-accent")
+            bt.set_valign(Gtk.Align.START)
+            bt.connect("clicked", lambda _b, i=it: self.act_on_report(i))
+            top.append(bt)
+            row.append(top)
+            sl = Gtk.Label(label=f"{when} \u00b7 {it['why']}", xalign=0, wrap=True)
+            sl.add_css_class("m-sub"); _wrap_anywhere(sl)
+            row.append(sl)
             rep = Gtk.Label(label=(it.get("report") or "")[:6000], xalign=0, wrap=True,
                             selectable=True)
-            _wrap_anywhere(rep)
+            rep.add_css_class("m-body"); _wrap_anywhere(rep)
             row.append(rep)
-            btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-            if it.get("bg_pid") is not None and it["bg_pid"] in self._bg:
-                bt = Gtk.Button(label="Show diff"); bt.add_css_class("quick")
-                bt.connect("clicked", lambda _b, p=it["bg_pid"]: self.show_bg_diff(p))
-                btns.append(bt)
-            bt = Gtk.Button(label="Act on it"); bt.add_css_class("quick")
-            bt.add_css_class("accent-btn")
-            bt.connect("clicked", lambda _b, i=it: self.act_on_report(i))
-            btns.append(bt)
-            row.append(btns)
-            body.append(row)
+            rows.append(row)
         self._inbox.mark_read()
         self._log_pin(card)
         return True
