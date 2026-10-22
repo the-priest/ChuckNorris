@@ -16120,6 +16120,14 @@ class ChuckWindow(Adw.ApplicationWindow):
                     nv.set_subtitle(_html.escape(msg))
                     ib.set_sensitive(True); vt.set_sensitive(True)
                     if ok:
+                        # you installed the natural voice to hear it: use it
+                        if (S.get("voice_engine") or "auto") in ("auto", "piper", "espeak"):
+                            S["voice_engine"] = "auto"
+                            try:
+                                eng.set_selected(eng_keys.index("auto"))
+                            except Exception:
+                                pass
+                        ib.set_label("Reinstall")
                         speak("Natural voice ready. This is how I sound now.", S)
                     return False
                 GLib.idle_add(fin)
@@ -16130,7 +16138,9 @@ class ChuckWindow(Adw.ApplicationWindow):
             nv.set_subtitle("testing\u2026")
 
             def work():
-                eng_now = voice.engine_for(S)
+                # the natural voice's Test tests the natural voice, even when
+                # another engine is speaking for now (after a failure)
+                eng_now = "kokoro" if voice.kokoro_ready() else voice.engine_for(S)
                 ok, msg = (voice.test_kokoro(S.get("kokoro_voice")) if eng_now == "kokoro"
                            else voice.test_piper() if eng_now == "piper"
                            else (bool(eng_now), voice.voice_status(S)[1]))

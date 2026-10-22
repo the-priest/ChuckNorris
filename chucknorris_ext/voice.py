@@ -41,6 +41,12 @@ KOKORO_URLS = {
     KOKORO_VOICES.name: "https://github.com/thewh1teagle/kokoro-onnx/releases/download/"
                         "model-files-v1.1/voices-v1.0.bin",
 }
+# the release assets are immutable: a file that matches is whole, one that
+# doesn't is damaged (never guessed from an error message)
+KOKORO_SHA256 = {
+    KOKORO_MODEL.name: (325505369, "beb0d1848dee9a49da392cc3df26958d46cfa35d321edf434f52949153f0df3a"),
+    KOKORO_VOICES.name: (28214398, "bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7d"),
+}
 KOKORO_RATE = 24000
 # Chuck's voice: Kokoro's two clearest American male voices, blended. Kokoro's
 # own grades put af_heart (A) and af_bella (A-) highest of all.
@@ -212,6 +218,28 @@ def _safe(fn):
         LAST_ERROR["kokoro"] = str(ex)
 
 
+def kokoro_file_ok(path, full=False):
+    """Is this model file the one we expect? Size always; the checksum too
+    when full=True (about a second for the 310 MB model)."""
+    want = KOKORO_SHA256.get(Path(path).name)
+    try:
+        if want is None or Path(path).stat().st_size != want[0]:
+            return want is None and Path(path).exists()
+    except OSError:
+        return False
+    if not full:
+        return True
+    import hashlib
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as fh:
+            for buf in iter(lambda: fh.read(1 << 20), b""):
+                h.update(buf)
+    except OSError:
+        return False
+    return h.hexdigest() == want[1]
+
+
 def _download(url, dest, progress, opener=None, label=""):
     import urllib.request
     op = opener.open if opener else urllib.request.urlopen
@@ -258,9 +286,15 @@ def _install_kokoro(progress, opener):
             return False, msg
         KOKORO_DIR.mkdir(parents=True, exist_ok=True)
         for dest, label in ((KOKORO_VOICES, "the voices"), (KOKORO_MODEL, "the voice model")):
-            if dest.exists() and dest.stat().st_size > 1_000_000:
-                continue
+            if kokoro_file_ok(dest):
+                continue                    # already here and whole: never downloaded twice
             _download(KOKORO_URLS[dest.name], dest, progress, opener, label)
+            if not kokoro_file_ok(dest, full=True):
+                try:
+                    dest.unlink()
+                except OSError:
+                    pass
+                raise RuntimeError(f"{label} arrived damaged (checksum mismatch) \u2014 try again")
     except Exception as ex:
         return False, f"{ex.__class__.__name__}: {ex}"
     stop_speaking()                         # a reply mid-sentence is cut, not "broken"
@@ -268,15 +302,15 @@ def _install_kokoro(progress, opener):
     _KOKORO_DOWN[0] = 0.0
     progress("testing the voice")
     ok, why = test_kokoro()
-    if not ok and re.search(r"protobuf|invalid|corrupt|load model|zip|pickle|npz|"
-                            r"unexpected end|truncat", why, re.I):
-        # the files themselves are bad: don't keep them, so a retry downloads
-        # afresh (a slow start or a missing library keeps the 350 MB download)
+    if not ok:
+        # only a file that fails its checksum is removed (a retry downloads it
+        # afresh); a library or runtime problem keeps the 340 MB of models
         for f in (KOKORO_MODEL, KOKORO_VOICES):
-            try:
-                f.unlink()
-            except OSError:
-                pass
+            if f.exists() and not kokoro_file_ok(f, full=True):
+                try:
+                    f.unlink()
+                except OSError:
+                    pass
     return (True, "natural voice ready (Kokoro)") if ok else (False, why)
 
 

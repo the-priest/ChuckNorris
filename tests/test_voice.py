@@ -204,6 +204,90 @@ if stray:
     fail(f"{len(stray)} temp wav files leaked")
 
 print()
+print("--- the natural voice: never downloaded twice, never deleted for a runtime error ---")
+import hashlib as _hl
+V = cn.voice
+_kd = pathlib.Path(tempfile.mkdtemp())
+_saved = (V.KOKORO_MODEL, V.KOKORO_VOICES, dict(V.KOKORO_SHA256), V.ensure_venv, V.test_kokoro, V.KOKORO_URLS)
+V.KOKORO_MODEL, V.KOKORO_VOICES = _kd / "kokoro-v1.0.onnx", _kd / "voices-v1.0.bin"
+_body = {V.KOKORO_MODEL.name: b"M" * 3000, V.KOKORO_VOICES.name: b"V" * 2000}
+V.KOKORO_SHA256.clear()
+V.KOKORO_SHA256.update({n: (len(b), _hl.sha256(b).hexdigest()) for n, b in _body.items()})
+V.KOKORO_URLS = {n: "https://x/" + n for n in _body}
+downloads = []
+
+
+class _Resp:
+    def __init__(self, data): self.data, self.headers = data, {"Content-Length": str(len(data))}
+    def read(self, n=-1): d, self.data = self.data[:n], self.data[n:]; return d
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+
+
+class _Opener:
+    def __init__(self, corrupt=False): self.corrupt = corrupt
+    def open(self, req, timeout=0):
+        name = req.full_url.rsplit("/", 1)[1]
+        downloads.append(name)
+        return _Resp(b"X" * len(_body[name]) if self.corrupt else _body[name])
+
+
+V.ensure_venv = lambda *a, **k: (True, "already installed")
+V.test_kokoro = lambda voice=None: (False, "Kokoro failed: InvalidArgument: [ONNXRuntimeError] : 2 : "
+                                           "INVALID_ARGUMENT : Unexpected input data type")
+ok_, msg_ = V.install_kokoro(opener=_Opener())
+if sorted(downloads) != sorted(_body):
+    fail(f"first install should download both files, got {downloads}")
+if not (V.KOKORO_MODEL.exists() and V.KOKORO_VOICES.exists()):
+    fail("a runtime error (InvalidArgument) deleted the intact model files")
+downloads.clear()
+V.install_kokoro(opener=_Opener())
+if downloads:
+    fail(f"intact files were downloaded again: {downloads}")
+V.KOKORO_MODEL.write_bytes(b"M" * 2999 + b"!")              # damaged, right size
+V.install_kokoro(opener=_Opener())
+if V.KOKORO_MODEL.exists():
+    fail("a damaged model (checksum mismatch) was kept after the test failed")
+V.KOKORO_MODEL.unlink(missing_ok=True); downloads.clear()
+ok_, msg_ = V.install_kokoro(opener=_Opener(corrupt=True))
+if ok_ or V.KOKORO_MODEL.exists() or "damaged" not in msg_:
+    fail(f"a corrupt download must be refused, not kept: {ok_} {msg_}")
+V.KOKORO_MODEL, V.KOKORO_VOICES, _sha, V.ensure_venv, V.test_kokoro, V.KOKORO_URLS = _saved
+V.KOKORO_SHA256.clear(); V.KOKORO_SHA256.update(_sha)
+print("  intact files kept and reused; damaged ones replaced")
+
+print("--- the voice server feeds the model the types it declares ---")
+_ks = importlib.util.spec_from_file_location("ks", "chucknorris_ext/kokoro_server.py")
+ks = importlib.util.module_from_spec(_ks); _ks.loader.exec_module(ks)
+try:
+    import numpy as _np
+except ImportError:
+    _np = None
+if _np is not None:
+    class _In:
+        def __init__(self, n, t): self.name, self.type = n, t
+
+    class _Sess:
+        def __init__(self, types): self.types, self.fed = types, None
+        def get_inputs(self): return [_In(n, t) for n, t in self.types.items()]
+        def run(self, out, feed): self.fed = feed; return [None]
+
+    class _Eng:
+        def __init__(self, sess): self.sess = sess
+    for types, want in (({"input_ids": "tensor(int64)", "style": "tensor(float)", "speed": "tensor(float)"},
+                         ("float32", 0.97)),
+                        ({"tokens": "tensor(int64)", "style": "tensor(float)", "speed": "tensor(int32)"},
+                         ("int32", 1))):
+        sess, sp = _Sess(types), [0.97]
+        ks.fit_inputs(_Eng(sess), _np, sp)
+        sess.run(None, {"input_ids" if "input_ids" in types else "tokens": _np.array([[1, 2]], dtype=_np.int64),
+                        "style": _np.zeros((1, 256), dtype=_np.float64),
+                        "speed": _np.array([0], dtype=_np.int32)})    # what kokoro-onnx 0.5 sends
+        got = sess.fed["speed"]
+        if str(got.dtype) != want[0] or abs(float(got[0]) - want[1]) > 1e-6 or sess.fed["style"].dtype != _np.float32:
+            fail(f"inputs not fitted to {types}: speed {got.dtype} {got}, style {sess.fed['style'].dtype}")
+    print("  speed and style match the model; the real speed is passed, not 0")
+
 print("TOTAL VOICE FAILURES:", len(FAILS))
 for f in FAILS:
     print("  ", f)
