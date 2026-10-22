@@ -9,6 +9,7 @@ written, so a stray `../../.ssh/id_rsa` in a generated filename can't escape.
 Nothing here executes project code — running is the app's approve-to-run card.
 """
 import os
+import stat
 import re
 import json
 import shutil
@@ -536,8 +537,9 @@ def grep(root, pattern, sub="", max_hits=60, max_line=220):
                 if fp.suffix.lower() in _GREP_SKIP_EXT:
                     continue
                 try:
-                    if fp.stat().st_size > MAX_FILE_BYTES:
-                        continue
+                    st = fp.stat()
+                    if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_FILE_BYTES:
+                        continue                # a pipe or device: reading it could hang
                     with open(fp, "r", encoding="utf-8", errors="strict") as fh:
                         for i, line in enumerate(fh, 1):
                             if rx.search(line):
@@ -593,7 +595,8 @@ def _project_files(root, limit=2000):
         try:
             p = subprocess.run(argv, capture_output=True, text=True, timeout=20) if argv else None
             if p is not None and p.returncode == 0:
-                return [f for f in p.stdout.splitlines() if f][:limit]
+                # regular files only: a pipe or device would hang whoever reads it
+                return [f for f in p.stdout.splitlines() if f and os.path.isfile(root / f)][:limit]
         except Exception:
             pass
     out = []
@@ -601,8 +604,8 @@ def _project_files(root, limit=2000):
         dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS
                              and not d.startswith("."))
         for f in sorted(filenames):
-            if f.startswith("."):
-                continue
+            if f.startswith(".") or not os.path.isfile(os.path.join(dirpath, f)):
+                continue                        # hidden, or a pipe/socket/device
             out.append(str((Path(dirpath) / f).relative_to(root)))
             if len(out) >= limit:
                 return out

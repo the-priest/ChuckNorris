@@ -50,6 +50,8 @@ def _files(root):
         for f in fns:
             if ".min." in f:
                 continue                                 # minified: no comments for us
+            if not os.path.isfile(os.path.join(dp, f)):
+                continue                                 # a pipe or socket: reading it would hang
             n += 1
             if n > MAX_FILES:
                 return

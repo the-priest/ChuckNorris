@@ -12,7 +12,7 @@ built genuinely works when executed.
 """
 import tempfile, subprocess, zipfile
 from pathlib import Path
-from sim import cn, new_win, type_and_send, check_history, check_finished, fail, FAILS
+from sim import new_win, type_and_send, check_history, check_finished, fail, FAILS
 import chucknorris_ext.builder as B
 
 tmp = Path(tempfile.mkdtemp())
@@ -141,6 +141,23 @@ if rc4 != -1:
     fail(f"expected 'no tests' sentinel, got rc={rc4}")
 print(" ", out4)
 
+print("\n-- a named pipe in the folder never hangs a tool --")
+import threading as _th
+from chucknorris_ext import aiwatch as _aw, codesearch as _cs
+fifo_root = Path(tempfile.mkdtemp())
+(fifo_root / "real.py").write_text("def handler(x):\n    return x  # tidy this AI!\n")
+for _n in ("pipe.py", "README.md", "app.js", "plain"):
+    os.mkfifo(fifo_root / _n)
+_real_which = B.shutil.which
+B.shutil.which = lambda n, *a, **k: None if n == "rg" else _real_which(n, *a, **k)   # the pure-Python grep
+for _name, _fn in (("grep", lambda: B.grep(fifo_root, "handler")), ("map", lambda: B.repo_map(fifo_root)),
+                   ("find", lambda: _cs.search(fifo_root, "handler")), ("watch", lambda: _aw.scan(fifo_root, {})),
+                   ("project files", lambda: B._project_files(fifo_root))):
+    _t = _th.Thread(target=_fn, daemon=True); _t.start(); _t.join(10)
+    if _t.is_alive():
+        fail(f"{_name} hangs on a named pipe in the folder")
+B.shutil.which = _real_which
+print("  grep, map, find, /watch and the file list skip pipes")
 print()
 print("TOTAL BUILDER FAILURES:", len(FAILS))
 for f in FAILS:
