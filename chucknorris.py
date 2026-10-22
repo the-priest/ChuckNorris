@@ -11329,6 +11329,12 @@ class ChuckWindow(Adw.ApplicationWindow):
             m = next((x for x in self._missions.values() if x["id"].endswith(parts[1])), None)
             if m is None:
                 return f"no mission {parts[1]}"
+            if parts[0] == "start" and m["state"] == _missions.AWAITING:
+                # it waits because it's over the auto-start limit: the user's call
+                self._confirm_card("MISSION", f"Chuck wants to start the mission \u201c{m['goal'][:200]}\u201d."
+                                   + self._mission_estimate_text(m).replace("\n", " "),
+                                   "Start", lambda mid=m["id"]: self.mission_action(mid, "start"))
+                return "asked the user to start it (it is over the auto-start limit)"
             ok = self.mission_action(m["id"], parts[0])
             return f"mission {m['id'][-5:]}: {m['state']}" + ("" if ok else " (nothing to do)")
         if cmd == "daemons" or cmd == "reminders":
@@ -11337,8 +11343,13 @@ class ChuckWindow(Adw.ApplicationWindow):
             return "\n".join(f"{d['id']} [{'on' if d.get('enabled') else 'paused'}] "
                              f"{_daemons.describe(d['when'])}: {d['brief'][:80]}" for d in items) or f"(no {cmd})"
         if cmd == "daemon":
-            self.daemon_command(arg)
-            return self.os_text("daemons")
+            w0 = (arg.split() or [""])[0].lower()
+            if w0 in ("run", "on", "off", "rm", "delete", "list", ""):
+                self.daemon_command(arg)
+                return self.os_text("daemons")
+            # creating one goes the way the daemon tool goes: one that acts
+            # is only proposed, and exists once the user allows it
+            return self._t_daemon(arg)
         if cmd == "inbox":
             items = self._inbox.unread() if self._inbox is not None else []
             if self._inbox is not None:

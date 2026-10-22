@@ -1834,6 +1834,23 @@ check(len(w._daemons.items) == n_d + 1 and "DAEMON" in notes(),
       "a daemon that only looks is created straight away")
 w._daemon_undo()
 check(len(w._daemons.items) == n_d, "and Undo takes it back")
+# the chuck tool is no back door around the approvals
+n_d = len(w._daemons.items)
+w.backend = ScriptedBackend(["```chuck daemon act every day at 3am: update the dependencies```", "Proposed."])
+type_and_send(w, "update my deps every night")
+check(len(w._daemons.items) == n_d and "DAEMON \u00b7 PROPOSED" in notes(),
+      "a daemon that acts, asked for through ```chuck```, is only proposed (same as the daemon tool)")
+w.backend = MissionBackend(["```mission build a and b once more```\nOn it.", "ok"])
+w.backend.seen, w.backend.results = [], []
+type_and_send(w, "once more")
+settle()
+mm3 = sorted(w._missions.values(), key=lambda x: -x["created"])[0]
+w.backend = ScriptedBackend([f"```chuck mission start {mm3['id'][-5:]}```", "Asked."])
+type_and_send(w, "go")
+check(mm3["state"] == MS.AWAITING and "MISSION" in notes(),
+      "a mission over the auto-start limit isn't started through ```chuck``` either: the user gets a Start card",
+      mm3["state"])
+w.mission_action(mm3["id"], "cancel")
 w.set_agent_mode(False, announce=False)
 w.backend = ScriptedBackend(["That needs to run on your machine.\n```agent update my system safely```", "Updating."])
 type_and_send(w, "update my system")
