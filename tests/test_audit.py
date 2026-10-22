@@ -509,6 +509,18 @@ cn._private_dirs()
 check(os.stat(cn.DATA_DIR).st_mode & 0o077 == 0 and os.stat(cn.CONFIG_DIR).st_mode & 0o077 == 0,
       "Chuck's data and config folders (chats, memory, checkpoints) are private at startup")
 
+print("\n--- the path a model meant, however it wrote it ---")
+for _h, _want in (("```write: page.html", "page.html"), ('```write "page.html"', "page.html"),
+                  ("```write `page.html`", "page.html"), ("```write path=page.html", "page.html"),
+                  ("```write page.html html", "page.html"), ("```write ./src/page.html", "src/page.html"),
+                  ("```write my notes.txt", "my notes.txt")):
+    _b = cn.file_blocks(_h + "\n<p>hi</p>\n```")
+    check(len(_b) == 1 and _b[0]["path"] == _want, f"{_h!r} writes {_want!r}", _b and _b[0]["path"])
+ws = folder("dotslash")
+w = agent(["```write ./index.html\n<p>hi</p>\n```", "Done."], ws)
+type_and_send(w, "make a page")
+check((ws / "index.html").read_text() == "<p>hi</p>\n", "./index.html is written, not refused as a bad path")
+
 # a markdown doc stays strict: its own bare fences may be content
 amb = cn.file_blocks("```write DOC.md\n# Doc\n```\nrm -rf x\n```\nmore\n```")
 check(len(amb) == 1 and amb[0]["ambiguous"] and amb[0]["end"] == len(

@@ -3305,6 +3305,27 @@ def display_spans(text, skip=()):
     return out
 
 
+_HEAD_LANGS = {"html", "htm", "css", "js", "javascript", "ts", "typescript", "tsx", "jsx", "python",
+               "py", "json", "yaml", "yml", "toml", "md", "markdown", "sh", "bash", "text", "txt",
+               "rust", "go", "c", "cpp", "java", "ruby", "php", "lua", "sql", "xml", "svg"}
+
+
+def _clean_head(head):
+    """The path a model meant in ```write <path>: models write `: app.py`,
+    "app.py", `app.py`, path=app.py, ./app.py, or app.py python."""
+    h = head.strip()
+    h = re.sub(r"^:\s*", "", h)
+    h = re.sub(r"^(?:path|file|filename)\s*[:=]\s*", "", h, flags=re.I)
+    if len(h) >= 2 and h[0] == h[-1] and h[0] in "\"'`":
+        h = h[1:-1].strip()
+    parts = h.rsplit(None, 1)
+    if len(parts) == 2 and parts[1].lower() in _HEAD_LANGS and "." in parts[0]:
+        h = parts[0].strip().strip("\"'`")
+    while h.startswith("./"):
+        h = h[2:]
+    return h
+
+
 def file_blocks(text):
     """Find ```write / ```edit blocks with NESTED-FENCE awareness.
 
@@ -3352,6 +3373,7 @@ def file_blocks(text):
             if j >= len(lines):
                 break
             head, j = lines[j].strip(), j + 1
+        head = _clean_head(head)
         body_start, end_line, end_col, depth, first_bare = j, None, None, 0, None
         k = j
         in_sr = False                     # inside an edit's SEARCH/REPLACE: text, not fences
