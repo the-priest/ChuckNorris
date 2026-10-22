@@ -91,6 +91,36 @@ The third roadmap (`docs/ROADMAP.md`, phases 10–15), with tests in
   disk or a command's output wakes them; they look, report and propose,
   never change anything unattended.
 
+### Polish and hardening
+
+- **A cleaner agent chat.** What Chuck says after a tool block sits under that
+  block's card; pictures it looks at share one labelled gallery card; a new
+  file's diff starts folded; placeholders carry no buttons; a stray code fence
+  from the model never dumps a file's code into the chat. Mission, daemon and
+  inbox cards are tidy lists with inline actions and a progress bar.
+- **Restricted folders protect git.** A repo's hooks and config are read-only
+  inside the sandbox, a hook planted in a repo created during a run is
+  disarmed, and Chuck's own file tools leave `.git` alone there.
+- **More secrets hidden** from sandboxed agents: browser profiles, cloud and
+  rclone credentials, and token files (`.git-credentials`, `.npmrc`, `.pypirc`,
+  `.pgpass`, `.my.cnf`).
+- **Merges never follow links.** A link in an agent's copy that points outside
+  it is refused at merge; pipes, sockets and devices are ignored everywhere a
+  tool reads the folder.
+- **No back doors around approvals.** Through the agent's `chuck` tool, a
+  daemon that acts is only proposed and a mission over the auto-start limit
+  waits for your Start, exactly as through the regular tools.
+- **The critical gate** treats more home and system wipes as critical
+  (`rm -rf ~/.`, `rm -rf ..`, `mv ~ …`, `rsync --delete` into home or `/`).
+- **Damaged files never stop Chuck opening**: chats, missions, memory,
+  checkpoints and the ledger are validated as they're read.
+- **Privacy.** Keys and tokens are redacted from the crash log, and Chuck's
+  data and config folders are private to you.
+- **Smaller fixes.** The browser is only handed web addresses; terminal output
+  from the shell commands is stripped of escape sequences; `/watch` ignores
+  comments Chuck wrote itself; `./file`, quoted and `path=` file names in a
+  write block go where the model meant.
+
 ### Fixed (bug hunts on this cycle)
 
 - **Voice input said "didn't hear anything" the instant the mic was tapped**
