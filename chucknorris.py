@@ -9352,9 +9352,13 @@ class ChuckWindow(Adw.ApplicationWindow):
         if r["conflicts"]:
             parts.append(f"{len(r['conflicts'])} CONFLICT(S) not written ({', '.join(r['conflicts'][:5])}"
                          " \u2014 its versions are in .chuck-conflicts/)")
+        if r.get("refused"):
+            parts.append(f"{len(r['refused'])} link(s) pointing outside the folder refused "
+                         f"({', '.join(r['refused'][:5])})")
         msg = "; ".join(parts) or "nothing to change"
-        self._sys_note(("\u26a0 " if r["conflicts"] else "\u2713 ") + f"background agent {e['pid']}: {msg}",
-                       "danger" if r["conflicts"] else "ok")
+        warn = r["conflicts"] or r.get("refused")
+        self._sys_note(("\u26a0 " if warn else "\u2713 ") + f"background agent {e['pid']}: {msg}",
+                       "danger" if warn else "ok")
         if e.get("ui"):
             self._set_status(e["ui"]["pill"], "merged", "ok")
             self._bg_buttons(e)

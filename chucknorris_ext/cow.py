@@ -42,8 +42,11 @@ def _files(root):
         dns[:] = sorted(d for d in dns if d not in SKIP)
         for f in fns:
             p = Path(dp) / f
-            if p.is_symlink() and not p.exists():
-                continue
+            if p.is_symlink():
+                if not p.exists():
+                    continue                    # dangling
+            elif not p.is_file():
+                continue                        # a pipe, socket or device: reading it could hang
             out.append(str(p.relative_to(root)))
             n += 1
             if n > MAX_FILES:
@@ -111,7 +114,11 @@ class Workspace:
         for rel in base - work:
             out[rel] = "deleted"
         for rel in base & work:
-            if not filecmp.cmp(self.base / rel, self.work / rel, shallow=False):
+            b, w = self.base / rel, self.work / rel
+            if b.is_symlink() or w.is_symlink():      # links compare by where they point
+                if b.is_symlink() != w.is_symlink() or os.readlink(b) != os.readlink(w):
+                    out[rel] = "modified"
+            elif not filecmp.cmp(b, w, shallow=False):
                 out[rel] = "modified"
         return dict(sorted(out.items()))
 
@@ -148,6 +155,12 @@ class Workspace:
                 continue
             mine = self.source / rel
             base, theirs = self.base / rel, self.work / rel
+            if theirs.is_symlink():
+                # a link is merged as a link, never followed: a copy of what it
+                # points at would carry a file from outside the agent's copy
+                # (~/.ssh/id_rsa) into your folder, past the sandbox
+                self._merge_link(rel, mine, theirs, res, cdir)
+                continue
             mine_now = mine.exists()
             mine_same_as_base = (mine_now and base.exists()
                                  and filecmp.cmp(mine, base, shallow=False))
@@ -188,6 +201,26 @@ class Workspace:
                         res["merged"].append(rel)
         return res
 
+    def _merge_link(self, rel, mine, theirs, res, cdir):
+        target = os.readlink(theirs)
+        work = self.work.resolve()
+        try:
+            dest = (theirs.parent / target).resolve() if not os.path.isabs(target) else Path(target).resolve()
+        except (OSError, RuntimeError):
+            dest = None
+        if os.path.isabs(target) or dest is None or not (dest == work or work in dest.parents):
+            res.setdefault("refused", []).append(rel)     # points outside the folder
+            return
+        if mine.is_symlink() and os.readlink(mine) == target:
+            res["kept"].append(rel)
+        elif not mine.exists() and not mine.is_symlink():
+            mine.parent.mkdir(parents=True, exist_ok=True)
+            os.symlink(target, mine)
+            res["applied"].append(rel)
+        else:
+            self._park(cdir, rel, theirs)
+            res["conflicts"].append(rel)
+
     @staticmethod
     def _merge3(mine, base, theirs):
         """git merge-file -p: the merged bytes, or None on overlapping edits."""
@@ -202,7 +235,9 @@ class Workspace:
     def _park(cdir, rel, theirs):
         dest = Path(cdir) / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(theirs, dest)
+        if dest.is_symlink() or dest.exists():
+            dest.unlink()
+        shutil.copy2(theirs, dest, follow_symlinks=False)   # a link stays a link
 
     def remove(self):
         shutil.rmtree(self.dir, ignore_errors=True)

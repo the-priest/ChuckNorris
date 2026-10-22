@@ -254,6 +254,24 @@ check((src / "c.py").read_text() == "c1\nYOURS\nc3\n" and r_["conflicts"] == ["c
       and (src / ".chuck-conflicts" / "c.py").read_text() == "c1\nAGENT\nc3\n",
       "overlapping edits are never forced: yours stays, the agent's is set aside")
 check((src / "new.py").exists() and not (src / "del.py").exists(), "new and deleted files carry over")
+secret = tmp / "outside-secret.txt"
+secret.write_text("PRIVATE-KEY")
+ws2_ = C.Workspace.create(src, tmp / "wt", "t2")
+os.symlink(str(secret), ws2_.work / "leak.txt")                 # an absolute link out
+os.symlink("../../../outside-secret.txt", ws2_.work / "leak2.txt")
+os.symlink("a.py", ws2_.work / "alias.py")                      # a link inside: fine
+os.mkfifo(ws2_.work / "pipe")
+(ws2_.work / "c.py").unlink(); os.symlink(str(secret), ws2_.work / "c.py")   # a file swapped for a link
+ch2 = ws2_.changes()
+check("pipe" not in ch2, "a named pipe in an agent's copy is ignored (reading it would hang the merge)")
+r2 = ws2_.merge()
+leaked = [p_ for p_ in src.rglob("*") if p_.is_file() and not p_.is_symlink()
+          and "PRIVATE-KEY" in p_.read_text(errors="replace")]
+check(not leaked and sorted(r2.get("refused", [])) == ["c.py", "leak.txt", "leak2.txt"],
+      "a link an agent made to a file OUTSIDE its copy is refused at merge, never followed into your folder",
+      (leaked, r2))
+check((src / "alias.py").is_symlink() and os.readlink(src / "alias.py") == "a.py",
+      "a link within the folder is merged as a link")
 
 
 class BgBackend(SubBackend):
