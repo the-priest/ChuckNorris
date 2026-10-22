@@ -8,7 +8,7 @@ sys.path.insert(0, _ROOT)
 
 If any of these ever fail again, a destructive-command hole has reopened.
 """
-import sys, types, re, os, inspect
+import sys, types, re, os
 gi=types.ModuleType("gi"); gi.require_version=lambda *a,**k:None
 repo=types.ModuleType("gi.repository")
 class _Any:
@@ -246,6 +246,17 @@ else:
         if _gate_at > _run_at:
             print(f"   HOLE: {_fn} runs before checking the tier"); fails += 1
     print("   both card paths check the tier before executing anything")
+
+print("13. home and system wipes hidden in less obvious spellings:")
+for _c in ("rm -fr ~/.", "rm -rf ~/.*", "rm -rf ..", "rm -rf ../..", "rm -rf ~alice",
+           "mv ~ /tmp/old-home", "rsync -a --delete /tmp/empty/ ~/", "rsync -a --delete empty/ /"):
+    if C(_c) != "critical":
+        print(f"   HOLE: {_c!r} is {C(_c)!r}, not critical"); fails += 1
+for _c in ("rm -rf .venv", "rm -rf node_modules", "rm -rf ../old-build", "rsync -a --delete src/ dst/",
+           "mv ~/a.txt ~/b.txt", "rm -rf ~/.cache/pip"):
+    if C(_c) == "critical":
+        print(f"   FALSE ALARM: {_c!r} is critical"); fails += 1
+print("   checked")
 
 print()
 print("TOTAL SAFETY FAILURES:", fails)

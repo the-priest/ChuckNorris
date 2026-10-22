@@ -752,6 +752,11 @@ def _open_path(path):
 
 
 def open_in_brave(url):
+    # only web addresses: a "URL" that is really a browser flag
+    # (--renderer-cmd-prefix=...) would run a command
+    url = str(url or "").strip()
+    if not re.match(r"(?i)^https?://[^\s]+$", url):
+        return False
     for b in ("brave", "brave-browser"):
         if shutil.which(b):
             subprocess.Popen([b, url]); return True
@@ -1823,7 +1828,14 @@ SANDBOX_NO_BWRAP = ("(not run: this folder is Sandboxed but bubblewrap isn't ins
 # What a sandboxed command must never see: credentials, and Chuck's own config
 # (the API key). They are hidden behind empty tmpfs mounts.
 _SANDBOX_HIDE = (".ssh", ".gnupg", ".aws", ".kube", ".docker", ".password-store",
-                 ".config/gh", ".config/chucknorris", ".local/share/keyrings")
+                 ".config/gh", ".config/chucknorris", ".local/share/keyrings",
+                 ".config/gcloud", ".azure", ".config/rclone",
+                 # browser profiles: cookies and saved passwords are logins
+                 ".mozilla", ".config/BraveSoftware", ".config/chromium",
+                 ".config/google-chrome", ".thunderbird")
+# single files that hold tokens: shown as empty
+_SANDBOX_HIDE_FILES = (".netrc", ".git-credentials", ".pypirc", ".npmrc", ".pgpass",
+                       ".my.cnf", ".config/hub")
 _SANDBOX_CACHE = DATA_DIR / "sandbox-cache"
 
 
@@ -1836,7 +1848,7 @@ def _secret_path(p):
     except (OSError, ValueError):
         return False
     home = str(Path.home())
-    for rel in _SANDBOX_HIDE + (".netrc",):
+    for rel in _SANDBOX_HIDE + _SANDBOX_HIDE_FILES:
         h = os.path.realpath(os.path.join(home, rel))
         if rp == h or rp.startswith(h + os.sep):
             return True
@@ -1895,8 +1907,17 @@ def _bwrap_argv(argv, env=None, write_root=True, net=None, persistent=False, roo
         if os.path.isdir(p):
             args += ["--tmpfs", p]
             hidden.append(p)
-    if os.path.isfile(os.path.join(home, ".netrc")):
-        args += ["--ro-bind", "/dev/null", os.path.join(home, ".netrc")]
+    for rel in _SANDBOX_HIDE_FILES:
+        if os.path.isfile(os.path.join(home, rel)):
+            args += ["--ro-bind", "/dev/null", os.path.join(home, rel)]
+    # a repo's hooks and config run OUTSIDE the sandbox the next time you use
+    # git there (a pre-commit hook, core.fsmonitor): code in the sandbox may
+    # change the project, never what git will execute for you later
+    for b, rw in binds:
+        for sub in (".git/hooks", ".git/config"):
+            gp = os.path.join(b, sub) if b and rw else ""
+            if gp and os.path.exists(gp) and not os.path.islink(gp):
+                args += ["--ro-bind", gp, gp]
     for b, rw in binds[1:]:                    # Chuck's own folders that live under a hidden one
         if b and os.path.exists(b) and any(b.startswith(h + os.sep) for h in hidden):
             args += ["--bind" if rw else "--ro-bind", b, b]
@@ -1915,6 +1936,80 @@ def _bwrap_argv(argv, env=None, write_root=True, net=None, persistent=False, roo
     if not (_SANDBOX["net"] if net is None else net):
         args.append("--unshare-net")
     return args + ["--"] + list(argv)
+
+
+# git settings that make git run a program: in a config written inside the
+# sandbox they are switched off (they'd run unconfined in your next git command)
+_GIT_RUNS = re.compile(r"^(\s*)((?:fsmonitor|hookspath|sshcommand|pager|editor|askpass|textconv|"
+                       r"clean|smudge|process|helper|program|gitproxy|external|driver|cmd|"
+                       r"path|uploadpack|receivepack)\s*=|[\w.-]+\s*=\s*!)", re.I | re.M)
+
+
+def _git_dirs(root, limit=20000):
+    """Every repo's .git under root (a project may hold nested repos), without
+    wandering into dependency folders."""
+    out, n = [], 0
+    for dp, dns, _fns in os.walk(str(root)):
+        if ".git" in dns:
+            out.append(os.path.join(dp, ".git"))
+        dns[:] = [d for d in dns if d != ".git" and d not in _GIT_SCAN_SKIP and not os.path.islink(os.path.join(dp, d))]
+        n += len(dns)
+        if n > limit:
+            break
+    return out
+
+
+_GIT_SCAN_SKIP = {"node_modules", ".venv", "venv", "__pycache__", "target", "dist", "build",
+                  ".cache", ".mypy_cache", ".pytest_cache", ".tox", ".next", ".gradle"}
+
+
+def _changed_since(path, since):
+    """ctime, not mtime: a process can backdate mtime (touch -d), not ctime."""
+    try:
+        return os.lstat(path).st_ctime >= since - 1
+    except OSError:
+        return False
+
+
+def _git_disarm(root, since):
+    """After sandboxed code ran in `root`: a git hook or a program-running git
+    setting it created or changed, in any repo under root, is disarmed, so it
+    can't run outside the sandbox the next time you use git. Hooks it didn't
+    touch (yours) are left alone; the top repo's are mounted read-only anyway.
+    Returns what was disarmed."""
+    out = []
+    if not root or not os.path.isdir(str(root)):
+        return out
+    for g in _git_dirs(root):
+        rel = os.path.relpath(g, str(root))
+        hooks = os.path.join(g, "hooks")
+        try:
+            names = os.listdir(hooks) if os.path.isdir(hooks) and not os.path.islink(hooks) else []
+        except OSError:
+            names = []
+        for n in names:
+            f = os.path.join(hooks, n)
+            if n.endswith((".sample", ".disabled-by-chuck")) or not _changed_since(f, since):
+                continue
+            try:
+                os.replace(f, f + ".disabled-by-chuck")
+                out.append(f"{rel}/hooks/{n}")
+            except OSError:
+                pass
+        cfg = os.path.join(g, "config")
+        try:
+            if os.path.islink(cfg) and _changed_since(cfg, since):
+                os.unlink(cfg)                # a config that points elsewhere: gone
+                out.append(f"{rel}/config")
+            elif os.path.isfile(cfg) and _changed_since(cfg, since):
+                text = Path(cfg).read_text(errors="replace")
+                safe = _GIT_RUNS.sub(lambda m: m.group(1) + "# disabled by Chuck: " + m.group(2), text)
+                if safe != text:
+                    Path(cfg).write_text(safe)
+                    out.append(f"{rel}/config")
+        except OSError:
+            pass
+    return out
 
 
 def _sandboxed(argv, env=None, persistent=False):
@@ -1949,6 +2044,7 @@ def _guarded_proc(argv, timeout, env, input_text=None):
     wrapped = _sandboxed(argv, env)
     if wrapped is None:
         return subprocess.CompletedProcess(argv, 126, "", SANDBOX_NO_BWRAP)
+    guard = (_SANDBOX.get("root"), time.time()) if argv != wrapped else None
     argv = wrapped
     proc = subprocess.Popen(argv, cwd=_cwd(),
                             stdin=subprocess.PIPE if input_text is not None
@@ -1971,6 +2067,13 @@ def _guarded_proc(argv, timeout, env, input_text=None):
     finally:
         with _LIVE_LOCK:
             _LIVE_PROCS.discard(proc)
+        if guard:
+            gone = _git_disarm(*guard)
+            if gone:
+                err = (locals().get("err") or "") + (
+                    "\n[Chuck disarmed " + ", ".join(gone) + ": git would have run it outside "
+                    "the sandbox. Git hooks and program-running git settings can't be set from "
+                    "a restricted folder.]")
     return subprocess.CompletedProcess(argv, proc.returncode, out, err)
 
 
@@ -7748,7 +7851,8 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._tool_feedback.append(f"[bg failed to start: {ex}]")
             return
         job = {"proc": proc, "log": log, "cmd": cmd, "name": name, "card": None,
-               "started": time.time()}
+               "started": time.time(),
+               "guard": _SANDBOX.get("root") if _SANDBOX["on"] else None}
         self._jobs[name] = job
         if _ledger is not None:
             try:
@@ -7887,6 +7991,13 @@ class ChuckWindow(Adw.ApplicationWindow):
     def _tick_jobs(self):
         for j in list(self._jobs.values()):
             self._update_job_card(j)
+            if j.get("guard") and (j["proc"].poll() is None or not j.get("guard_done")):
+                j["guard_done"] = j["proc"].poll() is not None    # one last look once it ends
+                gone = _git_disarm(j["guard"], j["started"])
+                if gone:
+                    self._sys_note("\U0001F6E1 disarmed " + ", ".join(gone) + f" (written by job "
+                                   f"'{j['name']}'): git would have run it outside the sandbox",
+                                   "dim")
         if not any(self._job_alive(n) for n in self._jobs):
             self._jobs_timer = 0
             return False
@@ -8278,6 +8389,9 @@ class ChuckWindow(Adw.ApplicationWindow):
         except (ValueError, OSError) as ex:
             self._sys_note(f"\u2717 patch not applied: {ex}", "danger")
             return f"[patch NOT applied, nothing was changed: {ex}]"
+        for rel, _b, _a in plan:
+            if self._git_internal(rel, "patching"):
+                return "[patch NOT applied, nothing was changed: it touches .git]"
         done, bad = self._apply_file_plan(p, plan)
         self._sys_note(f"\u2713 patched {len(done)} file(s)", "ok" if not bad else "danger")
         return (f"[patch applied to {len(done)} file(s): {', '.join(done)}]"
@@ -12293,7 +12407,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         if _browser is not None and hasattr(_browser, "FILES_ROOT"):
             _browser.FILES_ROOT[0] = None if mode == "full" or not self.workspace else str(self.workspace)
             _browser.HIDDEN[0] = tuple(os.path.realpath(os.path.join(str(Path.home()), r))
-                                       for r in _SANDBOX_HIDE + (".netrc",))
+                                       for r in _SANDBOX_HIDE + _SANDBOX_HIDE_FILES)
         for mod in (_builder, _diagnose, _lsp):  # tests, linters and language servers too
             if mod is not None and hasattr(mod, "RUN_WRAP"):
                 mod.RUN_WRAP[0] = wrap if wrap is None or mod is not _lsp else (
@@ -12672,12 +12786,27 @@ class ChuckWindow(Adw.ApplicationWindow):
               "isn't installed or isn't logged in, stop after the push and give the exact "
               "compare URL. Show the PR URL at the end.")
 
+    def _git_internal(self, rel, verb):
+        """In a restricted folder, the repo's .git is off limits to Chuck's file
+        tools (they run outside the sandbox): a hook or a git setting written
+        there would run unconfined the next time you use git. True = refused."""
+        if self._folder_access() == "full":
+            return False
+        if not any(seg == ".git" for seg in re.split(r"[/\\]+", (rel or "").strip())):
+            return False
+        self._sys_note(f"\U0001F6E1 not {verb} {rel.strip()}: a restricted folder's .git is "
+                       "off limits", "dim")
+        self._tool_feedback.append(f"[{verb} refused: {rel.strip()} is inside .git, which git "
+                                   "would run code from outside the sandbox; this folder is "
+                                   "restricted (/access). Use git commands instead.]")
+        return True
+
     def _do_write(self, rel, content):
         """Write one complete file into the working folder — checkpointed, shown
         as a diff, and verified if it's code, so a broken file never sits
         silently in a deliverable."""
         p = self._project_or_note()
-        if p is None:
+        if p is None or self._git_internal(rel, "writing"):
             return
         path, before = self._snapshot(p, rel)
         ok, msg, written = _builder.write_file(p, rel, content)
@@ -12702,7 +12831,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         """Apply SEARCH/REPLACE edits to one file — the cheap way to change an
         existing file: only the changed lines are sent, not the whole file."""
         p = self._project_or_note()
-        if p is None:
+        if p is None or self._git_internal(rel, "editing"):
             return
         rel = rel.strip()
         path, before = self._snapshot(p, rel)
@@ -12904,7 +13033,7 @@ class ChuckWindow(Adw.ApplicationWindow):
 
     def _do_rmfile(self, rel):
         p = self._project_or_note()
-        if p is None:
+        if p is None or self._git_internal(rel, "deleting"):
             return
         path, before = self._snapshot(p, rel)
         ok, msg = _builder.delete_file(p, rel)

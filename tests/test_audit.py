@@ -414,6 +414,46 @@ check("he'll re-read it and retry" in shown and "quote the current lines" not in
       "a missed edit reads as plain English; the model still gets the exact reason")
 check("quote the current lines" in hist_text(w), "(the model's feedback is unchanged)")
 
+print("\n--- a restricted folder can't plant code for git to run later ---")
+import shutil as _sh
+import subprocess as _sp
+check(cn.open_in_brave("--renderer-cmd-prefix=touch /tmp/x") is False
+      and cn.open_in_brave("file:///etc/passwd") is False, "the browser is only ever handed a web address")
+if _sh.which("bwrap") and _sh.which("git"):
+    ws = folder("gitguard")
+    _sp.run(["git", "init", "-q", str(ws)], check=True)
+    cfg0 = (ws / ".git" / "config").read_text()
+    fresh = ws / "fresh"
+    w = agent([
+        "```bash\nprintf '#!/bin/sh\\necho pwn\\n' > .git/hooks/pre-commit; "
+        "git config core.fsmonitor 'touch PWNED'; echo done\n```",
+        "```bash\nmkdir fresh && cd fresh && git init -q && printf '#!/bin/sh\\ntouch PWNED\\n' > "
+        ".git/hooks/pre-commit && chmod +x .git/hooks/pre-commit && git config core.fsmonitor 'touch PWNED'"
+        " && git config alias.st '!touch PWNED' && git config user.name Chuck\n```",
+        "```write .git/hooks/post-checkout\n#!/bin/sh\ntouch PWNED\n```",
+        "```bash\ncat ~/.git-credentials; ls ~/.mozilla; echo end\n```",
+        "Done."], ws)
+    (Path.home() / ".git-credentials").write_text("https://me:TOKEN-SECRET@github.com\n")
+    (Path.home() / ".mozilla" / "firefox").mkdir(parents=True, exist_ok=True)
+    (Path.home() / ".mozilla" / "firefox" / "cookies.sqlite").write_text("COOKIE-SECRET")
+    check(w.set_access("sandbox"), "sandboxed")
+    type_and_send(w, "try it")
+    h = hist_text(w)
+    check(not (ws / ".git" / "hooks" / "pre-commit").exists(), "an existing repo's hooks are read-only")
+    check((ws / ".git" / "config").read_text() == cfg0, "and so is its config")
+    hk = fresh / ".git" / "hooks"
+    check(not (hk / "pre-commit").exists() and (hk / "pre-commit.disabled-by-chuck").exists(),
+          "a hook planted in a repo made during the run is disarmed")
+    fc = (fresh / ".git" / "config").read_text()
+    check("# disabled by Chuck: fsmonitor" in fc and "# disabled by Chuck: st" in fc
+          and "name = Chuck" in fc, "program-running git settings are switched off; plain ones stay", fc)
+    check("Chuck disarmed" in h, "and the model is told why")
+    check(not (ws / ".git" / "hooks" / "post-checkout").exists() and "inside .git" in h,
+          "Chuck's own write tool refuses .git in a restricted folder")
+    check("TOKEN-SECRET" not in h and "cookies.sqlite" not in h and "firefox" not in h,
+          "token files and browser profiles are hidden from sandboxed commands")
+    check_finished(w, "git guard")
+
 # a markdown doc stays strict: its own bare fences may be content
 amb = cn.file_blocks("```write DOC.md\n# Doc\n```\nrm -rf x\n```\nmore\n```")
 check(len(amb) == 1 and amb[0]["ambiguous"] and amb[0]["end"] == len(

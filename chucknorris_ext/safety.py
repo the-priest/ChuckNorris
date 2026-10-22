@@ -24,7 +24,10 @@ _Q = r"""["']?"""
 _HOME = r"(?:~|\$HOME\b|\$\{HOME\}|/home/[^/\s'\";&|]+|/home|/root)"
 _SYS = r"/(?:etc|usr|boot|var|bin|sbin|lib|lib32|lib64|opt|srv|dev|proc|sys|nix|snap)"
 # a "root-ish" target: / itself, /*, home, a system dir, a bare wildcard, or cwd
-_NUKE_TARGET = _Q + r"(?:/\*?|" + _HOME + r"(?:/\*?)?|" + _SYS + r"/?\*?|\*|\.)/?" + _Q
+# (~/. and ~/.* are home too; .. and ../.. are the folders ABOVE this one;
+# ~name is someone's home)
+_NUKE_TARGET = (_Q + r"(?:/\*?|" + _HOME + r"(?:/\.?\*?)?|~[a-z_][\w-]*|" + _SYS
+                + r"/?\*?|\*|\.\.?(?:/\.\.)*)/?" + _Q)
 # the same without "." and "*": `find . -delete` or `chmod -R 755 .` in a
 # project is ordinary work
 _BROAD = _Q + r"(?:/\*?|" + _HOME + r"(?:/\*?)?|" + _SYS + r"/?\*?)/?" + _Q
@@ -63,6 +66,9 @@ CRITICAL = re.compile(
     r"|\btee\s+(?:-a\s+)?/etc/(?:passwd|shadow|sudoers|fstab|group)\b"
     r"|\btruncate\s+-s\s*0\s+/(?:etc|boot)/"
     r"|\bmv\s+(?:/|/etc|/boot|/home|~)\S*\s+/dev/null\b"
+    # moving home or a system dir away, or syncing an empty folder over one
+    r"|\bmv\s+(?:-\S+\s+)*" + _BROAD + _TEND +
+    r"|\brsync\b[^\n;&|]*\s--delete[^\n;&|]*\s" + _BROAD + r"\s*(?:$|[;&|)#])"
     # mass delete via find on a broad path
     r"|\bfind\s+" + _BROAD + _TEND + r"[^\n;&|]*(?:-delete\b|-exec\s+rm\b)"
     r"|\bgit\s+clean\b[^\n;&|]*\s" + _BROAD + _TEND +
