@@ -921,7 +921,8 @@ def md_segments(text):
         if ind:                                 # the fence's indent isn't part of the code
             body = "\n".join(ln[len(ind):] if ln.startswith(ind) else ln.lstrip(" \t")
                              for ln in body.split("\n"))
-        segs.append(("code", m.group("lang").lower(), body))
+        if body.strip():                        # a stray ``` is not an empty code card
+            segs.append(("code", m.group("lang").lower(), body))
         pos = m.end()
     if pos < len(text):
         segs.extend(_table_split(text[pos:]))
@@ -3131,7 +3132,9 @@ class GlyphField:
 
 
 _FILE_FENCE = re.compile(r"^[ \t]*(`{3,4})(write|edit|patch)(?![A-Za-z])[ \t]*(.*)$")
-_DOC_EXT = re.compile(r"\.(md|markdown|mdx|rst|txt|adoc|html?|ipynb|org)$", re.IGNORECASE)
+# files whose text may hold ``` fences of its own (an HTML page never does:
+# its code samples are <pre>, so a stray fence after one is the model's, not the page's)
+_DOC_EXT = re.compile(r"\.(md|markdown|mdx|rst|txt|adoc|ipynb|org)$", re.IGNORECASE)
 _SR_OPEN = re.compile(r"^<{5,9} ?SEARCH\s*$")
 _SR_CLOSE = re.compile(r"^>{5,9} ?REPLACE\s*$")
 # a fence that only SHOWS something: four or more backticks, tildes, or a
@@ -3280,9 +3283,12 @@ def file_blocks(text):
         # evidence. Only a bare fence that closes NOTHING is — counting every
         # bare fence flagged any doc written alongside another tool.
         ambiguous = False
-        if len(fence) == 3 and tag == "write" and _DOC_EXT.search(head):
+        # An EMPTY body with more fenced text after it is the same doubt for any
+        # file: "```write x\n```\n<the file>\n```" must not write an empty x.
+        if len(fence) == 3 and tag == "write" and (_DOC_EXT.search(head) or not body.strip()):
             depth_after = 0
-            for ln in lines[end_line + 1:]:
+            for n in range(end_line + 1, len(lines)):
+                ln = lines[n]
                 if _FILE_FENCE.match(ln):
                     break
                 st = ln.strip()
@@ -3290,8 +3296,12 @@ def file_blocks(text):
                     if depth_after:
                         depth_after -= 1
                         continue
+                    # nothing is written, and the file's text must not show up
+                    # in the chat as prose either: the block reaches as far as
+                    # its last unmatched fence
                     ambiguous = True
-                    break
+                    end = offs[n] + len(ln)
+                    continue
                 if st.startswith("```") and not st.startswith("````"):
                     if not (len(st) > 6 and st.endswith("```")):   # not ```look x```
                         depth_after += 1
@@ -6015,7 +6025,11 @@ class ChuckWindow(Adw.ApplicationWindow):
         if partial:
             shown = re.sub(r"`{3,4}(?:" + tags + r")(?![A-Za-z])(?:(?!```).)*$", "",
                            shown, flags=re.DOTALL)
-        return re.sub(r"\n{3,}", "\n\n", shown).strip()
+        shown = re.sub(r"\n{3,}", "\n\n", shown).strip()
+        if not partial or len(re.findall(r"(?m)^\s*```", shown)) % 2 == 0:
+            return shown
+        # a lone ``` left at the end (the model's stray closing fence) is noise
+        return re.sub(r"\n?[ \t]*```[ \t]*$", "", shown).rstrip()
 
     def _visible_stream_text(self):
         """The narration to show mid-stream, with tool blocks (closed or still
@@ -14605,9 +14619,10 @@ class ChuckWindow(Adw.ApplicationWindow):
             self._tool_feedback.append("[" + stall + "]")
 
         if fence_clash:
-            self._sys_note("\u26a0 couldn't tell where " + ", ".join(fence_clash)
-                           + " ends (``` fences inside it) \u2014 nothing written or run",
-                           "danger")
+            # the model is asked to resend it right away: a quiet note, not an alarm
+            self._sys_note("\u21bb " + ", ".join(os.path.basename(p_) for p_ in fence_clash)
+                           + ": its code fences were unclear, so nothing was written \u2014 "
+                           "asking Chuck to send it again", "dim")
             self._tool_feedback.append(
                 "[NOTHING was written or run: " + ", ".join(fence_clash) + " contains ``` "
                 "fences inside a 3-backtick ```write block, so its end is ambiguous. Send it "

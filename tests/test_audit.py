@@ -21,7 +21,7 @@ import time
 from pathlib import Path
 
 import gtkstub
-from sim import cn, new_win, type_and_send, settle, check_finished, check_history, FAILS
+from sim import cn, new_win, type_and_send, settle, check_finished, check_history, FAILS, bubbles
 
 fails = 0
 
@@ -333,6 +333,40 @@ check((ws / "tetris.html").read_text() == page,
 check((ws / "shot.txt").exists(), "the command in the same reply ran")
 check("held back" in h, "the look that would have raced the command is held, and the model told")
 check_finished(w, "tetris run")
+
+print("\n--- a stray fence never dumps a file's code into the chat ---")
+page = "<!doctype html>\n<html><body><script>\nfunction loop(t){ drawBoard(); }\n</script></body></html>"
+# the model's stray closing fence after its narration: an HTML page has no
+# fences of its own, so the page is written and the stray fence is dropped
+ws = folder("stray-after")
+w = agent([f"Writing it.\n```write tetris.html\n{page}\n```\n\nWritten. Now render it.\n```",
+           "Done."], ws)
+type_and_send(w, "make tetris")
+check((ws / "tetris.html").read_text() == page + "\n", "the page is written whole, first time")
+shown = " ".join(bubbles(w))
+check("Written. Now render it." in shown and "Now render it.\n```" not in shown,
+      "the narration shows, the stray ``` doesn't")
+check(all(sg[0] != "code" for b in bubbles(w) if "Written" in b for sg in cn.md_segments(b)),
+      "no empty code card")
+check_finished(w, "stray after")
+# a stray fence right after the header: an EMPTY file is never written, and
+# the page between the fences never shows up in the chat as prose
+ws = folder("stray-before")
+w = agent([f"Writing it.\n```write tetris.html\n```\n{page}\n```\n\nWritten.\n```",
+           f"````write tetris.html\n{page}\n````", "Done."], ws)
+type_and_send(w, "make tetris")
+shown = " ".join(bubbles(w))
+prose = [b for b in bubbles(w) if b.startswith("Writing it.")]
+check(prose and not any("drawBoard" in b or "<html" in b for b in prose),
+      "the page's code is not dumped into the chat")
+check("couldn't tell" not in shown and "send it again" in shown, "a calm note, not an alarm")
+check((ws / "tetris.html").read_text() == page + "\n", "the resend is written whole")
+check_finished(w, "stray before")
+# a markdown doc stays strict: its own bare fences may be content
+amb = cn.file_blocks("```write DOC.md\n# Doc\n```\nrm -rf x\n```\nmore\n```")
+check(len(amb) == 1 and amb[0]["ambiguous"] and amb[0]["end"] == len(
+    "```write DOC.md\n# Doc\n```\nrm -rf x\n```\nmore\n```"),
+      "an ambiguous doc block hides everything up to its last loose fence")
 
 w = agent([f"```write {tmp}/outside.txt\nno\n```", "Refused."], folder("abs_out"))
 type_and_send(w, "write outside")
