@@ -11290,6 +11290,13 @@ class ChuckWindow(Adw.ApplicationWindow):
     def remote_command(self, args, cwd=None, out=print):
         """A command from another `chucknorris` launch (Gio forwards its
         arguments here). `out` prints back to that terminal. -> exit code."""
+        raw_out = out
+
+        def out(text):
+            # what agents wrote (a daemon's report, a process name) goes to a
+            # terminal: escape sequences in it could retitle the window, write
+            # the clipboard (OSC 52) or hide lines, so control characters go
+            raw_out(re.sub(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]", "", str(text)))
         args = [a for a in args if a]
         if not args:
             return 0

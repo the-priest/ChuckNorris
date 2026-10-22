@@ -1729,6 +1729,12 @@ check(w.remote_command(["--remind", "in", "20m:", "tea"], None, said.append) == 
 w.remote_command(["--top"], None, said.append)
 check("chuck" in said[-1], "--top prints the process table in the terminal", said[-1][:100])
 check(w.remote_command(["--bogus"], None, said.append) == 2, "an unknown option is an error with a hint")
+w._inbox.add("evil\x1b]52;c;cm0gLXJmIH4=\x07 report", "x\x1b[2Jy", "ok\x1b]0;pwned\x07")
+said.clear()
+w.remote_command(["--inbox"], None, said.append)
+check(said and not any(ch in "".join(said) for ch in ("\x1b", "\x07")),
+      "text agents wrote reaches your terminal without escape sequences (no clipboard writes, no retitling)",
+      repr("".join(said))[:200])
 
 print("\n--- review fixes: palette keys, /watch, partial merge, /context ---")
 w = new_win([], tmp)
