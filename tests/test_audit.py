@@ -454,6 +454,32 @@ if _sh.which("bwrap") and _sh.which("git"):
           "token files and browser profiles are hidden from sandboxed commands")
     check_finished(w, "git guard")
 
+print("\n--- a damaged chat file opens safely and never poisons later saves ---")
+import json as _json
+w = agent(["Hi."])
+cd_ = cn.CHATS_DIR
+for _nm, _data in (("list", [1, 2]), ("null", None), ("hist-str", {"history": "nope"}),
+                   ("bad-items", {"title": 5, "history": [None, 3, {"role": "user"}, {"content": "x"},
+                                                         {"role": "assistant", "content": "fine"}]}),
+                   ("escape", {"ts": "../../evil", "history": [{"role": "user", "content": "hi"}]})):
+    _p = cd_ / f"bad-{_nm}.json"
+    _p.write_text(_json.dumps(_data))
+    w._load_chat(_p)
+    check(all(isinstance(m, dict) and m.get("role") in ("system", "user", "assistant") for m in w.history),
+          f"chat file '{_nm}' loads as clean history")
+_mem = cn._memory if hasattr(cn, "_memory") else None
+if _mem is not None:
+    _mem.FACTS.parent.mkdir(parents=True, exist_ok=True)
+    _mem.FACTS.write_text('5\n["x"]\n{"no": "text"}\nnot json\n{"text": "a fact with nothing else"}\n')
+    _mem.remember("the build uses meson")
+    check(any("meson" in str(f) for f in _mem.all_facts())
+          and isinstance(_mem.recall("how do we build it"), (str, list)),
+          "a damaged memory line is skipped; memory still saves and recalls")
+type_and_send(w, "still works?")
+check(not (cd_.parent.parent / "evil.json").exists() and not list(cd_.parent.glob("*evil*")),
+      "a chat's id from the file can't point a save outside the chats folder")
+check_finished(w, "damaged chats")
+
 # a markdown doc stays strict: its own bare fences may be content
 amb = cn.file_blocks("```write DOC.md\n# Doc\n```\nrm -rf x\n```\nmore\n```")
 check(len(amb) == 1 and amb[0]["ambiguous"] and amb[0]["end"] == len(

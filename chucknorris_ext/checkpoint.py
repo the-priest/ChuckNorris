@@ -116,9 +116,13 @@ class Shadow:
 
     def _manifest(self, sha):
         try:
-            return json.loads(self._manifest_path(sha).read_text())
+            m = json.loads(self._manifest_path(sha).read_text())
         except (OSError, ValueError):
+            m = None
+        if not isinstance(m, dict):
             return {"ignored": [], "empty": []}
+        return {k: [x for x in m.get(k) or [] if isinstance(x, str)] if isinstance(m.get(k), list) else []
+                for k in ("ignored", "empty")}
 
     def nested(self):
         """Folders that are git repositories of their own: their insides

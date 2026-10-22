@@ -19,6 +19,7 @@ Design (Basilisk memory.py lineage, stdlib-only):
 """
 import re
 import math
+import hashlib
 import json
 import time
 import threading
@@ -89,9 +90,17 @@ def _load():
                 if not line:
                     continue
                 try:
-                    out.append(json.loads(line))
+                    f = json.loads(line)
                 except Exception:
                     continue
+                if isinstance(f, dict) and isinstance(f.get("text"), str):
+                    # a damaged line is skipped, not fatal; a partial one is completed
+                    num = lambda v, d: v if isinstance(v, (int, float)) and not isinstance(v, bool) else d  # noqa: E731
+                    f.update(id=f["id"] if isinstance(f.get("id"), (int, str)) and f["id"] != "" else
+                             int(hashlib.sha1(f["text"].encode()).hexdigest()[:8], 16) % 10 ** 9,
+                             kind=str(f.get("kind") or "fact"), ts=num(f.get("ts"), 0.0),
+                             weight=num(f.get("weight"), 1.0), hits=num(f.get("hits"), 0))
+                    out.append(f)
         except OSError:
             return _CACHE["facts"] if _CACHE["sig"] else []
     _CACHE.update({"sig": sig, "facts": out, "stems": {}, "idf": None})

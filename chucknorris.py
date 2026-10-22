@@ -5446,11 +5446,13 @@ class ChuckWindow(Adw.ApplicationWindow):
                 meta = json.loads(f.read_text())
             except Exception:
                 continue
-            title = (meta.get("title") or "chat").strip().replace("\n", " ")
+            if not isinstance(meta, dict):
+                continue                        # not a chat (a damaged file): skip it
+            title = str(meta.get("title") or "chat").strip().replace("\n", " ")[:300]
             if q:
                 hay = title.lower() + " " + " ".join(
-                    m.get("content", "") for m in meta.get("history", [])
-                    if isinstance(m.get("content"), str) and m.get("role") != "system").lower()
+                    m["content"] for m in self._clean_history(meta.get("history"))
+                    if isinstance(m["content"], str) and m["role"] != "system").lower()
                 if q not in hay:
                     continue
             shown += 1
@@ -5509,10 +5511,28 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._refresh_sidebar()
         self._toast("Chat deleted")
 
+    @staticmethod
+    def _clean_history(hist):
+        """Only well-formed messages from a chat file: a damaged one must
+        neither crash the load nor poison every save after it."""
+        out = []
+        for m in hist if isinstance(hist, list) else []:
+            if not isinstance(m, dict) or m.get("role") not in ("system", "user", "assistant"):
+                continue
+            c = m.get("content")
+            if isinstance(c, list):
+                c = [x for x in c if isinstance(x, dict)]
+            elif not isinstance(c, str):
+                continue
+            out.append({**m, "content": c})
+        return out
+
     def _load_chat(self, path):
         try:
             meta = json.loads(Path(path).read_text())
         except Exception:
+            return
+        if not isinstance(meta, dict):
             return
         # Same reason as new_chat: an in-flight answer would otherwise land in
         # the chat we just switched to.
@@ -5521,14 +5541,16 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._save_chat()
         self._clear_sudo_pw()
         self._py_close()                # another chat's variables don't belong here
-        self.history = meta.get("history", [])
+        self.history = self._clean_history(meta.get("history"))
         if self.history and self.history[0].get("role") == "system":
             # old chats carry whatever prompt they were started with (v13's
             # was 5.7k characters); every resend would pay for it again
             self.history[0]["content"] = self._system_text()
         else:
             self.history.insert(0, {"role": "system", "content": self._system_text()})
-        self.chat_id = meta.get("ts", datetime.now().strftime("%Y%m%d-%H%M%S"))
+        ts = meta.get("ts")
+        self.chat_id = ts if isinstance(ts, str) and re.fullmatch(r"[\w.-]{1,40}", ts) \
+            else datetime.now().strftime("%Y%m%d-%H%M%S")
         cps = meta.get("checkpoints")
         self._checkpoints = [c for c in cps if isinstance(c, dict) and isinstance(c.get("sha"), str)
                              and isinstance(c.get("root"), str) and isinstance(c.get("hist"), int)
@@ -5537,7 +5559,7 @@ class ChuckWindow(Adw.ApplicationWindow):
         self._compact = (c if isinstance(c, dict) and isinstance(c.get("upto"), int)
                          and isinstance(c.get("text"), str) and 1 < c["upto"] <= len(self.history)
                          else None)
-        ws = meta.get("workspace") or ""
+        ws = meta.get("workspace") if isinstance(meta.get("workspace"), str) else ""
         _SHELL["cwd"] = None                    # a `cd` in another chat doesn't carry over
         if ws and os.path.isdir(ws) and (not self.workspace or str(self.workspace) != ws):
             self.set_workspace(ws, announce=False)
@@ -12406,15 +12428,19 @@ class ChuckWindow(Adw.ApplicationWindow):
                 meta = json.loads(f.read_text())
             except Exception:
                 continue
+            if not isinstance(meta, dict):
+                continue
             if meta.get("running") and meta.get("pid") != os.getpid() and not self._pid_alive(
                     meta.get("pid")):
-                best = (f, meta.get("title") or "a task")
+                best = (f, str(meta.get("title") or "a task")[:200])
                 break
         return best
 
     def _set_interrupted_flag(self, path, value):
         try:
             meta = json.loads(Path(path).read_text())
+            if not isinstance(meta, dict):
+                return
             meta["running"] = value
             tmp = Path(str(path) + ".tmp")
             tmp.write_text(json.dumps(meta, indent=2))

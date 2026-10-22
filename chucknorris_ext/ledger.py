@@ -221,9 +221,11 @@ def read_all(limit=None):
                 if not line:
                     continue
                 try:
-                    out.append(json.loads(line))
+                    e = json.loads(line)
                 except Exception:
                     continue
+                if isinstance(e, dict):
+                    out.append(e)
     except OSError:
         return out
     return out[-limit:] if limit else out
