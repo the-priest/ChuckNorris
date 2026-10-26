@@ -2408,6 +2408,21 @@ def _mentions_stream_options(ex):
     return "stream_options" in body or "include_usage" in body
 
 
+def _mentions_thinking(ex):
+    """A 400 about the reasoning options (a model that doesn't think, or
+    takes no budget): drop them for that model and ask again."""
+    body = _err_body(ex)
+    return "thinking" in body or "reasoning" in body
+
+
+# Settings > Model > Reasoning: how much the model may think before it answers
+REASONING_LEVELS = [(0, "Off \u2014 answer straight away (fastest)"),
+                    (1024, "Light \u2014 up to 1k tokens of thinking"),
+                    (4096, "Normal \u2014 up to 4k tokens"),
+                    (8192, "Deep \u2014 up to 8k tokens"),
+                    (32768, "Maximum \u2014 up to 32k tokens")]
+
+
 def _model_unavailable(ex):
     """This MODEL can't serve the request (retired, renamed, not on this
     account) — as opposed to the request itself being bad."""
@@ -2429,6 +2444,7 @@ class Backend:
     # first rejection is remembered for the process so it costs one retry,
     # once, rather than a failed request every turn.
     _no_stream_opts = False
+    _no_think_opts = set()          # models that refused thinking_budget / enable_thinking
 
     def __init__(self, settings):
         self.s = settings
@@ -2440,6 +2456,7 @@ class Backend:
         self.last_model = None       # the model that actually answered (fallback-aware)
         self.on_think = None         # callable(chunk) for reasoning deltas
         self.on_fallback = None      # callable(failed_model, fallback, why)
+        self.on_think_cut = None     # callable(seconds): thinking ran too long, asked directly
         # who is calling (the governor picks the model by role) and a model a
         # program pinned for itself
         self.role = "main"
@@ -2522,6 +2539,31 @@ class Backend:
         maxtok = max(256, min(32768, maxtok))
         payload = {"model": model, "messages": messages, "stream": True,
                    "temperature": temp, "max_tokens": maxtok}
+
+        def num(key, default, lo, hi):
+            try:
+                return max(lo, min(hi, int(self.s.get(key, default))))
+            except (TypeError, ValueError):
+                return default
+        # Reasoning has a ceiling (Settings > Model > Reasoning), sent to the
+        # API; and a clock: thinking past max_think_seconds with no answer yet
+        # is stopped and the question asked again without thinking, so a reply
+        # can't sit on "thinking..." for ten minutes.
+        think_budget = num("reasoning_budget", 4096, 0, 32768)
+        think_secs = num("max_think_seconds", 120, 0, 1800)
+        stall_secs = num("stall_seconds", 90, 20, 600)
+
+        def think_opts(on=True):
+            payload.pop("thinking_budget", None)
+            payload.pop("enable_thinking", None)
+            if payload["model"] in Backend._no_think_opts:
+                return
+            if not on or think_budget <= 0:
+                payload["enable_thinking"] = False
+            else:
+                payload["thinking_budget"] = max(128, think_budget)
+        think_opts()
+        cut_once = False
         if not Backend._no_stream_opts:
             # Real token counts on the final chunk, so the meter shows what the
             # API actually billed rather than a chars/4 guess.
@@ -2538,6 +2580,7 @@ class Backend:
                 return
             self.last_model = model
             got_any = False             # visible content reached the screen
+            think_t0, think_chars, cut = None, 0, False
             try:
                 req = urllib.request.Request(url, data=json.dumps(payload).encode(),
                                              headers=headers)
@@ -2548,7 +2591,9 @@ class Backend:
                 # opposite of what the setting appears to promise.
                 _op = _config.api_opener()
                 _open = _op.open if _op else urllib.request.urlopen
-                with _open(req, timeout=180) as resp:
+                # timeout = the longest silence between bytes: a stalled
+                # connection is retried instead of hanging for minutes
+                with _open(req, timeout=stall_secs) as resp:
                     if on_open:
                         on_open()          # connection is live — proof of life
                     for raw in resp:
@@ -2582,6 +2627,13 @@ class Backend:
                                 # reasoning retries cleanly instead of being
                                 # reported as an empty, "Done." reply
                                 think(r)
+                            if r and not got_any and not cut_once:
+                                think_chars += len(r)
+                                think_t0 = think_t0 or time.time()
+                                if ((think_secs and time.time() - think_t0 > think_secs)
+                                        or (think_budget and think_chars > think_budget * 6)):
+                                    cut = True     # past its budget or its clock
+                                    break
                             c = delta.get("content")
                             if c:
                                 got_any = True
@@ -2590,6 +2642,15 @@ class Backend:
                             continue
                 if should_stop and should_stop():
                     return
+                if cut:
+                    cut_once = True
+                    if self.on_think_cut:
+                        try:
+                            self.on_think_cut(int(time.time() - think_t0))
+                        except Exception:
+                            pass
+                    think_opts(on=False)        # the same question, answered directly
+                    continue
                 on_done()
                 return
             except Exception as ex:
@@ -2602,6 +2663,13 @@ class Backend:
                     Backend._no_stream_opts = True
                     payload.pop("stream_options", None)
                     continue                     # same attempt, without it
+                if (isinstance(ex, urllib.error.HTTPError) and ex.code in (400, 422) and not got_any
+                        and ("thinking_budget" in payload or "enable_thinking" in payload)
+                        and _mentions_thinking(ex)):
+                    # this model takes no reasoning options: ask without them
+                    Backend._no_think_opts.add(payload["model"])
+                    think_opts()
+                    continue
                 if got_any:
                     # Text already reached the screen — replaying the request
                     # would duplicate it, so keep what we have and carry on:
@@ -2628,6 +2696,7 @@ class Backend:
                         except Exception:
                             pass
                     model = payload["model"] = fb
+                    think_opts(on=not cut_once)
                     attempt = 0
                     continue
                 if attempt >= attempts or not _is_transient(ex):
@@ -14619,6 +14688,9 @@ class ChuckWindow(Adw.ApplicationWindow):
             self.backend.on_think = on_think
             self.backend.on_fallback = lambda bad, fb, why: GLib.idle_add(
                 self._fallback_note, bad, fb, why)
+            self.backend.on_think_cut = lambda secs: GLib.idle_add(
+                self._sys_note, f"\u23f1 thought for {secs} s without answering \u2014 asked for the "
+                "answer directly (Settings \u203a Model \u203a Reasoning)", "dim")
         except Exception:
             pass
 
@@ -15902,6 +15974,25 @@ class ChuckWindow(Adw.ApplicationWindow):
              sub="Lower is more literal and repeatable — better for shell work and code.")
         spin(g, "Max output tokens per reply", "max_tokens", 256, 32768, 256, 8192,
              sub="Per reply. Longer files continue automatically across replies.")
+        g = group(pg, "Reasoning", "How long a thinking model may think before it answers. "
+                  "Less is faster and cheaper; more helps hard problems.")
+        rz = Adw.ComboRow()
+        rz.set_title("Max reasoning")
+        rz_keys = [k for k, _l in REASONING_LEVELS]
+        rz.set_model(Gtk.StringList.new([lbl for _k, lbl in REASONING_LEVELS]))
+        try:
+            cur_rz = int(S.get("reasoning_budget", 4096))
+        except (TypeError, ValueError):
+            cur_rz = 4096
+        rz.set_selected(min(range(len(rz_keys)), key=lambda i: abs(rz_keys[i] - cur_rz)))
+        rz.connect("notify::selected", lambda *_a: changed(
+            "reasoning_budget", rz_keys[int(rz.get_selected() or 0)]))
+        g.add(rz)
+        spin(g, "Max thinking time (s)", "max_think_seconds", 0, 1800, 15, 120,
+             sub="Still thinking with no answer after this long: Chuck stops it and asks for the "
+                 "answer directly. 0 = no limit.")
+        spin(g, "Give up on a silent connection after (s)", "stall_seconds", 20, 600, 10, 90,
+             sub="No data at all for this long: the request is retried instead of hanging.")
 
         # ── Agent ──
         pg = page("Agent", "system-run-symbolic")
@@ -16241,7 +16332,8 @@ class ChuckWindow(Adw.ApplicationWindow):
             for k in ("voice_engine", "voice_speed", "voice_pitch", "research_sources",
                       "research_queries", "research_hops", "fetch_timeout", "chat_ttl_hours",
                       "render_keep", "render_page", "font_size", "voice_max_chars",
-                      "piper_model", "temperature", "max_tokens",
+                      "piper_model", "temperature", "max_tokens", "reasoning_budget",
+                      "max_think_seconds", "stall_seconds",
                       "web_cache_seconds", "proxy_api", "agent_steps", "price_in", "price_out"):
                 S.pop(k, None)
             save_settings(S)

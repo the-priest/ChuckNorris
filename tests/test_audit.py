@@ -521,6 +521,70 @@ w = agent(["```write ./index.html\n<p>hi</p>\n```", "Done."], ws)
 type_and_send(w, "make a page")
 check((ws / "index.html").read_text() == "<p>hi</p>\n", "./index.html is written, not refused as a bad path")
 
+print("\n--- reasoning: a ceiling, a clock, and no hanging on a silent connection ---")
+import http.server as _hs
+import json as _js
+_seen = []
+
+
+class _Fake(_hs.BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+
+    def do_POST(self):
+        body = _js.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        _seen.append(body)
+        mode = body["messages"][-1]["content"]
+        if mode == "picky" and ("thinking_budget" in body or "enable_thinking" in body):
+            self.send_response(400); self.end_headers()
+            self.wfile.write(b'{"message": "thinking_budget is not supported for this model"}')
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream"); self.end_headers()
+
+        def ev(d):
+            self.wfile.write(b"data: " + _js.dumps({"choices": [{"delta": d}]}).encode() + b"\n\n")
+            self.wfile.flush()
+        try:
+            if mode == "ponder" and body.get("enable_thinking") is not False:
+                for _ in range(400):              # thinks and thinks, never answers
+                    ev({"reasoning_content": "hmm, let me reconsider that once more. "})
+                    time.sleep(0.01)
+                return
+            ev({"content": "the answer"})
+            self.wfile.write(b"data: [DONE]\n\n")
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+
+_srv = _hs.ThreadingHTTPServer(("127.0.0.1", 0), _Fake)
+threading.Thread(target=_srv.serve_forever, daemon=True, name="srv-fakeapi").start()
+
+
+def _ask(text, **st):
+    b = cn.Backend({"siliconflow_api_key": "k", "siliconflow_base_url": f"http://127.0.0.1:{_srv.server_port}",
+                    **st})
+    out, cut, err = [], [], []
+    b.on_think = lambda c: None
+    b.on_think_cut = cut.append
+    b.stream([{"role": "user", "content": text}], out.append, lambda: None, err.append)
+    return "".join(out), cut, err
+
+
+_seen.clear()
+ans, cut, err = _ask("hi", reasoning_budget=8192)
+check(ans == "the answer" and _seen[-1].get("thinking_budget") == 8192, "the reasoning ceiling is sent")
+_ask("hi", reasoning_budget=0)
+check(_seen[-1].get("enable_thinking") is False and "thinking_budget" not in _seen[-1],
+      "reasoning Off asks for the answer straight away")
+_t0 = time.time()
+ans, cut, err = _ask("ponder", reasoning_budget=32768, max_think_seconds=1)
+check(ans == "the answer" and cut and _seen[-1].get("enable_thinking") is False and time.time() - _t0 < 15,
+      "a model that thinks past the clock is stopped and answers directly", (ans, cut, err))
+ans, cut, err = _ask("picky", reasoning_budget=4096)
+check(ans == "the answer" and "thinking_budget" not in _seen[-1],
+      "a model that refuses reasoning options still answers (asked again without them)", (ans, err))
+_srv.shutdown()
+
 # a markdown doc stays strict: its own bare fences may be content
 amb = cn.file_blocks("```write DOC.md\n# Doc\n```\nrm -rf x\n```\nmore\n```")
 check(len(amb) == 1 and amb[0]["ambiguous"] and amb[0]["end"] == len(
