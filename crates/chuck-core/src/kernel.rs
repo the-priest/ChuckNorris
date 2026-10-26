@@ -536,7 +536,7 @@ impl Kernel {
 
     /// True once the process must stop working (killed, or ended).
     pub fn should_stop(&self, pid: AgentId) -> bool {
-        self.lock().procs.get(&pid).map_or(true, |p| !p.state.alive())
+        self.lock().procs.get(&pid).is_none_or(|p| !p.state.alive())
     }
 
     /// True once the process was asked to finish: its next call is its last.

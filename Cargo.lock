@@ -111,6 +111,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "chuck-runtime"
+version = "18.0.0-alpha.1"
+dependencies = [
+ "chuck-core",
+ "chuck-model",
+ "chuck-tools",
+ "regex",
+ "serde_json",
+]
+
+[[package]]
 name = "chuck-sandbox"
 version = "18.0.0-alpha.1"
 dependencies = [

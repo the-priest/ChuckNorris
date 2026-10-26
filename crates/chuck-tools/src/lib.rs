@@ -5,8 +5,10 @@ pub mod blocks;
 pub mod cow;
 pub mod fs;
 pub mod run;
+pub mod search;
 
 pub use blocks::{clean_head, edit_pairs, file_blocks, prose, tool_blocks, FileBlock, ToolBlock};
 pub use cow::{ChangeKind, MergeResult, Workspace};
 pub use fs::{delete_file, edit_file, read_page, safe, unified, write_file, Change, FsError};
 pub use run::{bash, RunOpts, RunResult, Wrap};
+pub use search::{fingerprint, glob, grep};

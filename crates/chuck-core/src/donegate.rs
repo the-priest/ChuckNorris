@@ -423,11 +423,9 @@ impl Progress {
     pub fn turn(&mut self, mutated: bool, verified: bool, actions: &[String]) -> Stall {
         let repeat = !actions.is_empty() && actions == self.last_actions.as_slice();
         self.last_actions = actions.to_vec();
-        if mutated || verified {
-            if !repeat {
-                self.idle_turns = 0;
-                return Stall::None;
-            }
+        if (mutated || verified) && !repeat {
+            self.idle_turns = 0;
+            return Stall::None;
         }
         self.idle_turns += 1;
         if repeat && self.idle_turns >= 2 {

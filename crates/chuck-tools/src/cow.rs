@@ -5,8 +5,7 @@
 //! * a file only the worker changed  -> takes the worker's version
 //! * a file only the user changed    -> stays the user's
 //! * a file both changed             -> `git merge-file`; overlapping edits
-//!                                      are never forced: the worker's
-//!                                      version goes to .chuck-conflicts/
+//!   are never forced: the worker's version goes to .chuck-conflicts/
 //! * links are merged as links, never followed; a link pointing out of the
 //!   copy is refused; pipes, sockets and devices are ignored.
 

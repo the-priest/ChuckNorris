@@ -189,7 +189,8 @@ impl ChatModel for SiliconFlow {
                     think_on = false;
                     sink.notice(Notice::ThinkCut { secs });
                 }
-                Err((e, partial)) => {
+                Err(boxed) => {
+                    let (e, partial) = *boxed;
                     if let Some(mut out) = partial {
                         // text already reached the user: keep it as a CUT reply
                         // (the agent continues it) rather than replay and duplicate
@@ -228,7 +229,7 @@ impl ChatModel for SiliconFlow {
     }
 }
 
-type StreamErr = (ModelError, Option<Outcome>);
+type StreamErr = Box<(ModelError, Option<Outcome>)>;
 
 fn stream(resp: ureq::http::Response<ureq::Body>, req: &ChatRequest, sink: &mut dyn Sink, cut_once: bool)
     -> Result<Attempt, StreamErr>
@@ -240,7 +241,7 @@ fn stream(resp: ureq::http::Response<ureq::Body>, req: &ChatRequest, sink: &mut 
     let mut buf = String::new();
     loop {
         if sink.should_stop() {
-            return Err((ModelError::Stopped, None));
+            return Err(Box::new((ModelError::Stopped, None)));
         }
         buf.clear();
         let n = match lines.read_line(&mut buf) {
@@ -251,7 +252,7 @@ fn stream(resp: ureq::http::Response<ureq::Body>, req: &ChatRequest, sink: &mut 
                 } else {
                     ModelError::Network(e.to_string())
                 };
-                return Err((err, if out.text.is_empty() { None } else { Some(out) }));
+                return Err(Box::new((err, if out.text.is_empty() { None } else { Some(out) })));
             }
         };
         if n == 0 {

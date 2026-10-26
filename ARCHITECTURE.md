@@ -134,7 +134,7 @@ the Lead's verdict, and an **INCOMPLETE** label on anything not through it.
 | Python module | Rust home | Notes |
 |---|---|---|
 | `kernel.py` | `chuck-core::kernel` | processes, quotas over ancestors, signals, mailboxes, blackboard, syscall log, slot scheduler with priority + ageing |
-| `worker.py`, `agents.py` | `chuck-core::agent` | one agent loop for lead and workers; real threads, one per agent |
+| `worker.py`, `agents.py` | `chuck-runtime::{agent, lead}` | the worker loop and the Lead's orchestration; real threads, one per agent |
 | `missions.py` | `chuck-core::mission` | task DAG (Kahn), ready/blocked, test-gated merges |
 | `daemons.py` | `chuck-core::daemon` | triggers checked by plain code for free; read-only policy |
 | `budget.py`, `pricing.py`, `governor.py` | `chuck-core::budget`, `chuck-model::pricing` | day/month ledger, per-model prices |
@@ -153,7 +153,9 @@ the Lead's verdict, and an **INCOMPLETE** label on anything not through it.
 
 ```
 crates/
-  chuck-core      types, kernel, fleet, agent loop, DoneGate, evidence, missions, daemons, budget
+  chuck-core      types, kernel, fleet, DoneGate, evidence, missions, daemons, budget (no I/O)
+  chuck-runtime   the fleet at work: worker loop, Lead orchestration (assign, race, review,
+                  re-verify, merge), the critic pass, guarded execution of every block
   chuck-model     SiliconFlow client: SSE streaming, reasoning budget, stall timeout, retries,
                   fleet model resolution, pricing
   chuck-sandbox   bubblewrap argv, secrets, command safety classifier, git guard
