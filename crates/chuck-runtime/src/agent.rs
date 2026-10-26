@@ -139,7 +139,7 @@ pub fn think(ctx: &Ctx, id: AgentId, model: &str, convo: &Convo) -> Result<Strin
         req.reasoning = ctx.cfg.reasoning;
         req.max_tokens = ctx.cfg.max_tokens;
         let mut sink = AgentSink { id, ctx };
-        let r = ctx.model.chat(&req, &mut sink);
+        let r = chuck_model::chat_interruptible(&ctx.model, &req, &mut sink);
         ctx.kernel.release(id);
         let out = match r {
             Ok(o) => o,

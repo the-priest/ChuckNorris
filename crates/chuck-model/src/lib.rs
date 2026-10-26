@@ -14,6 +14,10 @@ pub use scripted::Scripted;
 pub use siliconflow::{is_siliconflow, SiliconFlow, DEFAULT_BASE};
 
 use serde_json::Value;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{channel, RecvTimeoutError};
+use std::sync::Arc;
+use std::time::Duration;
 
 /// How much a thinking model may think: a token budget sent to the API
 /// (0 = thinking off) and a clock (0 = none). Past the clock with no answer
@@ -152,5 +156,123 @@ pub trait ChatModel: Send + Sync {
     /// The chat models this key can use (for resolving the fleet's ids).
     fn list_models(&self) -> Result<Vec<String>, ModelError> {
         Ok(Vec::new())
+    }
+}
+
+enum Piece {
+    Think(String),
+    Delta(String),
+    Notice(Notice),
+    End(Result<Outcome, ModelError>),
+}
+
+struct Relay {
+    tx: std::sync::mpsc::Sender<Piece>,
+    stop: Arc<AtomicBool>,
+}
+
+impl Sink for Relay {
+    fn think(&mut self, c: &str) {
+        let _ = self.tx.send(Piece::Think(c.to_string()));
+    }
+    fn delta(&mut self, c: &str) {
+        let _ = self.tx.send(Piece::Delta(c.to_string()));
+    }
+    fn notice(&mut self, n: Notice) {
+        let _ = self.tx.send(Piece::Notice(n));
+    }
+    fn should_stop(&self) -> bool {
+        self.stop.load(Ordering::Relaxed)
+    }
+}
+
+/// [`ChatModel::chat`], but a Stop is honoured within a tenth of a second
+/// even while the connection is silent (connecting, or a server that hasn't
+/// sent a byte yet): the call runs on its own thread, and on Stop it is
+/// abandoned — it ends by itself at its next chunk or its stall timeout, and
+/// nothing it produces afterwards reaches anyone.
+pub fn chat_interruptible(model: &Arc<dyn ChatModel>, req: &ChatRequest, sink: &mut dyn Sink)
+    -> Result<Outcome, ModelError>
+{
+    if sink.should_stop() {
+        return Err(ModelError::Stopped);
+    }
+    let (tx, rx) = channel();
+    let stop = Arc::new(AtomicBool::new(false));
+    let relay_stop = stop.clone();
+    let (m, r) = (model.clone(), req.clone());
+    std::thread::Builder::new().name("chuck-model-call".into()).spawn(move || {
+        let mut relay = Relay { tx, stop: relay_stop };
+        let out = m.chat(&r, &mut relay);
+        let _ = relay.tx.send(Piece::End(out));
+    }).map_err(|e| ModelError::Network(format!("couldn't start the call: {e}")))?;
+    loop {
+        if sink.should_stop() {
+            stop.store(true, Ordering::Relaxed);
+            return Err(ModelError::Stopped);
+        }
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(Piece::Think(c)) => sink.think(&c),
+            Ok(Piece::Delta(c)) => sink.delta(&c),
+            Ok(Piece::Notice(n)) => sink.notice(n),
+            Ok(Piece::End(out)) => return out,
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(ModelError::Network("the call ended without a result".into()));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod interrupt_tests {
+    use super::*;
+
+    struct Hang;
+    impl ChatModel for Hang {
+        fn chat(&self, _: &ChatRequest, sink: &mut dyn Sink) -> Result<Outcome, ModelError> {
+            sink.delta("partial ");
+            std::thread::sleep(Duration::from_secs(5)); // a silent server: no chunk to check Stop at
+            Ok(Outcome::default())
+        }
+    }
+
+    struct Watch {
+        got: String,
+        flag: Arc<AtomicBool>,
+    }
+    impl Sink for Watch {
+        fn delta(&mut self, c: &str) {
+            self.got.push_str(c);
+        }
+        fn should_stop(&self) -> bool {
+            self.flag.load(Ordering::Relaxed)
+        }
+    }
+
+    #[test]
+    fn stop_wins_over_a_silent_connection() {
+        let m: Arc<dyn ChatModel> = Arc::new(Hang);
+        let flag = Arc::new(AtomicBool::new(false));
+        let f2 = flag.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            f2.store(true, Ordering::Relaxed);
+        });
+        let mut w = Watch { got: String::new(), flag };
+        let t0 = std::time::Instant::now();
+        let r = chat_interruptible(&m, &ChatRequest::new("m", vec![]), &mut w);
+        assert_eq!(r.unwrap_err(), ModelError::Stopped);
+        assert!(t0.elapsed() < Duration::from_secs(1), "{:?}", t0.elapsed());
+        assert_eq!(w.got, "partial ");
+    }
+
+    #[test]
+    fn a_normal_call_passes_through() {
+        let m: Arc<dyn ChatModel> = Arc::new(Scripted::new().replies(["hello there"]));
+        let mut c = Collect::default();
+        let out = chat_interruptible(&m, &ChatRequest::new("m", vec![]), &mut c).unwrap();
+        assert_eq!(out.text, "hello there");
+        assert_eq!(c.text, "hello there");
     }
 }

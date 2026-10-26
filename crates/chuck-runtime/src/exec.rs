@@ -293,7 +293,7 @@ impl<'a> Exec<'a> {
                 let list: Vec<String> = g.criteria.iter().map(|c| format!("{}: {}", c.id, c.text)).collect();
                 drop(g);
                 res.actions.push("criteria".into());
-                self.act("criteria", "", true, &format!("{} criteria", list.len()));
+                self.act("criteria", "", true, &list.join(" · "));
                 res.feedback.push(format!("[criteria accepted — link evidence with `for cN`:\n{}]", list.join("\n")));
             }
             "plan" => {

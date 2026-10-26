@@ -1,14 +1,6 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! chuck-store — what Chuck keeps on disk: settings (shared with the Python
+//! app), and, as the port continues, chats, the audit ledger and checkpoints.
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub mod settings;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub use settings::{config_dir, write_private, Settings, SettingsError};

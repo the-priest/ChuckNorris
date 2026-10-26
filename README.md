@@ -22,10 +22,14 @@ asleep until something needs them, and never out of your sight.
 </div>
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/the-priest/ChuckNorris/main/install.sh | bash && chucknorris
+curl -fsSL https://raw.githubusercontent.com/the-priest/ChuckNorris/rust-rewrite/install.sh | bash && chucknorris
 ```
 
 Paste a SiliconFlow API key in Settings, pick a folder, and say what you want.
+
+> **You are on the `rust-rewrite` branch.** The one-liner above installs from this branch: the
+> Chuck window, plus `chuck`, the new Rust fleet runtime. The rewrite is in progress; see
+> [The Rust fleet (preview)](#the-rust-fleet-preview) for what works today.
 
 ---
 
@@ -264,14 +268,48 @@ List prices as of October 2026. **Settings → Fetch** pulls the live list your 
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/the-priest/ChuckNorris/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/the-priest/ChuckNorris/rust-rewrite/install.sh | bash
 ```
 
 Or read the installer first:
 
 ```bash
-git clone https://github.com/the-priest/ChuckNorris.git && cd ChuckNorris && ./install.sh
+git clone -b rust-rewrite https://github.com/the-priest/ChuckNorris.git && cd ChuckNorris && ./install.sh
 ```
+
+Installed from this branch, the app's own updater stays on this branch. The installer also builds
+`chuck` with Rust 1.82 or newer. It uses your Rust if you have it, then your distro's package, and
+as a last resort installs rustup into `~/.cargo`. `CHUCK_RUST=0` skips this step.
+
+## The Rust fleet (preview)
+
+`chuck` is the rewrite of Chuck's agent runtime in Rust, built around a fixed team on SiliconFlow:
+one **Lead** (DeepSeek-V4.1-Flash) that talks to you, writes the acceptance criteria, plans, reviews
+and owns "done", and up to **four DeepSeek and four GLM-5.3-Flash workers**. Each worker is its own
+process and thread, working in its own copy of your project.
+
+```bash
+cd ~/code/my-project
+chuck run "the parser crashes on empty input: fix it and add a test"
+chuck models          # are the fleet's models on your account?
+chuck key             # save the API key (the window shares it)
+```
+
+"Done" is enforced in code, not left to the prompt:
+
+- Nothing changes until acceptance criteria exist, and larger work also needs a plan.
+- Every criterion needs evidence: a command and its real output, a test run, or a diff.
+- Verification must pass after the *last* change. An edit made after a passing test makes it count for nothing.
+- A worker's submission is refused while anything is missing. The Lead re-runs the checks on the
+  worker's copy before anything is merged into your folder.
+- Leftover TODOs and stubs, or a tiny diff for a large ask, block completion until fixed or justified.
+- An independent critic pass reviews the whole result before the Lead can finish.
+- Running out of budget ends the job **INCOMPLETE**, with the list of what is missing, never "done".
+
+What isn't ported yet: the Rust window (the window is still the Python app), the bubblewrap sandbox
+(`chuck` runs commands directly in the project folder, behind a floor of refused commands like
+`sudo` and `rm -rf ~`), checkpoints, missions, daemons and voice. [ARCHITECTURE.md](ARCHITECTURE.md)
+has the design and the plan.
 
 Arch and CachyOS are first-class; apt and dnf are supported. The installer sets up GTK4 and libadwaita, bubblewrap, a screenshot tool, the local voice models (about 600 MB, skip with `CHUCK_VOICE=0`) and the linters Chuck uses to check code. At runtime Chuck needs only Python's standard library and GTK; everything optional degrades gracefully when it's missing.
 

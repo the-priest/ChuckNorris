@@ -2,8 +2,11 @@
 # ============================================================================
 #  Chuck installer  —  desktop coding & system agent (Arch / CachyOS first)
 #
-#  One line:
-#    curl -fsSL https://raw.githubusercontent.com/the-priest/ChuckNorris/main/install.sh | bash
+#  One line (this is the rust-rewrite branch; it installs from itself):
+#    curl -fsSL https://raw.githubusercontent.com/the-priest/ChuckNorris/rust-rewrite/install.sh | bash
+#
+#  Also builds `chuck`, the Rust fleet runtime (1 Lead + 4 DeepSeek + 4 GLM
+#  workers on SiliconFlow), into ~/.local/bin. CHUCK_RUST=0 skips that.
 #
 #  Installs GTK4 + libadwaita (+ the PyGObject cairo bridge), screenshot tool,
 #  polkit, pacman-contrib, pciutils, pkgfile, espeak-ng (voice) and yt-dlp
@@ -14,7 +17,7 @@
 set -euo pipefail
 
 REPO="${CHUCK_REPO:-the-priest/ChuckNorris}"
-BRANCH="${CHUCK_BRANCH:-main}"
+BRANCH="${CHUCK_BRANCH:-rust-rewrite}"
 DATA_DIR="${HOME}/.local/share/chucknorris"
 APP_DIR="${DATA_DIR}/app"
 ASSET_DIR="${DATA_DIR}/assets"
@@ -22,17 +25,17 @@ LAUNCH="${HOME}/.local/bin/chucknorris"
 DESKTOP="${HOME}/.local/share/applications/org.thepriest.chucknorris.desktop"
 
 c1=$'\033[38;5;178m'; c2=$'\033[38;5;42m'; cd=$'\033[38;5;245m'; c0=$'\033[0m'
-step(){ printf '%s\u25b8 %s%s\n' "$c1" "$1" "$c0"; }
-ok(){   printf '%s\u2713 %s%s\n' "$c2" "$1" "$c0"; }
+step(){ printf '%s▸ %s%s\n' "$c1" "$1" "$c0"; }
+ok(){   printf '%s✓ %s%s\n' "$c2" "$1" "$c0"; }
 info(){ printf '%s  %s%s\n' "$cd" "$1" "$c0"; }
-die(){  printf '\033[38;5;196m\u2717 %s\033[0m\n' "$1" >&2; exit 1; }
+die(){  printf '\033[38;5;196m✗ %s\033[0m\n' "$1" >&2; exit 1; }
 
 mkdir -p "$APP_DIR" "$ASSET_DIR" "${HOME}/.local/bin" "${HOME}/.local/share/applications"
 
 step "installing GTK4 + tools (screenshot, polkit, cleanup, GPU, pkgfile, voice, video)"
 SESS="${XDG_SESSION_TYPE:-}"; DE="${XDG_CURRENT_DESKTOP:-}"
 if command -v pacman >/dev/null; then
-  PKGS="python-gobject python-cairo gtk4 libadwaita adwaita-icon-theme polkit pciutils pacman-contrib pkgfile espeak-ng yt-dlp alsa-utils python-pip whois bind traceroute wget openbsd-netcat nodejs shellcheck ruff bubblewrap"
+  PKGS="gcc python-gobject python-cairo gtk4 libadwaita adwaita-icon-theme polkit pciutils pacman-contrib pkgfile espeak-ng yt-dlp alsa-utils python-pip whois bind traceroute wget openbsd-netcat nodejs shellcheck ruff bubblewrap"
   if [ "$SESS" = "wayland" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then PKGS="$PKGS grim"; else PKGS="$PKGS scrot"; fi
   case "$DE" in *KDE*|*kde*|*plasma*|*Plasma*) PKGS="$PKGS spectacle" ;; esac
   # shellcheck disable=SC2086
@@ -43,12 +46,12 @@ if command -v pacman >/dev/null; then
   sudo pkgfile --update 2>/dev/null || true
 elif command -v apt-get >/dev/null; then
   sudo apt-get update
-  PKGS="python3-venv python3-gi python3-gi-cairo gir1.2-gtk-4.0 gir1.2-adw-1 adwaita-icon-theme libgtk-4-1 libadwaita-1-0 policykit-1 pciutils espeak-ng yt-dlp whois dnsutils traceroute wget netcat-openbsd bubblewrap"
+  PKGS="build-essential python3-venv python3-gi python3-gi-cairo gir1.2-gtk-4.0 gir1.2-adw-1 adwaita-icon-theme libgtk-4-1 libadwaita-1-0 policykit-1 pciutils espeak-ng yt-dlp whois dnsutils traceroute wget netcat-openbsd bubblewrap"
   if [ "$SESS" = "wayland" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then PKGS="$PKGS grim"; else PKGS="$PKGS scrot"; fi
   # shellcheck disable=SC2086
   sudo apt-get install -y $PKGS || die "apt install failed"
 elif command -v dnf >/dev/null; then
-  PKGS="python3-gobject python3-cairo gtk4 libadwaita adwaita-icon-theme polkit pciutils espeak-ng yt-dlp whois bind-utils traceroute wget nmap-ncat bubblewrap"
+  PKGS="gcc python3-gobject python3-cairo gtk4 libadwaita adwaita-icon-theme polkit pciutils espeak-ng yt-dlp whois bind-utils traceroute wget nmap-ncat bubblewrap"
   if [ "$SESS" = "wayland" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then PKGS="$PKGS grim"; else PKGS="$PKGS scrot"; fi
   # shellcheck disable=SC2086
   sudo dnf install -y $PKGS || die "dnf install failed"
@@ -98,11 +101,13 @@ trap 'rm -rf "$SRC_TMP"' EXIT
 # happens to be in the current folder (an old clone) must not be installed
 # over the latest release.
 SELF_DIR=""
+RUST_SRC=""
 if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
   SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 fi
 if [ -n "$SELF_DIR" ] && [ -f "$SELF_DIR/chucknorris.py" ] && [ -d "$SELF_DIR/chucknorris_ext" ]; then
   install_tree "$SELF_DIR"                           # running from a clone
+  RUST_SRC="$SELF_DIR"
 elif curl -fsSL "https://codeload.github.com/${REPO}/tar.gz/refs/heads/${BRANCH}" \
         -o "${SRC_TMP}/src.tar.gz" \
      && tar -xzf "${SRC_TMP}/src.tar.gz" -C "$SRC_TMP" \
@@ -114,6 +119,7 @@ elif curl -fsSL "https://codeload.github.com/${REPO}/tar.gz/refs/heads/${BRANCH}
   # a release you could get the new app with an old module list — and an app
   # that would not start.
   install_tree "$SRC_DIR"
+  RUST_SRC="$SRC_DIR"
 else
   info "archive download failed — falling back to fetching files one by one"
   curl -fsSL "https://raw.githubusercontent.com/${REPO}/${BRANCH}/chucknorris.py" \
@@ -183,8 +189,58 @@ else
   info "voice setup skipped (CHUCK_VOICE=0) — /voice in the app installs it"
 fi
 
+
+# The Rust fleet runtime: `chuck run "task"` (headless, today) — the window
+# above stays the Python app until the Rust window is finished.
+if [ "${CHUCK_RUST:-1}" = "1" ]; then
+  step "building chuck, the Rust fleet runtime (a few minutes the first time)"
+  cargo_ok() {
+    command -v cargo >/dev/null || return 1
+    v="$(cargo --version 2>/dev/null | awk '{print $2}')"
+    [ -n "$v" ] && [ "$(printf '%s\n1.82.0\n' "$v" | sort -V | head -n 1)" = "1.82.0" ]
+  }
+  [ -f "${HOME}/.cargo/env" ] && . "${HOME}/.cargo/env"
+  # rustup without a toolchain yet: give it one (installing the distro's
+  # `rust` next to rustup would conflict)
+  if ! cargo_ok && command -v rustup >/dev/null; then
+    rustup default stable >/dev/null 2>&1 || rustup toolchain install stable --profile minimal >/dev/null 2>&1 || true
+  fi
+  if ! cargo_ok && ! command -v rustup >/dev/null; then
+    if command -v pacman >/dev/null; then sudo pacman -S --needed --noconfirm rust >/dev/null 2>&1 || true
+    elif command -v dnf >/dev/null; then sudo dnf install -y rust cargo >/dev/null 2>&1 || true
+    fi
+  fi
+  if ! cargo_ok; then
+    # the distro's Rust is missing or older than 1.82: the official rustup,
+    # downloaded to a file first (never piped into a shell), user-local only
+    info "Rust 1.82+ not found — installing it with rustup into ~/.cargo"
+    RUSTUP="${SRC_TMP}/rustup-init.sh"
+    if curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs -o "$RUSTUP" \
+       && sh "$RUSTUP" -y --profile minimal --no-modify-path >/dev/null; then
+      . "${HOME}/.cargo/env"
+    fi
+  fi
+  if ! cargo_ok; then
+    info "couldn't get Rust 1.82+ — skipped chuck (the window works without it); re-run with Rust installed"
+  elif [ -z "$RUST_SRC" ] || [ ! -f "${RUST_SRC}/Cargo.toml" ]; then
+    info "the source archive wasn't available, so chuck can't be built — re-run the installer"
+  else
+    TARGET="${HOME}/.cache/chuck/cargo-target"
+    if ( cd "$RUST_SRC" && CARGO_TARGET_DIR="$TARGET" cargo build --release --locked -p chuck ); then
+      install -m 755 "${TARGET}/release/chuck" "${HOME}/.local/bin/chuck"
+      ok "$("${HOME}/.local/bin/chuck" version) installed — try: chuck run \"what to do\" (in a project folder)"
+    else
+      info "the Rust build failed (output above) — the window is installed and works without it"
+    fi
+  fi
+else
+  info "Rust runtime skipped (CHUCK_RUST=0)"
+fi
+
 cat > "$LAUNCH" <<EOF
 #!/usr/bin/env bash
+# installed from the ${BRANCH} branch: the in-app updater stays on it
+export CHUCK_BRANCH="\${CHUCK_BRANCH:-${BRANCH}}"
 exec python3 "${APP_DIR}/chucknorris.py" "\$@"
 EOF
 chmod +x "$LAUNCH"
@@ -220,5 +276,5 @@ fi
 case ":$PATH:" in *":${HOME}/.local/bin:"*) : ;; *)
   info "add to PATH:  export PATH=\"\$HOME/.local/bin:\$PATH\"" ;; esac
 
-printf '\n%sChuck installed.%s  Launch:  %schucknorris%s\n' "$c1" "$c0" "$c2" "$c0"
+printf '\n%sChuck installed (%s branch).%s  Launch:  %schucknorris%s\n' "$c1" "$BRANCH" "$c0" "$c2" "$c0"
 info "add a SiliconFlow key in Settings (or it reuses Basilisk's). Tab switches Agent / Chat."
