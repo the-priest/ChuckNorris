@@ -463,3 +463,147 @@ fn a_worker_that_removes_its_own_todo_can_submit() {
     assert_eq!(std::fs::read_to_string(dir.join("m.py")).unwrap(), "X = 1\n");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+fn has_bwrap() -> bool {
+    chuck_sandbox::bwrap().is_some()
+}
+
+#[test]
+fn before_the_criteria_a_command_can_look_but_not_change() {
+    if !has_bwrap() {
+        return;
+    }
+    let dir = tmp("look-only");
+    std::fs::write(dir.join("a.txt"), "old\n").unwrap();
+    let model = Arc::new(Scripted::new().replies([
+        "```bash\ncat a.txt; echo new > a.txt; echo made > b.txt\n```",
+        "It says old.",
+    ]));
+    let rt = Runtime::new(model.clone(), RuntimeConfig { store: dir.join("store"), ..RuntimeConfig::default() },
+                          Events::none());
+    let (report, _) = run_within(20, rt, Job::new("what's in a.txt?", &dir));
+    assert_eq!(report.outcome, Outcome::Answered { text: "It says old.".into() });
+    assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "old\n");
+    assert!(!dir.join("b.txt").exists());
+    let fb = last_user(&model.seen.lock().unwrap()[1]);
+    assert!(fb.contains("old") && fb.contains("ran read-only"), "{fb}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_critical_command_runs_only_on_the_users_yes() {
+    let dir = tmp("critical");
+    // harmless if it runs: decodes `echo ran > proof.txt` and pipes it into bash (curl|sh-shaped: critical)
+    let cmd = "echo ZWNobyByYW4gPiBwcm9vZi50eHQK | base64 -d | bash";
+    for (answer, runs) in [("no", false), ("yes", true)] {
+        let _ = std::fs::remove_file(dir.join("proof.txt"));
+        let script = format!("```criteria\n- proof exists :: verify: test -f proof.txt\n```\n```bash\n{cmd}\n```");
+        let model = Arc::new(Scripted::new().replies([script.as_str(), "ok, stopping here."]));
+        let (tx, rx) = channel();
+        let (atx, arx) = channel();
+        let mut job = Job::new("make proof", &dir);
+        job.answers = Some(arx);
+        let rt = Runtime::new(model.clone(), RuntimeConfig { store: dir.join("store"), lead_steps: 2,
+                                                              ..RuntimeConfig::default() }, Events(Some(tx)));
+        // the user, at the keyboard: answers when asked
+        std::thread::spawn(move || {
+            for e in rx.iter() {
+                if matches!(e, Event::Confirm { .. }) {
+                    let _ = atx.send(answer.to_string());
+                }
+            }
+        });
+        let _ = run_within(20, rt, job);
+        assert_eq!(dir.join("proof.txt").exists(), runs, "answer {answer}");
+        let fb = last_user(&model.seen.lock().unwrap()[1]);
+        assert_eq!(fb.contains("didn't approve"), !runs, "{fb}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn nobody_at_the_keyboard_means_no() {
+    let dir = tmp("no-keyboard");
+    let model = Arc::new(Scripted::new().replies([
+        "```criteria\n- x :: verify: true\n```\n```bash\necho ZWNobyByYW4gPiBwcm9vZi50eHQK | base64 -d | bash\n```",
+        "Stopping.",
+    ]));
+    let rt = Runtime::new(model.clone(), RuntimeConfig { store: dir.join("store"), lead_steps: 2,
+                                                          ..RuntimeConfig::default() }, Events::none());
+    let _ = run_within(20, rt, Job::new("make proof", &dir));
+    assert!(!dir.join("proof.txt").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_worker_never_runs_a_critical_command() {
+    let dir = tmp("worker-critical");
+    std::fs::write(dir.join("f.txt"), "1\n").unwrap();
+    let model = Arc::new(Scripted::new().respond(|req| {
+        let sys = text(&req.messages[0]);
+        if sys.contains("You are ds-") {
+            return if req.messages.len() == 2 {
+                "```bash\necho ZWNobyByYW4gPiBwcm9vZi50eHQK | base64 -d | bash\n```".into()
+            } else { "```submit\nblocked\n```".into() };
+        }
+        if req.messages.len() == 2 {
+            return "```criteria\n- f is 2 :: verify: grep -qx 2 f.txt\n```\n```plan\n- delegate\n```\n\
+                ```assign deepseek\ntitle: f\ncriteria:\n- f is 2 :: verify: grep -qx 2 f.txt\nbrief: set f\n```".into();
+        }
+        "Waiting.".into()
+    }));
+    let (atx, arx) = channel::<String>();
+    let mut job = Job::new("set f", &dir);
+    job.answers = Some(arx);
+    let _keep = atx; // a user is there, but workers don't ask
+    let rt = Runtime::new(model.clone(), RuntimeConfig { store: dir.join("store"), lead_steps: 4, worker_steps: 3,
+                                                          ..RuntimeConfig::default() }, Events::none());
+    let _ = run_within(30, rt, job);
+    let worker_fb: Vec<String> = model.seen.lock().unwrap().iter()
+        .filter(|r| text(&r.messages[0]).contains("You are ds-") && r.messages.len() > 2)
+        .map(last_user).collect();
+    assert!(worker_fb.iter().any(|f| f.contains("background workers never run")), "{worker_fb:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_read_only_folder_is_never_changed() {
+    if !has_bwrap() {
+        return;
+    }
+    let dir = tmp("readonly");
+    std::fs::write(dir.join("a.txt"), "old\n").unwrap();
+    let model = Arc::new(Scripted::new().replies([
+        "```criteria\n- a says new :: verify: grep -qx new a.txt\n```\n```write a.txt\nnew\n```\n\
+         ```bash\necho new > a.txt; cat a.txt\n```\n```plan\n- x\n```\n\
+         ```assign glm\ntitle: t\ncriteria:\n- a :: verify: true\nbrief: b\n```",
+        "I can't change a read-only folder.",
+    ]));
+    let cfg = RuntimeConfig { store: dir.join("store"), access: chuck_sandbox::Access::ReadOnly, lead_steps: 3,
+                              ..RuntimeConfig::default() };
+    let rt = Runtime::new(model.clone(), cfg, Events::none());
+    let _ = run_within(20, rt, Job::new("make a say new", &dir));
+    assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "old\n");
+    let fb = last_user(&model.seen.lock().unwrap()[1]);
+    assert!(fb.contains("read-only (its access setting)") && fb.contains("assign refused"), "{fb}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_offline_folder_has_no_network() {
+    if !has_bwrap() {
+        return;
+    }
+    let dir = tmp("offline");
+    let model = Arc::new(Scripted::new().replies([
+        "```criteria\n- n :: verify: true\n```\n```bash\ngetent hosts example.com >/dev/null && echo NET-ON || echo NET-OFF\n```",
+        "Done looking.",
+    ]));
+    let cfg = RuntimeConfig { store: dir.join("store"), access: chuck_sandbox::Access::Sandbox, lead_steps: 2,
+                              ..RuntimeConfig::default() };
+    let rt = Runtime::new(model.clone(), cfg, Events::none());
+    let _ = run_within(20, rt, Job::new("check the network", &dir));
+    let fb = last_user(&model.seen.lock().unwrap()[1]);
+    assert!(fb.contains("NET-OFF"), "{fb}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

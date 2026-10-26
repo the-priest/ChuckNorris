@@ -3,7 +3,7 @@
 //! for a worker, hand the result to the lead and wait for the verdict.
 
 use crate::events::{Event, Events};
-use crate::exec::{Exec, WORKER_TAGS};
+use crate::exec::{Exec, Sandbox, WORKER_TAGS};
 use crate::prompts;
 use crate::RuntimeConfig;
 use chuck_core::{AgentId, DoneGate, Kernel, Progress, Role, Stall, Submission, Task, Unmet};
@@ -256,7 +256,8 @@ pub fn run_worker(ctx: Ctx, w: WorkerSpec) {
                 ctx.events.emit(Event::Said { id: w.id, text: said });
             }
             let exec = Exec { id: w.id, role: w.role, kernel: &ctx.kernel, root: &w.ws.work, gate: &w.gate,
-                              wrap: ctx.cfg.wrap.clone(), stop: w.stop.clone(), events: &ctx.events,
+                              sandbox: Sandbox { access: ctx.cfg.access, bwrap: ctx.cfg.bwrap, worker: true },
+                              approve: None, stop: w.stop.clone(), events: &ctx.events,
                               cmd_timeout: ctx.cfg.cmd_timeout };
             let r = exec.run(&reply);
             let mut fb = r.feedback.clone();

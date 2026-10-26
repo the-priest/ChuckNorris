@@ -5,7 +5,7 @@
 
 use crate::agent::{run_worker, think, Convo, Ctx, Halt, ToLead, ToWorker, WorkerSpec};
 use crate::events::{Event, Outcome};
-use crate::exec::{parse_criteria, refuse_command, Exec, LeadCall, LEAD_TAGS};
+use crate::exec::{parse_criteria, refuse_command, Approve, Exec, LeadCall, Sandbox, LEAD_TAGS};
 use crate::prompts;
 use chuck_core::evidence::{clip, test_counts};
 use chuck_core::fleet::better;
@@ -67,7 +67,8 @@ pub struct LeadRun<'a> {
     workers: HashMap<AgentId, Worker>,
     tx: Sender<ToLead>,
     rx: Receiver<ToLead>,
-    answers: Option<Receiver<String>>,
+    /// The user's typed replies: answers to ```ask```, and yes/no to critical commands.
+    answers: Option<Arc<Mutex<Receiver<String>>>>,
     store: PathBuf,
     mutated: bool,
     critic_rounds: u32,
@@ -76,6 +77,31 @@ pub struct LeadRun<'a> {
     rejected_at: Option<(usize, String)>,
     /// The folder as the job found it: the real diff is measured against it.
     snapshot: Option<Snapshot>,
+}
+
+/// Forget lines typed before a question is shown: they don't answer it.
+/// (Before it's shown — after, a quick answer would be thrown away.)
+fn forget_typed(rx: &Mutex<Receiver<String>>) {
+    let rx = rx.lock().unwrap();
+    while rx.try_recv().is_ok() {}
+}
+
+/// The user's next typed line, or None when they stopped the job or nobody
+/// can answer.
+fn wait_answer(rx: &Mutex<Receiver<String>>, stop: &AtomicBool, kernel: &chuck_core::Kernel, id: AgentId)
+    -> Option<String>
+{
+    let rx = rx.lock().unwrap();
+    loop {
+        if stop.load(Ordering::Relaxed) || kernel.should_stop(id) {
+            return None;
+        }
+        match rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(a) => return Some(a),
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => return None,
+        }
+    }
 }
 
 fn defects_of(body: &str) -> Vec<String> {
@@ -214,8 +240,24 @@ impl<'a> LeadRun<'a> {
         let store = ctx.cfg.store.join(format!("job-{}-{}", std::process::id(), id));
         let snapshot = Snapshot::take(root, &store.join("snapshot")).ok();
         LeadRun { ctx, id, root: root.to_path_buf(), gate: Arc::new(Mutex::new(DoneGate::new(ask, Scale::Small))),
-                  tasks: Vec::new(), workers: HashMap::new(), tx, rx, answers, store, mutated: false,
+                  tasks: Vec::new(), workers: HashMap::new(), tx, rx, answers: answers.map(|a| Arc::new(Mutex::new(a))),
+                  store, mutated: false,
                   critic_rounds: 0, rejected_at: None, snapshot }
+    }
+
+    /// Asking the user for a critical command: shown, then their typed
+    /// "yes" (and nothing else) lets it run.
+    fn approver(&self) -> Option<Approve> {
+        let rx = self.answers.clone()?;
+        let (events, stop, kernel, id) = (self.ctx.events.clone(), self.ctx.stop.clone(), self.ctx.kernel.clone(), self.id);
+        Some(Arc::new(move |cmd: &str, why: &str| {
+            forget_typed(&rx);
+            events.emit(Event::Confirm { id, command: cmd.to_string(), why: why.to_string() });
+            kernel.block(id, "waiting for your approval");
+            let a = wait_answer(&rx, &stop, &kernel, id);
+            kernel.unblock(id);
+            a.is_some_and(|a| matches!(a.trim().to_lowercase().as_str(), "yes" | "y"))
+        }))
     }
 
     /// Workers are on it: a message from one of them will come.
@@ -424,7 +466,9 @@ impl<'a> LeadRun<'a> {
     fn run_check(&self, cmd: &str, cwd: &Path) -> chuck_tools::RunResult {
         let mut o = RunOpts::new(cwd);
         o.timeout = self.ctx.cfg.cmd_timeout;
-        o.wrap = self.ctx.cfg.wrap.clone();
+        if self.ctx.cfg.bwrap {
+            o.wrap = Some(chuck_sandbox::Jail::new(cwd).wrap()); // a worker's copy runs its code: jailed
+        }
         o.stop = Some(self.ctx.stop.clone());
         bash(cmd, o)
     }
@@ -483,6 +527,10 @@ impl<'a> LeadRun<'a> {
                 for (cmd, ids) in &cmds {
                     if let Some(why) = refuse_command(cmd, Role::Lead) {
                         failed.push(format!("`{cmd}` can't be re-run: {why}"));
+                        continue;
+                    }
+                    if chuck_sandbox::classify_command(cmd) == chuck_sandbox::Level::Critical {
+                        failed.push(format!("`{cmd}` is a critical command: it isn't run unattended to check work"));
                         continue;
                     }
                     let r = self.run_check(cmd, &work);
@@ -571,6 +619,9 @@ impl<'a> LeadRun<'a> {
     }
 
     fn assign(&mut self, call: &LeadCall) -> String {
+        if self.ctx.cfg.access == chuck_sandbox::Access::ReadOnly {
+            return "[assign refused: this folder is read-only — workers' results would have nowhere to go]".into();
+        }
         let spec = match parse_assign(&call.arg, &call.body) {
             Ok(s) => s,
             Err(e) => return e,
@@ -628,22 +679,15 @@ impl<'a> LeadRun<'a> {
 
     fn ask(&mut self, call: &LeadCall) -> String {
         let q = format!("{} {}", call.arg, call.body).trim().to_string();
+        if let Some(rx) = &self.answers {
+            forget_typed(rx);
+        }
         self.ctx.events.emit(Event::Ask { id: self.id, question: q });
         let Some(rx) = &self.answers else {
             return "[nobody can answer right now: make the most reasonable choice, say which, and go on]".into();
         };
-        while rx.try_recv().is_ok() {} // typed before the question: not an answer to it
         self.ctx.kernel.block(self.id, "waiting for your answer");
-        let answer = loop {
-            if self.ctx.stop.load(Ordering::Relaxed) || self.ctx.kernel.should_stop(self.id) {
-                break None;
-            }
-            match rx.recv_timeout(Duration::from_millis(200)) {
-                Ok(a) => break Some(a),
-                Err(RecvTimeoutError::Timeout) => continue,
-                Err(RecvTimeoutError::Disconnected) => break None,
-            }
-        };
+        let answer = wait_answer(rx, &self.ctx.stop, &self.ctx.kernel, self.id);
         self.ctx.kernel.unblock(self.id);
         match answer {
             Some(a) => format!("[the user answered: {a}]"),
@@ -838,7 +882,8 @@ impl<'a> LeadRun<'a> {
             }
             let (root_dir, job_gate) = (self.root.clone(), self.gate.clone());
             let exec = Exec { id: self.id, role: Role::Lead, kernel: &ctx.kernel, root: &root_dir, gate: &job_gate,
-                              wrap: ctx.cfg.wrap.clone(), stop: ctx.stop.clone(), events: &ctx.events,
+                              sandbox: Sandbox { access: ctx.cfg.access, bwrap: ctx.cfg.bwrap, worker: false },
+                              approve: self.approver(), stop: ctx.stop.clone(), events: &ctx.events,
                               cmd_timeout: ctx.cfg.cmd_timeout };
             let r = exec.run(&reply);
             self.mutated |= r.mutated;

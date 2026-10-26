@@ -305,11 +305,24 @@ chuck key             # save the API key (the window shares it)
 - Leftover TODOs and stubs, or a tiny diff for a large ask, block completion until fixed or justified.
 - An independent critic pass reviews the whole result before the Lead can finish.
 - Running out of budget ends the job **INCOMPLETE**, with the list of what is missing, never "done".
+- The gate and the critic judge the real result. That's your folder compared against a snapshot taken
+  when the job started, so a change made with a shell command counts too. `test true` or `echo ok`
+  never counts as a test.
 
-What isn't ported yet: the Rust window (the window is still the Python app), the bubblewrap sandbox
-(`chuck` runs commands directly in the project folder, behind a floor of refused commands like
-`sudo` and `rm -rf ~`), checkpoints, missions, daemons and voice. [ARCHITECTURE.md](ARCHITECTURE.md)
-has the design and the plan.
+Safety follows the same rules as the window:
+
+- **Workers run jailed.** Each one works in its own copy under bubblewrap: the rest of the system is
+  read-only, credentials (`~/.ssh`, keyrings, browser profiles, the API key) are hidden, and git
+  hooks can't be planted.
+- **The Lead follows your folder's access setting** (full, sandboxed, offline or read-only). Until the
+  criteria exist, its commands run with your folder mounted read-only.
+- **Critical commands wait for you.** Disk wipes, `rm -rf ~` and `curl | sh` run only after you type
+  `yes`, and never from a worker or with nobody at the keyboard. The classifier is a line-by-line
+  port of the window's, checked for identical verdicts on 1,371 commands.
+
+What isn't ported yet: the Rust window (the window is still the Python app), checkpoints and rewind,
+missions, daemons, the day/month budget ledger and voice. [ARCHITECTURE.md](ARCHITECTURE.md) has the
+design and the plan.
 
 Arch and CachyOS are first-class; apt and dnf are supported. The installer sets up GTK4 and libadwaita, bubblewrap, a screenshot tool, the local voice models (about 600 MB, skip with `CHUCK_VOICE=0`) and the linters Chuck uses to check code. At runtime Chuck needs only Python's standard library and GTK; everything optional degrades gracefully when it's missing.
 

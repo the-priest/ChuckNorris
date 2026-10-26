@@ -162,6 +162,8 @@ impl View {
                 st.warn(&format!("  ! {who}: {text}"))
             }
             Event::Ask { question, .. } => format!("\n{} {}", st.bold("? the lead asks:"), question.trim()),
+            Event::Confirm { command, why, .. } => format!("\n{} {}\n  {}\n  {}", st.bad(&st.bold("! CRITICAL")),
+                st.bold("the lead wants to run:"), command.trim(), st.dim(why)),
             Event::Usage { tokens, usd, .. } => {
                 self.tokens += tokens;
                 self.usd += usd;

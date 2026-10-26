@@ -15,7 +15,6 @@ pub use events::{Event, Events, Outcome};
 
 use chuck_core::{AgentId, DoneGate, FleetConfig, Kernel, Quota, Role, SpawnSpec};
 use chuck_model::{ChatModel, Reasoning};
-use chuck_tools::Wrap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::Receiver;
@@ -36,8 +35,11 @@ pub struct RuntimeConfig {
     pub job_quota: Quota,
     /// Each worker (also clipped to what the job has left).
     pub worker_quota: Quota,
-    /// The sandbox around every command (None: run directly).
-    pub wrap: Option<Wrap>,
+    /// The project folder's access (settings `folder_access`): the lead's
+    /// commands follow it. Workers always work jailed in their own copy.
+    pub access: chuck_sandbox::Access,
+    /// Use bubblewrap (when installed).
+    pub bwrap: bool,
     /// Where workers' copies live.
     pub store: PathBuf,
     /// Model calls in flight at once (1 lead + 4 + 4).
@@ -63,7 +65,8 @@ impl Default for RuntimeConfig {
             context_chars: 360_000,
             job_quota: Quota { tokens: Some(4_000_000), usd: Some(2.0), seconds: None },
             worker_quota: Quota::tokens(900_000),
-            wrap: None,
+            access: chuck_sandbox::Access::Full,
+            bwrap: chuck_sandbox::bwrap().is_some(),
             store: default_store(),
             slots: 9,
         }

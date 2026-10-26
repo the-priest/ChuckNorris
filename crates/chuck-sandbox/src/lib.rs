@@ -1,14 +1,8 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! chuck-sandbox — what keeps agents from hurting the machine: the
+//! destructive-command classifier and bubblewrap jails.
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub mod jail;
+pub mod safety;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub use jail::{bwrap, git_disarm, now_secs, secret_path, Access, Jail};
+pub use safety::{add_noconfirm, classify_code, classify_command, enforce_syu, prepare, Level};

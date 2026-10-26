@@ -92,6 +92,7 @@ dependencies = [
  "chuck-core",
  "chuck-model",
  "chuck-runtime",
+ "chuck-sandbox",
  "chuck-store",
  "libc",
  "serde_json",
@@ -124,6 +125,7 @@ version = "18.0.0-alpha.1"
 dependencies = [
  "chuck-core",
  "chuck-model",
+ "chuck-sandbox",
  "chuck-tools",
  "regex",
  "serde_json",
@@ -133,8 +135,11 @@ dependencies = [
 name = "chuck-sandbox"
 version = "18.0.0-alpha.1"
 dependencies = [
+ "chuck-tools",
  "fancy-regex",
- "serde",
+ "regex",
+ "serde_json",
+ "walkdir",
 ]
 
 [[package]]

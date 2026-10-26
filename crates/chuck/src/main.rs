@@ -10,6 +10,7 @@ mod term;
 use chuck_core::{FleetConfig, Quota};
 use chuck_model::{is_siliconflow, ChatModel, Reasoning, SiliconFlow, DEFAULT_BASE};
 use chuck_runtime::{Event, Events, Job, Outcome, Runtime, RuntimeConfig};
+use chuck_sandbox::Access;
 use chuck_store::Settings;
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::PathBuf;
@@ -73,6 +74,15 @@ fn client(s: &Settings) -> SiliconFlow {
     }
     let stall = Duration::from_secs(s.num("stall_seconds", 90.0, 20.0, 600.0) as u64);
     SiliconFlow::new(&base, key, stall, is_local(&base)).unwrap_or_else(|e| fail(&e.to_string()))
+}
+
+/// The folder's access as the window stores it (`folder_access`: path → mode).
+fn access_of(s: &Settings, folder: &std::path::Path) -> Access {
+    let Some(map) = s.map.get("folder_access").and_then(|v| v.as_object()) else { return Access::Full };
+    map.iter().find(|(k, _)| {
+        let p = std::path::Path::new(k.as_str());
+        p == folder || p.canonicalize().is_ok_and(|c| c == folder)
+    }).and_then(|(_, v)| v.as_str()).map_or(Access::Full, Access::parse)
 }
 
 fn fleet(s: &Settings) -> FleetConfig {
@@ -206,9 +216,14 @@ fn cmd_run(args: &[String]) -> i32 {
     let usd = a.max_usd.unwrap_or_else(|| s.num("fleet_job_usd", 2.0, 0.01, 1000.0));
     cfg.job_quota = Quota { usd: Some(usd), ..cfg.job_quota };
 
-    let header = format!("lead + {} DeepSeek + {} GLM · {} · up to {}", cfg.fleet.deepseek_workers,
-                         cfg.fleet.glm_workers, a.dir.canonicalize().unwrap_or(a.dir.clone()).display(),
-                         chuck_model::fmt_usd(usd));
+    let folder = a.dir.canonicalize().unwrap_or_else(|_| a.dir.clone());
+    cfg.access = access_of(&s, &folder);
+    if cfg.access != Access::Full && !cfg.bwrap {
+        eprintln!("chuck: this folder is {}, which needs bubblewrap to run commands — install it \
+            (pacman -S bubblewrap / apt install bubblewrap); until then commands are refused", cfg.access.label());
+    }
+    let header = format!("lead + {} DeepSeek + {} GLM · {} ({}) · up to {}", cfg.fleet.deepseek_workers,
+                         cfg.fleet.glm_workers, folder.display(), cfg.access.label(), chuck_model::fmt_usd(usd));
     let (tx, rx) = channel();
     let rt = Runtime::new(Arc::new(model), cfg, Events(Some(tx)));
     let mut job = Job::new(a.task, &a.dir);
@@ -252,6 +267,10 @@ fn cmd_run(args: &[String]) -> i32 {
         match &e {
             Event::Ask { .. } if asking => {
                 print!("{} ", view.st.bold(">"));
+                let _ = std::io::stdout().flush();
+            }
+            Event::Confirm { .. } if asking => {
+                print!("{} ", view.st.bold("type yes to run it, anything else to refuse >"));
                 let _ = std::io::stdout().flush();
             }
             Event::Finished(_) => break,

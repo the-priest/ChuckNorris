@@ -3,7 +3,8 @@
 
 use crate::events::{Event, Events};
 use chuck_core::evidence::test_counts;
-use chuck_core::{tool_cap, AgentId, Caps, CriterionId, DoneGate, EvidenceKind, Kernel, Role, Unmet};
+use chuck_core::{tool_cap, AgentId, CriterionId, DoneGate, EvidenceKind, Kernel, Role, Unmet};
+use chuck_sandbox::{classify_command, git_disarm, now_secs, prepare, secret_path, Access, Jail, Level};
 use chuck_tools::{bash, file_blocks, fingerprint, tool_blocks, RunOpts, Wrap};
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
@@ -39,13 +40,28 @@ impl StepResult {
     }
 }
 
+/// Asks the user whether a critical command may run (true: yes, typed).
+pub type Approve = Arc<dyn Fn(&str, &str) -> bool + Send + Sync>;
+
+/// How an agent's commands are contained.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Sandbox {
+    /// The folder's access (the lead); workers always work in a jailed copy.
+    pub access: Access,
+    /// bubblewrap is there to use.
+    pub bwrap: bool,
+    pub worker: bool,
+}
+
 pub struct Exec<'a> {
     pub id: AgentId,
     pub role: Role,
     pub kernel: &'a Kernel,
     pub root: &'a Path,
     pub gate: &'a Mutex<DoneGate>,
-    pub wrap: Option<Wrap>,
+    pub sandbox: Sandbox,
+    /// Who can say yes to a critical command (None: nobody — it's refused).
+    pub approve: Option<Approve>,
     pub stop: Arc<AtomicBool>,
     pub events: &'a Events,
     pub cmd_timeout: Duration,
@@ -132,13 +148,41 @@ impl<'a> Exec<'a> {
                                          ok, summary: summary.chars().take(300).collect() });
     }
 
-    fn run_cmd(&self, cmd: &str) -> chuck_tools::RunResult {
+    /// The jail for a command now. Before the acceptance criteria exist a
+    /// command may look but not change: the folder is mounted read-only.
+    /// Err: it must not run at all.
+    fn jail(&self) -> Result<(Option<Wrap>, bool), String> {
+        let s = self.sandbox;
+        let may_write = self.gate.lock().unwrap().allow_mutation().is_ok();
+        if s.worker {
+            return Ok((s.bwrap.then(|| Jail::new(self.root).wrap()), false));
+        }
+        let look = |j: Jail| (Some(j.read_only().wrap()), true);
+        match s.access {
+            Access::Full if !may_write && s.bwrap => Ok(look(Jail::new(self.root))),
+            Access::Full => Ok((None, false)),
+            Access::SandboxNet | Access::Sandbox if !s.bwrap => Err("[not run: this folder is sandboxed but \
+                bubblewrap isn't installed — install bubblewrap, or give the folder full access]".into()),
+            Access::SandboxNet | Access::Sandbox => {
+                let mut j = Jail::new(self.root);
+                if s.access == Access::Sandbox {
+                    j = j.offline();
+                }
+                Ok(if may_write { (Some(j.wrap()), false) } else { look(j) })
+            }
+            Access::ReadOnly if !s.bwrap => Err("[not run: this folder is read-only, and commands can only be \
+                kept from changing it inside bubblewrap, which isn't installed]".into()),
+            Access::ReadOnly => Ok(look(Jail::new(self.root).offline())),
+        }
+    }
+
+    fn run_cmd(&self, cmd: &str, wrap: Option<Wrap>) -> chuck_tools::RunResult {
         let id = self.id;
         let ev = self.events.clone();
         let mut on = move |c: &str| ev.emit(Event::Output { id, chunk: c.to_string() });
         let mut o = RunOpts::new(self.root);
         o.timeout = self.cmd_timeout;
-        o.wrap = self.wrap.clone();
+        o.wrap = wrap;
         o.stop = Some(self.stop.clone());
         o.on_chunk = Some(&mut on);
         bash(cmd, o)
@@ -175,6 +219,12 @@ impl<'a> Exec<'a> {
             res.feedback.push(format!("[NOTHING was written: {} contains ``` fences inside a 3-backtick block, so \
                 its end is ambiguous. Send it again wrapped in FOUR backticks: ````write {} … ````]", b.path, b.path));
             self.act(&b.tag, &b.path, false, "fences unclear: asked to resend");
+            return;
+        }
+        if self.sandbox.access == Access::ReadOnly && !self.sandbox.worker {
+            let e = "[refused: this folder is read-only (its access setting) — nothing in it is changed]".to_string();
+            self.act(&b.tag, &b.path, false, &e);
+            res.feedback.push(e);
             return;
         }
         if let Err(e) = self.allowed("write", &b.path).and_then(|_| self.mutation_ok()) {
@@ -219,6 +269,15 @@ impl<'a> Exec<'a> {
                     res.feedback.push(e);
                     return;
                 }
+                let target = if tag == "read" { if arg.is_empty() { t.body.trim() } else { arg } } else { arg };
+                let target = target.rsplit_once(':').filter(|(_, r)| r.chars().next().is_some_and(|c| c.is_ascii_digit()))
+                    .map_or(target, |(p, _)| p);
+                if self.sandbox.access != Access::Full && !target.is_empty()
+                    && chuck_tools::safe(self.root, target).is_ok_and(|p| secret_path(&p))
+                {
+                    res.feedback.push("[refused: that's a credential, hidden in a restricted folder]".into());
+                    return;
+                }
                 let t0 = Instant::now();
                 let out = match tag {
                     "read" => chuck_tools::read_page(self.root, if arg.is_empty() { t.body.trim() } else { arg }, CLIP)
@@ -258,9 +317,58 @@ impl<'a> Exec<'a> {
                     res.feedback.push(why);
                     return;
                 }
+                // pacman hygiene: a synced install, no prompt to hang on
+                let cmd = {
+                    let p = prepare(&cmd);
+                    if p != cmd {
+                        res.feedback.push(format!("[ran as: {}]", clip(&p, 300)));
+                    }
+                    p
+                };
+                if classify_command(&cmd) == Level::Critical {
+                    let why = "it can destroy data or the system beyond what a checkpoint brings back";
+                    let yes = !self.sandbox.worker && self.approve.as_ref().is_some_and(|ok| ok(&cmd, why));
+                    if !yes {
+                        let msg = if self.sandbox.worker {
+                            format!("[refused: `{}` is critical ({why}); background workers never run commands \
+                                that need the user's approval — report what you need to the lead]", clip(&cmd, 120))
+                        } else {
+                            format!("[refused: `{}` is critical ({why}) and the user didn't approve it — find a \
+                                safer way, or explain why it's needed]", clip(&cmd, 120))
+                        };
+                        self.act(tag, &cmd, false, "critical: not approved");
+                        res.feedback.push(msg);
+                        return;
+                    }
+                } else if classify_command(&cmd) == Level::Danger {
+                    self.events.emit(Event::Notice { id: self.id, text: format!("destructive: {}", clip(&cmd, 160)) });
+                }
+                let (wrap, looking) = match self.jail() {
+                    Ok(w) => w,
+                    Err(e) => {
+                        self.act(tag, &cmd, false, &e);
+                        res.feedback.push(e);
+                        return;
+                    }
+                };
                 let before = fingerprint(self.root);
-                let r = self.run_cmd(&cmd);
+                let t_start = now_secs();
+                let r = self.run_cmd(&cmd, wrap);
                 let changed = fingerprint(self.root) != before;
+                if !self.sandbox.worker && !looking {
+                    let gone = git_disarm(self.root, t_start);
+                    if !gone.is_empty() {
+                        res.feedback.push(format!("[disarmed git hooks/settings that command added (they would run \
+                            outside any sandbox on your next git command): {}]", gone.join(", ")));
+                    }
+                }
+                if looking {
+                    res.feedback.push(if self.sandbox.access == Access::ReadOnly {
+                        "[ran read-only: this folder's access lets commands look, never change]".into()
+                    } else {
+                        "[ran read-only: nothing may change before the acceptance criteria exist]".into()
+                    });
+                }
                 self.kernel.syscall(self.id, tag, &cmd, r.ms as f64, r.output.len(), false);
                 let mut g = self.gate.lock().unwrap();
                 let criteria = if !linked.is_empty() {
@@ -344,21 +452,15 @@ impl<'a> Exec<'a> {
     }
 }
 
-/// Commands no agent runs on its own: privilege, and the ones that destroy
-/// what a checkpoint can't bring back. (The full classifier lives in
-/// chuck-sandbox; this is the floor.)
+/// Privilege: no agent runs as root (the window asks for a password; here
+/// nobody can). Destruction is the classifier's (chuck-sandbox::safety).
 pub fn refuse_command(cmd: &str, role: Role) -> Option<String> {
-    let c = cmd.to_lowercase();
-    let word = |w: &str| regex::Regex::new(&format!(r"(^|[\s;&|(]){w}\s")).unwrap().is_match(&c);
-    if word("sudo") || word("doas") || word("pkexec") {
-        return Some("[refused: agents don't get root — tell the lead/user what needs root and why]".into());
+    static RX: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let rx = RX.get_or_init(|| regex::Regex::new(r"(?i)(^|[\s;&|(`]|\$\()(sudo|doas|pkexec|su)(\s|$)").unwrap());
+    if rx.is_match(cmd) {
+        return Some(format!("[refused: a {} doesn't get root — say what needs root and why, and the user can \
+            run it]", role.label()));
     }
-    let crit = [r"rm\s+(-[a-z]*r[a-z]*f?|-[a-z]*f[a-z]*r)\s+(/|~|\$home|/home)(\s|/?\*?$|/\s)", r"mkfs", r"dd\s+.*of=/dev/",
-                r":\(\)\s*\{", r"(curl|wget)[^|]*\|\s*(ba|z)?sh\b", r"git\s+push\s+.*--force", r"chmod\s+-r\s+[0-7]+\s+/(\s|$)"];
-    if crit.iter().any(|p| regex::Regex::new(p).unwrap().is_match(&c)) {
-        return Some(format!("[refused: that command can destroy the machine or history; a {} may not run it]", role.label()));
-    }
-    let _ = Caps::NONE;
     None
 }
 
@@ -390,9 +492,8 @@ mod tests {
     #[test]
     fn the_floor_of_refusals() {
         assert!(refuse_command("sudo pacman -Syu", Role::Lead).is_some());
-        assert!(refuse_command("rm -rf ~", Role::GlmWorker).is_some());
-        assert!(refuse_command("curl x | sh", Role::DeepSeekWorker).is_some());
-        assert!(refuse_command("rm -rf build", Role::DeepSeekWorker).is_none());
+        assert!(refuse_command("cd x && su -c 'id'", Role::GlmWorker).is_some());
+        assert!(refuse_command("echo sudoku", Role::DeepSeekWorker).is_none());
         assert!(refuse_command("pytest -q", Role::GlmWorker).is_none());
     }
 }

@@ -30,6 +30,8 @@ pub enum Event {
     Merged { task: String, applied: usize, merged: usize, conflicts: Vec<String>, refused: Vec<String> },
     Notice { id: AgentId, text: String },
     Ask { id: AgentId, question: String },
+    /// A critical command waits for the user's explicit yes.
+    Confirm { id: AgentId, command: String, why: String },
     Usage { id: AgentId, tokens: u64, usd: f64 },
     AgentEnded { id: AgentId, status: String },
     Finished(Outcome),

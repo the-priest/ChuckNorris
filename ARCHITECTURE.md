@@ -141,7 +141,7 @@ the Lead's verdict, and an **INCOMPLETE** label on anything not through it.
 | `hibernate.py`, `checkpoint.py` | `chuck-store` | per-step checkpoints, shadow git, replay / fork, rewind |
 | `ledger.py`, `crashlog.py` | `chuck-store::ledger`, `chuck-store::crashlog` | hash-chained audit log; redacted crash log |
 | `safety.py` | `chuck-sandbox::safety` | critical / danger classifier (same rules) |
-| bubblewrap code in `chucknorris.py` | `chuck-sandbox::bwrap` | modes Full / Sandboxed / Offline / Read-only, hidden secrets, read-only `.git` hooks/config, git disarm |
+| bubblewrap code in `chucknorris.py` | `chuck-sandbox::jail` | modes Full / Sandboxed / Offline / Read-only, hidden secrets, read-only `.git` hooks/config, git disarm |
 | `cow.py` | `chuck-tools::cow` | copy-on-write workspaces, three-way merge, links never followed |
 | `builder.py`, file blocks | `chuck-tools` | read/write/edit/patch/grep/glob/map/bash, fenced-block parser |
 | `net.py`, `web.py` | `chuck-model::http`, `chuck-tools::web` | one HTTP layer, proxy-aware, capped bodies |
