@@ -64,7 +64,7 @@ fn clip(s: &str, n: usize) -> String {
 
 /// "pytest -q for c1,c2" -> ("pytest -q", [c1, c2])
 pub fn split_for(arg: &str) -> (String, Vec<CriterionId>) {
-    let re = regex::Regex::new(r"\s+for\s+((?:c\d+\s*,?\s*)+)$").unwrap();
+    let re = regex::Regex::new(r"(?:^|\s+)for\s+((?:c\d+\s*,?\s*)+)$").unwrap();
     match re.captures(arg) {
         Some(c) => {
             let ids = regex::Regex::new(r"c(\d+)").unwrap().captures_iter(&c[1])
@@ -73,6 +73,21 @@ pub fn split_for(arg: &str) -> (String, Vec<CriterionId>) {
         }
         None => (arg.trim().to_string(), Vec::new()),
     }
+}
+
+/// A "verification" that can't fail: `true`, `echo ok`, `exit 0`, `sleep 1`…
+/// It is recorded as a plain command, never as a passing test.
+pub fn proves_nothing(cmd: &str) -> bool {
+    let segs: Vec<&str> = cmd.split([';', '&', '|', '\n']).map(str::trim)
+        .filter(|s| !s.is_empty()).collect();
+    !segs.is_empty() && segs.iter().all(|s| {
+        let mut w = s.split_whitespace();
+        match w.next() {
+            Some("true" | ":" | "echo" | "printf" | "sleep" | "pwd" | "date" | "whoami") => true,
+            Some("exit") => matches!(w.next(), None | Some("0")),
+            _ => false,
+        }
+    })
 }
 
 /// "- text :: verify: cmd" lines.
@@ -262,14 +277,15 @@ impl<'a> Exec<'a> {
                     res.feedback.push("[warning: that command changed files before acceptance criteria were \
                         written — the gate will not accept changes made without criteria]".into());
                 }
-                let kind = if tag == "test" {
+                let hollow = tag == "test" && proves_nothing(&cmd);
+                let kind = if tag == "test" && !hollow {
                     let (passed, failed) = test_counts(&r.output);
                     EvidenceKind::Test { cmd: cmd.clone(), exit: r.exit, passed, failed, output: out.clone() }
                 } else {
                     EvidenceKind::Command { cmd: cmd.clone(), exit: r.exit, output: out.clone() }
                 };
-                let verified = tag == "test" && r.ok();
-                g.record(self.id, criteria, kind, changed);
+                let verified = tag == "test" && !hollow && r.ok();
+                g.record(self.id, if hollow { Vec::new() } else { criteria }, kind, changed);
                 drop(g);
                 res.mutated |= changed;
                 res.verified |= verified;
@@ -278,6 +294,10 @@ impl<'a> Exec<'a> {
                 self.act(tag, &cmd, r.ok(), &head);
                 res.feedback.push(format!("{} `{}` → {head}\n{}", if tag == "test" { "TEST" } else { "RAN" },
                                           clip(&cmd, 300), if out.trim().is_empty() { "(no output)".into() } else { out }));
+                if hollow {
+                    res.feedback.push(format!("[`{}` can't fail, so it proves nothing and doesn't count as a test — \
+                        run the real tests, build, linter or the program itself]", clip(&cmd, 80)));
+                }
             }
             "submit" => {
                 res.submit = Some(format!("{}\n{}", arg, t.body).trim().to_string());
@@ -350,9 +370,21 @@ mod tests {
     fn for_and_criteria_parsing() {
         assert_eq!(split_for("pytest -q for c1, c3"), ("pytest -q".into(), vec![CriterionId(1), CriterionId(3)]));
         assert_eq!(split_for("make test"), ("make test".into(), vec![]));
+        assert_eq!(split_for("for c2"), ("".into(), vec![CriterionId(2)]), "the block form: ```test for c2```");
+        assert_eq!(split_for("format check"), ("format check".into(), vec![]));
         let c = parse_criteria("- parser takes empty input :: verify: `pytest -q tests/p.py`\n- docs updated\n");
         assert_eq!(c, vec![("parser takes empty input".into(), Some("pytest -q tests/p.py".into())),
                            ("docs updated".into(), None)]);
+    }
+
+    #[test]
+    fn hollow_verifications() {
+        for c in ["true", "echo ok", "echo done && exit 0", ":", "sleep 1; echo passed"] {
+            assert!(proves_nothing(c), "{c}");
+        }
+        for c in ["pytest -q", "cargo test", "echo x | grep -q x", "test -f out.txt", "true && make check"] {
+            assert!(!proves_nothing(c), "{c}");
+        }
     }
 
     #[test]

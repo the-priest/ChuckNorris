@@ -312,3 +312,154 @@ fn a_race_keeps_the_better_verified_entry() {
     assert_eq!(events.iter().filter(|e| matches!(e, Event::Merged { .. })).count(), 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Run a job on its own thread; a hang is a failure, not a stuck test suite.
+fn run_within(secs: u64, rt: Runtime, job: Job) -> (chuck_runtime::JobReport, Runtime) {
+    let (tx, rx) = channel();
+    std::thread::spawn(move || {
+        let r = rt.run(job);
+        let _ = tx.send((r, rt));
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(secs)).expect("the job hung")
+}
+
+#[test]
+fn a_lead_that_idles_while_a_submission_waits_is_told_not_hung() {
+    let dir = tmp("idle");
+    std::fs::write(dir.join("v.txt"), "1\n").unwrap();
+    let model = Arc::new(Scripted::new().respond(|req| {
+        let sys = text(&req.messages[0]);
+        let last = last_user(req);
+        if sys == chuck_runtime::prompts::CRITIC {
+            return "ACCEPT".into();
+        }
+        if sys.contains("You are glm-") {
+            return if req.messages.len() == 2 {
+                "```write v.txt\n2\n```\n```test grep -qx 2 v.txt```\n```submit\nv is 2\n```".into()
+            } else { "ok".into() };
+        }
+        if req.messages.len() == 2 {
+            return "```criteria\n- v.txt holds 2 :: verify: grep -qx 2 v.txt\n```\n```plan\n- delegate\n```\n\
+                ```assign glm\ntitle: v\ncriteria:\n- v.txt holds 2 :: verify: grep -qx 2 v.txt\nbrief: set it\n```".into();
+        }
+        if last.contains("SUBMISSION t1") {
+            return "Let me think about this submission.".into(); // no review: the worker now waits on the lead
+        }
+        if last.contains("waiting for your review") {
+            return "```review t1 accept\nfine\n```".into();
+        }
+        if heard(req, "t1 accepted") {
+            return "```test grep -qx 2 v.txt```\n```justify proportion\none value\n```\n```done\nv.txt holds 2 (checked).\n```".into();
+        }
+        "Waiting.".into()
+    }));
+    let rt = Runtime::new(model, RuntimeConfig { store: dir.join("store"), ..RuntimeConfig::default() }, Events::none());
+    let (report, _) = run_within(20, rt, Job::new("set v to 2", &dir));
+    assert!(matches!(report.outcome, Outcome::Done { .. }), "{:?}", report.outcome);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn hollow_tests_and_shell_edits_dont_fool_the_gate() {
+    let dir = tmp("hollow");
+    std::fs::write(dir.join("app.py"), "def f():\n    return 1\n").unwrap();
+    let model = Arc::new(Scripted::new().respond(|req| {
+        let sys = text(&req.messages[0]);
+        let last = last_user(req);
+        if sys == chuck_runtime::prompts::CRITIC {
+            return "ACCEPT".into();
+        }
+        if req.messages.len() == 2 {
+            // a stub slipped in through the shell (no write block), then a test that can't fail
+            return "```criteria\n- f returns 2\n```\n```bash\nprintf 'def f():\\n    raise NotImplementedError\\n' > app.py\n```\n\
+                ```test true```\n```done\nf returns 2.\n```".into();
+        }
+        if last.contains("NotImplementedError") && last.contains("done REFUSED") {
+            return "```write app.py\ndef f():\n    return 2\n```\n```test python3 -c 'import app; assert app.f() == 2'```\n\
+                ```done\nf returns 2; checked by importing it.\n```".into();
+        }
+        "Hmm.".into()
+    }));
+    let (tx, rx) = channel();
+    let rt = Runtime::new(model.clone(), RuntimeConfig { store: dir.join("store"), ..RuntimeConfig::default() },
+                          Events(Some(tx)));
+    let (report, _) = run_within(20, rt, Job::new("make f return 2", &dir));
+    assert!(matches!(report.outcome, Outcome::Done { .. }), "{:?}", report.outcome);
+    // the hollow `test true` never counted as a passing test
+    assert!(!report.gate.evidence.iter().any(|e| matches!(&e.kind, EvidenceKind::Test { cmd, .. } if cmd == "true")));
+    // the first done was refused for the stub the shell wrote
+    let lead_inputs: Vec<String> = model.seen.lock().unwrap().iter()
+        .filter(|r| text(&r.messages[0]).contains("You are the LEAD")).map(last_user).collect();
+    assert!(lead_inputs.iter().any(|t| t.contains("proves nothing")));
+    assert!(lead_inputs.iter().any(|t| t.contains("done REFUSED") && t.contains("NotImplementedError")));
+    assert_eq!(std::fs::read_to_string(dir.join("app.py")).unwrap(), "def f():\n    return 2\n");
+    let critic_calls = model.seen.lock().unwrap().iter()
+        .filter(|r| text(&r.messages[0]) == chuck_runtime::prompts::CRITIC).count();
+    assert_eq!(critic_calls, 1, "the critic only sees work that passed the gate");
+    drop(rx);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_critic_isnt_asked_again_about_unchanged_work() {
+    let dir = tmp("critic-again");
+    std::fs::write(dir.join("k.txt"), "a\n").unwrap();
+    let model = Arc::new(Scripted::new().respond(|req| {
+        let sys = text(&req.messages[0]);
+        if sys == chuck_runtime::prompts::CRITIC {
+            return "REJECT\n- k.txt should end with a newline".into();
+        }
+        if req.messages.len() == 2 {
+            return "```criteria\n- k.txt says b :: verify: grep -qx b k.txt\n```\n```write k.txt\nb\n```\n\
+                ```test grep -qx b k.txt```\n```done\nk.txt says b.\n```".into();
+        }
+        "```done\nk.txt says b.\n```".into() // the same done, again and again
+    }));
+    let rt = Runtime::new(model.clone(), RuntimeConfig { store: dir.join("store"), lead_steps: 6,
+                                                          ..RuntimeConfig::default() }, Events::none());
+    let (report, _) = run_within(20, rt, Job::new("make k say b", &dir));
+    assert!(matches!(report.outcome, Outcome::Paused { .. }), "{:?}", report.outcome);
+    let critic_calls = model.seen.lock().unwrap().iter()
+        .filter(|r| text(&r.messages[0]) == chuck_runtime::prompts::CRITIC).count();
+    assert_eq!(critic_calls, 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_worker_that_removes_its_own_todo_can_submit() {
+    let dir = tmp("todo-fixed");
+    std::fs::write(dir.join("m.py"), "X = 0\n").unwrap();
+    let model = Arc::new(Scripted::new().respond(|req| {
+        let sys = text(&req.messages[0]);
+        let last = last_user(req);
+        if sys == chuck_runtime::prompts::CRITIC {
+            return "ACCEPT".into();
+        }
+        if sys.contains("You are ds-") {
+            if req.messages.len() == 2 {
+                return "```write m.py\nX = 1  # TODO: confirm\n```\n```test grep -q 'X = 1' m.py```\n```submit\nX is 1\n```".into();
+            }
+            if last.contains("submission REFUSED") {
+                assert!(last.contains("TODO"), "{last}");
+                return "```write m.py\nX = 1\n```\n```test grep -qx 'X = 1' m.py```\n```submit\nX is 1, no TODO left\n```".into();
+            }
+            return "ok".into();
+        }
+        if req.messages.len() == 2 {
+            return "```criteria\n- X is 1 :: verify: grep -qx 'X = 1' m.py\n```\n```plan\n- delegate\n```\n\
+                ```assign deepseek\ntitle: X\ncriteria:\n- X is 1 :: verify: grep -qx 'X = 1' m.py\nbrief: set X\n```".into();
+        }
+        if last.contains("SUBMISSION t1") {
+            return "```review t1 accept\nok\n```".into();
+        }
+        if heard(req, "t1 accepted") {
+            return "```test grep -qx 'X = 1' m.py```\n```justify proportion\none constant\n```\n```done\nX is 1 (grep).\n```".into();
+        }
+        "Waiting.".into()
+    }));
+    let rt = Runtime::new(model, RuntimeConfig { store: dir.join("store"), ..RuntimeConfig::default() }, Events::none());
+    let (report, _) = run_within(20, rt, Job::new("set X to 1", &dir));
+    assert!(matches!(report.outcome, Outcome::Done { .. }), "{:?}", report.outcome);
+    assert_eq!(std::fs::read_to_string(dir.join("m.py")).unwrap(), "X = 1\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}

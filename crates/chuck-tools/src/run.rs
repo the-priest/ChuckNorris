@@ -90,67 +90,106 @@ pub fn bash(cmd: &str, mut o: RunOpts<'_>) -> RunResult {
         }));
     }
     drop(tx);
-    let mut head = Vec::<u8>::new();
-    let mut tail = std::collections::VecDeque::<u8>::new();
-    let mut total = 0usize;
-    let (mut timed_out, mut stopped) = (false, false);
+    let mut cap = Capped::default();
+    let (mut timed_out, mut stopped, mut lingered) = (false, false, false);
     let deadline = t0 + o.timeout;
+    let mut exited: Option<(Instant, std::process::ExitStatus)> = None;
     loop {
-        match rx.recv_timeout(Duration::from_millis(100)) {
+        match rx.recv_timeout(Duration::from_millis(50)) {
             Ok(chunk) => {
                 if let Some(f) = o.on_chunk.as_mut() {
                     f(&String::from_utf8_lossy(&chunk));
                 }
-                total += chunk.len();
-                for b in chunk {
-                    if head.len() < MAX_OUTPUT / 2 {
-                        head.push(b);
-                    } else {
-                        tail.push_back(b);
-                        if tail.len() > MAX_OUTPUT / 2 {
-                            tail.pop_front();
-                        }
-                    }
-                }
+                cap.push(&chunk);
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+        if exited.is_none() {
+            if let Ok(Some(st)) = child.try_wait() {
+                exited = Some((Instant::now(), st));
+            }
         }
         if o.stop.as_ref().is_some_and(|s| s.load(Ordering::Relaxed)) {
             stopped = true;
         } else if Instant::now() > deadline {
             timed_out = true;
+        } else if exited.is_some_and(|(at, _)| at.elapsed() > LINGER) {
+            // the command is over but something it started in the background
+            // still holds its output open: it would hang the agent until the timeout
+            lingered = true;
         }
-        if stopped || timed_out {
+        if stopped || timed_out || lingered {
             kill_group(pgid);
             break;
         }
     }
-    let status = child.wait();
+    let status = match exited {
+        Some((_, st)) => Ok(st),
+        None => child.wait(),
+    };
+    // the group is dead or done: the pipes close and the readers end
     for r in readers {
         let _ = r.join();
     }
     while let Ok(chunk) = rx.try_recv() {
-        for b in chunk {
-            if head.len() < MAX_OUTPUT / 2 { head.push(b) } else { tail.push_back(b) }
-        }
+        cap.push(&chunk);
     }
-    let mut output = String::from_utf8_lossy(&head).into_owned();
-    if !tail.is_empty() {
-        let elided = total.saturating_sub(head.len() + tail.len());
-        if elided > 0 {
-            output.push_str(&format!("\n… {elided} bytes elided …\n"));
-        }
-        output.push_str(&String::from_utf8_lossy(&tail.into_iter().collect::<Vec<_>>()));
-    }
+    let mut output = cap.text();
     if timed_out {
         output.push_str(&format!("\n(timed out after {} s — the whole process tree was stopped)", o.timeout.as_secs()));
     }
+    if lingered {
+        output.push_str("\n(the command finished, but processes it started in the background kept running and were \
+            stopped — to try a server, start it and test it in ONE command, e.g. `./serve & sleep 2; curl -s localhost:8000`)");
+    }
+    use std::os::unix::process::ExitStatusExt;
     let exit = match status {
-        Ok(s) => s.code().unwrap_or(if timed_out || stopped { 124 } else { 128 }),
+        Ok(s) => s.code().or_else(|| s.signal().map(|n| 128 + n)).unwrap_or(128),
         Err(_) => 128,
     };
+    let exit = if (timed_out || stopped) && exit == 0 { 124 } else { exit };
     RunResult { exit, output, timed_out, stopped, ms: t0.elapsed().as_millis() as u64 }
+}
+
+/// How long background stragglers may keep the output open after the
+/// command itself has exited.
+const LINGER: Duration = Duration::from_millis(1500);
+
+/// Output kept as head + tail, the middle counted and elided.
+#[derive(Default)]
+struct Capped {
+    head: Vec<u8>,
+    tail: std::collections::VecDeque<u8>,
+    total: usize,
+}
+
+impl Capped {
+    fn push(&mut self, chunk: &[u8]) {
+        self.total += chunk.len();
+        for &b in chunk {
+            if self.head.len() < MAX_OUTPUT / 2 {
+                self.head.push(b);
+            } else {
+                self.tail.push_back(b);
+                if self.tail.len() > MAX_OUTPUT / 2 {
+                    self.tail.pop_front();
+                }
+            }
+        }
+    }
+
+    fn text(self) -> String {
+        let mut out = String::from_utf8_lossy(&self.head).into_owned();
+        if !self.tail.is_empty() {
+            let elided = self.total.saturating_sub(self.head.len() + self.tail.len());
+            if elided > 0 {
+                out.push_str(&format!("\n… {elided} bytes elided …\n"));
+            }
+            out.push_str(&String::from_utf8_lossy(&self.tail.into_iter().collect::<Vec<_>>()));
+        }
+        out
+    }
 }
 
 fn kill_group(pgid: i32) {
@@ -208,6 +247,24 @@ mod tests {
         o.stop = Some(stop);
         let r = bash("sleep 20", o);
         assert!(r.stopped && !r.ok());
+    }
+
+    #[test]
+    fn a_background_straggler_doesnt_hang_the_agent() {
+        let d = std::env::temp_dir();
+        let t0 = Instant::now();
+        let r = bash("sleep 60 & echo started", RunOpts::new(&d));
+        assert!(t0.elapsed() < Duration::from_secs(5), "{:?}", t0.elapsed());
+        assert_eq!(r.exit, 0);
+        assert!(!r.timed_out);
+        assert!(r.output.starts_with("started") && r.output.contains("background"));
+    }
+
+    #[test]
+    fn a_signal_death_is_reported_as_128_plus_the_signal() {
+        let d = std::env::temp_dir();
+        let r = bash("kill -9 $$", RunOpts::new(&d));
+        assert_eq!(r.exit, 137);
     }
 
     #[test]

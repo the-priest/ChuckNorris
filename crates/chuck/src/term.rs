@@ -55,6 +55,11 @@ impl View {
         View { st: Style { color }, verbose, names: HashMap::new(), tokens: 0, usd: 0.0, last_gate: None, out }
     }
 
+    pub fn header(&mut self, text: &str) {
+        let line = format!("{} {}", self.st.accent(&self.st.bold("chuck")), self.st.dim(text));
+        self.line(line);
+    }
+
     fn who(&self, id: AgentId) -> String {
         self.names.get(&id).map(|(n, _)| n.clone()).unwrap_or_else(|| format!("#{id}"))
     }

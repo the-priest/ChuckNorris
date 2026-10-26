@@ -8,7 +8,7 @@ pub mod run;
 pub mod search;
 
 pub use blocks::{clean_head, edit_pairs, file_blocks, prose, tool_blocks, FileBlock, ToolBlock};
-pub use cow::{ChangeKind, MergeResult, Workspace};
+pub use cow::{changes_between, diff_between, ChangeKind, MergeResult, Snapshot, Workspace};
 pub use fs::{delete_file, edit_file, read_page, safe, unified, write_file, Change, FsError};
 pub use run::{bash, RunOpts, RunResult, Wrap};
 pub use search::{fingerprint, glob, grep};

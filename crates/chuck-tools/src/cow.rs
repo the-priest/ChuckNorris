@@ -97,6 +97,11 @@ fn copy_tree(src: &Path, dst: &Path) -> Result<(), CowError> {
 }
 
 fn same_file(a: &Path, b: &Path) -> bool {
+    if let (Ok(x), Ok(y)) = (fs::metadata(a), fs::metadata(b)) {
+        if x.len() != y.len() {
+            return false; // cheap, and the common case for a changed file
+        }
+    }
     match (fs::read(a), fs::read(b)) {
         (Ok(x), Ok(y)) => x == y,
         _ => false,
@@ -136,51 +141,12 @@ impl Workspace {
 
     /// What the worker changed.
     pub fn changes(&self) -> Result<BTreeMap<String, ChangeKind>, CowError> {
-        let base: BTreeSet<String> = files(&self.base)?.into_iter().collect();
-        let work: BTreeSet<String> = files(&self.work)?.into_iter().collect();
-        let mut out = BTreeMap::new();
-        for r in work.difference(&base) {
-            out.insert(r.clone(), ChangeKind::Added);
-        }
-        for r in base.difference(&work) {
-            out.insert(r.clone(), ChangeKind::Deleted);
-        }
-        for r in base.intersection(&work) {
-            let (b, w) = (self.base.join(r), self.work.join(r));
-            let changed = if b.is_symlink() || w.is_symlink() {
-                b.is_symlink() != w.is_symlink() || fs::read_link(&b).ok() != fs::read_link(&w).ok()
-            } else {
-                !same_file(&b, &w)
-            };
-            if changed {
-                out.insert(r.clone(), ChangeKind::Modified);
-            }
-        }
-        Ok(out)
+        changes_between(&self.base, &self.work)
     }
 
     /// A unified diff of the worker's changes, and the lines changed.
     pub fn diff(&self, limit: usize) -> Result<(String, usize), CowError> {
-        let mut text = String::new();
-        let mut lines = 0;
-        for (rel, kind) in self.changes()? {
-            let read = |p: &Path| if p.is_symlink() {
-                fs::read_link(p).ok().map(|t| format!("-> {}\n", t.display()))
-            } else {
-                fs::read(p).ok().map(|b| String::from_utf8_lossy(&b).into_owned())
-            };
-            let before = if kind == ChangeKind::Added { None } else { read(&self.base.join(&rel)) };
-            let after = if kind == ChangeKind::Deleted { None } else { read(&self.work.join(&rel)) };
-            let (d, a, r) = crate::fs::unified(&rel, before.as_deref(), after.as_deref());
-            lines += a + r;
-            text.push_str(&d);
-            if text.len() > limit {
-                text.truncate(limit);
-                text.push_str("\n… (diff cut)\n");
-                break;
-            }
-        }
-        Ok((text, lines))
+        diff_between(&self.base, &self.work, limit)
     }
 
     /// Bring the changes home, three-way (only through the Lead — see
@@ -197,6 +163,11 @@ impl Workspace {
             let (base, theirs) = (self.base.join(&rel), self.work.join(&rel));
             if theirs.is_symlink() {
                 self.merge_link(&rel, &mine, &theirs, &mut res, &cdir);
+                continue;
+            }
+            // never write through a link of yours that leads out of the project
+            if self.leads_out(&mine) {
+                res.refused.push(rel);
                 continue;
             }
             let mine_now = mine.exists();
@@ -249,6 +220,26 @@ impl Workspace {
         Ok(res)
     }
 
+    /// The user's path would put the write outside the project: a link to
+    /// elsewhere on the file itself or on a folder above it.
+    fn leads_out(&self, mine: &Path) -> bool {
+        if mine.is_symlink() {
+            // the worker's version is a plain file: writing it would follow the link
+            return mine.canonicalize().map_or(true, |c| !c.starts_with(&self.source));
+        }
+        let mut dir = mine.parent();
+        while let Some(d) = dir {
+            if d == self.source {
+                return false;
+            }
+            if d.exists() {
+                return d.canonicalize().map_or(true, |c| !c.starts_with(&self.source));
+            }
+            dir = d.parent();
+        }
+        true
+    }
+
     fn merge_link(&self, rel: &str, mine: &Path, theirs: &Path, res: &mut MergeResult, cdir: &Path) {
         let Ok(target) = fs::read_link(theirs) else { return };
         let work = self.work.canonicalize().unwrap_or_else(|_| self.work.clone());
@@ -275,6 +266,94 @@ impl Workspace {
 
     pub fn remove(&self) {
         let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// What changed from `base` to `other`.
+pub fn changes_between(base_dir: &Path, other: &Path) -> Result<BTreeMap<String, ChangeKind>, CowError> {
+    let base: BTreeSet<String> = files(base_dir)?.into_iter().collect();
+    let work: BTreeSet<String> = files(other)?.into_iter().collect();
+    let mut out = BTreeMap::new();
+    for r in work.difference(&base) {
+        out.insert(r.clone(), ChangeKind::Added);
+    }
+    for r in base.difference(&work) {
+        out.insert(r.clone(), ChangeKind::Deleted);
+    }
+    for r in base.intersection(&work) {
+        let (b, w) = (base_dir.join(r), other.join(r));
+        let changed = if b.is_symlink() || w.is_symlink() {
+            b.is_symlink() != w.is_symlink() || fs::read_link(&b).ok() != fs::read_link(&w).ok()
+        } else {
+            !same_file(&b, &w)
+        };
+        if changed {
+            out.insert(r.clone(), ChangeKind::Modified);
+        }
+    }
+    Ok(out)
+}
+
+/// A unified diff from `base` to `other` (cut past `limit` bytes), and the
+/// number of lines added plus removed (always the full count).
+pub fn diff_between(base: &Path, other: &Path, limit: usize) -> Result<(String, usize), CowError> {
+    let mut text = String::new();
+    let mut lines = 0;
+    let mut cut = false;
+    for (rel, kind) in changes_between(base, other)? {
+        let read = |p: &Path| if p.is_symlink() {
+            fs::read_link(p).ok().map(|t| format!("-> {}\n", t.display()))
+        } else {
+            fs::read(p).ok().map(|b| String::from_utf8_lossy(&b).into_owned())
+        };
+        let before = if kind == ChangeKind::Added { None } else { read(&base.join(&rel)) };
+        let after = if kind == ChangeKind::Deleted { None } else { read(&other.join(&rel)) };
+        let (d, a, r) = crate::fs::unified(&rel, before.as_deref(), after.as_deref());
+        lines += a + r;
+        if !cut {
+            text.push_str(&d);
+            if text.len() > limit {
+                let mut at = limit;
+                while !text.is_char_boundary(at) {
+                    at -= 1;
+                }
+                text.truncate(at);
+                text.push_str("\n… (diff cut)\n");
+                cut = true;
+            }
+        }
+    }
+    Ok((text, lines))
+}
+
+/// The folder as it was when a job started, to diff the real result against
+/// (shell commands change files too, not only the agents' edits).
+#[derive(Clone, Debug)]
+pub struct Snapshot {
+    pub source: PathBuf,
+    pub base: PathBuf,
+}
+
+impl Snapshot {
+    pub fn take(source: &Path, dir: &Path) -> Result<Snapshot, CowError> {
+        let source = source.canonicalize().map_err(|e| CowError::Io(format!("no such folder {}: {e}", source.display())))?;
+        if dir.exists() {
+            let _ = fs::remove_dir_all(dir);
+        }
+        if let Err(e) = copy_tree(&source, dir) {
+            let _ = fs::remove_dir_all(dir);
+            return Err(e);
+        }
+        Ok(Snapshot { source, base: dir.to_path_buf() })
+    }
+
+    /// Everything that changed in the folder since the snapshot.
+    pub fn diff(&self, limit: usize) -> Result<(String, usize), CowError> {
+        diff_between(&self.base, &self.source, limit)
+    }
+
+    pub fn remove(&self) {
+        let _ = fs::remove_dir_all(&self.base);
     }
 }
 
@@ -308,6 +387,30 @@ mod tests {
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn a_merge_never_writes_through_your_links_out_of_the_project() {
+        let outside = tmp("outside");
+        fs::write(outside.join("secret.txt"), "keep\n").unwrap();
+        let src = tmp("src-links");
+        let store = tmp("store-links");
+        std::os::unix::fs::symlink(&outside, src.join("ext")).unwrap();
+        std::os::unix::fs::symlink(outside.join("secret.txt"), src.join("s.txt")).unwrap();
+        let ws = Workspace::create(&src, &store, "t1").unwrap();
+        // the worker replaces the file link with a plain file, and adds a file "under" the folder link
+        fs::remove_file(ws.work.join("s.txt")).unwrap();
+        fs::write(ws.work.join("s.txt"), "pwned\n").unwrap();
+        fs::remove_file(ws.work.join("ext")).unwrap();
+        fs::create_dir_all(ws.work.join("ext")).unwrap();
+        fs::write(ws.work.join("ext/new.txt"), "pwned\n").unwrap();
+        let r = ws.merge(None).unwrap();
+        assert_eq!(fs::read_to_string(outside.join("secret.txt")).unwrap(), "keep\n");
+        assert!(!outside.join("new.txt").exists());
+        assert!(r.refused.contains(&"s.txt".to_string()) && r.refused.contains(&"ext/new.txt".to_string()), "{r:?}");
+        for d in [outside, src, store] {
+            let _ = fs::remove_dir_all(d);
+        }
     }
 
     #[test]

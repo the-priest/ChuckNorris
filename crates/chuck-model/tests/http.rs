@@ -81,6 +81,9 @@ fn handle(mut c: TcpStream, seen: Seen) {
         }
         return;
     }
+    if mode == "empty" {
+        return; // headers, then the connection closes: no reply at all
+    }
     if mode == "drop" {
         ev(&mut c, json!({"content": "half an ans"}));
         return; // connection closes mid-answer, no [DONE]
@@ -171,7 +174,16 @@ fn a_drop_mid_answer_keeps_the_text_as_a_cut_reply() {
     let (r, _) = ask(&client(&base, 10), "drop", Reasoning::default());
     let out = r.unwrap();
     assert_eq!(out.text, "half an ans");
-    assert!(out.was_cut() || out.finish.is_none());
+    assert!(out.was_cut(), "half a reply is never passed off as whole: {:?}", out.finish);
+}
+
+#[test]
+fn an_empty_stream_is_retried_then_reported() {
+    let (base, seen) = serve();
+    let (r, sink) = ask(&client(&base, 10), "empty", Reasoning::default());
+    assert!(matches!(r, Err(ModelError::Network(_))), "{r:?}");
+    assert_eq!(seen.lock().unwrap().len(), 3, "three attempts");
+    assert!(sink.notices.iter().any(|n| matches!(n, Notice::Retrying { .. })));
 }
 
 #[test]

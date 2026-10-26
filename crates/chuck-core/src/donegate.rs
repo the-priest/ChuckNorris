@@ -96,7 +96,7 @@ impl Unmet {
             Unmet::OutOfProportion { lines } => {
                 format!("a large ask with a {lines}-line change — finish it or justify it to the lead")
             }
-            Unmet::NotReviewed => "the lead hasn't reviewed the current version".into(),
+            Unmet::NotReviewed => "the current version hasn't been reviewed and accepted".into(),
             Unmet::Rejected(d) => format!("rejected by the lead: {}", clip(&d.join("; "), 200)),
             Unmet::NotTheLead(r) => format!("a {} can't declare the job done; submit it to the lead", r.label()),
         }
@@ -159,14 +159,48 @@ pub struct DoneGate {
     lines_changed: usize,
     /// Flag lines (file:line) the Lead accepted a justification for.
     accepted_justifications: Vec<String>,
+    /// The real current diff (the copy, or the folder against its snapshot),
+    /// when the runtime has measured it: what the craftsmanship and
+    /// proportion checks judge. Without it they judge the recorded diffs,
+    /// the latest per file.
+    #[serde(default)]
+    observed: Option<(String, usize)>,
 }
+
+/// A unified diff split per file: (file, section), in order.
+fn sections(patch: &str) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    let lines: Vec<&str> = patch.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let ln = lines[i];
+        let header = ln.starts_with("--- ") && lines.get(i + 1).is_some_and(|n| n.starts_with("+++ "));
+        if header {
+            let file = lines[i + 1][4..].trim().trim_start_matches("b/").to_string();
+            let file = if file == "/dev/null" { ln[4..].trim().trim_start_matches("a/").to_string() } else { file };
+            out.push((file, format!("{ln}\n{}\n", lines[i + 1])));
+            i += 2;
+            continue;
+        }
+        match out.last_mut() {
+            Some((_, s)) => {
+                s.push_str(ln);
+                s.push('\n');
+            }
+            None => out.push((String::new(), format!("{ln}\n"))),
+        }
+        i += 1;
+    }
+    out
+}
+
 
 impl DoneGate {
     pub fn new(ask: impl Into<String>, scale: Scale) -> DoneGate {
         DoneGate {
             ask: ask.into(), scale, phase: Phase::Intake, criteria: Vec::new(),
             criteria_accepted: false, plan: Vec::new(), evidence: Vec::new(), seq: 0,
-            last_mutation: 0, lines_changed: 0, accepted_justifications: Vec::new(),
+            last_mutation: 0, lines_changed: 0, accepted_justifications: Vec::new(), observed: None,
         }
     }
 
@@ -230,6 +264,7 @@ impl DoneGate {
         let seq = self.next_seq();
         if mutates {
             self.last_mutation = seq;
+            self.observed = None; // measured before this change: no longer the truth
             if let EvidenceKind::Diff { added, removed, .. } = &kind {
                 self.lines_changed += added + removed;
             }
@@ -273,13 +308,47 @@ impl DoneGate {
         })
     }
 
-    /// Unfinished-code flags in every diff of this job, minus the ones the
-    /// Lead accepted a justification for.
+    /// The runtime measured the real diff of the work (see `observed`).
+    pub fn observe(&mut self, patch: String, lines: usize) {
+        self.observed = Some((patch, lines));
+    }
+
+    /// The latest recorded diff of each file. Each recorded diff is from the
+    /// file's state before that change, so this is what the most recent
+    /// change of each file looked like.
+    fn latest_sections(&self) -> Vec<(String, String)> {
+        let mut by_file: Vec<(String, String)> = Vec::new();
+        for e in &self.evidence {
+            if let EvidenceKind::Diff { patch, .. } = &e.kind {
+                for (f, s) in sections(patch) {
+                    match by_file.iter_mut().find(|(g, _)| *g == f) {
+                        Some(slot) => slot.1 = s,
+                        None => by_file.push((f, s)),
+                    }
+                }
+            }
+        }
+        by_file
+    }
+
+    /// Lines changed by the work: measured when the runtime observed the
+    /// real diff, else summed over every recorded change.
+    pub fn lines_changed(&self) -> usize {
+        match &self.observed {
+            Some((_, n)) => *n,
+            None => self.lines_changed,
+        }
+    }
+
+    /// Unfinished-code flags in the work as it stands, minus the ones the
+    /// Lead accepted a justification for. A TODO written and then removed
+    /// doesn't count; one still in the result does.
     pub fn flags(&self) -> Vec<Flag> {
-        self.evidence.iter().flat_map(|e| match &e.kind {
-            EvidenceKind::Diff { patch, .. } => scan_diff(patch),
-            _ => Vec::new(),
-        }).filter(|f| !self.accepted_justifications.iter().any(|a| a == &f.line || a == &f.file))
+        let found = match &self.observed {
+            Some((patch, _)) => scan_diff(patch),
+            None => self.latest_sections().iter().flat_map(|(_, s)| scan_diff(s)).collect(),
+        };
+        found.into_iter().filter(|f| !self.accepted_justifications.iter().any(|a| a == &f.line || a == &f.file))
             .collect()
     }
 
@@ -320,10 +389,11 @@ impl DoneGate {
         for f in self.flags() {
             out.push(Unmet::Craftsmanship(format!("{}: {} — `{}`", f.file, f.why, f.line)));
         }
-        if self.scale == Scale::Large && self.lines_changed < 20
+        let lines = self.lines_changed();
+        if self.scale == Scale::Large && lines < 20
             && !self.accepted_justifications.iter().any(|a| a == "proportion")
         {
-            out.push(Unmet::OutOfProportion { lines: self.lines_changed });
+            out.push(Unmet::OutOfProportion { lines });
         }
         out
     }
@@ -355,6 +425,9 @@ impl DoneGate {
     /// Everything, review included.
     pub fn check(&self) -> Vec<Unmet> {
         let mut out = self.check_work();
+        if out == [Unmet::NoCriteria] {
+            return out; // nothing to review yet
+        }
         match self.latest_review() {
             None => out.push(Unmet::NotReviewed),
             Some((_, seq)) if seq < self.last_mutation => out.push(Unmet::NotReviewed),
@@ -551,6 +624,50 @@ mod tests {
         assert!(!g.is_done());
         assert!(gaps.iter().any(|s| s.contains("no evidence")));
         assert_eq!(g.phase.label(), "INCOMPLETE");
+    }
+
+    fn edit(file: &str, minus: &str, plus: &str) -> EvidenceKind {
+        let patch = format!("--- a/{file}\n+++ b/{file}\n@@ -1 +1 @@\n-{minus}\n+{plus}\n");
+        EvidenceKind::Diff { files: vec![file.into()], added: 1, removed: 1, patch }
+    }
+
+    #[test]
+    fn a_todo_that_was_removed_no_longer_counts() {
+        let mut g = DoneGate::new("x", Scale::Small);
+        g.set_criteria(Role::Lead, vec![("works".into(), None)]);
+        g.record(W, vec![CriterionId(1)], edit("a.py", "pass", "# TODO: handle errors"), true);
+        g.record(W, vec![CriterionId(1)], edit("a.py", "# TODO: handle errors", "raise ValueError(x)"), true);
+        g.record(W, vec![CriterionId(1)], test(0), false);
+        assert!(g.check_work().is_empty(), "{:?}", g.check_work());
+        // but one left in another file still blocks
+        g.record(W, vec![CriterionId(1)], edit("b.py", "x = 1", "x = 1  # FIXME"), true);
+        g.record(W, vec![CriterionId(1)], test(0), false);
+        assert!(matches!(g.check_work().as_slice(), [Unmet::Craftsmanship(_)]));
+    }
+
+    #[test]
+    fn the_measured_diff_decides_and_a_later_change_discards_it() {
+        let mut g = DoneGate::new("x", Scale::Large);
+        g.set_criteria(Role::Lead, vec![("works".into(), None)]);
+        g.set_plan(vec!["do it".into()]);
+        g.record(W, vec![CriterionId(1)], diff(3, "y = "), true);
+        g.record(W, vec![CriterionId(1)], test(0), false);
+        // the edits were tiny, but a command also changed 40 lines: measured, it's in proportion
+        g.observe(format!("--- a/x.py\n+++ b/x.py\n{}", "+line\n".repeat(40)), 40);
+        assert!(g.check_work().is_empty(), "{:?}", g.check_work());
+        // the measured diff shows a stub the recorded edits never did
+        g.observe("--- a/x.py\n+++ b/x.py\n+    raise NotImplementedError\n".into(), 40);
+        assert!(g.check_work().iter().any(|u| matches!(u, Unmet::Craftsmanship(_))));
+        // any new change makes the measurement stale: back to the recorded diffs
+        g.record(W, vec![CriterionId(1)], diff(30, "z = "), true);
+        g.record(W, vec![CriterionId(1)], test(0), false);
+        assert!(g.check_work().is_empty(), "{:?}", g.check_work());
+    }
+
+    #[test]
+    fn nothing_to_review_before_criteria() {
+        let g = DoneGate::new("x", Scale::Small);
+        assert_eq!(g.check(), vec![Unmet::NoCriteria]);
     }
 
     #[test]

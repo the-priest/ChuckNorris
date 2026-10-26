@@ -239,6 +239,7 @@ fn stream(resp: ureq::http::Response<ureq::Body>, req: &ChatRequest, sink: &mut 
     let mut out = Outcome::default();
     let mut think_t0: Option<Instant> = None;
     let mut buf = String::new();
+    let mut finished = false;
     loop {
         if sink.should_stop() {
             return Err(Box::new((ModelError::Stopped, None)));
@@ -262,6 +263,7 @@ fn stream(resp: ureq::http::Response<ureq::Body>, req: &ChatRequest, sink: &mut 
         let Some(data) = line.strip_prefix("data:") else { continue };
         let data = data.trim();
         if data == "[DONE]" {
+            finished = true;
             break;
         }
         let Ok(d) = serde_json::from_str::<Value>(data) else { continue };
@@ -271,6 +273,7 @@ fn stream(resp: ureq::http::Response<ureq::Body>, req: &ChatRequest, sink: &mut 
         let Some(ch) = d.get("choices").and_then(|c| c.get(0)) else { continue };
         if let Some(f) = ch.get("finish_reason").and_then(|f| f.as_str()) {
             out.finish = Some(f.to_string());
+            finished = true;
         }
         let delta = ch.get("delta").cloned().unwrap_or(Value::Null);
         if let Some(r) = delta.get("reasoning_content").and_then(|r| r.as_str()) {
@@ -295,6 +298,13 @@ fn stream(resp: ureq::http::Response<ureq::Body>, req: &ChatRequest, sink: &mut 
                 out.text.push_str(c);
             }
         }
+    }
+    if !finished {
+        // the connection ended mid-reply: never pass half a reply off as whole
+        if out.text.is_empty() {
+            return Err(Box::new((ModelError::Network("the stream ended before the reply".into()), None)));
+        }
+        out.finish = Some("length".into());
     }
     Ok(Attempt::Done(out))
 }

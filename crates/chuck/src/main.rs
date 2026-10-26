@@ -206,17 +206,27 @@ fn cmd_run(args: &[String]) -> i32 {
     let usd = a.max_usd.unwrap_or_else(|| s.num("fleet_job_usd", 2.0, 0.01, 1000.0));
     cfg.job_quota = Quota { usd: Some(usd), ..cfg.job_quota };
 
+    let header = format!("lead + {} DeepSeek + {} GLM · {} · up to {}", cfg.fleet.deepseek_workers,
+                         cfg.fleet.glm_workers, a.dir.canonicalize().unwrap_or(a.dir.clone()).display(),
+                         chuck_model::fmt_usd(usd));
     let (tx, rx) = channel();
     let rt = Runtime::new(Arc::new(model), cfg, Events(Some(tx)));
     let mut job = Job::new(a.task, &a.dir);
-    let interactive = std::io::stdin().is_terminal();
-    let answers = if interactive {
+    // the Lead's questions are answered from the keyboard; stdin is read on
+    // its own thread so Ctrl-C still stops the job while a question is open
+    if std::io::stdin().is_terminal() {
         let (atx, arx) = channel();
         job.answers = Some(arx);
-        Some(atx)
-    } else {
-        None
-    };
+        std::thread::spawn(move || {
+            for line in std::io::stdin().lock().lines() {
+                let Ok(line) = line else { break };
+                if atx.send(line.trim().to_string()).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+    let asking = job.answers.is_some();
     let stop = job.stop.clone();
     unsafe {
         libc::signal(libc::SIGINT, on_sigint as *const () as libc::sighandler_t);
@@ -236,29 +246,21 @@ fn cmd_run(args: &[String]) -> i32 {
 
     let color = std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none();
     let mut view = term::View::new(color, a.verbose, Box::new(std::io::stdout()));
-    let mut outcome = None;
+    view.header(&header);
     for e in rx.iter() {
         view.show(&e);
         match &e {
-            Event::Ask { .. } => {
-                if let Some(atx) = &answers {
-                    print!("{} ", view.st.bold(">"));
-                    let _ = std::io::stdout().flush();
-                    let mut line = String::new();
-                    let _ = std::io::stdin().lock().read_line(&mut line);
-                    let _ = atx.send(line.trim().to_string());
-                }
+            Event::Ask { .. } if asking => {
+                print!("{} ", view.st.bold(">"));
+                let _ = std::io::stdout().flush();
             }
-            Event::Finished(o) => outcome = Some(o.clone()),
+            Event::Finished(_) => break,
             _ => {}
         }
     }
     let report = worker.join().unwrap_or_else(|_| fail("the job crashed"));
     done.store(true, Ordering::Relaxed);
-    if let Outcome::Answered { text } = &report.outcome {
-        println!("\n{}", text.trim());
-    }
-    match outcome.unwrap_or(report.outcome) {
+    match report.outcome {
         Outcome::Done { .. } | Outcome::Answered { .. } => 0,
         Outcome::Paused { .. } => 2,
         Outcome::Failed { .. } => 1,

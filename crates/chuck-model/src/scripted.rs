@@ -55,8 +55,9 @@ impl ChatModel for Scripted {
             .or_else(|| self.shared.lock().unwrap().pop_front())
             .or_else(|| self.responder.as_ref().map(|f| f(req)))
             .unwrap_or_else(|| "Done.".to_string());
-        for chunk in text.as_bytes().chunks(40) {
-            sink.delta(&String::from_utf8_lossy(chunk));
+        let chars: Vec<char> = text.chars().collect();
+        for chunk in chars.chunks(40) {
+            sink.delta(&chunk.iter().collect::<String>());
         }
         Ok(Outcome {
             usage: Some(Usage { prompt: (req.sent_chars() / 4) as u64 + 50, completion: (text.len() / 4) as u64 + 5,

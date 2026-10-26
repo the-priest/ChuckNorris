@@ -120,6 +120,21 @@ fn first_message(job: &Job) -> String {
     format!("EARLIER IN THIS CHAT:\n{earlier}NOW:\n{}", job.ask)
 }
 
+/// Copies left behind by a job whose process is gone (a crash, a power cut):
+/// nothing will ever merge them, so they only take space.
+fn sweep_stale(store: &Path) {
+    let Ok(rd) = std::fs::read_dir(store) else { return };
+    let me = std::process::id();
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let Some(pid) = name.strip_prefix("job-").and_then(|r| r.split('-').next()).and_then(|p| p.parse::<u32>().ok())
+        else { continue };
+        if pid != me && !Path::new(&format!("/proc/{pid}")).exists() {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
+}
+
 impl Runtime {
     pub fn new(model: Arc<dyn ChatModel>, cfg: RuntimeConfig, events: Events) -> Runtime {
         let kernel = Arc::new(Kernel::new(cfg.slots));
@@ -138,6 +153,7 @@ impl Runtime {
                                    tokens: 0, usd: 0.0 };
             }
         };
+        sweep_stale(&self.cfg.store);
         let ctx = Ctx { kernel: self.kernel.clone(), model: self.model.clone(), cfg: self.cfg.clone(),
                         events: self.events.clone(), stop: job.stop.clone() };
         let lead = self.kernel.spawn(SpawnSpec::new("lead", Role::Lead).quota(self.cfg.job_quota)

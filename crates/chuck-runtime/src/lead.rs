@@ -11,7 +11,7 @@ use chuck_core::evidence::{clip, test_counts};
 use chuck_core::fleet::better;
 use chuck_core::{AgentId, Caps, Criterion, CriterionId, DoneGate, EvidenceKind, Progress, Role, Scale, SpawnSpec,
                  Stall, Submission, Task, Unmet, Verdict};
-use chuck_tools::{bash, RunOpts, Workspace};
+use chuck_tools::{bash, RunOpts, Snapshot, Workspace};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -71,6 +71,11 @@ pub struct LeadRun<'a> {
     store: PathBuf,
     mutated: bool,
     critic_rounds: u32,
+    /// The evidence count and summary when the critic last rejected: `done`
+    /// again with neither changed is refused without spending another review.
+    rejected_at: Option<(usize, String)>,
+    /// The folder as the job found it: the real diff is measured against it.
+    snapshot: Option<Snapshot>,
 }
 
 fn defects_of(body: &str) -> Vec<String> {
@@ -207,9 +212,25 @@ impl<'a> LeadRun<'a> {
     pub fn new(ctx: &'a Ctx, id: AgentId, root: &Path, ask: &str, answers: Option<Receiver<String>>) -> LeadRun<'a> {
         let (tx, rx) = channel();
         let store = ctx.cfg.store.join(format!("job-{}-{}", std::process::id(), id));
+        let snapshot = Snapshot::take(root, &store.join("snapshot")).ok();
         LeadRun { ctx, id, root: root.to_path_buf(), gate: Arc::new(Mutex::new(DoneGate::new(ask, Scale::Small))),
                   tasks: Vec::new(), workers: HashMap::new(), tx, rx, answers, store, mutated: false,
-                  critic_rounds: 0 }
+                  critic_rounds: 0, rejected_at: None, snapshot }
+    }
+
+    /// Workers are on it: a message from one of them will come.
+    fn busy(&self) -> bool {
+        self.tasks.iter().any(|t| t.state == TaskState::Running)
+    }
+
+    /// Submissions waiting for the lead's verdict.
+    fn awaiting_review(&self) -> Vec<String> {
+        self.tasks.iter().filter(|t| t.state == TaskState::Review).map(|t| t.task.id.clone()).collect()
+    }
+
+    /// The real change to the folder since the job began, when measurable.
+    fn measure(&self) -> Option<(String, usize)> {
+        self.snapshot.as_ref().and_then(|s| s.diff(400_000).ok())
     }
 
     fn open_tasks(&self) -> Vec<String> {
@@ -240,7 +261,7 @@ impl<'a> LeadRun<'a> {
             Ok(ws) => ws,
             Err(e) => {
                 k.exit(id, 1, Some("no workspace".into()));
-                return Err(format!("couldn't make {name} a copy of the project: {e:?}"));
+                return Err(format!("couldn't make {name} a copy of the project: {e}"));
             }
         };
         let mut g = task.gate();
@@ -496,7 +517,7 @@ impl<'a> LeadRun<'a> {
                             s.pending = Some(sub);
                             s.state = TaskState::Review;
                         }
-                        return format!("[{tid}: merging failed ({e:?}) — nothing was brought home; try again or do \
+                        return format!("[{tid}: merging failed ({e}) — nothing was brought home; try again or do \
                             it yourself]");
                     }
                 };
@@ -555,12 +576,15 @@ impl<'a> LeadRun<'a> {
             Err(e) => return e,
         };
         {
+            // delegated work is large work: a plan first, and a result in proportion
             let mut g = self.gate.lock().unwrap();
-            g.scale = Scale::Large; // delegated work is large work: a plan, and a result in proportion
-            if let Err(unmet) = g.allow_mutation() {
+            let mut probe = g.clone();
+            probe.scale = Scale::Large;
+            if let Err(unmet) = probe.allow_mutation() {
                 return format!("[assign refused — first: {}]",
                                unmet.iter().map(Unmet::describe).collect::<Vec<_>>().join("; "));
             }
+            g.scale = Scale::Large;
         }
         let unknown: Vec<&String> = spec.after.iter().filter(|d| !self.tasks.iter().any(|t| &t.task.id == *d)).collect();
         if !unknown.is_empty() {
@@ -584,8 +608,11 @@ impl<'a> LeadRun<'a> {
         let mut arg = call.arg.trim().to_string();
         let mut target = self.gate.clone();
         if let Some((first, rest)) = arg.split_once(char::is_whitespace) {
-            if let Some(w) = self.tasks.iter().find(|t| t.task.id == first).and_then(|t| t.workers.first())
-                .and_then(|w| self.workers.get(w)) {
+            if let Some(t) = self.tasks.iter().find(|t| t.task.id == first) {
+                let Some(w) = t.workers.first().and_then(|w| self.workers.get(w)).filter(|w| w.live) else {
+                    return format!("[justify: {first} has no worker on it now (it is {:?}) — nothing to justify]",
+                                   t.state).to_lowercase();
+                };
                 target = w.gate.clone();
                 arg = rest.trim().to_string();
             }
@@ -605,6 +632,7 @@ impl<'a> LeadRun<'a> {
         let Some(rx) = &self.answers else {
             return "[nobody can answer right now: make the most reasonable choice, say which, and go on]".into();
         };
+        while rx.try_recv().is_ok() {} // typed before the question: not an answer to it
         self.ctx.kernel.block(self.id, "waiting for your answer");
         let answer = loop {
             if self.ctx.stop.load(Ordering::Relaxed) || self.ctx.kernel.should_stop(self.id) {
@@ -625,7 +653,7 @@ impl<'a> LeadRun<'a> {
 
     /// The independent pass: a fresh model call that sees only the request,
     /// the criteria, the evidence and the diff.
-    fn critic(&mut self, summary: &str) -> Result<Verdict, Halt> {
+    fn critic(&mut self, summary: &str, real_diff: Option<&str>) -> Result<Verdict, Halt> {
         let input = {
             let g = self.gate.lock().unwrap();
             let mut s = format!("REQUEST:\n{}\n\nACCEPTANCE CRITERIA:\n", g.ask);
@@ -649,7 +677,9 @@ impl<'a> LeadRun<'a> {
                     EvidenceKind::Look { note, .. } => s.push_str(&format!("    {}\n", clip(note, 400))),
                 }
             }
-            s.push_str(&format!("\nFINAL DIFF:\n{}\n\nTHE TEAM'S SUMMARY:\n{}", clip(&patches, 40_000), clip(summary, 4000)));
+            let diff = real_diff.unwrap_or(&patches);
+            s.push_str(&format!("\nFINAL DIFF (the folder now, against how the job found it):\n{}\n\nTHE TEAM'S \
+                SUMMARY:\n{}", clip(diff, 40_000), clip(summary, 4000)));
             s
         };
         let k = &self.ctx.kernel;
@@ -673,12 +703,27 @@ impl<'a> LeadRun<'a> {
                                   open.join(", "))));
         }
         let list = |gaps: &[Unmet]| gaps.iter().map(Unmet::describe).collect::<Vec<_>>().join("\n- ");
-        let gaps = self.gate.lock().unwrap().check_work();
+        if summary.is_empty() {
+            return Ok(Err("[done needs a summary for the user: what changed and how it was verified]".into()));
+        }
+        let real = self.measure();
+        let gaps = {
+            let mut g = self.gate.lock().unwrap();
+            if let Some((patch, lines)) = &real {
+                g.observe(patch.clone(), *lines);
+            }
+            g.check_work()
+        };
         if !gaps.is_empty() {
             return Ok(Err(format!("[done REFUSED by the gate — still missing:\n- {}]", list(&gaps))));
         }
+        let seen = self.gate.lock().unwrap().evidence.len();
+        if self.rejected_at.as_ref().is_some_and(|(n, s)| *n == seen && *s == summary) {
+            return Ok(Err("[done REFUSED: neither the work nor the summary changed since the independent review \
+                rejected it — address its defects first]".into()));
+        }
         self.critic_rounds += 1;
-        let verdict = self.critic(&summary)?;
+        let verdict = self.critic(&summary, real.as_ref().map(|(p, _)| p.as_str()))?;
         let defects = match &verdict {
             Verdict::Rejected(d) => d.clone(),
             Verdict::Accepted => Vec::new(),
@@ -687,6 +732,7 @@ impl<'a> LeadRun<'a> {
         let _ = g.review(self.id, Role::Lead, verdict, "independent critic pass");
         self.ctx.events.emit(Event::Reviewed { task: "job".into(), accepted: defects.is_empty(), defects: defects.clone() });
         if !defects.is_empty() {
+            self.rejected_at = Some((g.evidence.len(), summary.clone()));
             return Ok(Err(format!("[done REFUSED: the independent review (round {}) rejected the result:\n- {}\n\
                 Fix each one, verify again, then ```done```]", self.critic_rounds, defects.join("\n- "))));
         }
@@ -759,6 +805,9 @@ impl<'a> LeadRun<'a> {
                 let _ = j.join();
             }
         }
+        if let Some(s) = &self.snapshot {
+            s.remove();
+        }
         let _ = std::fs::remove_dir_all(&self.store);
         out
     }
@@ -811,14 +860,23 @@ impl<'a> LeadRun<'a> {
             }
             let waiting = !self.open_tasks().is_empty();
             if !r.acted() {
-                if !self.mutated && self.tasks.is_empty() {
+                let reviews = self.awaiting_review();
+                if said.trim().is_empty() {
+                    fb.push("[your reply was empty — answer the user, or carry on with the tools]".into());
+                } else if !self.mutated && self.tasks.is_empty() {
                     return Outcome::Answered { text: said.trim().to_string() };
-                }
-                if waiting {
+                } else if !reviews.is_empty() {
+                    // the workers wait on you: waiting on them would wait forever
+                    fb.push(format!("[{} waiting for your review — ```review <task> accept``` or ```review <task> \
+                        reject``` + `- <defect>` lines]", reviews.join(", ")));
+                } else if self.busy() {
                     match self.wait_for_worker() {
                         Ok(m) => fb.extend(m),
                         Err(h) => return self.pause(&h.describe()),
                     }
+                } else if waiting {
+                    fb.push(format!("[{} can't start until its dependencies are merged — review, reassign or \
+                        do them]", self.open_tasks().join(", ")));
                 } else {
                     fb.push("[no tool calls. Files changed, so only ```done``` finishes this — verify the whole \
                         result, then ```done``` + a summary; the gate tells you what is missing]".into());

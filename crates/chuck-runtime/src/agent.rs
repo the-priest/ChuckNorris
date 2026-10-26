@@ -53,13 +53,33 @@ impl Halt {
 #[derive(Clone, Debug, Default)]
 pub struct Convo {
     pub msgs: Vec<Value>,
+    /// The task as given, kept apart so trimming notes never touch it.
+    first: String,
     trimmed: usize,
+}
+
+/// Keep the head and the tail of an over-long message (errors live at the
+/// end, what was asked lives at the start).
+fn squeeze(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let keep = max.saturating_sub(80) / 2;
+    let mut a = keep;
+    while !s.is_char_boundary(a) {
+        a -= 1;
+    }
+    let mut b = s.len() - keep;
+    while !s.is_char_boundary(b) {
+        b += 1;
+    }
+    format!("{}\n… ({} characters left out to fit the context) …\n{}", &s[..a], b - a, &s[b..])
 }
 
 impl Convo {
     pub fn new(system: &str, first: &str) -> Convo {
         Convo { msgs: vec![json!({"role": "system", "content": system}), json!({"role": "user", "content": first})],
-                trimmed: 0 }
+                first: first.to_string(), trimmed: 0 }
     }
 
     pub fn user(&mut self, text: &str) {
@@ -74,7 +94,9 @@ impl Convo {
         self.msgs.iter().map(|m| m["content"].as_str().map_or(0, str::len)).sum()
     }
 
-    /// Drop the oldest assistant/user pairs until it fits.
+    /// Fit the context: drop the oldest assistant/user pairs (never the
+    /// system prompt, the task, or the latest exchange); if one message is
+    /// still too big on its own, keep its head and tail.
     pub fn fit(&mut self, max_chars: usize) {
         while self.chars() > max_chars && self.msgs.len() > 4 {
             self.msgs.drain(2..4);
@@ -83,10 +105,17 @@ impl Convo {
         if self.trimmed > 0 {
             let note = format!("[{} earlier messages were trimmed to fit the context; the gate keeps every \
                 piece of evidence, so re-read files rather than relying on memory]", self.trimmed);
-            if let Some(first) = self.msgs.get_mut(1) {
-                let text = first["content"].as_str().unwrap_or("");
-                let base = text.split("\n\n[").next().unwrap_or(text).to_string();
-                first["content"] = Value::String(format!("{base}\n\n{note}"));
+            self.msgs[1]["content"] = Value::String(format!("{}\n\n{note}", self.first));
+        }
+        let total = self.chars();
+        if total > max_chars {
+            let over = total - max_chars;
+            if let Some(big) = self.msgs.iter_mut().skip(1)
+                .max_by_key(|m| m["content"].as_str().map_or(0, str::len))
+            {
+                let text = big["content"].as_str().unwrap_or("").to_string();
+                let target = text.len().saturating_sub(over).max(2000);
+                big["content"] = Value::String(squeeze(&text, target));
             }
         }
     }
@@ -232,12 +261,17 @@ pub fn run_worker(ctx: Ctx, w: WorkerSpec) {
             let r = exec.run(&reply);
             let mut fb = r.feedback.clone();
             if let Some(report) = &r.submit {
-                let sub = w.gate.lock().unwrap().submit();
+                // judged on the copy as it really is, not on the history of edits
+                let (diff, lines) = w.ws.diff(400_000).unwrap_or_else(|e| (format!("(diff failed: {e})"), 0));
+                let sub = {
+                    let mut g = w.gate.lock().unwrap();
+                    g.observe(diff.clone(), lines);
+                    g.submit()
+                };
                 match sub {
                     Err(gaps) => fb.push(format!("[submission REFUSED by the gate — still missing:\n- {}\nFinish \
                         these, then submit again]", describe(&gaps).join("\n- "))),
                     Ok(()) => {
-                        let (diff, lines) = w.ws.diff(200_000).unwrap_or_else(|e| (format!("(diff failed: {e:?})"), 0));
                         let evidence = w.gate.lock().unwrap().evidence.clone();
                         ctx.events.emit(Event::Submitted { task: w.task.id.clone(), worker: w.id, lines });
                         let s = Submission { task: w.task.id.clone(), worker: w.id, role: w.role, report: report.clone(),
@@ -317,5 +351,31 @@ mod tests {
         assert!(c.msgs.last().unwrap()["content"].as_str().unwrap().starts_with("result 9"));
         c.fit(1000);
         assert_eq!(c.msgs[1]["content"].as_str().unwrap().matches("trimmed").count(), 1);
+    }
+
+    #[test]
+    fn the_task_survives_trimming_even_with_brackets_in_it() {
+        let task = "fix it\n\n[see the log] below";
+        let mut c = Convo::new("sys", task);
+        for i in 0..10 {
+            c.assistant(&"a".repeat(200));
+            c.user(&format!("r{i}"));
+        }
+        c.fit(1500);
+        c.fit(1500);
+        let first = c.msgs[1]["content"].as_str().unwrap();
+        assert!(first.starts_with(task), "{first}");
+        assert_eq!(first.matches("trimmed").count(), 1);
+    }
+
+    #[test]
+    fn one_huge_message_is_squeezed_not_sent_whole() {
+        let mut c = Convo::new("sys", "task");
+        c.assistant("ok");
+        c.user(&format!("HEAD{}TAIL", "x".repeat(50_000)));
+        c.fit(10_000);
+        let last = c.msgs.last().unwrap()["content"].as_str().unwrap();
+        assert!(c.chars() <= 10_200, "{}", c.chars());
+        assert!(last.starts_with("HEAD") && last.ends_with("TAIL"));
     }
 }
