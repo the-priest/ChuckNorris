@@ -162,7 +162,7 @@ crates/
   chuck-tools     tools + evidence capture, fenced-block parser, cow workspaces, checkpoints
   chuck-store     settings, chats, audit ledger, missions/hibernate stores, crash log
   chuck-voice     TTS/STT sidecar control, audio player probe
-  chuck-ui        GTK4 + libadwaita front end
+  chuck-ui        GTK4 + libadwaita: conversation, work lane, fleet (/top), Done gate, settings
   chuck           the binary: `chuck` (window), `chuck run "task"` (headless), `chuck top`
 ```
 

@@ -9,6 +9,7 @@ pub mod events;
 pub mod exec;
 pub mod lead;
 pub mod prompts;
+pub mod setup;
 
 pub use agent::{Ctx, Halt};
 pub use events::{Event, Events, Outcome};

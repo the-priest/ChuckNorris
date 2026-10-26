@@ -35,7 +35,7 @@ mkdir -p "$APP_DIR" "$ASSET_DIR" "${HOME}/.local/bin" "${HOME}/.local/share/appl
 step "installing GTK4 + tools (screenshot, polkit, cleanup, GPU, pkgfile, voice, video)"
 SESS="${XDG_SESSION_TYPE:-}"; DE="${XDG_CURRENT_DESKTOP:-}"
 if command -v pacman >/dev/null; then
-  PKGS="gcc python-gobject python-cairo gtk4 libadwaita adwaita-icon-theme polkit pciutils pacman-contrib pkgfile espeak-ng yt-dlp alsa-utils python-pip whois bind traceroute wget openbsd-netcat nodejs shellcheck ruff bubblewrap"
+  PKGS="gcc pkgconf python-gobject python-cairo gtk4 libadwaita adwaita-icon-theme polkit pciutils pacman-contrib pkgfile espeak-ng yt-dlp alsa-utils python-pip whois bind traceroute wget openbsd-netcat nodejs shellcheck ruff bubblewrap"
   if [ "$SESS" = "wayland" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then PKGS="$PKGS grim"; else PKGS="$PKGS scrot"; fi
   case "$DE" in *KDE*|*kde*|*plasma*|*Plasma*) PKGS="$PKGS spectacle" ;; esac
   # shellcheck disable=SC2086
@@ -46,12 +46,12 @@ if command -v pacman >/dev/null; then
   sudo pkgfile --update 2>/dev/null || true
 elif command -v apt-get >/dev/null; then
   sudo apt-get update
-  PKGS="build-essential python3-venv python3-gi python3-gi-cairo gir1.2-gtk-4.0 gir1.2-adw-1 adwaita-icon-theme libgtk-4-1 libadwaita-1-0 policykit-1 pciutils espeak-ng yt-dlp whois dnsutils traceroute wget netcat-openbsd bubblewrap"
+  PKGS="build-essential pkg-config libgtk-4-dev libadwaita-1-dev python3-venv python3-gi python3-gi-cairo gir1.2-gtk-4.0 gir1.2-adw-1 adwaita-icon-theme libgtk-4-1 libadwaita-1-0 policykit-1 pciutils espeak-ng yt-dlp whois dnsutils traceroute wget netcat-openbsd bubblewrap"
   if [ "$SESS" = "wayland" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then PKGS="$PKGS grim"; else PKGS="$PKGS scrot"; fi
   # shellcheck disable=SC2086
   sudo apt-get install -y $PKGS || die "apt install failed"
 elif command -v dnf >/dev/null; then
-  PKGS="gcc python3-gobject python3-cairo gtk4 libadwaita adwaita-icon-theme polkit pciutils espeak-ng yt-dlp whois bind-utils traceroute wget nmap-ncat bubblewrap"
+  PKGS="gcc pkgconf-pkg-config gtk4-devel libadwaita-devel python3-gobject python3-cairo gtk4 libadwaita adwaita-icon-theme polkit pciutils espeak-ng yt-dlp whois bind-utils traceroute wget nmap-ncat bubblewrap"
   if [ "$SESS" = "wayland" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then PKGS="$PKGS grim"; else PKGS="$PKGS scrot"; fi
   # shellcheck disable=SC2086
   sudo dnf install -y $PKGS || die "dnf install failed"
@@ -228,9 +228,22 @@ if [ "${CHUCK_RUST:-1}" = "1" ]; then
     TARGET="${HOME}/.cache/chuck/cargo-target"
     if ( cd "$RUST_SRC" && CARGO_TARGET_DIR="$TARGET" cargo build --release --locked -p chuck ); then
       install -m 755 "${TARGET}/release/chuck" "${HOME}/.local/bin/chuck"
+      cat > "${HOME}/.local/share/applications/org.thepriest.chuck.fleet.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Chuck Fleet
+GenericName=AI engineering team
+Comment=One lead and eight workers on SiliconFlow; work ends only through the Done gate
+Exec=${HOME}/.local/bin/chuck
+Icon=org.thepriest.chucknorris
+Terminal=false
+Categories=Development;Utility;
+StartupNotify=true
+EOF
       ok "$("${HOME}/.local/bin/chuck" version) installed — try: chuck run \"what to do\" (in a project folder)"
     else
-      info "the Rust build failed (output above) — the window is installed and works without it"
+      info "the Rust build failed (output above) — the Chuck window is installed and works without it"
+      info "(the fleet window needs GTK 4.14+ and libadwaita 1.5+)"
     fi
   fi
 else

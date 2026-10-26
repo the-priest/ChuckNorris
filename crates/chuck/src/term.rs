@@ -156,7 +156,7 @@ impl View {
                     st.dim(&format!("  gate: {phase} — {} open: {}", unmet.len(), one_line(&unmet.join("; "), 120)))
                 }
             }
-            Event::Gate { .. } | Event::Thinking { .. } | Event::Delta { .. } => return,
+            Event::Gate { .. } | Event::Board { .. } | Event::Thinking { .. } | Event::Delta { .. } => return,
             Event::Notice { id, text } => {
                 let who = self.who(*id);
                 st.warn(&format!("  ! {who}: {text}"))

@@ -24,6 +24,8 @@ pub enum Event {
     Action { id: AgentId, tool: String, arg: String, ok: bool, summary: String },
     Output { id: AgentId, chunk: String },
     Gate { id: AgentId, task: Option<String>, phase: String, unmet: Vec<String> },
+    /// The job's criteria as they stand: (id, text, verify, evidence labels).
+    Board { criteria: Vec<(String, String, Option<String>, Vec<String>)> },
     Assigned { task: String, title: String, worker: AgentId, role: Role },
     Submitted { task: String, worker: AgentId, lines: usize },
     Reviewed { task: String, accepted: bool, defects: Vec<String> },

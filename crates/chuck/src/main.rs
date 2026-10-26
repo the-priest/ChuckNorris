@@ -7,11 +7,9 @@
 
 mod term;
 
-use chuck_core::{FleetConfig, Quota};
-use chuck_model::{is_siliconflow, ChatModel, Reasoning, SiliconFlow, DEFAULT_BASE};
-use chuck_runtime::{Event, Events, Job, Outcome, Runtime, RuntimeConfig};
-use chuck_sandbox::Access;
-use chuck_store::{Ledger, Settings, Spend};
+use chuck_model::ChatModel;
+use chuck_runtime::{setup, Event, Events, Job, Outcome, Runtime};
+use chuck_store::{Ledger, Settings};
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -25,6 +23,7 @@ const HELP: &str = "\
 chuck — one Lead and eight workers on SiliconFlow; work ends only through the Done gate.
 
 USAGE
+  chuck             the fleet window (in the folder you start it from)
   chuck run [-C DIR] [--max-usd N] [--verbose] \"what to do\"
   chuck models      show the fleet's models, checked against your account
   chuck key         save your SiliconFlow API key (shared with the Chuck window)
@@ -33,7 +32,8 @@ USAGE
                     (or checkpoint N); a rewind can itself be undone
   chuck version
 
-  The window is `chucknorris` while the Rust window is being built.
+  `chucknorris` is the full Chuck window (research, voice, chats); `chuck` is
+  the fleet's own window.
 
 RUN
   -C, --dir DIR     the project folder (default: the current folder)
@@ -59,48 +59,8 @@ fn fail(msg: &str) -> ! {
     std::process::exit(1);
 }
 
-fn is_local(base: &str) -> bool {
-    let rest = base.split("://").nth(1).unwrap_or("");
-    let host = rest.split('/').next().unwrap_or("");
-    let host = host.rsplit_once(':').map_or(host, |(h, p)| if p.chars().all(|c| c.is_ascii_digit()) { h } else { host });
-    matches!(host, "127.0.0.1" | "localhost" | "[::1]")
-}
-
-/// The one client every agent shares. SiliconFlow only (a server on this
-/// machine is allowed for testing).
-fn client(s: &Settings) -> SiliconFlow {
-    let Some(key) = s.api_key() else {
-        fail("no SiliconFlow API key yet — run `chuck key`, or add it in the window's Settings")
-    };
-    let base = s.str("siliconflow_base_url").unwrap_or(DEFAULT_BASE).to_string();
-    if !is_siliconflow(&base) && !is_local(&base) {
-        fail(&format!("{base} isn't a SiliconFlow endpoint: Chuck's fleet talks to SiliconFlow only \
-            (clear \"API base URL\" in Settings)"));
-    }
-    let stall = Duration::from_secs(s.num("stall_seconds", 90.0, 20.0, 600.0) as u64);
-    SiliconFlow::new(&base, key, stall, is_local(&base)).unwrap_or_else(|e| fail(&e.to_string()))
-}
-
-/// The folder's access as the window stores it (`folder_access`: path → mode).
-fn access_of(s: &Settings, folder: &std::path::Path) -> Access {
-    let Some(map) = s.map.get("folder_access").and_then(|v| v.as_object()) else { return Access::Full };
-    map.iter().find(|(k, _)| {
-        let p = std::path::Path::new(k.as_str());
-        p == folder || p.canonicalize().is_ok_and(|c| c == folder)
-    }).and_then(|(_, v)| v.as_str()).map_or(Access::Full, Access::parse)
-}
-
-fn fleet(s: &Settings) -> FleetConfig {
-    let mut f = FleetConfig::default();
-    if let Some(m) = s.str("fleet_deepseek_model") {
-        f.deepseek_model = m.to_string();
-    }
-    if let Some(m) = s.str("fleet_glm_model") {
-        f.glm_model = m.to_string();
-    }
-    f.deepseek_workers = s.num("fleet_deepseek_workers", 4.0, 0.0, 4.0) as u8;
-    f.glm_workers = s.num("fleet_glm_workers", 4.0, 0.0, 4.0) as u8;
-    f
+fn client(s: &Settings) -> chuck_model::SiliconFlow {
+    setup::client(s).unwrap_or_else(|e| fail(&e))
 }
 
 fn cmd_key() {
@@ -226,7 +186,7 @@ fn cmd_ledger(n: usize) -> i32 {
 fn cmd_models() {
     let s = Settings::load();
     let c = client(&s);
-    let mut f = fleet(&s);
+    let mut f = setup::fleet(&s);
     let live = c.list_models().unwrap_or_else(|e| fail(&e.to_string()));
     let changes = f.resolve(&live);
     let have = |m: &str| live.iter().any(|x| x == m);
@@ -282,50 +242,16 @@ fn parse_run(args: &[String]) -> Result<RunArgs, String> {
 fn cmd_run(args: &[String]) -> i32 {
     let a = parse_run(args).unwrap_or_else(|e| fail(&e));
     let s = Settings::load();
-    if let Some(p) = &s.problem {
-        eprintln!("chuck: {p}");
-    }
-    let model = client(&s);
-    let mut cfg = RuntimeConfig { fleet: fleet(&s), ..RuntimeConfig::default() };
-    if let Ok(live) = model.list_models() {
-        for (from, to) in cfg.fleet.resolve(&live) {
-            eprintln!("chuck: {from} isn't on your account; using {to}");
-        }
-    }
-    cfg.reasoning = Reasoning {
-        budget: s.num("reasoning_budget", 4096.0, 0.0, 32768.0) as u32,
-        max_think_secs: s.num("max_think_seconds", 120.0, 0.0, 1800.0) as u32,
-    };
-    let mut usd = a.max_usd.unwrap_or_else(|| s.num("fleet_job_usd", 2.0, 0.01, 1000.0));
-    // the window's evidence chain and day/month spend: one history, one budget
-    let spend = Arc::new(Spend::at(&Spend::default_path()));
-    cfg.day_limit = s.num("budget_day_usd", 0.0, 0.0, 100_000.0);
-    cfg.month_limit = s.num("budget_month_usd", 0.0, 0.0, 1_000_000.0);
-    if let Some(o) = spend.over(cfg.day_limit, cfg.month_limit) {
-        fail(&format!("the {} spending limit ({}) is reached ({} spent) — raise it in the window's Settings to go on",
-                      if o.scope == "day" { "daily" } else { "monthly" }, chuck_model::fmt_usd(o.limit),
-                      chuck_model::fmt_usd(o.spent)));
-    }
-    if let Some(left) = spend.left(cfg.day_limit, cfg.month_limit) {
-        usd = usd.min(left);
-    }
-    cfg.spend = Some(spend);
-    cfg.audit = Some(Arc::new(Ledger::at(&Ledger::default_path())));
-    if s.map.get("checkpoints").and_then(|v| v.as_bool()) != Some(false) {
-        cfg.checkpoints = Some(chuck_store::checkpoint::default_store());
-    }
-    cfg.job_quota = Quota { usd: Some(usd), ..cfg.job_quota };
-
     let folder = a.dir.canonicalize().unwrap_or_else(|_| a.dir.clone());
-    cfg.access = access_of(&s, &folder);
-    if cfg.access != Access::Full && !cfg.bwrap {
-        eprintln!("chuck: this folder is {}, which needs bubblewrap to run commands — install it \
-            (pacman -S bubblewrap / apt install bubblewrap); until then commands are refused", cfg.access.label());
+    let setup::Setup { model, cfg, usd, notes } = setup::from_settings(&s, &folder, a.max_usd)
+        .unwrap_or_else(|e| fail(&e));
+    for n in notes {
+        eprintln!("chuck: {n}");
     }
     let header = format!("lead + {} DeepSeek + {} GLM · {} ({}) · up to {}", cfg.fleet.deepseek_workers,
                          cfg.fleet.glm_workers, folder.display(), cfg.access.label(), chuck_model::fmt_usd(usd));
     let (tx, rx) = channel();
-    let rt = Runtime::new(Arc::new(model), cfg, Events(Some(tx)));
+    let rt = Runtime::new(model, cfg, Events(Some(tx)));
     let mut job = Job::new(a.task, &a.dir);
     // the Lead's questions are answered from the keyboard; stdin is read on
     // its own thread so Ctrl-C still stops the job while a question is open
@@ -407,6 +333,9 @@ fn main() {
             println!("chuck {VERSION}");
             0
         }
+        None if std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some() => {
+            chuck_ui::run(chuck_ui::Options::default())
+        }
         None | Some("help" | "--help" | "-h") => {
             println!("{HELP}");
             0
@@ -437,13 +366,5 @@ mod tests {
         assert!(parse_run(&v(&["--bogus", "x"])).is_err());
         assert!(parse_run(&v(&[])).is_err());
         assert_eq!(parse_run(&v(&["--", "-v", "means", "verbose"])).unwrap().task, "-v means verbose");
-    }
-
-    #[test]
-    fn only_siliconflow_or_this_machine() {
-        assert!(is_local("http://127.0.0.1:8080/v1"));
-        assert!(is_local("http://localhost/v1"));
-        assert!(!is_local("https://api.openai.com/v1"));
-        assert!(!is_local("https://localhost.evil.com/v1"));
     }
 }

@@ -239,8 +239,6 @@ fn describe(gaps: &[Unmet]) -> Vec<String> {
 pub fn run_worker(ctx: Ctx, w: WorkerSpec) {
     let model = ctx.cfg.fleet.model_for(w.role).to_string();
     let root = w.ws.work.display().to_string();
-    ctx.events.emit(Event::AgentStarted { id: w.id, role: w.role, name: w.name.clone(), model: model.clone(),
-                                          task: Some(w.task.id.clone()) });
     let mut convo = Convo::new(&prompts::worker(w.role, &w.name, &model, &w.task, &root),
                                &format!("{}\n\nYour copy of the project: {root}", prompts::task_brief(&w.task)));
     let mut progress = Progress::default();

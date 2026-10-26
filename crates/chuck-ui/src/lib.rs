@@ -1,14 +1,18 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! chuck-ui — the GTK4 window: talk to the Lead, watch the fleet work, see
+//! the Done gate fill in.
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+mod md;
+mod style;
+mod window;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
+pub use window::Options;
+
+use adw::prelude::*;
+
+/// Open the window; returns when it's closed.
+pub fn run(opts: Options) -> i32 {
+    let app = adw::Application::builder().application_id("org.thepriest.chuck.fleet")
+        .flags(gtk::gio::ApplicationFlags::NON_UNIQUE).build();
+    app.connect_activate(move |app| window::build(app, opts.clone()));
+    app.run_with_args::<&str>(&[]).value()
 }

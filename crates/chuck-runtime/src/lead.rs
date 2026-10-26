@@ -337,6 +337,10 @@ impl<'a> LeadRun<'a> {
         let spec = WorkerSpec { id, role, name: name.clone(), task: task.clone(), ws: ws.clone(), gate: gate.clone(),
                                 stop: stop.clone(), to_lead: self.tx.clone(), inbox: wrx };
         let ctx = self.ctx.clone();
+        // announced here, before Assigned: whoever listens knows the name first
+        self.ctx.events.emit(Event::AgentStarted { id, role, name: name.clone(),
+                                                   model: self.ctx.cfg.fleet.model_for(role).to_string(),
+                                                   task: Some(task.id.clone()) });
         let join = std::thread::Builder::new().name(format!("chuck-{name}"))
             .spawn(move || run_worker(ctx, spec))
             .map_err(|e| format!("couldn't start {name}: {e}"))?;
@@ -982,6 +986,8 @@ impl<'a> LeadRun<'a> {
                 }
                 ctx.events.emit(Event::Gate { id: self.id, task: None, phase: g.phase.label().into(),
                                               unmet: g.check().iter().map(Unmet::describe).collect() });
+                ctx.events.emit(Event::Board { criteria: g.board().into_iter()
+                    .map(|(c, ev)| (c.id.to_string(), c.text, c.verify, ev)).collect() });
             }
             fb.push(exec.gate_line());
             let open = self.open_tasks();

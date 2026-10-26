@@ -288,8 +288,21 @@ one **Lead** (DeepSeek-V4.1-Flash) that talks to you, writes the acceptance crit
 and owns "done", and up to **four DeepSeek and four GLM-5.3-Flash workers**. Each worker is its own
 process and thread, working in its own copy of your project.
 
+<img src="assets/screenshots/fleet-run.png" alt="The Chuck Fleet window: the Lead plans and assigns two tasks, a DeepSeek and a GLM worker do them in parallel, each is reviewed, merged and verified, the independent review accepts it, and the Done gate on the right shows every criterion with its evidence" width="100%">
+
+Run `chuck` (or open **Chuck Fleet**) for the fleet's window:
+- the conversation with the Lead, with every agent's work underneath;
+- the fleet itself, live, with each agent's state, task and spend;
+- the Done gate, with each criterion and its evidence.
+
+Critical commands stop and ask for your yes right in the conversation. A finished job can be rewound
+with one click.
+
+<img src="assets/screenshots/fleet-critical.png" alt="A critical command (curl piped into bash) waiting in the conversation for the user to press Run it or Refuse" width="100%">
+
 ```bash
 cd ~/code/my-project
+chuck                 # the window
 chuck run "the parser crashes on empty input: fix it and add a test"
 chuck models          # are the fleet's models on your account?
 chuck key             # save the API key (the window shares it)
@@ -331,7 +344,8 @@ Before every step that changes your folder, `chuck` takes a checkpoint in the wi
 history. `chuck rewind` puts the whole folder back to before the last job, including whatever shell
 commands changed, and a rewind can itself be undone.
 
-What isn't ported yet: the Rust window (the window is still the Python app), daemons and voice. [ARCHITECTURE.md](ARCHITECTURE.md) has the
+What isn't ported yet: daemons and voice. The Chuck window (`chucknorris`), with research, voice and
+saved chats, is still the Python app; Chuck Fleet is the new window built around the fleet. [ARCHITECTURE.md](ARCHITECTURE.md) has the
 design and the plan.
 
 Arch and CachyOS are first-class; apt and dnf are supported. The installer sets up GTK4 and libadwaita, bubblewrap, a screenshot tool, the local voice models (about 600 MB, skip with `CHUCK_VOICE=0`) and the linters Chuck uses to check code. At runtime Chuck needs only Python's standard library and GTK; everything optional degrades gracefully when it's missing.
