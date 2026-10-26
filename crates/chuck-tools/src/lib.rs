@@ -1,14 +1,12 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! chuck-tools — what agents do on the machine: read their blocks, change
+//! files safely, run commands, and work in isolated copies.
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub mod blocks;
+pub mod cow;
+pub mod fs;
+pub mod run;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub use blocks::{clean_head, edit_pairs, file_blocks, prose, tool_blocks, FileBlock, ToolBlock};
+pub use cow::{ChangeKind, MergeResult, Workspace};
+pub use fs::{delete_file, edit_file, read_page, safe, unified, write_file, Change, FsError};
+pub use run::{bash, RunOpts, RunResult, Wrap};

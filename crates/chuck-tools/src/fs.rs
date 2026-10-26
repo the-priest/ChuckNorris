@@ -1,0 +1,364 @@
+//! Files inside a working folder, the way a careful engineer edits them.
+
+use crate::blocks::edit_pairs;
+use std::fs;
+use std::io::Read;
+use std::path::{Component, Path, PathBuf};
+
+pub const MAX_FILE_BYTES: usize = 2 << 20;
+
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum FsError {
+    #[error("{0}")]
+    Refused(String),
+    #[error("{0}")]
+    Failed(String),
+}
+
+/// Resolve `rel` inside `root`. Absolute paths are accepted only when they
+/// already point inside the folder; `..`, `~` elsewhere, backslashes and
+/// symlinks that lead out are refused (never quietly rewritten).
+pub fn safe(root: &Path, rel: &str) -> Result<PathBuf, FsError> {
+    let rel = rel.trim();
+    if rel.is_empty() {
+        return Err(FsError::Refused("no filename given".into()));
+    }
+    let base = root.canonicalize().map_err(|e| FsError::Failed(format!("no such folder {}: {e}", root.display())))?;
+    let rel_owned: String;
+    let rel = if rel.starts_with('/') || rel.starts_with('~') {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let abs = if let Some(r) = rel.strip_prefix('~') { format!("{home}{r}") } else { rel.to_string() };
+        let abs = PathBuf::from(abs);
+        let resolved = resolve_existing(&abs);
+        match resolved.strip_prefix(&base) {
+            Ok(r) if !r.as_os_str().is_empty() => {
+                rel_owned = r.to_string_lossy().into_owned();
+                rel_owned.as_str()
+            }
+            _ => return Err(FsError::Refused(format!("give a path inside the project ({}), not {rel:?}",
+                                                     base.display()))),
+        }
+    } else {
+        rel
+    };
+    if rel.contains('\\') {
+        return Err(FsError::Refused("use forward slashes".into()));
+    }
+    for part in rel.split('/').filter(|p| !p.is_empty()) {
+        if part.chars().all(|c| c == '.') || part.starts_with("..") || part.contains('\0') {
+            return Err(FsError::Refused(format!("path segment not allowed: {part:?}")));
+        }
+    }
+    let p = resolve_existing(&base.join(rel));
+    if p != base && !p.starts_with(&base) {
+        return Err(FsError::Refused(format!("path escapes the project: {rel}")));
+    }
+    Ok(p)
+}
+
+/// Canonicalize the longest existing prefix (so a symlink in the middle is
+/// followed), then append the rest.
+fn resolve_existing(p: &Path) -> PathBuf {
+    let mut existing = p.to_path_buf();
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        if let Ok(c) = existing.canonicalize() {
+            let mut out = c;
+            for t in tail.iter().rev() {
+                out.push(t);
+            }
+            return normalize(&out);
+        }
+        match (existing.file_name().map(|s| s.to_os_string()), existing.parent()) {
+            (Some(name), Some(parent)) => {
+                tail.push(name);
+                existing = parent.to_path_buf();
+            }
+            _ => return normalize(p),
+        }
+    }
+}
+
+fn normalize(p: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+pub fn read_keep(p: &Path) -> std::io::Result<String> {
+    let mut s = String::new();
+    fs::File::open(p)?.read_to_string(&mut s)?;
+    Ok(s)
+}
+
+/// "\r\n" when every line of the file ends in CRLF.
+pub fn eol_of(text: &str) -> &'static str {
+    let n = text.matches('\n').count();
+    if n > 0 && text.matches("\r\n").count() == n { "\r\n" } else { "\n" }
+}
+
+fn with_eol(text: &str, eol: &str) -> String {
+    if eol == "\n" { text.to_string() } else { text.replace("\r\n", "\n").replace('\n', eol) }
+}
+
+/// Before/after of one change, for the diff, the checkpoint and the evidence.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Change {
+    pub rel: String,
+    pub path: PathBuf,
+    pub before: Option<String>,
+    pub after: Option<String>,
+}
+
+impl Change {
+    pub fn diff(&self) -> (String, usize, usize) {
+        unified(&self.rel, self.before.as_deref(), self.after.as_deref())
+    }
+}
+
+/// Write a whole file. A Windows file stays a Windows file; a script is made
+/// executable.
+pub fn write_file(root: &Path, rel: &str, content: &str) -> Result<Change, FsError> {
+    let p = safe(root, rel)?;
+    if content.len() > MAX_FILE_BYTES {
+        return Err(FsError::Refused("file too large (2 MB cap)".into()));
+    }
+    let before = if p.is_file() { read_keep(&p).ok() } else { None };
+    let mut data = content.to_string();
+    if !data.contains('\r') {
+        if let Some(b) = &before {
+            data = with_eol(&data, eol_of(b));
+        }
+    }
+    if let Some(parent) = p.parent() {
+        fs::create_dir_all(parent).map_err(|e| FsError::Failed(format!("couldn't write {rel}: {e}")))?;
+    }
+    fs::write(&p, &data).map_err(|e| FsError::Failed(format!("couldn't write {rel}: {e}")))?;
+    if p.extension().is_some_and(|e| e == "sh") || data.starts_with("#!") {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(m) = fs::metadata(&p) {
+            let mut perm = m.permissions();
+            perm.set_mode(perm.mode() | 0o755);
+            let _ = fs::set_permissions(&p, perm);
+        }
+    }
+    Ok(Change { rel: rel_of(root, &p), path: p, before, after: Some(data) })
+}
+
+fn rel_of(root: &Path, p: &Path) -> String {
+    let base = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    p.strip_prefix(&base).map(|r| r.to_string_lossy().into_owned()).unwrap_or_else(|_| p.display().to_string())
+}
+
+/// Locate `needle` ignoring trailing whitespace on each line, only when the
+/// match is unique.
+fn loose_find(hay: &str, needle: &str) -> Option<(usize, usize)> {
+    let hl: Vec<&str> = hay.split('\n').collect();
+    let nl: Vec<&str> = needle.split('\n').map(str::trim_end).collect();
+    if nl.len() > hl.len() {
+        return None;
+    }
+    let mut hit = None;
+    for i in 0..=hl.len() - nl.len() {
+        if hl[i..i + nl.len()].iter().map(|l| l.trim_end()).eq(nl.iter().copied()) {
+            if hit.is_some() {
+                return None;
+            }
+            hit = Some(i);
+        }
+    }
+    let i = hit?;
+    let start: usize = hl[..i].iter().map(|l| l.len() + 1).sum();
+    let end = start + hl[i..i + nl.len()].join("\n").len();
+    Some((start, end))
+}
+
+/// Apply SEARCH/REPLACE blocks: all or nothing. An empty SEARCH on a file
+/// that doesn't exist creates it.
+pub fn edit_file(root: &Path, rel: &str, body: &str) -> Result<Change, FsError> {
+    let p = safe(root, rel)?;
+    let blocks = edit_pairs(body);
+    if blocks.is_empty() {
+        return Err(FsError::Refused("no SEARCH/REPLACE block found — use <<<<<<< SEARCH / ======= / >>>>>>> REPLACE".into()));
+    }
+    if !p.exists() {
+        if blocks.len() == 1 && blocks[0].0.trim().is_empty() {
+            return write_file(root, rel, &format!("{}\n", blocks[0].1));
+        }
+        return Err(FsError::Refused(format!("no such file: {rel} (read it first, or write it)")));
+    }
+    let raw = read_keep(&p).map_err(|e| FsError::Failed(format!("couldn't read {rel}: {e}")))?;
+    let eol = eol_of(&raw);
+    let mut text = if eol == "\r\n" { raw.replace("\r\n", "\n") } else { raw.clone() };
+    for (n, (search, repl)) in blocks.iter().enumerate() {
+        let n = n + 1;
+        if search.trim().is_empty() {
+            return Err(FsError::Refused(format!("block {n}: empty SEARCH on an existing file")));
+        }
+        match text.matches(search.as_str()).count() {
+            1 => text = text.replacen(search.as_str(), repl, 1),
+            0 => match loose_find(&text, search) {
+                Some((a, b)) => text = format!("{}{}{}", &text[..a], repl, &text[b..]),
+                None => return Err(FsError::Refused(format!(
+                    "block {n}: SEARCH text not found in {rel} — read the file and quote the current lines exactly"))),
+            },
+            c => return Err(FsError::Refused(format!(
+                "block {n}: SEARCH matches {c} places in {rel} — include more surrounding lines so it is unique"))),
+        }
+    }
+    let data = with_eol(&text, eol);
+    fs::write(&p, &data).map_err(|e| FsError::Failed(format!("couldn't edit {rel}: {e}")))?;
+    Ok(Change { rel: rel_of(root, &p), path: p, before: Some(raw), after: Some(data) })
+}
+
+pub fn delete_file(root: &Path, rel: &str) -> Result<Change, FsError> {
+    let p = safe(root, rel)?;
+    let before = if p.is_file() { read_keep(&p).ok() } else { None };
+    if p.is_dir() {
+        fs::remove_dir_all(&p).map_err(|e| FsError::Failed(e.to_string()))?;
+    } else if p.exists() || p.is_symlink() {
+        fs::remove_file(&p).map_err(|e| FsError::Failed(e.to_string()))?;
+    } else {
+        return Err(FsError::Refused(format!("no such file: {rel}")));
+    }
+    Ok(Change { rel: rel_of(root, &p), path: p, before, after: None })
+}
+
+/// A page of a file: numbered lines `start..end` (1-based), at most `limit`
+/// characters, ending with the exact call for the next page when cut.
+pub fn read_page(root: &Path, spec: &str, limit: usize) -> Result<String, FsError> {
+    let (path, start, end) = match spec.rsplit_once(':') {
+        Some((p, range)) if range.chars().next().is_some_and(|c| c.is_ascii_digit()) => {
+            let (a, b) = range.split_once('-').unwrap_or((range, ""));
+            (p, a.parse().unwrap_or(1usize).max(1), b.parse().ok())
+        }
+        _ => (spec, 1usize, None),
+    };
+    let p = safe(root, path)?;
+    let meta = fs::metadata(&p).map_err(|e| FsError::Failed(format!("{path}: {e}")))?;
+    if meta.is_dir() {
+        let mut names: Vec<String> = fs::read_dir(&p).map_err(|e| FsError::Failed(e.to_string()))?
+            .flatten().map(|e| {
+                let n = e.file_name().to_string_lossy().into_owned();
+                if e.path().is_dir() { n + "/" } else { n }
+            }).collect();
+        names.sort();
+        return Ok(format!("{path}/ — {} entries\n{}", names.len(), names.join("\n")));
+    }
+    if !meta.is_file() {
+        return Err(FsError::Refused(format!("{path} isn't a regular file")));
+    }
+    let bytes = fs::read(&p).map_err(|e| FsError::Failed(e.to_string()))?;
+    if bytes[..bytes.len().min(4096)].contains(&0) {
+        return Err(FsError::Refused(format!("{path} is a binary file")));
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    let lines: Vec<&str> = text.lines().collect();
+    let total = lines.len();
+    let mut out = String::new();
+    let mut last = start.saturating_sub(1);
+    for (i, l) in lines.iter().enumerate().skip(start - 1) {
+        if end.is_some_and(|e| i + 1 > e) {
+            break;
+        }
+        let row = format!("{:>5}  {l}\n", i + 1);
+        if out.len() + row.len() > limit && !out.is_empty() {
+            break;
+        }
+        out.push_str(&row);
+        last = i + 1;
+    }
+    if last < end.unwrap_or(total).min(total) {
+        out.push_str(&format!("… {} more lines — continue with ```read {path}:{}```\n", total - last, last + 1));
+    }
+    Ok(format!("{path} ({total} lines)\n{out}"))
+}
+
+/// A unified diff and its +/- counts. `None` sides mean created/deleted.
+pub fn unified(rel: &str, before: Option<&str>, after: Option<&str>) -> (String, usize, usize) {
+    let a = before.unwrap_or("");
+    let b = after.unwrap_or("");
+    let d = similar::TextDiff::from_lines(a, b);
+    let (mut added, mut removed) = (0, 0);
+    for ch in d.iter_all_changes() {
+        match ch.tag() {
+            similar::ChangeTag::Insert => added += 1,
+            similar::ChangeTag::Delete => removed += 1,
+            similar::ChangeTag::Equal => {}
+        }
+    }
+    let from = if before.is_some() { format!("a/{rel}") } else { "/dev/null".into() };
+    let to = if after.is_some() { format!("b/{rel}") } else { "/dev/null".into() };
+    let text = d.unified_diff().context_radius(3).header(&from, &to).to_string();
+    (text, added, removed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp() -> PathBuf {
+        let d = std::env::temp_dir().join(format!("chuck-fs-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn writes_stay_inside_the_folder() {
+        let r = tmp();
+        assert!(write_file(&r, "src/a.py", "x = 1\n").is_ok());
+        for bad in ["../x", "/etc/passwd", "a/../../x", "..\\x", "~/.bashrc"] {
+            assert!(write_file(&r, bad, "no").is_err(), "{bad}");
+        }
+        let inside = format!("{}/b.py", r.canonicalize().unwrap().display());
+        assert!(write_file(&r, &inside, "ok\n").is_ok(), "an absolute path inside is fine");
+        std::os::unix::fs::symlink("/etc", r.join("out")).unwrap();
+        assert!(write_file(&r, "out/evil", "x").is_err(), "a link out is refused");
+    }
+
+    #[test]
+    fn edits_are_all_or_nothing_and_whitespace_tolerant() {
+        let r = tmp();
+        fs::write(r.join("a.py"), "def f():  \n    return 1\n").unwrap();
+        let body = "<<<<<<< SEARCH\ndef f():\n    return 1\n=======\ndef f():\n    return 2\n>>>>>>> REPLACE";
+        let ch = edit_file(&r, "a.py", body).unwrap();
+        assert_eq!(ch.after.as_deref(), Some("def f():\n    return 2\n"));
+        let bad = "<<<<<<< SEARCH\nreturn 2\n=======\nreturn 3\n>>>>>>> REPLACE\n<<<<<<< SEARCH\nnope\n=======\nx\n>>>>>>> REPLACE";
+        assert!(edit_file(&r, "a.py", bad).is_err());
+        assert_eq!(fs::read_to_string(r.join("a.py")).unwrap(), "def f():\n    return 2\n");
+    }
+
+    #[test]
+    fn windows_files_stay_windows_files() {
+        let r = tmp();
+        fs::write(r.join("w.txt"), "a\r\nb\r\n").unwrap();
+        write_file(&r, "w.txt", "a\nc\n").unwrap();
+        assert_eq!(fs::read_to_string(r.join("w.txt")).unwrap(), "a\r\nc\r\n");
+    }
+
+    #[test]
+    fn reads_in_pages() {
+        let r = tmp();
+        fs::write(r.join("big.txt"), (1..=500).map(|i| format!("line {i}\n")).collect::<String>()).unwrap();
+        let p = read_page(&r, "big.txt", 400).unwrap();
+        assert!(p.contains("    1  line 1") && p.contains("continue with ```read big.txt:"));
+        let q = read_page(&r, "big.txt:499-500", 4000).unwrap();
+        assert!(q.contains("  500  line 500") && !q.contains("more lines"));
+    }
+
+    #[test]
+    fn diffs_count_lines() {
+        let (d, a, rm) = unified("x.py", Some("a\nb\n"), Some("a\nc\nd\n"));
+        assert_eq!((a, rm), (2, 1));
+        assert!(d.contains("--- a/x.py") && d.contains("+c"));
+    }
+}
