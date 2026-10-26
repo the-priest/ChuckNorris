@@ -16141,14 +16141,19 @@ class ChuckWindow(Adw.ApplicationWindow):
                 # the natural voice's Test tests the natural voice, even when
                 # another engine is speaking for now (after a failure)
                 eng_now = "kokoro" if voice.kokoro_ready() else voice.engine_for(S)
-                ok, msg = (voice.test_kokoro(S.get("kokoro_voice")) if eng_now == "kokoro"
+                try:
+                    sp = max(0.5, min(2.0, float(S.get("voice_speed") or 1.0)))
+                except (TypeError, ValueError):
+                    sp = 1.0
+                ok, msg = (voice.test_kokoro(S.get("kokoro_voice"), play=True, speed=sp)
+                           if eng_now == "kokoro"
                            else voice.test_piper() if eng_now == "piper"
                            else (bool(eng_now), voice.voice_status(S)[1]))
 
                 def fin():
                     nv.set_subtitle(_html.escape(msg))
                     vt.set_sensitive(True)
-                    if ok:
+                    if ok and eng_now != "kokoro":      # Kokoro's test was already heard
                         speak("Chuck Norris does not adjust settings. Settings adjust to "
                               "Chuck Norris.", S)
                     return False

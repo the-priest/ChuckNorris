@@ -193,7 +193,8 @@ _KOKORO_DOWN = [0.0]          # until when Kokoro is skipped after it broke mid-
 def engine_for(s):
     """Which engine will speak: kokoro, piper or espeak (None if none can)."""
     want = (s.get("voice_engine") or "auto").lower()
-    if want in ("auto", "kokoro") and kokoro_ready() and time.time() >= _KOKORO_DOWN[0]:
+    if (want in ("auto", "kokoro") and kokoro_ready() and time.time() >= _KOKORO_DOWN[0]
+            and not LAST_ERROR.get("player")):      # no player that can play it: another voice
         return "kokoro"
     if want in ("auto", "piper") and piper_bin() and _find_piper_model():
         return "piper"
@@ -207,8 +208,10 @@ def engine_for(s):
 def warm_up(s):
     """Start Kokoro in the background so the first reply speaks at once."""
     if engine_for(s) == "kokoro":
-        threading.Thread(target=lambda: _safe(KOKORO.warm), daemon=True,
-                         name="kokoro-warm").start()
+        def warm():
+            _raw_player_argv()                  # find the player that really plays, once
+            _safe(KOKORO.warm)
+        threading.Thread(target=warm, daemon=True, name="kokoro-warm").start()
 
 
 def _safe(fn):
@@ -314,17 +317,35 @@ def _install_kokoro(progress, opener):
     return (True, "natural voice ready (Kokoro)") if ok else (False, why)
 
 
-def test_kokoro(voice=None):
+def test_kokoro(voice=None, play=False, speed=1.0):
+    """Synthesise a sentence (and with play=True, play it out loud through the
+    player that will be used) -> (ok, what happened)."""
     if not kokoro_ready():
         return False, "Kokoro isn't installed \u2014 Settings \u203a Voice \u203a Install natural voice"
     out = str(CONFIG_DIR / f".say-test-{os.getpid()}.pcm")
     try:
         n = KOKORO.synth("Chuck Norris approves this voice.", voice or DEFAULT_KOKORO_VOICE,
-                         1.0, out, timeout=120)
+                         speed, out, timeout=120)
         LAST_ERROR["kokoro"] = ""
         _KOKORO_DOWN[0] = 0.0                  # it works again: use it again
         LAST_ERROR["kokoro_told"] = False
-        return (True, "Kokoro works") if n > KOKORO_RATE // 2 else (False, "Kokoro made no audio")
+        if n <= KOKORO_RATE // 2:
+            return False, "Kokoro made no audio"
+        if not play:
+            return True, "Kokoro works"
+        with _PLAYER_LOCK:                     # a fresh look at the players
+            _PLAYER_BAD.clear()
+            _PLAYER_OK[0] = None
+        LAST_ERROR["player"] = ""
+        stop_speaking()
+        stream = _Stream(_TTS_GEN[0])
+        with open(out, "rb") as fh:
+            played = stream.write(fh.read())
+        stream.finish()
+        if not played:
+            return False, ("Kokoro made the speech, but it couldn't be played: "
+                           + (LAST_ERROR.get("player") or "the audio player failed"))
+        return True, f"Kokoro works \u00b7 playing through {stream.argv[0] if stream.argv else 'your player'}"
     except Exception as ex:
         LAST_ERROR["kokoro"] = str(ex)
         return False, f"Kokoro failed: {ex}"
@@ -338,6 +359,9 @@ def test_kokoro(voice=None):
 def voice_status(s=None):
     """(state, detail) of the voice that will actually speak."""
     s = s or _SETTINGS
+    if kokoro_ready() and LAST_ERROR.get("player") and (s.get("voice_engine") or "auto") in ("auto", "kokoro"):
+        return "fail", (f"Kokoro can't be heard: {LAST_ERROR['player'][:200]} "
+                        "\u2014 another voice speaks meanwhile")
     if kokoro_ready() and time.time() < _KOKORO_DOWN[0]:
         return "fail", (f"Kokoro failed: {LAST_ERROR.get('kokoro', '')[:140]} "
                         "\u2014 another voice speaks meanwhile")
@@ -557,24 +581,70 @@ def _play(path, gen=None):
     return False
 
 
+# Raw 16-bit PCM on stdin, in order of preference. Which one works is
+# checked, not assumed: PipeWire 1.2+ reads raw stdin only with --raw (without
+# it, pw-play takes stdin for a sound FILE, fails and exits: silence), while
+# 1.0's pw-play has no --raw at all. Both forms are listed; the probe keeps
+# the first that really plays.
 _RAW_PLAYERS = (
-    ["pw-play", "--rate", str(KOKORO_RATE), "--channels", "1", "--format", "s16", "-"],
     ["paplay", "--raw", f"--rate={KOKORO_RATE}", "--channels=1", "--format=s16le"],
+    ["pw-play", "--raw", "--rate", str(KOKORO_RATE), "--channels", "1", "--format", "s16", "-"],
+    ["pw-play", "--rate", str(KOKORO_RATE), "--channels", "1", "--format", "s16", "-"],
     ["aplay", "-q", "-t", "raw", "-f", "S16_LE", "-r", str(KOKORO_RATE), "-c", "1"],
-    ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", "-f", "s16le", "-ar",
+    ["ffplay", "-nodisp", "-autoexit", "-loglevel", "error", "-f", "s16le", "-ar",
      str(KOKORO_RATE), "-ac", "1", "-i", "-"],
 )
 _ACTIVE_PLAYER = [None]
+_PLAYER_OK = [None]                 # the player that passed its probe
+_PLAYER_BAD = set()                 # ones that failed: not tried again this session
+_PLAYER_LOCK = threading.Lock()
 
 
-def _raw_player_argv():
+def _probe_player(argv):
+    """Play 0.1 s of silence: (ok, why). A player that can't open its input
+    or reach the sound server exits non-zero at once."""
+    try:
+        p = subprocess.run(argv, input=b"\0\0" * (KOKORO_RATE // 10), stdout=subprocess.DEVNULL,
+                           stderr=subprocess.PIPE, timeout=8)
+    except subprocess.TimeoutExpired:
+        return False, "it hung"
+    except OSError as ex:
+        return False, str(ex)
+    if p.returncode == 0:
+        return True, ""
+    err = (p.stderr or b"").decode("utf-8", "replace").strip().splitlines()
+    return False, (err[-1] if err else f"exit {p.returncode}")[:160]
+
+
+def _raw_player_argv(refresh=False):
+    """The command that plays Kokoro's audio, or None (LAST_ERROR['player']
+    then says why)."""
     want = (_SETTINGS.get("voice_player") or "").strip()
     if want:
-        return want.split()
-    for argv in _RAW_PLAYERS:
-        if _have(argv[0]):
-            return argv
-    return None
+        return want.split()                   # your own command: used as given
+    with _PLAYER_LOCK:
+        if _PLAYER_OK[0] and not refresh:
+            return _PLAYER_OK[0]
+        tried = []
+        for argv in _RAW_PLAYERS:
+            if not _have(argv[0]) or tuple(argv) in _PLAYER_BAD:
+                continue
+            ok, why = _probe_player(argv)
+            if ok:
+                _PLAYER_OK[0] = argv
+                LAST_ERROR["player"] = ""
+                return argv
+            _PLAYER_BAD.add(tuple(argv))
+            tried.append(f"{' '.join(argv[:2]) if argv[1] == '--raw' else argv[0]}: {why}")
+        LAST_ERROR["player"] = (("no audio player could play sound \u2014 " + "; ".join(tried))
+                                if tried else "no audio player found (install pipewire-pulse "
+                                "or pulseaudio-utils for paplay, or alsa-utils for aplay)")
+        return None
+
+
+def player_name():
+    argv = _raw_player_argv()
+    return argv[0] if argv else None
 
 
 class _Stream:
@@ -584,23 +654,48 @@ class _Stream:
     def __init__(self, gen):
         self.gen = gen
         self.proc = None
+        self.argv = None
+        self.started = False
 
     def write(self, pcm):
-        if self.proc is None:
-            argv = _raw_player_argv()
-            if not argv:
+        """Play pcm. A player that dies under us is dropped for the session
+        and the next one takes over, starting with this same chunk."""
+        for _attempt in range(len(_RAW_PLAYERS) + 1):
+            if self.proc is None:
+                argv = _raw_player_argv()
+                if not argv:
+                    return False
+                self.argv = argv
+                self.proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                                             stderr=subprocess.DEVNULL)
+                _ACTIVE_PLAYER[0] = self.proc
+            if self._feed(pcm):
+                return True
+            if self.gen != _TTS_GEN[0]:
                 return False
-            self.proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
-                                         stderr=subprocess.DEVNULL)
-            _ACTIVE_PLAYER[0] = self.proc
+            # the player died: never this one again; try the next
+            self.kill()
+            self.proc = None
+            if (_SETTINGS.get("voice_player") or "").strip():
+                LAST_ERROR["player"] = f"your player command stopped ({' '.join(self.argv)[:80]})"
+                return False
+            with _PLAYER_LOCK:
+                _PLAYER_BAD.add(tuple(self.argv))
+                _PLAYER_OK[0] = None
+        return False
+
+    def _feed(self, pcm):
         step = KOKORO_RATE // 5 * 2               # 0.2 s at a time: Stop is never far off
         try:
             for i in range(0, len(pcm), step):
                 if self.gen != _TTS_GEN[0]:
                     self.kill()
                     return False
+                if self.proc.poll() is not None:
+                    return False
                 self.proc.stdin.write(pcm[i:i + step])
             self.proc.stdin.flush()
+            self.started = True
             return True
         except (BrokenPipeError, OSError, ValueError):
             return False
@@ -989,6 +1084,11 @@ def _speak_kokoro(clean, gen, s):
             broke = True
             break
         if not stream.write(pcm + gap):
+            if gen == _TTS_GEN[0]:
+                # no player could play it: never silence. Say why, and let
+                # another voice read the rest (from this chunk on)
+                broke = True
+                LAST_ERROR["kokoro"] = LAST_ERROR.get("player") or "the audio player stopped"
             break
         spoken += 1
     stream.finish()

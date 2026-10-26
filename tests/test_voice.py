@@ -288,6 +288,70 @@ if _np is not None:
             fail(f"inputs not fitted to {types}: speed {got.dtype} {got}, style {sess.fed['style'].dtype}")
     print("  speed and style match the model; the real speed is passed, not 0")
 
+print("--- the natural voice is heard, whatever player the system has ---")
+import stat as _st
+_fb = pathlib.Path(tempfile.mkdtemp())
+_heard = _fb / "heard.raw"
+
+
+def _script(name, body):
+    f = _fb / name
+    f.write_text("#!/bin/sh\n" + body + "\n")
+    f.chmod(f.stat().st_mode | _st.S_IEXEC)
+
+
+# paplay with no sound server; pw-play like PipeWire 1.2+: raw stdin only with --raw
+_script("paplay", "echo 'Connection failure: Connection refused' >&2; exit 1")
+_script("pw-play", f'case " $* " in *" --raw "*) cat >> {_heard}; exit 0;; esac\n'
+                   "echo 'sndfile: failed to open audio file \"-\": Format not recognised.' >&2; exit 1")
+_spec = importlib.util.find_spec("subprocess")         # a clean copy: this file fakes the module's
+_rsp = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(_rsp)   # Popen and run
+_fakes = (V.subprocess.run, V.subprocess.Popen)
+V.subprocess.run, V.subprocess.Popen = _rsp.run, _rsp.Popen
+_path0, _which0 = os.environ.get("PATH", ""), V.shutil.which
+os.environ["PATH"] = f"{_fb}:{_path0}"
+V.shutil.which = lambda n: str(_fb / n) if (_fb / n).exists() else None
+V._WHICH_CACHE.clear() if hasattr(V, "_WHICH_CACHE") else None
+_vp = V._SETTINGS.get("voice_player")
+V._SETTINGS["voice_player"] = ""
+V._PLAYER_BAD.clear(); V._PLAYER_OK[0] = None; V.LAST_ERROR["player"] = ""
+argv = V._raw_player_argv()
+if not argv or argv[:2] != ["pw-play", "--raw"]:
+    fail(f"with PipeWire 1.2+ and no Pulse server, pw-play --raw must be chosen, got {argv}")
+_heard.write_bytes(b"")
+st = V._Stream(V._TTS_GEN[0])
+ok = st.write(b"\x01\x02" * 24000)
+st.finish()
+if not ok or _heard.read_bytes() != b"\x01\x02" * 24000:
+    fail(f"the audio didn't reach the player whole ({ok}, {len(_heard.read_bytes())} bytes)")
+# a player that passes the probe but dies mid-speech: the next one takes over
+_script("pw-play", "exit 1")
+_script("aplay", f"cat >> {_heard}; exit 0")
+_heard.write_bytes(b"")
+st = V._Stream(V._TTS_GEN[0])
+ok = st.write(b"\x05\x06" * 240000)
+st.finish()
+if not ok or b"\x05\x06" * 240000 not in _heard.read_bytes():   # (after the probe's silence)
+    fail(f"when the player dies, the next one must take over the same audio ({ok})")
+# no player at all: Kokoro steps aside, and says why
+for _n in ("aplay", "pw-play"):
+    (_fb / _n).unlink()
+V._PLAYER_BAD.clear(); V._PLAYER_OK[0] = None
+_kr = V.kokoro_ready
+V.kokoro_ready = lambda: True
+if V._raw_player_argv() is not None or "paplay" not in V.LAST_ERROR.get("player", ""):
+    fail(f"with no working player, the reason must be recorded: {V.LAST_ERROR.get('player')!r}")
+if V.engine_for({"voice_engine": "auto"}) == "kokoro":
+    fail("Kokoro must not be chosen when nothing can play its audio")
+if "can't be heard" not in V.voice_status({"voice_engine": "auto"})[1]:
+    fail(f"the voice status must say why: {V.voice_status({'voice_engine': 'auto'})}")
+V.kokoro_ready = _kr
+os.environ["PATH"], V.shutil.which = _path0, _which0
+V.subprocess.run, V.subprocess.Popen = _fakes
+V._SETTINGS["voice_player"] = _vp or ""
+V._PLAYER_BAD.clear(); V._PLAYER_OK[0] = None; V.LAST_ERROR["player"] = ""
+print("  pw-play --raw chosen on new PipeWire; a dying player is replaced; no player -> another voice")
+
 print("TOTAL VOICE FAILURES:", len(FAILS))
 for f in FAILS:
     print("  ", f)
