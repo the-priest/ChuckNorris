@@ -665,3 +665,36 @@ fn every_command_any_agent_ran_is_in_the_evidence_chain() {
     assert!(kinds.contains(&("shell".into(), "grep -qx 2 v.txt".into())), "{kinds:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_whole_job_can_be_rewound() {
+    if std::process::Command::new("git").arg("--version").output().is_err() {
+        return;
+    }
+    let dir = tmp("rewind");
+    let proj = dir.join("proj");
+    std::fs::create_dir_all(&proj).unwrap();
+    std::fs::write(proj.join("x.txt"), "1\n").unwrap();
+    let model = Arc::new(Scripted::new().respond(|req| {
+        if text(&req.messages[0]) == chuck_runtime::prompts::CRITIC {
+            return "ACCEPT".into();
+        }
+        if req.messages.len() == 2 {
+            return "```criteria\n- x.txt holds 2 :: verify: grep -qx 2 x.txt\n```\n```write x.txt\n2\n```\n\
+                ```bash\necho extra > made-by-shell.txt\n```\n```test grep -qx 2 x.txt```\n```done\nx.txt holds 2 (grep).\n```".into();
+        }
+        "ok".into()
+    }));
+    let store = dir.join("checkpoints");
+    let cfg = RuntimeConfig { store: dir.join("store"), checkpoints: Some(store.clone()), ..RuntimeConfig::default() };
+    let rt = Runtime::new(model, cfg, Events::none());
+    let (report, _) = run_within(20, rt, Job::new("make x hold 2", &proj));
+    assert!(matches!(report.outcome, Outcome::Done { .. }), "{:?}", report.outcome);
+    assert_eq!(std::fs::read_to_string(proj.join("x.txt")).unwrap(), "2\n");
+    let sh = chuck_store::Shadow::new(&proj, &store).unwrap();
+    assert!(sh.points(10).len() >= 2, "one before the job, one before the step");
+    sh.restore(report.checkpoint.as_deref().unwrap()).unwrap();
+    assert_eq!(std::fs::read_to_string(proj.join("x.txt")).unwrap(), "1\n");
+    assert!(!proj.join("made-by-shell.txt").exists(), "what a command made is undone too");
+    let _ = std::fs::remove_dir_all(&dir);
+}

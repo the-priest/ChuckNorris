@@ -77,6 +77,9 @@ pub struct LeadRun<'a> {
     rejected_at: Option<(usize, String)>,
     /// The folder as the job found it: the real diff is measured against it.
     snapshot: Option<Snapshot>,
+    /// The folder's rewind history (the window's shadow repo).
+    shadow: Option<chuck_store::Shadow>,
+    pub first_checkpoint: Option<String>,
 }
 
 /// Forget lines typed before a question is shown: they don't answer it.
@@ -242,7 +245,25 @@ impl<'a> LeadRun<'a> {
         LeadRun { ctx, id, root: root.to_path_buf(), gate: Arc::new(Mutex::new(DoneGate::new(ask, Scale::Small))),
                   tasks: Vec::new(), workers: HashMap::new(), tx, rx, answers: answers.map(|a| Arc::new(Mutex::new(a))),
                   store, mutated: false,
-                  critic_rounds: 0, rejected_at: None, snapshot }
+                  critic_rounds: 0, rejected_at: None, snapshot,
+                  shadow: ctx.cfg.checkpoints.as_ref().filter(|_| ctx.cfg.access != chuck_sandbox::Access::ReadOnly)
+                      .and_then(|store| chuck_store::Shadow::new(root, store).ok()),
+                  first_checkpoint: None }
+    }
+
+    /// Snapshot the folder before a step that may change it. A failure turns
+    /// checkpoints off for this job (said once), never the job itself.
+    fn checkpoint(&mut self, label: &str) {
+        let Some(sh) = &self.shadow else { return };
+        match sh.snapshot(&format!("chuck: {label}")) {
+            Ok(sha) => {
+                self.first_checkpoint.get_or_insert(sha);
+            }
+            Err(e) => {
+                self.ctx.events.emit(Event::Notice { id: self.id, text: format!("rewind is off for this folder: {e}") });
+                self.shadow = None;
+            }
+        }
     }
 
     /// Asking the user for a critical command: shown, then their typed
@@ -558,6 +579,7 @@ impl<'a> LeadRun<'a> {
                     return format!("[{tid} can't be accepted — its gate refuses:\n- {}\nIt went back to the worker]",
                                    d.join("\n- "));
                 }
+                self.checkpoint(&format!("before merging {tid}"));
                 let m = match self.workers.get(&sub.worker).unwrap().ws.merge(None) {
                     Ok(m) => m,
                     Err(e) => {
@@ -861,6 +883,8 @@ impl<'a> LeadRun<'a> {
         let model = ctx.cfg.fleet.deepseek_model.clone();
         let root = self.root.display().to_string();
         let mut convo = Convo::new(&prompts::lead(&ctx.cfg.fleet, &root), first);
+        let ask = self.gate.lock().unwrap().ask.clone();
+        self.checkpoint(&format!("before \"{}\"", clip(&ask, 60)));
         let mut progress = Progress::default();
         let mut replans = 0;
         let mut warned_term = false;
@@ -879,6 +903,15 @@ impl<'a> LeadRun<'a> {
             let said = chuck_tools::prose(&reply, LEAD_TAGS);
             if !said.trim().is_empty() {
                 ctx.events.emit(Event::Said { id: self.id, text: said.clone() });
+            }
+            let acts = !chuck_tools::file_blocks(&reply).is_empty()
+                || !chuck_tools::tool_blocks(&reply, &["bash", "sh", "test"]).is_empty();
+            if acts && self.first_checkpoint.is_some() {
+                let what = chuck_tools::file_blocks(&reply).first().map(|b| format!("{} {}", b.tag, b.path))
+                    .or_else(|| chuck_tools::tool_blocks(&reply, &["bash", "sh", "test"]).first()
+                        .map(|t| format!("{} {}", t.tag, if t.arg.is_empty() { t.body.lines().next().unwrap_or("") } else { &t.arg })))
+                    .unwrap_or_default();
+                self.checkpoint(&format!("before {}", clip(&what, 80)));
             }
             let (root_dir, job_gate) = (self.root.clone(), self.gate.clone());
             let exec = Exec { id: self.id, role: Role::Lead, kernel: &ctx.kernel, root: &root_dir, gate: &job_gate,

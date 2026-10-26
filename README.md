@@ -293,6 +293,8 @@ cd ~/code/my-project
 chuck run "the parser crashes on empty input: fix it and add a test"
 chuck models          # are the fleet's models on your account?
 chuck key             # save the API key (the window shares it)
+chuck rewind          # undo the last job (chuck rewind --list for every checkpoint)
+chuck ledger          # verify the evidence chain, show the last commands run
 ```
 
 "Done" is enforced in code, not left to the prompt:
@@ -325,8 +327,11 @@ into the same tamper-evident hash chain (`chuck ledger` verifies it), and every 
 toward the same daily and monthly limits. Past a limit no agent gets another call. Only you can
 raise it.
 
-What isn't ported yet: the Rust window (the window is still the Python app), checkpoints and rewind,
-daemons and voice. [ARCHITECTURE.md](ARCHITECTURE.md) has the
+Before every step that changes your folder, `chuck` takes a checkpoint in the window's own rewind
+history. `chuck rewind` puts the whole folder back to before the last job, including whatever shell
+commands changed, and a rewind can itself be undone.
+
+What isn't ported yet: the Rust window (the window is still the Python app), daemons and voice. [ARCHITECTURE.md](ARCHITECTURE.md) has the
 design and the plan.
 
 Arch and CachyOS are first-class; apt and dnf are supported. The installer sets up GTK4 and libadwaita, bubblewrap, a screenshot tool, the local voice models (about 600 MB, skip with `CHUCK_VOICE=0`) and the linters Chuck uses to check code. At runtime Chuck needs only Python's standard library and GTK; everything optional degrades gracefully when it's missing.

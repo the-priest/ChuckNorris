@@ -29,6 +29,8 @@ USAGE
   chuck models      show the fleet's models, checked against your account
   chuck key         save your SiliconFlow API key (shared with the Chuck window)
   chuck ledger [N]  verify the evidence chain and show the last N commands run
+  chuck rewind [-C DIR] [--list | N]   put the folder back to before the last job
+                    (or checkpoint N); a rewind can itself be undone
   chuck version
 
   The window is `chucknorris` while the Rust window is being built.
@@ -143,6 +145,69 @@ fn read_secret(tty: bool) -> String {
     line
 }
 
+fn ago(at: i64) -> String {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    let s = (now - at).max(0);
+    match s {
+        0..=59 => "just now".into(),
+        60..=3599 => format!("{} min ago", s / 60),
+        3600..=86_399 => format!("{} h ago", s / 3600),
+        _ => format!("{} d ago", s / 86_400),
+    }
+}
+
+/// `chuck rewind [-C DIR] [--list | N | <sha>]`: the folder back to before
+/// the last job (or to checkpoint N, newest = 1). Undoable: it says how.
+fn cmd_rewind(args: &[String]) -> i32 {
+    let mut dir = PathBuf::from(".");
+    let mut target: Option<String> = None;
+    let mut list = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-C" | "--dir" => {
+                i += 1;
+                dir = PathBuf::from(args.get(i).unwrap_or_else(|| fail("-C needs a folder")));
+            }
+            "--list" | "-l" => list = true,
+            w => target = Some(w.to_string()),
+        }
+        i += 1;
+    }
+    let sh = chuck_store::Shadow::new(&dir, &chuck_store::checkpoint::default_store())
+        .unwrap_or_else(|e| fail(&e.to_string()));
+    let pts = sh.points(40);
+    if pts.is_empty() {
+        println!("no checkpoints for {} yet — chuck takes one before every step that changes it", sh.work.display());
+        return 0;
+    }
+    if list {
+        for (n, p) in pts.iter().enumerate().take(20) {
+            let differ = sh.changed_since(&p.sha).len();
+            println!("{:>2}  {}  {:<12}  {}  ({})", n + 1, &p.sha[..10], ago(p.at), p.label,
+                     match differ { 0 => "no files differ now".to_string(), 1 => "1 file differs now".into(),
+                                    k => format!("{k} files differ now") });
+        }
+        return 0;
+    }
+    let pick = match target.as_deref() {
+        None => pts.iter().find(|p| p.label.starts_with("chuck: before \"")),
+        Some(t) if t.len() <= 3 && t.chars().all(|c| c.is_ascii_digit()) => {
+            t.parse::<usize>().ok().and_then(|n| n.checked_sub(1)).and_then(|n| pts.get(n))
+        }
+        Some(t) => pts.iter().find(|p| p.sha.starts_with(t)),
+    };
+    let Some(p) = pick else { fail("no such checkpoint — `chuck rewind --list` shows them") };
+    match sh.restore(&p.sha) {
+        Ok((undo, changed)) => {
+            println!("rewound {} to {} ({}): {} file(s) put back", sh.work.display(), &p.sha[..10], p.label, changed.len());
+            println!("undo this rewind:  chuck rewind -C {} {}", sh.work.display(), &undo[..10]);
+            0
+        }
+        Err(e) => fail(&e.to_string()),
+    }
+}
+
 fn cmd_ledger(n: usize) -> i32 {
     let l = Ledger::at(&Ledger::default_path());
     let v = l.verify();
@@ -246,6 +311,9 @@ fn cmd_run(args: &[String]) -> i32 {
     }
     cfg.spend = Some(spend);
     cfg.audit = Some(Arc::new(Ledger::at(&Ledger::default_path())));
+    if s.map.get("checkpoints").and_then(|v| v.as_bool()) != Some(false) {
+        cfg.checkpoints = Some(chuck_store::checkpoint::default_store());
+    }
     cfg.job_quota = Quota { usd: Some(usd), ..cfg.job_quota };
 
     let folder = a.dir.canonicalize().unwrap_or_else(|_| a.dir.clone());
@@ -311,6 +379,9 @@ fn cmd_run(args: &[String]) -> i32 {
     }
     let report = worker.join().unwrap_or_else(|_| fail("the job crashed"));
     done.store(true, Ordering::Relaxed);
+    if let (Some(cp), false) = (&report.checkpoint, matches!(report.outcome, Outcome::Answered { .. })) {
+        println!("{}", view.st.dim(&format!("undo all of it:  chuck rewind -C {} {}", folder.display(), &cp[..10])));
+    }
     match report.outcome {
         Outcome::Done { .. } | Outcome::Answered { .. } => 0,
         Outcome::Paused { .. } => 2,
@@ -330,6 +401,7 @@ fn main() {
             cmd_key();
             0
         }
+        Some("rewind") => cmd_rewind(&args[1..]),
         Some("ledger") => cmd_ledger(args.get(1).and_then(|n| n.parse().ok()).unwrap_or(15)),
         Some("version" | "--version" | "-V") => {
             println!("chuck {VERSION}");

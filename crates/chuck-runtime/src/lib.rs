@@ -51,6 +51,9 @@ pub struct RuntimeConfig {
     pub spend: Option<Arc<chuck_store::Spend>>,
     pub day_limit: f64,
     pub month_limit: f64,
+    /// Where the folder's checkpoints go (the window's store): the lead
+    /// snapshots before every step that acts. None: no checkpoints.
+    pub checkpoints: Option<PathBuf>,
 }
 
 pub fn default_store() -> PathBuf {
@@ -80,6 +83,7 @@ impl Default for RuntimeConfig {
             spend: None,
             day_limit: 0.0,
             month_limit: 0.0,
+            checkpoints: None,
         }
     }
 }
@@ -110,6 +114,9 @@ pub struct JobReport {
     pub lead: AgentId,
     pub tokens: u64,
     pub usd: f64,
+    /// The checkpoint taken before the job touched anything: `rewind` to it
+    /// undoes the whole job.
+    pub checkpoint: Option<String>,
 }
 
 pub struct Runtime {
@@ -164,7 +171,7 @@ impl Runtime {
                 let outcome = Outcome::Failed { error: format!("no such folder: {}", job.folder.display()) };
                 self.events.emit(Event::Finished(outcome.clone()));
                 return JobReport { outcome, gate: DoneGate::new(job.ask, chuck_core::Scale::Small), lead: AgentId(0),
-                                   tokens: 0, usd: 0.0 };
+                                   tokens: 0, usd: 0.0, checkpoint: None };
             }
         };
         sweep_stale(&self.cfg.store);
@@ -191,7 +198,8 @@ impl Runtime {
         self.events.emit(Event::AgentEnded { id: lead, status: label.into() });
         let (tokens, usd) = self.kernel.info(lead).map(|p| (p.tokens, p.usd)).unwrap_or_default();
         let gate = run.gate.lock().unwrap().clone();
+        let checkpoint = run.first_checkpoint.clone();
         self.events.emit(Event::Finished(outcome.clone()));
-        JobReport { outcome, gate, lead, tokens, usd }
+        JobReport { outcome, gate, lead, tokens, usd, checkpoint }
     }
 }
