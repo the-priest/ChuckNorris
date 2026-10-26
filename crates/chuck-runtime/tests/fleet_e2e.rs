@@ -607,3 +607,61 @@ fn an_offline_folder_has_no_network() {
     assert!(fb.contains("NET-OFF"), "{fb}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn past_the_daily_limit_no_agent_gets_a_call() {
+    let dir = tmp("limit");
+    let spend = Arc::new(chuck_store::Spend::at(&dir.join("spend.json")));
+    spend.add(5.0);
+    let model = Arc::new(Scripted::new().replies(["```criteria\n- x\n```"]));
+    let cfg = RuntimeConfig { store: dir.join("store"), spend: Some(spend), day_limit: 3.0, ..RuntimeConfig::default() };
+    let rt = Runtime::new(model.clone(), cfg, Events::none());
+    let (report, _) = run_within(20, rt, Job::new("anything", &dir));
+    match &report.outcome {
+        Outcome::Paused { gaps } => assert!(gaps[0].contains("daily spending limit"), "{gaps:?}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(model.calls(), 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn every_command_any_agent_ran_is_in_the_evidence_chain() {
+    let dir = tmp("audit");
+    std::fs::write(dir.join("v.txt"), "1\n").unwrap();
+    let ledger = Arc::new(chuck_store::Ledger::at(&dir.join("ledger.jsonl")));
+    let model = Arc::new(Scripted::new().respond(|req| {
+        let sys = text(&req.messages[0]);
+        let last = last_user(req);
+        if sys == chuck_runtime::prompts::CRITIC {
+            return "ACCEPT".into();
+        }
+        if sys.contains("You are glm-") {
+            return if req.messages.len() == 2 {
+                "```write v.txt\n2\n```\n```test grep -qx 2 v.txt```\n```submit\nv is 2\n```".into()
+            } else { "ok".into() };
+        }
+        if req.messages.len() == 2 {
+            return "```criteria\n- v.txt holds 2 :: verify: grep -qx 2 v.txt\n```\n```plan\n- delegate\n```\n\
+                ```assign glm\ntitle: v\ncriteria:\n- v.txt holds 2 :: verify: grep -qx 2 v.txt\nbrief: set it\n```".into();
+        }
+        if last.contains("SUBMISSION t1") {
+            return "```review t1 accept\nfine\n```".into();
+        }
+        if heard(req, "t1 accepted") {
+            return "```test grep -qx 2 v.txt```\n```justify proportion\none value\n```\n```done\nv.txt holds 2 (checked).\n```".into();
+        }
+        "Waiting.".into()
+    }));
+    let cfg = RuntimeConfig { store: dir.join("store"), audit: Some(ledger.clone()), ..RuntimeConfig::default() };
+    let rt = Runtime::new(model, cfg, Events::none());
+    let (report, _) = run_within(20, rt, Job::new("set v to 2", &dir));
+    assert!(matches!(report.outcome, Outcome::Done { .. }), "{:?}", report.outcome);
+    let v = ledger.verify();
+    assert!(v.ok, "{v:?}");
+    let kinds: Vec<(String, String)> = ledger.read_all().iter().map(|e| (e["kind"].as_str().unwrap().to_string(),
+        e["command"].as_str().unwrap().to_string())).collect();
+    assert!(kinds.contains(&("agent".into(), "grep -qx 2 v.txt".into())), "{kinds:?}");
+    assert!(kinds.contains(&("shell".into(), "grep -qx 2 v.txt".into())), "{kinds:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

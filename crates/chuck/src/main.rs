@@ -11,7 +11,7 @@ use chuck_core::{FleetConfig, Quota};
 use chuck_model::{is_siliconflow, ChatModel, Reasoning, SiliconFlow, DEFAULT_BASE};
 use chuck_runtime::{Event, Events, Job, Outcome, Runtime, RuntimeConfig};
 use chuck_sandbox::Access;
-use chuck_store::Settings;
+use chuck_store::{Ledger, Settings, Spend};
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -28,6 +28,7 @@ USAGE
   chuck run [-C DIR] [--max-usd N] [--verbose] \"what to do\"
   chuck models      show the fleet's models, checked against your account
   chuck key         save your SiliconFlow API key (shared with the Chuck window)
+  chuck ledger [N]  verify the evidence chain and show the last N commands run
   chuck version
 
   The window is `chucknorris` while the Rust window is being built.
@@ -36,6 +37,8 @@ RUN
   -C, --dir DIR     the project folder (default: the current folder)
   --max-usd N       spending cap for this job, Lead and workers together
   -v, --verbose     also show what workers say and every command's output
+  The folder's access (set in the window with /access), the daily and monthly
+  spending limits, and the evidence ledger are the window's own.
   Ctrl-C stops every agent; the job ends INCOMPLETE with what is missing.
 
 EXIT STATUS
@@ -140,6 +143,21 @@ fn read_secret(tty: bool) -> String {
     line
 }
 
+fn cmd_ledger(n: usize) -> i32 {
+    let l = Ledger::at(&Ledger::default_path());
+    let v = l.verify();
+    println!("evidence ledger — {} entries, {}: {}", v.count, if v.ok { "VERIFIED" } else { "BROKEN" }, v.message);
+    println!("({})\n", l.path.display());
+    let all = l.read_all();
+    for e in all.iter().skip(all.len().saturating_sub(n)) {
+        let rc = e.get("rc").and_then(|x| x.as_i64()).unwrap_or(-1);
+        let mark = if rc == 0 { "✓".to_string() } else { format!("✗ rc={rc}") };
+        let cmd: String = e.get("command").and_then(|x| x.as_str()).unwrap_or("").chars().take(90).collect();
+        println!("{}  {mark}  {}", e.get("ts").and_then(|x| x.as_str()).unwrap_or("?"), cmd.replace('\n', " ⏎ "));
+    }
+    if v.ok { 0 } else { 1 }
+}
+
 fn cmd_models() {
     let s = Settings::load();
     let c = client(&s);
@@ -213,7 +231,21 @@ fn cmd_run(args: &[String]) -> i32 {
         budget: s.num("reasoning_budget", 4096.0, 0.0, 32768.0) as u32,
         max_think_secs: s.num("max_think_seconds", 120.0, 0.0, 1800.0) as u32,
     };
-    let usd = a.max_usd.unwrap_or_else(|| s.num("fleet_job_usd", 2.0, 0.01, 1000.0));
+    let mut usd = a.max_usd.unwrap_or_else(|| s.num("fleet_job_usd", 2.0, 0.01, 1000.0));
+    // the window's evidence chain and day/month spend: one history, one budget
+    let spend = Arc::new(Spend::at(&Spend::default_path()));
+    cfg.day_limit = s.num("budget_day_usd", 0.0, 0.0, 100_000.0);
+    cfg.month_limit = s.num("budget_month_usd", 0.0, 0.0, 1_000_000.0);
+    if let Some(o) = spend.over(cfg.day_limit, cfg.month_limit) {
+        fail(&format!("the {} spending limit ({}) is reached ({} spent) — raise it in the window's Settings to go on",
+                      if o.scope == "day" { "daily" } else { "monthly" }, chuck_model::fmt_usd(o.limit),
+                      chuck_model::fmt_usd(o.spent)));
+    }
+    if let Some(left) = spend.left(cfg.day_limit, cfg.month_limit) {
+        usd = usd.min(left);
+    }
+    cfg.spend = Some(spend);
+    cfg.audit = Some(Arc::new(Ledger::at(&Ledger::default_path())));
     cfg.job_quota = Quota { usd: Some(usd), ..cfg.job_quota };
 
     let folder = a.dir.canonicalize().unwrap_or_else(|_| a.dir.clone());
@@ -298,6 +330,7 @@ fn main() {
             cmd_key();
             0
         }
+        Some("ledger") => cmd_ledger(args.get(1).and_then(|n| n.parse().ok()).unwrap_or(15)),
         Some("version" | "--version" | "-V") => {
             println!("chuck {VERSION}");
             0

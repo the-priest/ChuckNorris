@@ -44,6 +44,13 @@ pub struct RuntimeConfig {
     pub store: PathBuf,
     /// Model calls in flight at once (1 lead + 4 + 4).
     pub slots: usize,
+    /// The evidence ledger every command is recorded in (the window's).
+    pub audit: Option<Arc<chuck_store::Ledger>>,
+    /// The day/month spend every model call is booked in, and its limits
+    /// (0 = none): over a limit, no agent gets another call.
+    pub spend: Option<Arc<chuck_store::Spend>>,
+    pub day_limit: f64,
+    pub month_limit: f64,
 }
 
 pub fn default_store() -> PathBuf {
@@ -69,6 +76,10 @@ impl Default for RuntimeConfig {
             bwrap: chuck_sandbox::bwrap().is_some(),
             store: default_store(),
             slots: 9,
+            audit: None,
+            spend: None,
+            day_limit: 0.0,
+            month_limit: 0.0,
         }
     }
 }

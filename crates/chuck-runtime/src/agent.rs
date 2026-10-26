@@ -153,6 +153,10 @@ pub fn think(ctx: &Ctx, id: AgentId, model: &str, convo: &Convo) -> Result<Strin
     let mut msgs = convo.msgs.clone();
     let mut text = String::new();
     for round in 0..3 {
+        if let Some(over) = ctx.cfg.spend.as_ref().and_then(|s| s.over(ctx.cfg.day_limit, ctx.cfg.month_limit)) {
+            return Err(Halt::Killed(format!("the {} spending limit ({}) is reached — only you can raise it, in \
+                Settings", if over.scope == "day" { "daily" } else { "monthly" }, chuck_model::fmt_usd(over.limit))));
+        }
         loop {
             if ctx.stop.load(Ordering::Relaxed) {
                 return Err(Halt::Stopped);
@@ -182,6 +186,9 @@ pub fn think(ctx: &Ctx, id: AgentId, model: &str, convo: &Convo) -> Result<Strin
         let usage = out.usage.unwrap_or_else(|| Usage::estimate(req.sent_chars(), out.text.len()));
         let usd = usage.cost(price_for(&out.model)).unwrap_or(0.0);
         ctx.kernel.charge(id, usage.prompt, usage.completion, usd);
+        if let Some(s) = &ctx.cfg.spend {
+            s.add(usd);
+        }
         ctx.events.emit(Event::Usage { id, tokens: usage.prompt + usage.completion, usd });
         text.push_str(&out.text);
         if !out.was_cut() || round == 2 {
@@ -257,7 +264,8 @@ pub fn run_worker(ctx: Ctx, w: WorkerSpec) {
             }
             let exec = Exec { id: w.id, role: w.role, kernel: &ctx.kernel, root: &w.ws.work, gate: &w.gate,
                               sandbox: Sandbox { access: ctx.cfg.access, bwrap: ctx.cfg.bwrap, worker: true },
-                              approve: None, stop: w.stop.clone(), events: &ctx.events,
+                              approve: None, audit: ctx.cfg.audit.clone().map(|l| (l, w.name.clone())),
+                              stop: w.stop.clone(), events: &ctx.events,
                               cmd_timeout: ctx.cfg.cmd_timeout };
             let r = exec.run(&reply);
             let mut fb = r.feedback.clone();

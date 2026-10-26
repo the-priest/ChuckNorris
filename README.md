@@ -320,8 +320,13 @@ Safety follows the same rules as the window:
   `yes`, and never from a worker or with nobody at the keyboard. The classifier is a line-by-line
   port of the window's, checked for identical verdicts on 1,371 commands.
 
+`chuck` and the window share one evidence ledger and one budget. Every command an agent runs goes
+into the same tamper-evident hash chain (`chuck ledger` verifies it), and every model call counts
+toward the same daily and monthly limits. Past a limit no agent gets another call. Only you can
+raise it.
+
 What isn't ported yet: the Rust window (the window is still the Python app), checkpoints and rewind,
-missions, daemons, the day/month budget ledger and voice. [ARCHITECTURE.md](ARCHITECTURE.md) has the
+daemons and voice. [ARCHITECTURE.md](ARCHITECTURE.md) has the
 design and the plan.
 
 Arch and CachyOS are first-class; apt and dnf are supported. The installer sets up GTK4 and libadwaita, bubblewrap, a screenshot tool, the local voice models (about 600 MB, skip with `CHUCK_VOICE=0`) and the linters Chuck uses to check code. At runtime Chuck needs only Python's standard library and GTK; everything optional degrades gracefully when it's missing.

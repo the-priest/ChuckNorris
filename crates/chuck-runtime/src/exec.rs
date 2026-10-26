@@ -62,6 +62,8 @@ pub struct Exec<'a> {
     pub sandbox: Sandbox,
     /// Who can say yes to a critical command (None: nobody — it's refused).
     pub approve: Option<Approve>,
+    /// Where every command that ran is recorded, and as whom.
+    pub audit: Option<(Arc<chuck_store::Ledger>, String)>,
     pub stop: Arc<AtomicBool>,
     pub events: &'a Events,
     pub cmd_timeout: Duration,
@@ -353,8 +355,15 @@ impl<'a> Exec<'a> {
                 };
                 let before = fingerprint(self.root);
                 let t_start = now_secs();
+                let started = chuck_store::ledger::local_stamp("%Y-%m-%dT%H:%M:%S%z");
                 let r = self.run_cmd(&cmd, wrap);
                 let changed = fingerprint(self.root) != before;
+                if let Some((ledger, who)) = &self.audit {
+                    // every command that ran, whatever the agent later says about it (recorded after
+                    // the change check, so a ledger inside the project isn't mistaken for a change)
+                    ledger.record(&cmd, r.exit, &r.output, if self.sandbox.worker { "agent" } else { "shell" },
+                                  &format!("chuck:{}:{who}", std::process::id()), &started);
+                }
                 if !self.sandbox.worker && !looking {
                     let gone = git_disarm(self.root, t_start);
                     if !gone.is_empty() {

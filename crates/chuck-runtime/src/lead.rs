@@ -883,7 +883,8 @@ impl<'a> LeadRun<'a> {
             let (root_dir, job_gate) = (self.root.clone(), self.gate.clone());
             let exec = Exec { id: self.id, role: Role::Lead, kernel: &ctx.kernel, root: &root_dir, gate: &job_gate,
                               sandbox: Sandbox { access: ctx.cfg.access, bwrap: ctx.cfg.bwrap, worker: false },
-                              approve: self.approver(), stop: ctx.stop.clone(), events: &ctx.events,
+                              approve: self.approver(), audit: ctx.cfg.audit.clone().map(|l| (l, "lead".into())),
+                              stop: ctx.stop.clone(), events: &ctx.events,
                               cmd_timeout: ctx.cfg.cmd_timeout };
             let r = exec.run(&reply);
             self.mutated |= r.mutated;
