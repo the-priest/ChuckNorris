@@ -76,6 +76,25 @@ pub fn web(s: &Settings) -> chuck_web::Web {
     })
 }
 
+/// Language servers, with the user's choices (settings `lsp_servers`:
+/// {"python": "pylsp"} or {"rust": ["rust-analyzer"]}) over the ones found.
+pub fn lsp(s: &Settings) -> chuck_code::Manager {
+    let m = chuck_code::Manager::new();
+    if let Some(map) = s.map.get("lsp_servers").and_then(|v| v.as_object()) {
+        for (lang, v) in map {
+            let argv: Vec<String> = match v {
+                serde_json::Value::String(cmd) => cmd.split_whitespace().map(String::from).collect(),
+                serde_json::Value::Array(a) => a.iter().filter_map(|x| x.as_str().map(String::from)).collect(),
+                _ => continue,
+            };
+            if !argv.is_empty() {
+                m.set_server(lang, argv);
+            }
+        }
+    }
+    m
+}
+
 /// Build a job's setup for `folder`. `max_usd`: a cap for this job (else
 /// the setting). Err: it can't start (no key, over a limit…).
 pub fn from_settings(s: &Settings, folder: &Path, max_usd: Option<f64>) -> Result<Setup, String> {

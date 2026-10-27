@@ -62,6 +62,8 @@ pub struct RuntimeConfig {
     pub sources: usize,
     /// MCP servers (the app's, running for as long as it does).
     pub mcp: Option<Arc<chuck_mcp::Manager>>,
+    /// Language servers for def/refs/rename (the lead's folder only).
+    pub lsp: Option<Arc<chuck_code::Manager>>,
 }
 
 pub fn default_store() -> PathBuf {
@@ -96,6 +98,7 @@ impl Default for RuntimeConfig {
             web: None,
             sources: 6,
             mcp: None,
+            lsp: None,
         }
     }
 }
@@ -190,6 +193,18 @@ impl Runtime {
             }
         };
         sweep_stale(&self.cfg.store);
+        if let Some(lsp) = &self.cfg.lsp {
+            // language servers run as the folder's commands do (some run project code)
+            let access = self.cfg.access;
+            let wrap: Option<chuck_code::lsp::Wrap> = match access {
+                chuck_sandbox::Access::Full => None,
+                _ if !self.cfg.bwrap => Some(Arc::new(|_| None)),
+                chuck_sandbox::Access::SandboxNet => Some(chuck_sandbox::Jail::new(&folder).wrap()),
+                chuck_sandbox::Access::Sandbox => Some(chuck_sandbox::Jail::new(&folder).offline().wrap()),
+                chuck_sandbox::Access::ReadOnly => Some(chuck_sandbox::Jail::new(&folder).read_only().offline().wrap()),
+            };
+            lsp.set_wrap(&format!("{}\0{}", folder.display(), access.label()), wrap);
+        }
         let ctx = Ctx { kernel: self.kernel.clone(), model: self.model.clone(), cfg: self.cfg.clone(),
                         events: self.events.clone(), stop: job.stop.clone() };
         let lead = self.kernel.spawn(SpawnSpec::new("lead", Role::Lead).quota(self.cfg.job_quota)

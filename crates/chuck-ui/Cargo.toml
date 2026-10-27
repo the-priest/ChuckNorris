@@ -8,6 +8,7 @@ rust-version.workspace = true
 [dependencies]
 adw = { version = "0.7", package = "libadwaita", features = ["v1_5"] }
 gtk = { version = "0.9", package = "gtk4", features = ["v4_14"] }
+chuck-code = { version = "18.0.0-alpha.1", path = "../chuck-code" }
 chuck-core = { version = "18.0.0-alpha.1", path = "../chuck-core" }
 chuck-model = { version = "18.0.0-alpha.1", path = "../chuck-model" }
 chuck-runtime = { version = "18.0.0-alpha.1", path = "../chuck-runtime" }

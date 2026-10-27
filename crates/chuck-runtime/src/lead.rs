@@ -998,7 +998,7 @@ impl<'a> LeadRun<'a> {
                               stop: ctx.stop.clone(), events: &ctx.events,
                               cmd_timeout: ctx.cfg.cmd_timeout,
                               web: ctx.cfg.web.as_deref(), sources: ctx.cfg.sources,
-                              mcp: ctx.cfg.mcp.as_deref() };
+                              mcp: ctx.cfg.mcp.as_deref(), lsp: ctx.cfg.lsp.as_deref() };
             let r = exec.run(&reply);
             self.mutated |= r.mutated;
             let mut fb = r.feedback.clone();

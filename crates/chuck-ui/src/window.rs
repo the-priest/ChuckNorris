@@ -99,6 +99,8 @@ struct State {
     on_handoff: Option<Rc<dyn Fn(String)>>,
     /// MCP servers: started with the window, shared by every job, ended with it.
     mcp: Arc<chuck_mcp::Manager>,
+    /// Language servers: started on first use, ended with the window.
+    lsp: Arc<chuck_code::Manager>,
     tokens: u64,
     spent: f64,
     /// Prompt tokens sent, and how many of them the API's cache served.
@@ -714,12 +716,13 @@ fn start(shared: &Shared, text: String) {
     let (model, cfg) = match (&st.opts.model, setup::from_settings(&settings, &folder, None)) {
         (Some(m), _) => (m.clone(), chuck_runtime::RuntimeConfig { access: setup::access_of(&settings, &folder),
                                                                   web: st.opts.web.clone(), mcp: Some(st.mcp.clone()),
+                                                                  lsp: Some(st.lsp.clone()),
                                                                   ..Default::default() }),
         (None, Ok(s)) => {
             for n in &s.notes {
                 st.act(format!("<span foreground=\"#F5B454\">! {}</span>", md::escape(n)));
             }
-            (s.model, chuck_runtime::RuntimeConfig { mcp: Some(st.mcp.clone()), ..s.cfg })
+            (s.model, chuck_runtime::RuntimeConfig { mcp: Some(st.mcp.clone()), lsp: Some(st.lsp.clone()), ..s.cfg })
         }
         (None, Err(e)) => {
             st.add(Entry::Card { kind: "CAN'T START".into(), class: "gap-card".into(), text: e });
@@ -823,6 +826,7 @@ fn shut_down(shared: &Shared) {
     }
     st.save();
     st.mcp.stop_all();
+    st.lsp.stop_all();
 }
 
 fn settings_dialog(shared: &Shared) {
@@ -1323,7 +1327,8 @@ pub fn build(app: &adw::Application, opts: Options) {
     chat_btn.set_active(chat_mode);
     let shared: Shared = Rc::new(RefCell::new(State {
         ui, panel, opts: opts.clone(), folder: None, saved: Saved::default(), running: None, names: HashMap::new(),
-        models: HashMap::new(), lane: None, last_ps: Vec::new(), chat: chat_mode, on_handoff: None, mcp: mcp.clone(), tokens: 0,
+        models: HashMap::new(), lane: None, last_ps: Vec::new(), chat: chat_mode, on_handoff: None, mcp: mcp.clone(),
+        lsp: Arc::new(setup::lsp(&Settings::load())), tokens: 0,
         spent: 0.0, prompt: 0, cached: 0, unsaved: false,
     }));
     *slot.borrow_mut() = Some(shared.clone());

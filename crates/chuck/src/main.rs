@@ -263,6 +263,8 @@ fn cmd_run(args: &[String], chat: bool) -> i32 {
         }
         cfg.mcp = Some(mcp.clone());
     }
+    let lsp = Arc::new(setup::lsp(&s));
+    cfg.lsp = Some(lsp.clone());
     let header = if chat {
         format!("chat · {} · up to {}", term::short_model(&cfg.fleet.deepseek_model), chuck_model::fmt_usd(usd))
     } else {
@@ -332,6 +334,7 @@ fn cmd_run(args: &[String], chat: bool) -> i32 {
     }
     let report = worker.join().unwrap_or_else(|_| fail("the job crashed"));
     mcp.stop_all();
+    lsp.stop_all();
     chuck_tools::kill_all();
     done.store(true, Ordering::Relaxed);
     if let (Some(cp), false) = (&report.checkpoint, matches!(report.outcome, Outcome::Answered { .. })) {

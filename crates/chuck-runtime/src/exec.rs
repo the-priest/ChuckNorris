@@ -11,8 +11,10 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-pub const WORKER_TAGS: &[&str] = &["read", "grep", "glob", "bash", "sh", "test", "search", "fetch", "mcp", "submit"];
-pub const LEAD_TAGS: &[&str] = &["read", "grep", "glob", "bash", "sh", "test", "search", "fetch", "mcp", "criteria", "plan", "assign",
+pub const WORKER_TAGS: &[&str] = &["read", "grep", "glob", "map", "def", "refs", "rename", "bash", "sh", "test", "search", "fetch",
+    "mcp", "submit"];
+pub const LEAD_TAGS: &[&str] = &["read", "grep", "glob", "map", "def", "refs", "rename", "bash", "sh", "test", "search",
+    "fetch", "mcp", "criteria", "plan", "assign",
     "review", "justify", "done", "ask"];
 const CLIP: usize = 20_000;
 /// A fetched page is handed over this many characters at a time.
@@ -75,6 +77,9 @@ pub struct Exec<'a> {
     pub sources: usize,
     /// MCP servers (the lead's only: they run outside any worker's jail).
     pub mcp: Option<&'a chuck_mcp::Manager>,
+    /// Language servers (the lead's only, for the same reason: workers get
+    /// the syntax answers).
+    pub lsp: Option<&'a chuck_code::Manager>,
 }
 
 fn clip(s: &str, n: usize) -> String {
@@ -446,6 +451,8 @@ impl<'a> Exec<'a> {
             }
             "search" | "fetch" => self.web(tag, arg, t.body.trim(), res),
             "mcp" => self.mcp(t, res),
+            "map" | "def" | "refs" => self.code(tag, arg, t.body.trim(), res),
+            "rename" => self.rename(arg, t.body.trim(), res),
             "submit" => {
                 res.submit = Some(format!("{}\n{}", arg, t.body).trim().to_string());
             }
@@ -474,6 +481,120 @@ impl<'a> Exec<'a> {
             }
             other => res.lead_calls.push(LeadCall { tag: other.into(), arg: arg.into(), body: t.body.clone() }),
         }
+    }
+
+    /// The language servers this agent may use: the lead's own, never a
+    /// worker's (a server for a worker's copy would run outside its jail).
+    fn servers(&self) -> Option<&chuck_code::Manager> {
+        if self.sandbox.worker { None } else { self.lsp }
+    }
+
+    /// Lines naming files: those under a credentials folder are left out
+    /// when the folder's access is restricted (as read and grep do).
+    fn hide_secrets(&self, text: String) -> String {
+        if self.sandbox.access == Access::Full {
+            return text;
+        }
+        text.lines().filter(|l| {
+            let path = l.split([':', ' ']).next().unwrap_or("");
+            path.is_empty() || !chuck_tools::safe(self.root, path).is_ok_and(|p| secret_path(&p))
+        }).collect::<Vec<_>>().join("\n")
+    }
+
+    /// ```map```, ```def <name>```, ```refs <name>```: the project's shape,
+    /// where a name is defined and who uses it — by meaning through a
+    /// language server when there is one, by syntax when not (and it says so).
+    fn code(&self, tag: &str, arg: &str, body: &str, res: &mut StepResult) {
+        let what = if arg.is_empty() { body.lines().next().unwrap_or("").trim() } else { arg };
+        res.actions.push(format!("{tag} {what}").trim().to_string());
+        if let Err(e) = self.allowed(tag, what) {
+            res.feedback.push(e);
+            return;
+        }
+        let t0 = Instant::now();
+        let timeout = Duration::from_secs(45);
+        let (ok, text) = match tag {
+            "map" => (true, format!("REPO MAP of {}:\n{}", self.root.display(), chuck_code::repo_map(self.root, 16_000))),
+            _ if what.is_empty() => (false, format!("[{tag}: give a name, e.g. ```{tag} save``` or ```{tag} Store.save```]")),
+            "def" => match chuck_code::definitions(self.servers(), self.root, what, timeout) {
+                Ok((hits, how)) => (true, chuck_code::lsp::report_defs(what, &hits, &how, 30)),
+                Err(e) => (false, format!("[def {what}: {e}]")),
+            },
+            _ => match chuck_code::references(self.servers(), self.root, what, timeout, 200) {
+                Ok((refs, how, defs)) => (true, chuck_code::lsp::report_refs(what, &refs, &how, &defs, 80)),
+                Err(e) => (false, format!("[refs {what}: {e}]")),
+            },
+        };
+        let text = self.hide_secrets(text);
+        self.kernel.syscall(self.id, tag, what, t0.elapsed().as_secs_f64() * 1000.0, text.len(), false);
+        self.act(tag, what, ok, text.lines().next().unwrap_or(""));
+        res.feedback.push(clip(&text, CLIP));
+    }
+
+    /// ```rename <old> <new>```: the language server renames a symbol and
+    /// every real use of it, across files, checked against the files on
+    /// disk; each changed file is recorded like a ```write```.
+    fn rename(&self, arg: &str, body: &str, res: &mut StepResult) {
+        let joined = format!("{arg} {body}");
+        let words: Vec<&str> = joined.split_whitespace().map(|w| w.trim_matches('`')).collect();
+        let [old, new] = words[..] else {
+            res.feedback.push("[rename: give the old and the new name: ```rename make_store build_store```]".into());
+            return;
+        };
+        res.actions.push(format!("rename {old} {new}"));
+        let refuse = |res: &mut StepResult, why: String| {
+            self.act("rename", old, false, &why);
+            res.feedback.push(format!("[rename NOT done, nothing was changed: {why}]"));
+        };
+        if let Err(e) = self.allowed("rename", old) {
+            res.feedback.push(e);
+            return;
+        }
+        if self.sandbox.worker {
+            return refuse(res, "renaming needs a language server, which workers don't get — edit the uses yourself \
+                (```refs``` finds them)".into());
+        }
+        if self.sandbox.access == Access::ReadOnly {
+            return refuse(res, "this folder is read-only (its access setting)".into());
+        }
+        if let Err(e) = self.mutation_ok() {
+            return refuse(res, e);
+        }
+        let all: Vec<CriterionId> = self.gate.lock().unwrap().criteria.iter().map(|c| c.id).collect();
+        let (plan, how) = match chuck_code::rename(self.servers(), self.root, old, new, Duration::from_secs(60)) {
+            Ok(p) => p,
+            Err(e) => return refuse(res, e.0),
+        };
+        if plan.is_empty() {
+            return refuse(res, format!("{how} found nothing to change"));
+        }
+        let mut done = Vec::new();
+        for (rel, before, after) in &plan {
+            // the file must still be what the plan was made from
+            if chuck_tools::fs::read_keep(&self.root.join(rel)).ok().as_deref() != Some(before.as_str()) {
+                res.feedback.push(format!("[rename stopped: {rel} changed while renaming; {} file(s) were already \
+                    renamed: {}]", done.len(), done.join(", ")));
+                break;
+            }
+            match chuck_tools::write_file(self.root, rel, after) {
+                Ok(ch) => {
+                    let (patch, added, removed) = ch.diff();
+                    self.gate.lock().unwrap().record(self.id, all.clone(), EvidenceKind::Diff {
+                        files: vec![ch.rel.clone()], added, removed, patch }, true);
+                    res.mutated = true;
+                    done.push(ch.rel);
+                }
+                Err(e) => {
+                    res.feedback.push(format!("[rename stopped at {rel}: {e}; renamed so far: {}]", done.join(", ")));
+                    break;
+                }
+            }
+        }
+        let n: usize = plan.iter().map(|(_, b, a)| a.matches(new).count().saturating_sub(b.matches(new).count())).sum();
+        let summary = format!("{old} → {new} via {how}: {n} occurrence(s) in {} file(s)", done.len());
+        self.act("rename", old, !done.is_empty(), &summary);
+        res.feedback.push(format!("[renamed {summary}: {}]\nRun the tests: a rename can still miss uses in strings or \
+            dynamic code.", done.join(", ")));
     }
 
     /// ```mcp server.tool``` + JSON arguments: a tool on an MCP server. The

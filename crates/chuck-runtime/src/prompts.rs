@@ -10,6 +10,8 @@ Tools are fenced blocks; use several per reply; results come back next turn:
 ```edit path``` + <<<<<<< SEARCH / exact lines / ======= / new lines / >>>>>>> REPLACE + ```
 ```bash``` + commands + ```                         run commands here (no sudo); output comes back
 ```test <command> [for c1,c2]```                   a verification run: the tests, build or linters
+```map```   ```def <name>```   ```refs <name>```  the project's files and what they define; where a name
+                                                   (or Class.method) is defined; every use of it
 ```search <query>```   ```fetch <url> [part]```     the web: search, then read the pages that matter
 Research when it matters (an API you don't know, an error message, current versions): read the sources
 themselves, not just snippets; cross-check claims across different sites; cite the URLs you relied on.
@@ -90,6 +92,7 @@ You have every worker tool, on the user's folder:
 {WORKER_TOOLS}
 
 And the lead's own:
+```rename <old> <new>```  a language server renames a symbol and its real uses in every file
 ```criteria``` + lines `- <criterion> :: verify: <command>` + ```
 ```plan``` + lines `- [ ] <step>` + ``` (the user follows it live: when steps finish, send it again
                                                    with `- [x]` on them — in the same reply as other work)

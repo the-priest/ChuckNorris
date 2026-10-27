@@ -381,8 +381,17 @@ stricter than a command's:
   first, unless you mark its server `"trust": true`;
 - Chat mode sees only the read-only tools.
 
+Agents find code by meaning: ```` ```def save``` ```` and ```` ```refs Store.save``` ```` ask the
+language server you have installed (pyright, basedpyright, pylsp, jedi, typescript-language-server or
+TypeScript 7's tsc, rust-analyzer, gopls, clangd; or the one named in the `lsp_servers` setting). Without
+one, they fall back to syntax and a whole-word search, and say so. ```` ```map``` ```` lists every file with
+what it defines. The Lead's ```` ```rename old new``` ```` lets the server rename a symbol and its real uses
+across files; it refuses if the server's view of a file differs from the file on disk, and runs only
+through the Done gate. Servers run in the folder's sandbox (some run project code) and serve the Lead's
+folder only; workers get the syntax answers, since a server for a worker's copy would run outside its jail.
+
 What isn't ported to Rust yet, so isn't in this branch's app: voice (Kokoro, Piper, talking to it),
-a real browser for pages that need JavaScript, images and video, daemons and language servers.
+a real browser for pages that need JavaScript, images and video, and daemons.
 [ARCHITECTURE.md](ARCHITECTURE.md) has the design and the plan.
 
 Arch and CachyOS are first-class; apt and dnf are supported. The installer sets up GTK4 and libadwaita, bubblewrap, a screenshot tool, the local voice models (about 600 MB, skip with `CHUCK_VOICE=0`) and the linters Chuck uses to check code. At runtime Chuck needs only Python's standard library and GTK; everything optional degrades gracefully when it's missing.
