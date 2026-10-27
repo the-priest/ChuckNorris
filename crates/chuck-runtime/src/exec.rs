@@ -458,7 +458,9 @@ impl<'a> Exec<'a> {
         let ev = self.events.clone();
         let mut on = move |c: &str| ev.emit(Event::Output { id, chunk: c.to_string() });
         let mut o = RunOpts::new(self.root);
-        o.timeout = self.cmd_timeout;
+        // a server or a watcher in front never ends: it holds the agent a little while, never half an hour
+        o.timeout = if chuck_tools::run::serves(cmd) { self.cmd_timeout.min(chuck_tools::run::SERVER_WAIT) } else {
+            self.cmd_timeout };
         o.wrap = wrap;
         o.stop = Some(self.stop.clone());
         o.on_chunk = Some(&mut on);

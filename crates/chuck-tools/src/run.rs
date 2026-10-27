@@ -169,6 +169,44 @@ pub fn bash(cmd: &str, mut o: RunOpts<'_>) -> RunResult {
     RunResult { exit, output, timed_out, stopped, ms: t0.elapsed().as_millis() as u64 }
 }
 
+/// How long a command that starts a server or a watcher in the foreground
+/// may hold its agent: it never ends by itself, so waiting for the command's
+/// whole limit (half an hour) would stall the job for nothing.
+pub const SERVER_WAIT: Duration = Duration::from_secs(25);
+
+/// Does `cmd` run a server or a watcher in the foreground (one that never
+/// ends by itself)? Started in the background (`… &`) or under `timeout` it
+/// doesn't hold anyone up.
+pub fn serves(cmd: &str) -> bool {
+    use std::sync::OnceLock;
+    static SEP: OnceLock<regex::Regex> = OnceLock::new();
+    static SRV: OnceLock<regex::Regex> = OnceLock::new();
+    let sep = SEP.get_or_init(|| regex::Regex::new(r"&&|\|\||;|\n|\||&").unwrap());
+    let srv = SRV.get_or_init(|| regex::Regex::new(concat!(
+        r"^(?:(?:sudo|exec|env(?:\s+\w+=\S+)*|\w+=\S+)\s+)*(?:npx\s+(?:-y\s+|--yes\s+)?)?(?:",
+        r"(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:dev|start|serve|watch|preview)\b",
+        r"|vite(?:\s+(?:dev|serve|preview))?(?:\s+--?\w[\w-]*(?:[= ]\S+)?)*\s*$",
+        r"|next\s+(?:dev|start)\b|nodemon\b|live-server\b|http-server\b|serve(?:\s+[\w./-]+)?\s*$",
+        r"|python3?\s+-m\s+http\.server\b|php\s+-S\b|flask\s+run\b|uvicorn\b|gunicorn\b",
+        r"|(?:bundle\s+exec\s+)?rails\s+s(?:erver)?\b|jekyll\s+serve\b|hugo\s+server\b|cargo\s+watch\b",
+        r"|webpack(?:-dev-server|\s+serve|\s+.*--watch)\b|tsc\s+.*(?:-w|--watch)\b|tail\s+-[fF]\b|watch\s+\S",
+        r")")).unwrap());
+    // `docker compose up` stays in front unless detached
+    let compose = |t: &str| (t.starts_with("docker compose up") || t.starts_with("docker-compose up"))
+        && !t.split_whitespace().any(|w| w == "-d" || w == "--detach");
+    let mut from = 0;
+    let mut segs: Vec<(&str, bool)> = Vec::new();
+    for m in sep.find_iter(cmd) {
+        segs.push((&cmd[from..m.start()], m.as_str() == "&"));
+        from = m.end();
+    }
+    segs.push((&cmd[from..], false));
+    segs.iter().any(|(seg, background)| {
+        let t = seg.trim();
+        !background && !t.starts_with("timeout ") && (srv.is_match(t) || compose(t))
+    })
+}
+
 /// Output as a person (and a model) reads it: colour and cursor codes out,
 /// a progress bar redrawn with `\r` down to what it showed last, other
 /// control characters gone.
@@ -386,6 +424,22 @@ fn kill_group(pgid: i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_server_in_front_is_told_apart_from_one_in_the_background() {
+        for c in ["npm run dev", "npm start", "yarn dev", "pnpm run preview", "npx vite", "vite", "vite --port 3000",
+                  "python3 -m http.server 8000", "python -m http.server", "cd web && npm run dev", "php -S localhost:8000",
+                  "flask run", "uvicorn app:app --reload", "nodemon server.js", "tail -f log.txt", "npx serve .",
+                  "docker compose up", "next dev", "tsc -p . --watch", "PORT=3000 npm start", "serve dist"] {
+            assert!(serves(c), "{c} serves");
+        }
+        for c in ["npm run dev > /tmp/dev.log 2>&1 & sleep 3; curl -s localhost:5173", "npm test", "npm run build",
+                  "vite build", "npx vite build", "python3 -m pytest", "timeout 5 npm run dev", "docker compose up -d",
+                  "grep -q serve index.html", "cat watch.js", "node server.js --help | head", "echo npm start",
+                  "python3 -m http.server 8000 & sleep 1; curl -s localhost:8000", "tsc", "ls serve"] {
+            assert!(!serves(c), "{c} doesn't hold anyone up");
+        }
+    }
 
     #[test]
     fn nothing_waits_for_a_person_and_output_reads_clean() {

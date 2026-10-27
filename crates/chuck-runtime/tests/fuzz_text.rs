@@ -197,6 +197,7 @@ fn the_safety_checks_take_anything() {
         survive("classify / outside / prepare", seed, 800, 25, |s| {
             let _ = chuck_sandbox::classify_command(s);
             let _ = chuck_sandbox::classify_code(s);
+            let _ = chuck_tools::run::serves(s);
             let _ = chuck_sandbox::outside_paths(s, root);
             let p = chuck_sandbox::prepare(s);
             // a rewrite never makes a command less safe than it was

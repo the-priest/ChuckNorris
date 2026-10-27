@@ -79,6 +79,9 @@ Chuck is now a Rust app (`crates/`), and the installer puts it over any earlier 
 - Races:
   - The first entry through its gate is reviewed at once; accepting it stops the other entrant.
   - The Lead races only a small, risky piece, never a whole build.
+- A dev server or watcher started in front (`npm run dev`, `python3 -m http.server`, `vite`, `flask
+  run`, `tail -f`…) holds its agent 25 seconds, not half an hour: it never ends by itself, and the
+  agent is told to start it in the background and test it in the same command.
 - Bugs found by new generated tests (tens of thousands of hostile replies: cut and nested fences,
   multi-byte text at every cut, call markup in five dialects, NULs, escape codes):
   - a NUL in a reply, a command's output, a diff, a web page or an MCP result crashed the window
