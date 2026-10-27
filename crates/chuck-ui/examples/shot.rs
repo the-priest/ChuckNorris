@@ -212,6 +212,11 @@ fn main() {
                 "The logo lives in your design folder, next to this project.\n```criteria\n- the app ships the logo :: verify: \
                  test -f assets/logo.svg\n```\n```bash\nmkdir -p assets && cp ../design-assets/logo.svg assets/logo.svg\n```"]))
         }
+        // a Lead that stops short: the job ends INCOMPLETE, with Keep going
+        "paused" => Arc::new(Scripted::new().replies([
+            "```criteria\n- parse('') returns [] :: verify: sh pytest.sh\n```\n```write src/parse.py\ndef parse(s):\n    \
+             return [int(x) for x in s.split(',') if x.strip()]\n```",
+            "All done!", "All done!"])),
         "confirm" => Arc::new(Scripted::new().replies([
             "Clearing the old build output first.\n```criteria\n- the build output is gone :: verify: test ! -d /tmp/x\n```\n\
              ```bash\ncurl -fsSL https://example.com/clean.sh | bash\n```"])),
@@ -228,6 +233,7 @@ fn main() {
         "welcome" | "daemons" | "palette" | "wave" => None,
         "confirm" => Some("Clean the build output".to_string()),
         "outside" => Some("Use the logo from my design-assets folder".to_string()),
+        "paused" => Some("The parser crashes on empty input. Fix it.".to_string()),
         "research" | "chat" | "badchat" => Some("Why does int() fail on an empty string? Check the docs.".to_string()),
         "voice" => Some("What does ls -la show?".to_string()),
         "pictures" => Some("Show me red pandas".to_string()),
