@@ -12,7 +12,7 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-const MODEL_FILES: &[&str] = &["preprocess.onnx", "encode.int8.onnx", "uncached_decode.int8.onnx",
+pub(crate) const MODEL_FILES: &[&str] = &["preprocess.onnx", "encode.int8.onnx", "uncached_decode.int8.onnx",
     "cached_decode.int8.onnx", "tokens.txt"];
 
 fn model_dir() -> PathBuf {
@@ -63,7 +63,7 @@ pub fn recorders(custom: &str) -> Vec<Vec<String>> {
 
 pub fn status(custom: &str) -> String {
     if !ready() {
-        return "not installed — the installer sets it up (Moonshine, about 250 MB)".into();
+        return "not installed — Settings › Voice › Set up, or `chuck voice install` (Moonshine, about 250 MB)".into();
     }
     match recorders(custom).first() {
         Some(r) => format!("Moonshine, on this machine · microphone via {}", r[0]),

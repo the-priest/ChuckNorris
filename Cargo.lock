@@ -138,6 +138,7 @@ dependencies = [
  "chuck-store",
  "chuck-tools",
  "chuck-ui",
+ "chuck-voice",
  "libc",
  "serde_json",
 ]
@@ -291,6 +292,8 @@ dependencies = [
  "fancy-regex",
  "libc",
  "serde_json",
+ "sha2",
+ "ureq",
 ]
 
 [[package]]

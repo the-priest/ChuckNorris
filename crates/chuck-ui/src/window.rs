@@ -1966,8 +1966,7 @@ fn settings_dialog(shared: &Shared) {
     let vp = chuck_voice::Prefs::from(&s);
     let voice = shared.borrow().voice.clone();
     let voice_group = adw::PreferencesGroup::builder().title("Voice")
-        .description("Spoken and heard on this machine: nothing is uploaded. The installer sets up the natural voice \
-            (Kokoro) and voice input (Moonshine).").build();
+        .description("Spoken and heard on this machine: nothing is uploaded.").build();
     let tts = adw::SwitchRow::builder().title("Read replies aloud")
         .active(s.map.get("tts").and_then(|v| v.as_bool()).unwrap_or(true)).build();
     let buddy_row = adw::SwitchRow::builder().title("Chuck pops up")
@@ -2008,8 +2007,51 @@ fn settings_dialog(shared: &Shared) {
     let lstatus = adw::ActionRow::builder().title("Listening")
         .subtitle(md::escape(&chuck_voice::listen::status(s.str("mic_command").unwrap_or("")))).build();
     lstatus.set_subtitle_lines(2);
+    // set up (or repair) the natural voice and voice input, here and now
+    let setup = adw::ActionRow::builder().title("Natural voice and voice input")
+        .subtitle("Kokoro and Moonshine, about 600 MB, all on this machine").build();
+    setup.set_subtitle_lines(2);
+    let get = gtk::Button::with_label(if chuck_voice::speak::kokoro_ready() && chuck_voice::listen::ready() { "Repair" }
+                                      else { "Set up" });
+    get.add_css_class("pill-sm");
+    get.set_valign(gtk::Align::Center);
+    {
+        let (setup, vstatus, lstatus, voice) = (setup.clone(), vstatus.clone(), lstatus.clone(), voice.clone());
+        get.connect_clicked(move |b| {
+            b.set_sensitive(false);
+            let (tx, rx) = std::sync::mpsc::channel::<Result<String, Vec<Result<String, String>>>>();
+            std::thread::spawn(move || {
+                let ptx = tx.clone();
+                let said = chuck_voice::install::all(&|m| { let _ = ptx.send(Ok(m.chars().take(140).collect())); });
+                let _ = tx.send(Err(said));
+            });
+            let (b, setup, vstatus, lstatus, voice) = (b.clone(), setup.clone(), vstatus.clone(), lstatus.clone(), voice.clone());
+            glib::timeout_add_local(Duration::from_millis(200), move || {
+                while let Ok(m) = rx.try_recv() {
+                    match m {
+                        Ok(line) => setup.set_subtitle(&md::escape(&line)),
+                        Err(said) => {
+                            let ok = said.iter().all(|r| r.is_ok());
+                            setup.set_subtitle(&md::escape(&said.into_iter().map(|r| match r {
+                                Ok(m) => format!("✓ {m}"),
+                                Err(e) => format!("✗ {e}"),
+                            }).collect::<Vec<_>>().join("\n")));
+                            let s = Settings::load();
+                            vstatus.set_subtitle(&md::escape(&voice.status(&chuck_voice::Prefs::from(&s))));
+                            lstatus.set_subtitle(&md::escape(&chuck_voice::listen::status(s.str("mic_command").unwrap_or(""))));
+                            b.set_label(if ok { "Repair" } else { "Try again" });
+                            b.set_sensitive(true);
+                            return glib::ControlFlow::Break;
+                        }
+                    }
+                }
+                glib::ControlFlow::Continue
+            });
+        });
+    }
+    setup.add_suffix(&get);
     for r in [tts.upcast_ref::<gtk::Widget>(), buddy_row.upcast_ref(), engine.upcast_ref(), kvoice.upcast_ref(), speed.upcast_ref(),
-              vstatus.upcast_ref(), autosend.upcast_ref(), lstatus.upcast_ref()] {
+              vstatus.upcast_ref(), autosend.upcast_ref(), lstatus.upcast_ref(), setup.upcast_ref()] {
         voice_group.add(r);
     }
     page.add(&voice_group);

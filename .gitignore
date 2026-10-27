@@ -3,3 +3,7 @@ __pycache__/
 
 # Rust
 /target/
+
+# test runs that set HOME to the checkout
+/.local/
+/.cache/

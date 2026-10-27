@@ -8,7 +8,7 @@
 #  Chuck IS the Rust app: it is built from the branch into
 #  ~/.local/bin/chuck, and the menu entry and the `chucknorris` command open
 #  it, replacing whatever Chuck was installed before. The Python app is still
-#  installed alongside (the voice setup uses it); it is what opens only if the
+#  installed alongside: it is what opens (and sets the voice up) only if the
 #  Rust build fails, and the installer says so loudly. CHUCK_RUST=0 skips it.
 #
 #  Installs GTK4 + libadwaita (+ the PyGObject cairo bridge), screenshot tool,
@@ -233,33 +233,6 @@ python3 -m py_compile "${APP_DIR}/chucknorris.py" "${APP_DIR}"/chucknorris_ext/*
   || die "a downloaded file is corrupt (did not compile). Re-run the installer."
 ok "app installed"
 
-# The natural voice (Kokoro) and voice input (Moonshine): both run on this
-# machine. Installed by the app's own, tested code, in a private venv.
-if [ "${CHUCK_VOICE:-1}" = "1" ]; then
-  step "setting up the natural voice + voice input (Kokoro + Moonshine, about 600 MB, all local)"
-  info "this is the big download; CHUCK_VOICE=0 skips it (then: /voice in the app)"
-  ( cd "${APP_DIR}" && python3 - <<'PYEOF'
-import sys
-from chucknorris_ext import voice, listen
-def say(m):
-    end = "\r" if m.startswith("downloading") else "\n"
-    sys.stdout.write("\r\033[K  " + m + end)
-    sys.stdout.flush()
-try:
-    ok1, m1 = voice.install_kokoro(say)
-    say(("✓ " if ok1 else "✗ ") + m1)
-    ok2, m2 = listen.install(say)
-    say(("✓ " if ok2 else "✗ ") + m2)
-finally:
-    voice.KOKORO.stop()
-    listen.EARS.stop()
-PYEOF
-  ) || info "voice setup didn't finish — run /voice in the app to retry"
-else
-  info "voice setup skipped (CHUCK_VOICE=0) — /voice in the app installs it"
-fi
-
-
 # Chuck, the Rust app.
 RUST_MIN="1.88.0"     # what its dependencies need (Cargo.toml's rust-version)
 RUST_WHY=""
@@ -320,6 +293,39 @@ $(grep -E '^error' -A6 "$BUILD_LOG" 2>/dev/null | head -n 20 || tail -n 15 "$BUI
   fi
 else
   RUST_WHY="skipped (CHUCK_RUST=0)"
+fi
+
+# The natural voice (Kokoro) and voice input (Moonshine): both run on this
+# machine, in a private venv. Set up by Chuck itself (`chuck voice install`,
+# also Settings › Voice › Set up); by the Python app's code only when the
+# Rust Chuck couldn't be built. Safe to re-run: nothing whole is fetched twice.
+if [ "${CHUCK_VOICE:-1}" = "1" ]; then
+  step "setting up the natural voice + voice input (Kokoro + Moonshine, about 600 MB, all local)"
+  info "this is the big download; CHUCK_VOICE=0 skips it (then: chuck voice install)"
+  if [ "$RUST_OK" = "1" ]; then
+    "${HOME}/.local/bin/chuck" voice install \
+      || info "voice setup didn't finish — Settings › Voice › Set up, or: chuck voice install"
+  else
+  ( cd "${APP_DIR}" && python3 - <<'PYEOF'
+import sys
+from chucknorris_ext import voice, listen
+def say(m):
+    end = "\r" if m.startswith("downloading") else "\n"
+    sys.stdout.write("\r\033[K  " + m + end)
+    sys.stdout.flush()
+try:
+    ok1, m1 = voice.install_kokoro(say)
+    say(("✓ " if ok1 else "✗ ") + m1)
+    ok2, m2 = listen.install(say)
+    say(("✓ " if ok2 else "✗ ") + m2)
+finally:
+    voice.KOKORO.stop()
+    listen.EARS.stop()
+PYEOF
+  ) || info "voice setup didn't finish — run /voice in the app to retry"
+  fi
+else
+  info "voice setup skipped (CHUCK_VOICE=0) — chuck voice install sets it up"
 fi
 
 # What "Chuck" opens: the Rust app when it built, the

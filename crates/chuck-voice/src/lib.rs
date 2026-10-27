@@ -3,6 +3,7 @@
 //! ones the installer set up for the Python app; nothing leaves the machine.
 
 pub mod clean;
+pub mod install;
 pub mod listen;
 pub mod speak;
 

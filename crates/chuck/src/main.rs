@@ -33,6 +33,8 @@ USAGE
   chuck key         save your SiliconFlow API key (shared with the Chuck window)
   chuck doctor      check everything Chuck depends on (the API, sandbox, search, voice…)
   chuck update      install the newest Chuck
+  chuck voice [install]   how speaking and listening stand; `install` sets up the
+                    natural voice and voice input (Kokoro + Moonshine, ~600 MB, local)
   chuck daemons [rm N | pause N | resume N]   your daemons and reminders
   chuck inbox [read]   what daemons reported (they run while the window is open)
   chuck ledger [N]  verify the evidence chain and show the last N commands run
@@ -433,6 +435,42 @@ fn cmd_run(args: &[String], chat: bool, cont: bool) -> i32 {
     }
 }
 
+/// How the voice stands, or (`install`) set it up.
+fn cmd_voice(arg: Option<&str>) -> i32 {
+    let s = Settings::load();
+    let status = |s: &Settings| {
+        println!("speaking   {}", chuck_voice::Voice::new().status(&chuck_voice::Prefs::from(s)));
+        println!("listening  {}", chuck_voice::listen::status(s.str("mic_command").unwrap_or("")));
+    };
+    match arg {
+        None | Some("status") => {
+            status(&s);
+            0
+        }
+        Some("install") => {
+            let tty = std::io::stdout().is_terminal();
+            let say = |m: &str| {
+                if tty && m.starts_with("downloading") {
+                    print!("\r\x1b[K  {m}");
+                } else {
+                    print!("{}  {m}\n", if tty { "\r\x1b[K" } else { "" });
+                }
+                let _ = std::io::stdout().flush();
+            };
+            let said = chuck_voice::install::all(&say);
+            for r in &said {
+                match r {
+                    Ok(m) => say(&format!("✓ {m}")),
+                    Err(e) => say(&format!("✗ {e}")),
+                }
+            }
+            status(&s);
+            i32::from(said.iter().any(|r| r.is_err()))
+        }
+        Some(other) => fail(&format!("chuck voice: unknown `{other}` (status, install)")),
+    }
+}
+
 fn main() {
     chuck_store::crashlog::install();
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -478,6 +516,7 @@ fn main() {
                 Err(e) => fail(&e),
             },
         },
+        Some("voice") => cmd_voice(args.get(1).map(String::as_str)),
         Some("daemons") => cmd_daemons(&args[1..]),
         Some("inbox") => cmd_inbox(args.get(1).map(String::as_str)),
         Some("ledger") => cmd_ledger(args.get(1).and_then(|n| n.parse().ok()).unwrap_or(15)),

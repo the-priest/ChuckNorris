@@ -581,3 +581,43 @@ fn a_reply_stuck_repeating_itself_is_cut_and_the_job_goes_on() {
     assert!(rx.try_iter().any(|e| matches!(e, Event::Snag { kind, .. } if kind == "runaway reply")));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn what_the_lead_reads_while_workers_build_comes_back_at_once() {
+    let dir = tmp("look");
+    std::fs::write(dir.join("notes.txt"), "the port is 9090\n").unwrap();
+    let saw_early = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let early = saw_early.clone();
+    let model = Arc::new(Scripted::new().respond(move |req| {
+        if text(&req.messages[0]) == chuck_runtime::prompts::CRITIC {
+            return "ACCEPT".into();
+        }
+        if !worker(req).is_empty() {
+            // a slow worker: the Lead's read must not wait for it
+            std::thread::sleep(Duration::from_millis(1500));
+            return "```write port.txt\n9090\n```\n```test grep -q 9090 port.txt```\n```submit\nport.txt holds 9090\n```".into();
+        }
+        let last = last_user(req);
+        if req.messages.len() == 2 {
+            return "```criteria\n- port.txt holds 9090 :: verify: grep -q 9090 port.txt\n```\n```plan\n- t1: write it\n```\n\
+                ```assign worker\ntitle: Port file\ncriteria:\n- port.txt holds 9090 :: verify: grep -q 9090 port.txt\n\
+                brief: write port.txt\n```\n```read notes.txt```".into();
+        }
+        if last.contains("the port is 9090") && !last.contains("SUBMISSION") {
+            early.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        if last.contains("SUBMISSION t1") {
+            return "```review t1 accept\nok\n```".into();
+        }
+        if heard(req, "t1 accepted") {
+            return "```test grep -q 9090 port.txt```\n```justify proportion\none value\n```\n\
+                ```done\nport.txt holds 9090.\n```".into();
+        }
+        "Waiting.".into()
+    }));
+    let rt = Runtime::new(model, RuntimeConfig { store: dir.join("store"), ..RuntimeConfig::default() }, Events(None));
+    let (report, _) = run_within(30, rt, Job::new("write the port", &dir));
+    assert!(matches!(report.outcome, Outcome::Done { .. }), "{:?}", report.outcome);
+    assert!(saw_early.load(std::sync::atomic::Ordering::SeqCst), "the Lead's read waited for the worker's hand-in");
+    let _ = std::fs::remove_dir_all(&dir);
+}

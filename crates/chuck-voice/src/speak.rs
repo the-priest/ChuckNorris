@@ -463,8 +463,8 @@ impl Voice {
             Some("kokoro") => format!("Kokoro · {}", p.kokoro_voice),
             Some("piper") => format!("Piper · {}", piper_model(p).and_then(|m| m.file_stem().map(|s| s.to_string_lossy().into_owned()))
                 .unwrap_or_default()),
-            Some(_) => "espeak-ng (robotic: install the natural voice with the installer)".into(),
-            None => "no voice installed — run the installer (it sets up Kokoro), or install espeak-ng".into(),
+            Some(_) => "espeak-ng (robotic: Settings › Voice › Set up, or `chuck voice install`, gets the natural one)".into(),
+            None => "no voice installed — Settings › Voice › Set up, or `chuck voice install` (Kokoro), or install espeak-ng".into(),
         };
         if err.is_empty() { base } else { format!("{base} — last problem: {err}") }
     }

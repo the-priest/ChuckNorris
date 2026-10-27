@@ -768,8 +768,9 @@ impl<'a> LeadRun<'a> {
                 }
                 if !failed.is_empty() {
                     reject(&gate, failed.clone(), "re-verification failed");
-                    return format!("[{tid} NOT accepted: the lead's re-run of its verification failed, so it went \
+                    let s = format!("[{tid} NOT accepted: the lead's re-run of its verification failed, so it went \
                         back to the worker:\n- {}]", failed.join("\n- "));
+                    return self.next_entry(&tid, s);
                 }
                 let done = {
                     let mut g = gate.lock().unwrap();
@@ -779,8 +780,9 @@ impl<'a> LeadRun<'a> {
                 if let Err(gaps) = done {
                     let d: Vec<String> = gaps.iter().map(Unmet::describe).collect();
                     reject(&gate, d.clone(), "the task gate refused");
-                    return format!("[{tid} can't be accepted — its gate refuses:\n- {}\nIt went back to the worker]",
-                                   d.join("\n- "));
+                    let s = format!("[{tid} can't be accepted — its gate refuses:\n- {}\nIt went back to the worker]",
+                                    d.join("\n- "));
+                    return self.next_entry(&tid, s);
                 }
                 self.checkpoint(&format!("before merging {tid}"));
                 let m = match self.workers.get(&sub.worker).unwrap().ws.merge(None) {
@@ -855,6 +857,16 @@ impl<'a> LeadRun<'a> {
                 format!("[review: `{other}` isn't a verdict — accept or reject]")
             }
         }
+    }
+
+    /// After a race entry is sent back: the other entrant's, if it already
+    /// handed in, is in front of the Lead now (never left waiting).
+    fn next_entry(&mut self, tid: &str, mut said: String) -> String {
+        if let Some(h) = self.slot(tid).and_then(|s| s.held.pop()) {
+            said.push_str("\n\n");
+            said.push_str(&self.present(h));
+        }
+        said
     }
 
     /// A merged task's plan steps are done: the plan the user follows moves
@@ -1329,6 +1341,8 @@ impl<'a> LeadRun<'a> {
         let mut warned_term = false;
         let mut nudged = false;
         let mut gate_nudged = false;
+        // turns in a row the Lead used its own tools while workers built (see the wait below)
+        let mut looked_busy = 0u32;
         // turns of work since the plan last changed: past a few, the lead is reminded to mark it
         let mut plan_stale = 0usize;
         let mut plan_seen = self.gate.lock().unwrap().plan_view();
@@ -1373,8 +1387,6 @@ impl<'a> LeadRun<'a> {
             }
             let (root_dir, job_gate, outside, team) = (self.root.clone(), self.gate.clone(), self.outside.clone(),
                                                        self.team.clone());
-            // while workers build, the project is theirs: what the Lead changed under them would collide
-            // with their merges (it looks, reviews and steers; ```cancel``` takes a task back)
             // while workers build, the files they have changed: the Lead may change them too (it's the boss),
             // and the worker on one hears it at once
             let claimed = self.claimed();
@@ -1419,7 +1431,20 @@ impl<'a> LeadRun<'a> {
             // workers on it, nothing to review, nothing refused: the Lead's next turn is when one of
             // them hands in (or asks it something) — never a turn spent polling
             let mut waited = false;
-            if self.busy() && self.awaiting_review().is_empty() && !refused && !r.malformed {
+            // a turn that read or ran something gets its answer now, not when a worker next hands in
+            // (a few in a row, though, is polling: then it waits too)
+            let looked = r.actions.iter().any(|a| {
+                let tag = a.split_whitespace().next().unwrap_or("");
+                ["read", "bash", "sh", "test", "grep", "glob", "map", "def", "refs", "find", "search", "fetch", "browse",
+                 "mcp"].contains(&tag)
+            });
+            looked_busy = if looked && self.busy() { looked_busy + 1 } else { 0 };
+            if r.acted() {
+                nudged = false; // it works again: a later announcement gets its nudge too
+                gate_nudged = false;
+            }
+            if self.busy() && self.awaiting_review().is_empty() && !refused && !r.malformed
+                && (!looked || looked_busy > 3) {
                 match self.wait_for_worker() {
                     Ok(m) => fb.extend(m),
                     Err(h) => return self.pause(&h.describe()),
