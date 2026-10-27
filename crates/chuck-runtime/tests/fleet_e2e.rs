@@ -1,10 +1,10 @@
 //! The fleet end to end, on a real folder, with a scripted model standing in
-//! for SiliconFlow: the Lead writes criteria and a plan, delegates to a
-//! DeepSeek worker and a GLM worker in parallel, rejects shallow work,
+//! for SiliconFlow: the Lead writes criteria and a plan, delegates to two
+//! V4-Flash workers in parallel (and waits for them), rejects shallow work,
 //! re-verifies and merges what passes, is refused "done" until the whole
 //! result is verified, and finishes only after the critic accepts.
 
-use chuck_core::{EvidenceKind, Verdict, DEEPSEEK_MODEL, GLM_MODEL};
+use chuck_core::{EvidenceKind, Verdict, DEEPSEEK_MODEL, WORKER_MODEL};
 use chuck_model::{ChatRequest, Scripted};
 use chuck_runtime::{Event, Events, Job, Outcome, Runtime, RuntimeConfig};
 use std::path::PathBuf;
@@ -45,10 +45,10 @@ fn lead(req: &ChatRequest) -> String {
         return "Let me start.\n```write hack.txt\nnot yet\n```\n\
             ```criteria\n- greet NAME prints `Hello, NAME!` and greet alone prints `Hello, world!` :: verify: bash test.sh\n\
             - the README documents greet :: verify: grep -q greet README.md\n```\n\
-            ```plan\n- t1: fix greet and its test (DeepSeek)\n- t2: document it (GLM)\n- verify the whole result\n```\n\
-            ```assign deepseek\ntitle: Fix greet\ncriteria:\n- greet NAME prints Hello, NAME! and greet alone prints \
+            ```plan\n- t1: fix greet and its test\n- t2: document it\n- verify the whole result\n```\n\
+            ```assign worker\ntitle: Fix greet\ncriteria:\n- greet NAME prints Hello, NAME! and greet alone prints \
             Hello, world! :: verify: bash test.sh\nbrief:\ngreet.sh prints the wrong greeting; test.sh must cover it.\n```\n\
-            ```assign glm\ntitle: Document greet\ncriteria:\n- README.md documents greet :: verify: grep -q greet README.md\n\
+            ```assign worker\ntitle: Document greet\ncriteria:\n- README.md documents greet :: verify: grep -q greet README.md\n\
             brief:\nWrite README.md describing greet.sh.\n```".into();
     }
     let last = last_user(req);
@@ -100,7 +100,7 @@ fn deepseek_worker(req: &ChatRequest) -> String {
     "Thinking about it.".into()
 }
 
-fn glm_worker(req: &ChatRequest) -> String {
+fn docs_worker(req: &ChatRequest) -> String {
     if req.messages.len() == 2 {
         return "```write README.md\n# greet\n\n`greet NAME` prints a greeting; with no name it greets the world.\n```\n\
             ```test grep -q greet README.md```\n```submit\nREADME.md documents greet.\n```".into();
@@ -124,16 +124,14 @@ fn lead_and_two_families_deliver_through_every_gate() {
 
     let model = Arc::new(Scripted::new().respond(|req| {
         let sys = text(&req.messages[0]);
+        let me = req.messages.get(1).map(text).unwrap_or_default();
         if sys == chuck_runtime::prompts::CRITIC {
             critic(req)
         } else if sys.contains("You are the LEAD") {
             lead(req)
-        } else if sys.contains("You are ds-") {
-            assert_eq!(req.model, DEEPSEEK_MODEL);
-            deepseek_worker(req)
-        } else if sys.contains("You are glm-") {
-            assert_eq!(req.model, GLM_MODEL);
-            glm_worker(req)
+        } else if me.starts_with("You are ds-") {
+            assert_eq!(req.model, WORKER_MODEL, "workers build on the workhorse");
+            if me.contains("TASK t1") { deepseek_worker(req) } else { docs_worker(req) }
         } else {
             panic!("who is this? {sys}")
         }
@@ -156,14 +154,22 @@ fn lead_and_two_families_deliver_through_every_gate() {
     assert!(events.iter().any(|e| matches!(e, Event::Action { tool, ok: false, summary, .. }
         if tool == "write" && summary.contains("nothing may change yet"))));
 
-    // both families worked, each in its own copy
+    // the Lead thought on V4.1, the workers on V4-Flash, each worker in its own copy
     let models: Vec<String> = model.seen.lock().unwrap().iter().map(|r| r.model.clone()).collect();
-    assert!(models.iter().any(|m| m == GLM_MODEL) && models.iter().any(|m| m == DEEPSEEK_MODEL));
+    assert!(models.iter().any(|m| m == WORKER_MODEL) && models.iter().any(|m| m == DEEPSEEK_MODEL));
+    // while they worked the Lead waited: it never spent a turn just to hear "Waiting"
+    let lead_turns = model.seen.lock().unwrap().iter().filter(|r| text(&r.messages[0]).contains("You are the LEAD")).count();
+    assert!(lead_turns <= 8, "the Lead polled: {lead_turns} turns");
+    // the plan moved with the merges, and the team heard each one
+    let plan = events.iter().rev().find_map(|e| match e { Event::Plan { steps } => Some(steps.clone()), _ => None }).unwrap();
+    assert!(plan[0].1 && plan[1].1, "t1 and t2 ticked off when they merged: {plan:?}");
+    assert!(events.iter().any(|e| matches!(e, Event::Team { from, text, .. } if from == "lead" && text.starts_with("t1 ")
+        && text.contains("merged"))));
     let assigned: Vec<(String, chuck_core::Role)> = events.iter().filter_map(|e| match e {
         Event::Assigned { task, role, .. } => Some((task.clone(), *role)),
         _ => None,
     }).collect();
-    assert_eq!(assigned, vec![("t1".into(), chuck_core::Role::DeepSeekWorker), ("t2".into(), chuck_core::Role::GlmWorker)]);
+    assert_eq!(assigned, vec![("t1".into(), chuck_core::Role::DeepSeekWorker), ("t2".into(), chuck_core::Role::DeepSeekWorker)]);
 
     // t1 was submitted twice (rejected once), t2 once; both merged
     let subs: Vec<&str> = events.iter().filter_map(|e| match e {
@@ -269,17 +275,18 @@ fn a_race_keeps_the_better_verified_entry() {
     std::fs::write(dir.join("n.txt"), "0\n").unwrap();
     let model = Arc::new(Scripted::new().respond(|req| {
         let sys = text(&req.messages[0]);
+        let me = req.messages.get(1).map(text).unwrap_or_default();
         let last = last_user(req);
         if sys == chuck_runtime::prompts::CRITIC {
             return "ACCEPT".into();
         }
-        if sys.contains("You are ds-") {
+        if me.starts_with("You are ds-1") {
             // two passing verification runs: the stronger entry
             return if req.messages.len() == 2 {
                 "```write n.txt\n7\n```\n```test grep -qx 7 n.txt```\n```test grep -qx 7 n.txt```\n```submit\n7, checked twice\n```".into()
             } else { "ok".into() };
         }
-        if sys.contains("You are glm-") {
+        if me.starts_with("You are ds-2") {
             return if req.messages.len() == 2 {
                 "```write n.txt\n7\n```\n```test grep -qx 7 n.txt```\n```submit\n7\n```".into()
             } else { "ok".into() };
@@ -308,7 +315,8 @@ fn a_race_keeps_the_better_verified_entry() {
         Event::Assigned { role, .. } => Some(*role),
         _ => None,
     }).collect();
-    assert_eq!(roles, vec![chuck_core::Role::DeepSeekWorker, chuck_core::Role::GlmWorker]);
+    // no GLM pool (GLM is the eyes): a race is two workers on the workhorse
+    assert_eq!(roles, vec![chuck_core::Role::DeepSeekWorker, chuck_core::Role::DeepSeekWorker]);
     assert_eq!(events.iter().filter(|e| matches!(e, Event::Merged { .. })).count(), 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -329,18 +337,19 @@ fn a_lead_that_idles_while_a_submission_waits_is_told_not_hung() {
     std::fs::write(dir.join("v.txt"), "1\n").unwrap();
     let model = Arc::new(Scripted::new().respond(|req| {
         let sys = text(&req.messages[0]);
+        let me = req.messages.get(1).map(text).unwrap_or_default();
         let last = last_user(req);
         if sys == chuck_runtime::prompts::CRITIC {
             return "ACCEPT".into();
         }
-        if sys.contains("You are glm-") {
+        if me.starts_with("You are ds-") {
             return if req.messages.len() == 2 {
                 "```write v.txt\n2\n```\n```test grep -qx 2 v.txt```\n```submit\nv is 2\n```".into()
             } else { "ok".into() };
         }
         if req.messages.len() == 2 {
             return "```criteria\n- v.txt holds 2 :: verify: grep -qx 2 v.txt\n```\n```plan\n- delegate\n```\n\
-                ```assign glm\ntitle: v\ncriteria:\n- v.txt holds 2 :: verify: grep -qx 2 v.txt\nbrief: set it\n```".into();
+                ```assign worker\ntitle: v\ncriteria:\n- v.txt holds 2 :: verify: grep -qx 2 v.txt\nbrief: set it\n```".into();
         }
         if last.contains("SUBMISSION t1") {
             return "Let me think about this submission.".into(); // no review: the worker now waits on the lead
@@ -431,11 +440,12 @@ fn a_worker_that_removes_its_own_todo_can_submit() {
     std::fs::write(dir.join("m.py"), "X = 0\n").unwrap();
     let model = Arc::new(Scripted::new().respond(|req| {
         let sys = text(&req.messages[0]);
+        let me = req.messages.get(1).map(text).unwrap_or_default();
         let last = last_user(req);
         if sys == chuck_runtime::prompts::CRITIC {
             return "ACCEPT".into();
         }
-        if sys.contains("You are ds-") {
+        if me.starts_with("You are ds-") {
             if req.messages.len() == 2 {
                 return "```write m.py\nX = 1  # TODO: confirm\n```\n```test grep -q 'X = 1' m.py```\n```submit\nX is 1\n```".into();
             }
@@ -540,8 +550,8 @@ fn a_worker_never_runs_a_critical_command() {
     let dir = tmp("worker-critical");
     std::fs::write(dir.join("f.txt"), "1\n").unwrap();
     let model = Arc::new(Scripted::new().respond(|req| {
-        let sys = text(&req.messages[0]);
-        if sys.contains("You are ds-") {
+        let me = req.messages.get(1).map(text).unwrap_or_default();
+        if me.starts_with("You are ds-") {
             return if req.messages.len() == 2 {
                 "```bash\necho ZWNobyByYW4gPiBwcm9vZi50eHQK | base64 -d | bash\n```".into()
             } else { "```submit\nblocked\n```".into() };
@@ -560,7 +570,7 @@ fn a_worker_never_runs_a_critical_command() {
                                                           ..RuntimeConfig::default() }, Events::none());
     let _ = run_within(30, rt, job);
     let worker_fb: Vec<String> = model.seen.lock().unwrap().iter()
-        .filter(|r| text(&r.messages[0]).contains("You are ds-") && r.messages.len() > 2)
+        .filter(|r| text(&r.messages[1]).starts_with("You are ds-") && r.messages.len() > 2)
         .map(last_user).collect();
     assert!(worker_fb.iter().any(|f| f.contains("background workers never run")), "{worker_fb:?}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -576,7 +586,7 @@ fn a_read_only_folder_is_never_changed() {
     let model = Arc::new(Scripted::new().replies([
         "```criteria\n- a says new :: verify: grep -qx new a.txt\n```\n```write a.txt\nnew\n```\n\
          ```bash\necho new > a.txt; cat a.txt\n```\n```plan\n- x\n```\n\
-         ```assign glm\ntitle: t\ncriteria:\n- a :: verify: true\nbrief: b\n```",
+         ```assign worker\ntitle: t\ncriteria:\n- a :: verify: true\nbrief: b\n```",
         "I can't change a read-only folder.",
     ]));
     let cfg = RuntimeConfig { store: dir.join("store"), access: chuck_sandbox::Access::ReadOnly, lead_steps: 3,
@@ -632,18 +642,19 @@ fn every_command_any_agent_ran_is_in_the_evidence_chain() {
     let ledger = Arc::new(chuck_store::Ledger::at(&dir.join("ledger.jsonl")));
     let model = Arc::new(Scripted::new().respond(|req| {
         let sys = text(&req.messages[0]);
+        let me = req.messages.get(1).map(text).unwrap_or_default();
         let last = last_user(req);
         if sys == chuck_runtime::prompts::CRITIC {
             return "ACCEPT".into();
         }
-        if sys.contains("You are glm-") {
+        if me.starts_with("You are ds-") {
             return if req.messages.len() == 2 {
                 "```write v.txt\n2\n```\n```test grep -qx 2 v.txt```\n```submit\nv is 2\n```".into()
             } else { "ok".into() };
         }
         if req.messages.len() == 2 {
             return "```criteria\n- v.txt holds 2 :: verify: grep -qx 2 v.txt\n```\n```plan\n- delegate\n```\n\
-                ```assign glm\ntitle: v\ncriteria:\n- v.txt holds 2 :: verify: grep -qx 2 v.txt\nbrief: set it\n```".into();
+                ```assign worker\ntitle: v\ncriteria:\n- v.txt holds 2 :: verify: grep -qx 2 v.txt\nbrief: set it\n```".into();
         }
         if last.contains("SUBMISSION t1") {
             return "```review t1 accept\nfine\n```".into();

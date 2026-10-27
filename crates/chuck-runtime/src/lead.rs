@@ -7,6 +7,7 @@ use crate::agent::{run_worker, think, Convo, Ctx, Halt, ToLead, ToWorker, Worker
 use crate::events::{Event, Outcome};
 use crate::exec::{parse_criteria, refuse_command, Approve, Exec, Grant, LeadCall, Sandbox, LEAD_TAGS};
 use crate::prompts;
+use crate::team::Team;
 use chuck_core::evidence::{clip, test_counts};
 use chuck_core::fleet::better;
 use chuck_core::{AgentId, Caps, Criterion, CriterionId, DoneGate, EvidenceKind, Progress, Role, Scale, SpawnSpec,
@@ -102,6 +103,28 @@ pub struct LeadRun<'a> {
     pub paused_why: Option<String>,
     /// Places outside the folder the user allowed for this job.
     outside: Arc<Mutex<Vec<PathBuf>>>,
+    /// The job's channel: the workers talk on it, the Lead follows it.
+    team: Arc<Team>,
+    /// The last post the Lead has read.
+    heard: u64,
+}
+
+/// A lead call that didn't do what was asked: the Lead must hear it now,
+/// not after waiting on the workers.
+fn refusal(line: &str) -> bool {
+    let l = line.to_lowercase();
+    l.contains("refused") || l.contains("not a lead tool") || l.contains("isn't a verdict")
+        || l.contains("not accepted") || l.contains("can't be accepted") || l.contains("merging failed")
+        || ["[assign:", "[review:", "[justify:", "[cancel:", "[a rejection needs"].iter().any(|p| l.starts_with(p))
+}
+
+/// Does a plan step stand for this task? It names it (`t2`), or it is the
+/// task's title.
+fn step_is(step: &str, id: &str, title: &str) -> bool {
+    let s = step.to_lowercase();
+    let named = s.split(|c: char| !c.is_ascii_alphanumeric()).any(|w| w == id);
+    let t = title.trim().to_lowercase();
+    named || (!t.is_empty() && (s.trim() == t || (t.len() >= 12 && s.contains(&t))))
 }
 
 /// Forget lines typed before a question is shown: they don't answer it.
@@ -184,17 +207,17 @@ pub fn parse_assign(arg: &str, body: &str) -> Result<AssignSpec, String> {
     let a = arg.to_lowercase();
     let mut words = a.split_whitespace();
     let (prefer, race) = match words.next() {
-        Some("deepseek" | "ds") => (Role::DeepSeekWorker, false),
+        Some("worker" | "deepseek" | "ds") => (Role::DeepSeekWorker, false),
         Some("glm") => (Role::GlmWorker, false),
         Some("race") => (Role::DeepSeekWorker, true),
-        other => return Err(format!("[assign: say who — ```assign deepseek```, ```assign glm``` or ```assign race```, \
-            not `{}`]", other.unwrap_or(""))),
+        other => return Err(format!("[assign: ```assign worker``` (or ```assign race``` for two on it), not `{}`]",
+                                    other.unwrap_or(""))),
     };
     let rest: Vec<&str> = words.collect();
     let after = match rest.first() {
         Some(&"after") => rest[1..].join(" ").split([',', ' ']).map(str::trim).filter(|s| !s.is_empty())
             .map(String::from).collect(),
-        Some(w) => return Err(format!("[assign: unexpected `{w}` — the form is ```assign glm after t1,t2```]")),
+        Some(w) => return Err(format!("[assign: unexpected `{w}` — the form is ```assign worker after t1,t2```]")),
         None => Vec::new(),
     };
     let (mut title, mut scale) = (String::new(), Scale::Small);
@@ -283,7 +306,7 @@ impl<'a> LeadRun<'a> {
                   shadow: ctx.cfg.checkpoints.as_ref().filter(|_| ctx.cfg.access != chuck_sandbox::Access::ReadOnly)
                       .and_then(|store| chuck_store::Shadow::new(root, store).ok()),
                   first_checkpoint: None, steer: None, resume: None, task_base: 0, resumed: false, last_msgs: Vec::new(), last_head: 1,
-                  paused_why: None, outside: Arc::default() }
+                  paused_why: None, outside: Arc::default(), team: Arc::default(), heard: 0 }
     }
 
     /// Snapshot the folder before a step that may change it. A failure turns
@@ -421,7 +444,8 @@ impl<'a> LeadRun<'a> {
         let (wtx, wrx) = channel();
         let stop = Arc::new(AtomicBool::new(false));
         let spec = WorkerSpec { id, role, name: name.clone(), task: task.clone(), ws: ws.clone(), gate: gate.clone(),
-                                stop: stop.clone(), to_lead: self.tx.clone(), inbox: wrx };
+                                stop: stop.clone(), to_lead: self.tx.clone(), inbox: wrx, team: self.team.clone(),
+                                roster: self.roster(&name), heard: self.team.cursor() };
         let ctx = self.ctx.clone();
         // announced here, before Assigned: whoever listens knows the name first
         self.ctx.events.emit(Event::AgentStarted { id, role, name: name.clone(),
@@ -434,6 +458,41 @@ impl<'a> LeadRun<'a> {
         self.workers.insert(id, Worker { role, name, ws, gate, tx: wtx, stop, join: Some(join),
                                          live: true });
         Ok(id)
+    }
+
+    /// Who else is on the job and on what, and what the team has said: a
+    /// new worker's first picture of the others.
+    fn roster(&self, me: &str) -> String {
+        let mut lines: Vec<String> = Vec::new();
+        for t in self.tasks.iter().filter(|t| t.state == TaskState::Running || t.state == TaskState::Review) {
+            for w in t.workers.iter().filter_map(|w| self.workers.get(w)).filter(|w| w.live && w.name != me) {
+                lines.push(format!("- {} is on {} \"{}\"", w.name, t.task.id, clip(&t.task.title, 80)));
+            }
+        }
+        for t in self.tasks.iter().filter(|t| t.state == TaskState::Merged) {
+            lines.push(format!("- {} \"{}\" is merged into the project (your copy may predate it)", t.task.id,
+                               clip(&t.task.title, 80)));
+        }
+        let said = self.team.recent(8);
+        if lines.is_empty() && said.is_empty() {
+            return String::new();
+        }
+        let mut s = String::new();
+        if !lines.is_empty() {
+            s = format!("YOUR TEAM (talk to them with ```team```):\n{}", lines.join("\n"));
+        }
+        if !said.is_empty() {
+            s.push_str(&format!("{}{}", if s.is_empty() { "" } else { "\n\n" },
+                                crate::team::render(&said).replacen("new messages", "what was said so far", 1)));
+        }
+        s
+    }
+
+    /// Say on the team channel what everyone should know (a task started,
+    /// merged, cancelled).
+    fn announce(&self, text: &str) {
+        self.team.post("lead", None, text);
+        self.ctx.events.emit(Event::Team { from: "lead".into(), to: None, text: text.to_string() });
     }
 
     /// Start every queued task whose dependencies are merged and whose pool
@@ -457,8 +516,14 @@ impl<'a> LeadRun<'a> {
                 continue;
             }
             let task = self.tasks[i].task.clone();
-            let roles = if task.race { vec![Role::DeepSeekWorker, Role::GlmWorker] } else { vec![task.prefer] };
-            if roles.iter().any(|r| self.live(*r) >= self.ctx.cfg.fleet.max_workers(*r)) {
+            let fleet = &self.ctx.cfg.fleet;
+            // a race is two different models when there are two pools, else two workers of one
+            let roles = if task.race {
+                vec![fleet.pool(Role::DeepSeekWorker), fleet.pool(Role::GlmWorker)]
+            } else {
+                vec![fleet.pool(task.prefer)]
+            };
+            if roles.iter().any(|r| self.live(*r) + roles.iter().filter(|x| *x == r).count() > fleet.max_workers(*r)) {
                 continue;
             }
             let mut started = Vec::new();
@@ -478,6 +543,8 @@ impl<'a> LeadRun<'a> {
                 slot.workers = started;
                 out.push(format!("[{} \"{}\" → {}{}]", task.id, task.title, names.join(" vs "),
                                  if task.race { ": a race; the better verified result comes to you" } else { "" }));
+                let who: Vec<String> = names.iter().map(|n| n.split(" (").next().unwrap_or(n).to_string()).collect();
+                self.announce(&format!("{} \"{}\" started: {}", task.id, clip(&task.title, 100), who.join(", ")));
             }
         }
         out
@@ -488,6 +555,8 @@ impl<'a> LeadRun<'a> {
             w.live = false;
             w.stop.store(true, Ordering::Relaxed);
             let _ = w.tx.send(ToWorker::Stop);
+            // a worker mid-call stops now, not when its turn is over (joined below)
+            self.ctx.kernel.signal(id, chuck_core::Signal::Kill);
             if let Some(j) = w.join.take() {
                 let _ = j.join();
             }
@@ -524,6 +593,13 @@ impl<'a> LeadRun<'a> {
     /// A message from a worker; returns what the lead should hear.
     fn on_worker(&mut self, msg: ToLead) -> Vec<String> {
         let mut out = Vec::new();
+        let from = match &msg {
+            ToLead::Submitted(s) => s.worker,
+            ToLead::Ended { worker, .. } => *worker,
+        };
+        if self.workers.get(&from).is_some_and(|w| !w.live) {
+            return out; // retired (cancelled, or a race's loser): what it sends now is moot
+        }
         match msg {
             ToLead::Submitted(sub) => {
                 let sub = *sub;
@@ -565,6 +641,7 @@ impl<'a> LeadRun<'a> {
                     return out;
                 }
                 slot.state = TaskState::Failed(gaps.clone());
+                self.team.post("lead", None, &format!("{task} stopped unfinished ({name}: {})", clip(&why, 120)));
                 out.push(format!("[{task}: {name} stopped without finished work ({why}). Still missing:\n- {}\n\
                     Reassign it with tighter criteria, do it yourself, or say in your summary that it isn't done]",
                     if gaps.is_empty() { "(nothing listed)".into() } else { gaps.join("\n- ") }));
@@ -694,10 +771,17 @@ impl<'a> LeadRun<'a> {
                 }
                 self.mutated = true;
                 let _ = wtx.send(ToWorker::Accepted);
+                let mut title = String::new();
                 if let Some(s) = self.slot(&tid) {
                     s.state = TaskState::Merged;
                     s.workers.clear();
+                    title = s.task.title.clone();
                 }
+                let mut files = m.applied.clone();
+                files.extend(m.merged.iter().cloned());
+                self.announce(&format!("{tid} \"{}\" merged into the project: {}. Copies made before this don't have \
+                    it; your work merges on top of it.", clip(&title, 100), clip(&files.join(", "), 400)));
+                self.mark_plan_for(&tid, &title);
                 self.ctx.events.emit(Event::Reviewed { task: tid.clone(), accepted: true, defects: Vec::new() });
                 if let Some(j) = self.workers.get_mut(&sub.worker).and_then(|w| w.join.take()) {
                     let _ = j.join();
@@ -729,6 +813,46 @@ impl<'a> LeadRun<'a> {
                 format!("[review: `{other}` isn't a verdict — accept or reject]")
             }
         }
+    }
+
+    /// A merged task's plan steps are done: the plan the user follows moves
+    /// with the work, whether or not the Lead marks it.
+    fn mark_plan_for(&self, tid: &str, title: &str) {
+        let mut g = self.gate.lock().unwrap();
+        let steps: Vec<usize> = g.plan_view().iter().enumerate()
+            .filter(|(_, (s, done))| !done && step_is(s, tid, title)).map(|(i, _)| i + 1).collect();
+        if !steps.is_empty() && g.mark_plan(&steps, true).is_ok() {
+            self.ctx.events.emit(Event::Plan { steps: g.plan_view() });
+        }
+    }
+
+    /// ```cancel t2 <why>```: take a task back — its workers stop, their
+    /// copies go, and what depends on it can't start.
+    fn cancel(&mut self, call: &LeadCall) -> String {
+        let arg = call.arg.trim();
+        let (tid, why) = arg.split_once(char::is_whitespace).unwrap_or((arg, ""));
+        let why = format!("{why} {}", call.body).trim().to_string();
+        let Some(slot) = self.tasks.iter().find(|t| t.task.id == tid) else {
+            return format!("[cancel: there is no task `{tid}` — ```cancel t2 <why>```]");
+        };
+        if !slot.open() {
+            return format!("[cancel: {tid} isn't open (it is {})]", format!("{:?}", slot.state).to_lowercase());
+        }
+        let workers = slot.workers.clone();
+        for w in workers {
+            self.retire(w);
+        }
+        let why = if why.is_empty() { "cancelled by the lead".to_string() } else { format!("cancelled: {why}") };
+        if let Some(s) = self.slot(tid) {
+            s.state = TaskState::Failed(vec![why.clone()]);
+            s.workers.clear();
+            s.held.clear();
+            s.pending = None;
+        }
+        self.announce(&format!("{tid} {why}"));
+        let mut out = vec![format!("[{tid} {why}; its workers stopped. Assign it again (changed) if it's still needed]")];
+        out.extend(self.start_ready());
+        out.join("\n")
     }
 
     fn assign(&mut self, call: &LeadCall) -> String {
@@ -917,6 +1041,37 @@ impl<'a> LeadRun<'a> {
         while let Ok(m) = self.rx.try_recv() {
             out.extend(self.on_worker(m));
         }
+        out.extend(self.crashed());
+        out
+    }
+
+    /// Workers whose thread ended without a word (it panicked): each is a
+    /// task that stopped, never one waited on forever.
+    fn crashed(&mut self) -> Vec<String> {
+        let gone: Vec<AgentId> = self.workers.iter()
+            .filter(|(_, w)| w.live && w.join.as_ref().is_some_and(|j| j.is_finished())).map(|(id, _)| *id).collect();
+        let mut out = Vec::new();
+        for id in gone {
+            // a message it sent just before ending comes first
+            while let Ok(m) = self.rx.try_recv() {
+                out.extend(self.on_worker(m));
+            }
+            let Some(w) = self.workers.get_mut(&id).filter(|w| w.live) else { continue };
+            let why = match w.join.take().map(|j| j.join()) {
+                Some(Err(p)) => format!("it crashed: {}", p.downcast_ref::<String>().cloned()
+                    .or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_else(|| "a panic".into())),
+                _ => "it ended without a word".into(),
+            };
+            let gaps = w.gate.lock().unwrap_or_else(|e| e.into_inner()).pause();
+            // its process ends (and gives back its slot), as a worker's own exit would
+            self.ctx.kernel.exit(id, 1, Some("crashed".into()));
+            self.ctx.events.emit(Event::AgentEnded { id, status: "crashed".into() });
+            let Some(task) = self.tasks.iter().find(|t| t.workers.contains(&id)).map(|t| t.task.id.clone()) else {
+                w.live = false;
+                continue;
+            };
+            out.extend(self.on_worker(ToLead::Ended { task, worker: id, gaps, why }));
+        }
         out
     }
 
@@ -933,6 +1088,9 @@ impl<'a> LeadRun<'a> {
             if let Some(s) = self.steering() {
                 break Ok(vec![s]);
             }
+            if self.team.addressed("lead", self.heard) {
+                break Ok(Vec::new()); // the turn's feedback carries it
+            }
             match self.rx.recv_timeout(Duration::from_millis(200)) {
                 Ok(m) => {
                     let mut out = self.on_worker(m);
@@ -942,7 +1100,13 @@ impl<'a> LeadRun<'a> {
                         break Ok(out);
                     }
                 }
-                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Timeout) => {
+                    let out = self.crashed();
+                    if !out.is_empty() {
+                        self.publish();
+                        break Ok(out);
+                    }
+                }
                 Err(RecvTimeoutError::Disconnected) => break Ok(vec!["[every worker is gone]".into()]),
             }
         };
@@ -1087,7 +1251,15 @@ impl<'a> LeadRun<'a> {
                     .unwrap_or_default();
                 self.checkpoint(&format!("before {}", clip(&what, 80)));
             }
-            let (root_dir, job_gate, outside) = (self.root.clone(), self.gate.clone(), self.outside.clone());
+            let (root_dir, job_gate, outside, team) = (self.root.clone(), self.gate.clone(), self.outside.clone(),
+                                                       self.team.clone());
+            // while workers build, the project is theirs: what the Lead changed under them would collide
+            // with their merges (it looks, reviews and steers; ```cancel``` takes a task back)
+            let running: Vec<String> = self.tasks.iter().filter(|t| matches!(t.state, TaskState::Running | TaskState::Review))
+                .map(|t| t.task.id.clone()).collect();
+            let hold = (!running.is_empty()).then(|| format!("[refused: the workers are changing the project now ({}) \
+                — a change of yours would collide with their merges. Review what they hand in, guide them with \
+                ```team```, or take a task back with ```cancel tN <why>```; then change it yourself]", running.join(", ")));
             let exec = Exec { id: self.id, role: Role::Lead, kernel: &ctx.kernel, root: &root_dir, gate: &job_gate,
                               sandbox: Sandbox { access: ctx.cfg.access, bwrap: ctx.cfg.bwrap, worker: false },
                               approve: self.approver(), audit: ctx.cfg.audit.clone().map(|l| (l, "lead".into())),
@@ -1095,14 +1267,17 @@ impl<'a> LeadRun<'a> {
                               cmd_timeout: ctx.cfg.cmd_timeout,
                               web: ctx.cfg.web.as_deref(), sources: ctx.cfg.sources,
                               mcp: ctx.cfg.mcp.as_deref(), lsp: ctx.cfg.lsp.as_deref(),
-                              memory: ctx.cfg.memory.as_deref(), allowed_outside: Some(&outside) };
+                              memory: ctx.cfg.memory.as_deref(), allowed_outside: Some(&outside),
+                              team: Some((&team, "lead")), hold };
             let r = exec.run(&reply);
             self.mutated |= r.mutated;
             let mut fb = r.feedback.clone();
+            let mut refused = false;
             for call in &r.lead_calls {
                 let line = match call.tag.as_str() {
                     "assign" => self.assign(call),
                     "review" => self.review(call),
+                    "cancel" => self.cancel(call),
                     "justify" => self.justify(call),
                     "browse" => crate::browse::browse(ctx, self.id, &self.root, &self.gate, call),
                     "ask" => self.ask(call),
@@ -1113,10 +1288,23 @@ impl<'a> LeadRun<'a> {
                     },
                     other => format!("[{other}: not a lead tool]"),
                 };
+                // a refused assign/review/cancel needs the Lead now; a refused `done` while workers run
+                // only means "wait for them", which is what happens next
+                refused |= matches!(call.tag.as_str(), "assign" | "review" | "cancel" | "justify") && refusal(&line);
                 fb.push(line);
             }
             let waiting = !self.open_tasks().is_empty();
-            if !r.acted() {
+            // workers on it, nothing to review, nothing refused: the Lead's next turn is when one of
+            // them hands in (or asks it something) — never a turn spent polling
+            let mut waited = false;
+            if self.busy() && self.awaiting_review().is_empty() && !refused && !r.malformed {
+                match self.wait_for_worker() {
+                    Ok(m) => fb.extend(m),
+                    Err(h) => return self.pause(&h.describe()),
+                }
+                waited = true;
+            }
+            if !r.acted() && !waited {
                 let reviews = self.awaiting_review();
                 if r.malformed {
                     // it meant to act: what it wrote is not an answer (the feedback says how to write it)
@@ -1143,11 +1331,6 @@ impl<'a> LeadRun<'a> {
                     // the workers wait on you: waiting on them would wait forever
                     fb.push(format!("[{} waiting for your review — ```review <task> accept``` or ```review <task> \
                         reject``` + `- <defect>` lines]", reviews.join(", ")));
-                } else if self.busy() {
-                    match self.wait_for_worker() {
-                        Ok(m) => fb.extend(m),
-                        Err(h) => return self.pause(&h.describe()),
-                    }
                 } else if waiting {
                     fb.push(format!("[{} can't start until its dependencies are merged — review, reassign or \
                         do them]", self.open_tasks().join(", ")));
@@ -1157,6 +1340,12 @@ impl<'a> LeadRun<'a> {
                 }
             }
             fb.extend(self.drain());
+            // the Lead follows the whole team, what workers say to each other too
+            let (posts, cursor) = self.team.overheard("lead", self.heard);
+            self.heard = cursor;
+            if !posts.is_empty() {
+                fb.push(crate::team::render(&posts));
+            }
             if !self.tasks.is_empty() {
                 self.publish();
             }

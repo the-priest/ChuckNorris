@@ -1,17 +1,34 @@
 //! The fleet: one Lead and up to eight workers, SiliconFlow only.
+//!
+//! The Lead (DeepSeek-V4.1-Flash) plans, reviews and merges; the workers
+//! (DeepSeek-V4-Flash, the cheaper workhorse) build; GLM-5.3-Flash is the
+//! team's eyes (it describes screenshots) and, if asked for, a second pool
+//! of workers.
 
 use crate::donegate::{DoneGate, Scale};
 use crate::evidence::{Criterion, Evidence};
 use crate::types::{AgentId, ModelFamily, Role};
 use serde::{Deserialize, Serialize};
 
+/// The Lead's model (and Chat's, the critic's).
 pub const DEEPSEEK_MODEL: &str = "deepseek-ai/DeepSeek-V4.1-Flash-1017";
+/// The workers' model: the cheap, fast workhorse.
+pub const WORKER_MODEL: &str = "deepseek-ai/DeepSeek-V4-Flash";
+/// The eyes (and the GLM pool, when there is one).
 pub const GLM_MODEL: &str = "zai-org/GLM-5.3-Flash";
 
-/// Who the team is. The default is the full 1 + 4 + 4.
+fn worker_model() -> String {
+    WORKER_MODEL.into()
+}
+
+/// Who the team is: the Lead, up to 8 DeepSeek workers, GLM for the eyes.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FleetConfig {
+    /// The Lead's model.
     pub deepseek_model: String,
+    /// The DeepSeek workers' model.
+    #[serde(default = "worker_model")]
+    pub worker_model: String,
     pub glm_model: String,
     pub deepseek_workers: u8,
     pub glm_workers: u8,
@@ -21,26 +38,40 @@ impl Default for FleetConfig {
     fn default() -> FleetConfig {
         FleetConfig {
             deepseek_model: DEEPSEEK_MODEL.into(),
+            worker_model: WORKER_MODEL.into(),
             glm_model: GLM_MODEL.into(),
             deepseek_workers: 4,
-            glm_workers: 4,
+            glm_workers: 0,
         }
     }
 }
 
 impl FleetConfig {
     pub fn model_for(&self, role: Role) -> &str {
-        match role.family() {
-            ModelFamily::DeepSeek => &self.deepseek_model,
-            ModelFamily::Glm => &self.glm_model,
+        match role {
+            Role::DeepSeekWorker | Role::Daemon => &self.worker_model,
+            _ => match role.family() {
+                ModelFamily::DeepSeek => &self.deepseek_model,
+                ModelFamily::Glm => &self.glm_model,
+            },
         }
     }
 
     pub fn max_workers(&self, role: Role) -> usize {
         match role {
-            Role::DeepSeekWorker => self.deepseek_workers.min(4) as usize,
+            Role::DeepSeekWorker => self.deepseek_workers.min(8) as usize,
             Role::GlmWorker => self.glm_workers.min(4) as usize,
             _ => 0,
+        }
+    }
+
+    /// The pool a task goes to: the one asked for when it has room to exist
+    /// at all, else the other.
+    pub fn pool(&self, asked: Role) -> Role {
+        match asked {
+            Role::GlmWorker if self.glm_workers == 0 => Role::DeepSeekWorker,
+            Role::DeepSeekWorker if self.deepseek_workers == 0 && self.glm_workers > 0 => Role::GlmWorker,
+            r => r,
         }
     }
 
@@ -50,12 +81,15 @@ impl FleetConfig {
     pub fn resolve(&mut self, live: &[String]) -> Vec<(String, String)> {
         let mut changes = Vec::new();
         for (slot, family) in [(&mut self.deepseek_model, "deepseek-v4.1-flash"),
+                               (&mut self.worker_model, "deepseek-v4-flash"),
                                (&mut self.glm_model, "glm-5.3-flash")] {
             if live.iter().any(|m| m == slot.as_str()) {
                 continue;
             }
+            // a bigger sibling (`-Pro`, `-Max`) costs more: only when it's all there is
+            let pricier = |m: &str| ["-pro", "-max"].iter().any(|x| m.to_lowercase().contains(x));
             let best = live.iter().filter(|m| m.to_lowercase().contains(family))
-                .min_by_key(|m| (strsim(m, slot), m.len()));
+                .min_by_key(|m| (pricier(m), strsim(m, slot), m.len()));
             if let Some(b) = best {
                 changes.push((slot.clone(), b.clone()));
                 *slot = b.clone();
@@ -128,12 +162,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_fleet_is_one_plus_four_plus_four_on_siliconflow_ids() {
+    fn default_fleet_is_a_v41_lead_with_v4_flash_workers() {
         let f = FleetConfig::default();
         assert_eq!(f.model_for(Role::Lead), DEEPSEEK_MODEL);
-        assert_eq!(f.model_for(Role::DeepSeekWorker), DEEPSEEK_MODEL);
+        assert_eq!(f.model_for(Role::DeepSeekWorker), WORKER_MODEL);
+        assert_eq!(f.model_for(Role::Daemon), WORKER_MODEL);
         assert_eq!(f.model_for(Role::GlmWorker), GLM_MODEL);
-        assert_eq!(f.max_workers(Role::DeepSeekWorker) + f.max_workers(Role::GlmWorker), 8);
+        assert_eq!((f.max_workers(Role::DeepSeekWorker), f.max_workers(Role::GlmWorker)), (4, 0));
+        // GLM is the eyes: a task asked of a GLM pool that isn't there goes to the workers
+        assert_eq!(f.pool(Role::GlmWorker), Role::DeepSeekWorker);
+        let eight = FleetConfig { deepseek_workers: 8, ..FleetConfig::default() };
+        assert_eq!(eight.max_workers(Role::DeepSeekWorker), 8);
+        // an older saved config (no worker model) gets the workhorse
+        let old: FleetConfig = serde_json::from_str(r#"{"deepseek_model":"a","glm_model":"b","deepseek_workers":4,"glm_workers":4}"#).unwrap();
+        assert_eq!(old.worker_model, WORKER_MODEL);
     }
 
     #[test]
@@ -148,5 +190,12 @@ mod tests {
         let mut g = FleetConfig::default();
         g.resolve(&["deepseek-ai/DeepSeek-V4.1-Flash-1017".into()]);
         assert_eq!(g.deepseek_model, DEEPSEEK_MODEL);
+        // the workhorse: the account's V4-Flash, never mistaken for V4.1
+        let mut h = FleetConfig::default();
+        h.resolve(&["deepseek-ai/DeepSeek-V4.1-Flash-1017".into(), "deepseek-ai/DeepSeek-V4-Flash-0738".into()]);
+        assert_eq!((h.deepseek_model.as_str(), h.worker_model.as_str()), (DEEPSEEK_MODEL, "deepseek-ai/DeepSeek-V4-Flash-0738"));
+        let mut m = FleetConfig::default();
+        m.resolve(&["deepseek-ai/DeepSeek-V4-Flash-Max".into(), "deepseek-ai/DeepSeek-V4-Flash-0731".into()]);
+        assert_eq!(m.worker_model, "deepseek-ai/DeepSeek-V4-Flash-0731", "not the pricier Max");
     }
 }

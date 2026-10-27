@@ -77,7 +77,7 @@ impl Runtime {
     pub fn daemon(&self, d: DaemonRun) -> DaemonReport {
         let ctx = Ctx { kernel: self.kernel.clone(), model: self.model.clone(), cfg: self.cfg.clone(),
                         events: self.events.clone(), stop: d.stop.clone() };
-        let model = self.cfg.fleet.deepseek_model.clone();
+        let model = self.cfg.fleet.model_for(Role::Daemon).to_string();
         let quota = Quota { tokens: Some(d.tokens), usd: self.cfg.job_quota.usd, seconds: Some(d.minutes as f64 * 60.0) };
         let id = self.kernel.spawn(SpawnSpec::new(format!("daemon: {}", d.name).chars().take(60).collect::<String>(),
                                                   Role::Daemon).quota(quota).caps(Caps::READ | Caps::EXEC | Caps::NET)

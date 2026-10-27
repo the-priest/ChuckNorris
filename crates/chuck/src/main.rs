@@ -258,10 +258,11 @@ fn cmd_models() {
     let live = c.list_models().unwrap_or_else(|e| fail(&e.to_string()));
     let changes = f.resolve(&live);
     let have = |m: &str| live.iter().any(|x| x == m);
-    println!("lead + {} DeepSeek workers  {}  {}", f.deepseek_workers, f.deepseek_model,
-             if have(&f.deepseek_model) { "✓ on your account" } else { "✗ not on your account" });
-    println!("{} GLM workers             {}  {}", f.glm_workers, f.glm_model,
-             if have(&f.glm_model) { "✓ on your account" } else { "✗ not on your account" });
+    let on = |m: &str| if have(m) { "✓ on your account" } else { "✗ not on your account" };
+    println!("lead (plans, reviews, merges)  {}  {}", f.deepseek_model, on(&f.deepseek_model));
+    println!("{} workers (build)             {}  {}", f.deepseek_workers, f.worker_model, on(&f.worker_model));
+    println!("eyes (screenshots){}       {}  {}", if f.glm_workers > 0 { format!(" + {} GLM workers", f.glm_workers) }
+             else { String::new() }, f.glm_model, on(&f.glm_model));
     for (from, to) in changes {
         println!("  {from} isn't listed; using {to}");
     }
@@ -337,7 +338,7 @@ fn cmd_run(args: &[String], chat: bool, cont: bool) -> i32 {
     let header = if chat {
         format!("chat · {} · up to {}", term::short_model(&cfg.fleet.deepseek_model), chuck_model::fmt_usd(usd))
     } else {
-        format!("lead + {} DeepSeek + {} GLM · {} ({}) · up to {}", cfg.fleet.deepseek_workers, cfg.fleet.glm_workers,
+        format!("lead + {} workers · {} ({}) · up to {}", cfg.fleet.deepseek_workers + cfg.fleet.glm_workers,
                 folder.display(), cfg.access.label(), chuck_model::fmt_usd(usd))
     };
     let (tx, rx) = channel();

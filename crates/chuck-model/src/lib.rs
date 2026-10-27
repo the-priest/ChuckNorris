@@ -136,6 +136,10 @@ pub enum ModelError {
     Timeout,
     #[error("stopped")]
     Stopped,
+    /// The call's own thread died (a bug, not the network): trying again
+    /// would only do it again.
+    #[error("the model call crashed: {0}")]
+    Crashed(String),
 }
 
 impl ModelError {
@@ -202,9 +206,11 @@ pub fn chat_interruptible(model: &Arc<dyn ChatModel>, req: &ChatRequest, sink: &
     let relay_stop = stop.clone();
     let (m, r) = (model.clone(), req.clone());
     std::thread::Builder::new().name("chuck-model-call".into()).spawn(move || {
-        let mut relay = Relay { tx, stop: relay_stop };
-        let out = m.chat(&r, &mut relay);
-        let _ = relay.tx.send(Piece::End(out));
+        let mut relay = Relay { tx: tx.clone(), stop: relay_stop };
+        let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| m.chat(&r, &mut relay)))
+            .unwrap_or_else(|p| Err(ModelError::Crashed(p.downcast_ref::<String>().cloned()
+                .or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_else(|| "a panic".into()))));
+        let _ = tx.send(Piece::End(out));
     }).map_err(|e| ModelError::Network(format!("couldn't start the call: {e}")))?;
     loop {
         if sink.should_stop() {
@@ -218,7 +224,7 @@ pub fn chat_interruptible(model: &Arc<dyn ChatModel>, req: &ChatRequest, sink: &
             Ok(Piece::End(out)) => return out,
             Err(RecvTimeoutError::Timeout) => continue,
             Err(RecvTimeoutError::Disconnected) => {
-                return Err(ModelError::Network("the call ended without a result".into()));
+                return Err(ModelError::Crashed("the call ended without a result".into()));
             }
         }
     }

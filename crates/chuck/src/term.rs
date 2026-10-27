@@ -112,6 +112,8 @@ impl View {
                 };
                 format!("  {mark} {} {} {}", st.dim(&format!("{who:<6}")), tool, st.dim(&what))
             }
+            Event::Team { from, to, text } => st.dim(&format!("  ✉ {from} → {}: {}", to.as_deref().unwrap_or("everyone"),
+                                                           one_line(text, 140))),
             Event::Gallery { query, items } => {
                 let mut s = format!("  {} {query}", st.accent(&format!("◉ {} pictures", items.len())));
                 for p in items {

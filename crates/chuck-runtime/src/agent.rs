@@ -349,6 +349,9 @@ pub fn think(ctx: &Ctx, id: AgentId, model: &str, convo: &Convo) -> Result<Strin
     Ok(text)
 }
 
+/// The most a worker's conversation holds (characters).
+pub const WORKER_CONTEXT: usize = 240_000;
+
 /// Worker → lead.
 #[derive(Debug)]
 pub enum ToLead {
@@ -376,6 +379,12 @@ pub struct WorkerSpec {
     pub stop: Arc<AtomicBool>,
     pub to_lead: Sender<ToLead>,
     pub inbox: Receiver<ToWorker>,
+    /// The job's channel, shared with the Lead and the other workers.
+    pub team: Arc<crate::team::Team>,
+    /// Who else is working and on what, as the worker first reads it.
+    pub roster: String,
+    /// The team post it starts reading after (the roster covers what came before).
+    pub heard: u64,
 }
 
 fn describe(gaps: &[Unmet]) -> Vec<String> {
@@ -387,22 +396,26 @@ pub fn run_worker(ctx: Ctx, w: WorkerSpec) {
     let model = ctx.cfg.fleet.model_for(w.role).to_string();
     let root = w.ws.work.display().to_string();
     // the project's own rules (its CHUCK.md / AGENTS.md is in the copy too)
-    let system = prompts::with_context(prompts::worker(w.role, &w.name, &model, &w.task, &root),
-                                       &prompts::instructions(Some(&w.ws.work)), "");
-    let mut convo = Convo::new(&system,
-                               &format!("{}\n\nYour copy of the project: {root}", prompts::task_brief(&w.task)));
+    let system = prompts::with_context(prompts::worker(), &prompts::instructions(Some(&w.ws.work)), "");
+    let mut convo = Convo::new(&system, &prompts::worker_first(&w.name, &model, &w.task, &root, &w.roster));
+    let mut heard = w.heard;
     let mut progress = Progress::default();
     let mut warned_term = false;
     let (status, ended) = 'life: {
         for _step in 0..ctx.cfg.worker_steps {
+            if w.stop.load(Ordering::Relaxed) {
+                break 'life ("stopped", None); // the lead took the task back
+            }
             if ctx.kernel.terminating(w.id) && !warned_term {
                 warned_term = true;
                 convo.user("[the budget is nearly spent: this is your LAST turn. Submit what is verified and say \
                     plainly what isn't]");
             }
-            convo.fit(ctx.cfg.context_chars);
+            // a worker's context is one task's: kept smaller than the Lead's, so each call costs less
+            convo.fit(ctx.cfg.context_chars.min(WORKER_CONTEXT));
             let reply = match think(&ctx, w.id, &model, &convo) {
                 Ok(r) => r,
+                Err(_) if w.stop.load(Ordering::Relaxed) => break 'life ("stopped", None),
                 Err(h) => break 'life ("paused", Some(h.describe())),
             };
             // calls in the model's own format (DeepSeek's DSML…) run as the blocks they mean
@@ -420,7 +433,8 @@ pub fn run_worker(ctx: Ctx, w: WorkerSpec) {
                               cmd_timeout: ctx.cfg.cmd_timeout,
                               web: ctx.cfg.web.as_deref(), sources: ctx.cfg.sources,
                               mcp: ctx.cfg.mcp.as_deref(), lsp: ctx.cfg.lsp.as_deref(),
-                              memory: ctx.cfg.memory.as_deref(), allowed_outside: None };
+                              memory: ctx.cfg.memory.as_deref(), allowed_outside: None,
+                              team: Some((&w.team, &w.name)), hold: None };
             let r = exec.run(&reply);
             let mut fb = r.feedback.clone();
             if let Some(report) = &r.submit {
@@ -482,6 +496,11 @@ pub fn run_worker(ctx: Ctx, w: WorkerSpec) {
                 break 'life ("paused", Some("budget spent".into()));
             }
             fb.push(exec.gate_line());
+            let (posts, cursor) = w.team.since(&w.name, heard);
+            heard = cursor;
+            if !posts.is_empty() {
+                fb.push(crate::team::render(&posts));
+            }
             {
                 let g = w.gate.lock().unwrap();
                 ctx.events.emit(Event::Gate { id: w.id, task: Some(w.task.id.clone()), phase: g.phase.label().into(),

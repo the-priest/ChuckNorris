@@ -11,7 +11,8 @@ pub type Price = (f64, Option<f64>, f64);
 
 const PRICES: &[(&str, Price)] = &[
     ("deepseek-ai/deepseek-v4.1-flash", (0.158, Some(0.01), 0.633)),
-    ("deepseek-ai/deepseek-v4-flash", (0.13, None, 0.28)),
+    ("deepseek-ai/deepseek-v4-flash", (0.14, Some(0.028), 0.28)),
+    ("deepseek-ai/deepseek-v4-flash-0731", (0.22, Some(0.014), 0.66)),
     ("zai-org/glm-5.3-flash", (0.15, None, 0.50)),
     ("zai-org/glm-5.3", (1.40, Some(0.26), 4.40)),
     ("zai-org/glm-5.1", (1.40, None, 4.40)),

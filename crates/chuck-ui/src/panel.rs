@@ -139,6 +139,8 @@ pub struct Panel {
     plan_bar: gtk::ProgressBar,
     plan_now: gtk::Label,
     tasks: Section,
+    team: Section,
+    team_posts: usize,
     agents: Section,
     commands: Section,
     running_box: gtk::Box,
@@ -182,6 +184,8 @@ impl Panel {
 
         let tasks = mk("tasks", "TASKS");
         tasks.body.append(&label("Work the Lead hands to the fleet appears here.", &["panel-dim"]));
+        let team = mk("team", "TEAM TALK");
+        team.body.append(&label("What the workers and the Lead say to each other appears here.", &["panel-dim"]));
         let agents = mk("agents", "AGENTS");
         agents.body.append(&label("Agents appear here while a job runs.", &["panel-dim"]));
 
@@ -211,17 +215,18 @@ impl Panel {
         let daemons = mk("daemons", "DAEMONS & REMINDERS");
         let memory = mk("memory", "MEMORY");
 
-        for s in [&plan, &tasks, &agents, &commands, &research, &gate, &spend, &checkpoints, &inbox, &daemons, &memory] {
+        for s in [&plan, &tasks, &team, &agents, &commands, &research, &gate, &spend, &checkpoints, &inbox, &daemons, &memory] {
             side.append(&s.root);
         }
         let root = gtk::ScrolledWindow::builder().child(&side).hscrollbar_policy(gtk::PolicyType::Never).build();
-        let p = Panel { root, plan, plan_bar, plan_now, tasks, agents, commands, running_box, recent_box,
+        let p = Panel { root, plan, plan_bar, plan_now, tasks, team, team_posts: 0, agents, commands, running_box, recent_box,
                         research, searches: 0, pages: 0, gate,
                         gate_phase, gate_unmet, gate_criteria, spend, checkpoints, inbox, daemons, memory, steps: Vec::new(), finished: false,
                         logs: HashMap::new(), running: HashMap::new(), recent: VecDeque::new(), recent_dirty: false,
                         agents_sig: String::new() };
         p.plan.summary.set_label("no plan yet");
         p.tasks.summary.set_label("none");
+        p.team.summary.set_label("quiet");
         p.agents.summary.set_label("idle");
         p.commands.summary.set_label("none yet");
         p.research.summary.set_label("none");
@@ -240,6 +245,10 @@ impl Panel {
         self.agents_sig.clear();
         self.set_plan(Vec::new());
         self.set_tasks(&[]);
+        clear(&self.team.body);
+        self.team_posts = 0;
+        self.team.summary.set_label("quiet");
+        self.team.body.append(&label("What the workers and the Lead say to each other appears here.", &["panel-dim"]));
         clear(&self.research.body);
         (self.searches, self.pages) = (0, 0);
         self.research.summary.set_label("none");
@@ -366,6 +375,29 @@ impl Panel {
         }
     }
 
+    // ── the team's talk ──
+
+    /// A message on the team channel: who to whom, and what.
+    pub fn team_post(&mut self, from: &str, to: Option<&str>, text: &str) {
+        if self.team_posts == 0 {
+            clear(&self.team.body);
+        }
+        self.team_posts += 1;
+        let head = label("", &["team-head"]);
+        head.set_markup(&format!("<b>{}</b> <span foreground=\"#5F5F6E\">→ {}</span>", escape(from),
+                                 escape(to.unwrap_or("everyone"))));
+        head.set_wrap(false);
+        self.team.body.append(&head);
+        self.team.body.append(&label(&one_line(text, 400), &["panel-text"]));
+        while self.team.body.observe_children().n_items() > 160 {
+            if let Some(first) = self.team.body.first_child() {
+                self.team.body.remove(&first);
+            }
+        }
+        self.team.summary.set_label(&format!("{} message{} · last: {from}", self.team_posts,
+                                             if self.team_posts == 1 { "" } else { "s" }));
+    }
+
     // ── research ──
 
     /// A search or a page read: who, what, how it went. Pages link out.
@@ -436,16 +468,19 @@ impl Panel {
         self.agents_sig.clear(); // redraw on the next tick
     }
 
+    /// The agents at work now, each with what it is doing; the ones that
+    /// finished are a count (their work shows in the tasks and the log).
     pub fn set_agents(&mut self, ps: &[ProcInfo], models: &HashMap<AgentId, String>) {
-        let working = ps.iter().filter(|p| matches!(p.state, ProcState::Running | ProcState::Waiting | ProcState::Ready))
-            .count();
         let usd: f64 = ps.iter().filter(|p| p.ppid.is_none()).map(|p| p.usd).sum::<f64>().max(0.0);
-        self.agents.summary.set_label(&if ps.is_empty() { "idle".to_string() } else {
-            format!("{working} working · {} total · {}", ps.len(), fmt_usd(usd))
+        let (active, ended): (Vec<&ProcInfo>, Vec<&ProcInfo>) = ps.iter().partition(|p| p.state.alive());
+        self.agents.summary.set_label(&if ps.is_empty() { "idle".to_string() } else if active.is_empty() {
+            format!("none active · {} finished · {}", ended.len(), fmt_usd(usd))
+        } else {
+            format!("{} active · {} finished · {}", active.len(), ended.len(), fmt_usd(usd))
         });
         // only rebuild when something visible changed (and only while open)
-        let sig: String = ps.iter().map(|p| format!("{}{:?}{}{}{}", p.pid, p.state, p.activity, p.tokens,
-            self.logs.get(&p.name).map_or(0, |l| l.len()))).collect();
+        let sig: String = active.iter().map(|p| format!("{}{:?}{}{}{}", p.pid, p.state, p.activity, p.tokens,
+            self.logs.get(&p.name).map_or(0, |l| l.len()))).chain(std::iter::once(ended.len().to_string())).collect();
         if !self.agents.open() || sig == self.agents_sig {
             if !self.agents.open() {
                 self.agents_sig.clear();
@@ -454,11 +489,11 @@ impl Panel {
         }
         self.agents_sig = sig;
         clear(&self.agents.body);
-        if ps.is_empty() {
-            self.agents.body.append(&label("Agents appear here while a job runs.", &["panel-dim"]));
-            return;
+        if active.is_empty() {
+            self.agents.body.append(&label(if ps.is_empty() { "Agents appear here while a job runs." } else {
+                "Nobody is working right now." }, &["panel-dim"]));
         }
-        for p in ps {
+        for p in active {
             let head = gtk::Box::new(gtk::Orientation::Horizontal, 8);
             let dot = gtk::Box::new(gtk::Orientation::Horizontal, 0);
             dot.add_css_class("dot");
@@ -489,6 +524,13 @@ impl Panel {
             if !p.brief.is_empty() && p.role != Role::Lead {
                 col.append(&label(&one_line(&p.brief, 48), &["panel-meta"]));
             }
+            // what it did last: the line that says what it is on
+            if let Some(last) = self.logs.get(&p.name).and_then(|l| l.back()) {
+                let l = label(&one_line(last, 60), &["panel-dim"]);
+                l.set_wrap(false);
+                l.set_ellipsize(pango::EllipsizeMode::End);
+                col.append(&l);
+            }
             head.append(&col);
             let body = gtk::Box::new(gtk::Orientation::Vertical, 1);
             body.add_css_class("panel-detail");
@@ -505,6 +547,20 @@ impl Panel {
                 _ => body.append(&label("nothing yet", &["panel-dim"])),
             }
             self.agents.body.append(&expander(head.upcast_ref(), body.upcast_ref()));
+        }
+        if !ended.is_empty() {
+            // "18 finished: eyes ×14, ds-1, ds-2, critic …" — counted by name
+            let mut by: Vec<(String, usize)> = Vec::new();
+            for p in &ended {
+                match by.iter_mut().find(|(n, _)| *n == p.name) {
+                    Some((_, c)) => *c += 1,
+                    None => by.push((p.name.clone(), 1)),
+                }
+            }
+            let names: Vec<String> = by.iter().map(|(n, c)| if *c > 1 { format!("{n} ×{c}") } else { n.clone() }).collect();
+            let spent: f64 = ended.iter().map(|p| p.usd).sum();
+            self.agents.body.append(&label(&format!("{} finished ({}): {}", ended.len(), fmt_usd(spent),
+                                                    one_line(&names.join(", "), 200)), &["panel-dim"]));
         }
     }
 

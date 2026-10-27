@@ -22,6 +22,29 @@ Chuck is now a Rust app (`crates/`), and the installer puts it over any earlier 
 - Three bot-check markers (Cloudflare's `cf-browser-verification` among them) never matched: they
   sat after a line break in a raw string. They match now.
 - The Python app stays installed as the fallback. It now offers the switch to the Rust app.
+- **The fleet is a team.** Workers run on DeepSeek-V4-Flash (cheaper); the Lead (V4.1-Flash)
+  plans, reviews and merges; GLM-5.3-Flash is only the eyes. Up to 8 workers.
+  - Workers talk on a shared channel (```` ```team``` ````, to everyone or `@name`). Every message
+    is in the new **Team talk** section.
+  - The Lead waits while workers build: no turn spent polling. It wakes on a submission, a message
+    to it, or your words.
+  - Until the workers hand in, the Lead can't change the folder under them. ```` ```cancel tN``` ````
+    takes a task back.
+  - The plan ticks off a step when its task merges.
+- Tool calls in DeepSeek's own format (DSML, `<invoke>`, `<tool_call>`) run as the blocks they
+  mean, for workers too. Before this, workers' calls were dropped, so the Lead ended up doing all
+  the work. A ```` ```criteria```` opened mid-line counts too.
+- The Agents section shows only the agents at work and what each is doing. Finished ones are a
+  count.
+- A worker whose model call crashes is reported to the Lead, not retried for minutes. A worker
+  thread that dies is noticed, not waited on forever.
+- Smaller prompts:
+  - Every worker gets the same system prompt, so the API caches it once for all of them.
+  - A worker's context is capped lower than the Lead's.
+  - V4-Flash is priced with its cache discount.
+- `read .` lists the folder.
+- A sed/awk pattern like `'/## 3. Setup/'`, or text a heredoc only writes out, is no longer taken for
+  a path outside the folder. Numbered criteria (`1. …`) parse.
 
 ## Unreleased (v17, in progress)
 

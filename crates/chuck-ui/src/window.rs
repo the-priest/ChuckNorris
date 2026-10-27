@@ -926,6 +926,12 @@ fn on_event(st: &mut State, e: Event, shared: &Shared) {
             st.daemons.add("", when, &what, &folder, &kind, 150_000);
             refresh_daemons(st, shared);
         }
+        Event::Team { from, to, text } => {
+            st.panel.team_post(&from, to.as_deref(), &text);
+            st.panel.log(&from, format!("team → {}: {}", to.as_deref().unwrap_or("everyone"), one_line(&text, 160)));
+            st.act(format!("<span foreground=\"#7DD3FC\">✉ {} → {}: {}</span>", esc(&from),
+                           esc(to.as_deref().unwrap_or("everyone")), esc(&one_line(&text, 140))));
+        }
         Event::Handoff { request } => {
             st.add(Entry::Handoff { request });
             st.save();
@@ -1735,13 +1741,12 @@ fn settings_dialog(shared: &Shared) {
     page.add(&api);
 
     let fleet = adw::PreferencesGroup::builder().title("Fleet")
-        .description("One Lead (DeepSeek-V4.1-Flash) plus up to four workers of each family.").build();
-    let ds = adw::SpinRow::with_range(0.0, 4.0, 1.0);
-    ds.set_title("DeepSeek workers");
-    ds.set_value(s.num("fleet_deepseek_workers", 4.0, 0.0, 4.0));
-    let glm = adw::SpinRow::with_range(0.0, 4.0, 1.0);
-    glm.set_title("GLM-5.3-Flash workers");
-    glm.set_value(s.num("fleet_glm_workers", 4.0, 0.0, 4.0));
+        .description("The Lead (DeepSeek-V4.1-Flash) plans, reviews and merges; the workers (DeepSeek-V4-Flash, \
+            cheaper) build and talk to each other; GLM-5.3-Flash looks at screenshots.").build();
+    let ds = adw::SpinRow::with_range(0.0, 8.0, 1.0);
+    ds.set_title("Workers");
+    ds.set_subtitle("How many build at once. 0: the Lead does the work itself");
+    ds.set_value(s.num("fleet_deepseek_workers", 4.0, 0.0, 8.0));
     let cap = adw::SpinRow::with_range(0.05, 100.0, 0.05);
     cap.set_title("Spending cap per job ($)");
     cap.set_digits(2);
@@ -1755,7 +1760,6 @@ fn settings_dialog(shared: &Shared) {
             limit, which this needs set (Spending limits below)")
         .active(s.map.get("fleet_auto_continue").and_then(|v| v.as_bool()) == Some(true)).build();
     fleet.add(&ds);
-    fleet.add(&glm);
     fleet.add(&cap);
     fleet.add(&cmd_min);
     fleet.add(&auto);
@@ -1996,7 +2000,6 @@ fn settings_dialog(shared: &Shared) {
             s.set("siliconflow_api_key", k.into());
         }
         s.set("fleet_deepseek_workers", (ds.value() as i64).into());
-        s.set("fleet_glm_workers", (glm.value() as i64).into());
         s.set("fleet_job_usd", cap.value().into());
         s.set("fleet_auto_continue", auto.is_active().into());
         s.set("command_timeout", ((cmd_min.value() * 60.0) as i64).into());

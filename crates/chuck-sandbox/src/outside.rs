@@ -122,13 +122,48 @@ fn allowed(p: &Path, root: &Path, home: &Path) -> bool {
         || p.starts_with(home.join(".local/share/chucknorris/sandbox-cache"))
 }
 
+/// The command without the bodies of heredocs that are only data — text
+/// `cat` or `tee` writes out (a file's contents name paths that are never
+/// opened). A heredoc fed to anything else (a shell, python…) is code, and
+/// stays.
+fn without_data_heredocs(cmd: &str) -> String {
+    let mut out = String::new();
+    let mut lines = cmd.lines();
+    while let Some(line) = lines.next() {
+        out.push_str(line);
+        out.push('\n');
+        let Some(at) = line.find("<<").filter(|i| !line[*i..].starts_with("<<<")) else { continue };
+        // the command the heredoc feeds: the first word of its pipeline segment
+        let seg = line[..at].rsplit(['|', ';', '&', '(']).next().unwrap_or("");
+        let prog = seg.split_whitespace().find(|w| !w.contains('=')).unwrap_or("");
+        let prog = prog.rsplit('/').next().unwrap_or(prog);
+        if !matches!(prog, "cat" | "tee") {
+            continue;
+        }
+        let tag: String = line[at + 2..].trim_start_matches('-').trim_start()
+            .trim_start_matches(['\'', '"']).chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+        if tag.is_empty() {
+            continue;
+        }
+        // skip the body up to its closing line
+        for body in lines.by_ref() {
+            if body.trim() == tag {
+                out.push_str(body);
+                out.push('\n');
+                break;
+            }
+        }
+    }
+    out
+}
+
 /// The paths outside `root` that `cmd` names (each once), resolved against
 /// `root`. Empty: it stays in the folder.
 pub fn outside_paths(cmd: &str, root: &Path) -> Vec<PathBuf> {
     let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let h = home();
     let mut out: Vec<PathBuf> = Vec::new();
-    for w in words(cmd) {
+    for w in words(&without_data_heredocs(cmd)) {
         // NAME=/path and --opt=/path name a path too
         let w = match w.split_once('=') {
             Some((k, v)) if !k.is_empty() && (k.starts_with('-') || k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')) => v.to_string(),
@@ -152,6 +187,11 @@ pub fn outside_paths(cmd: &str, root: &Path) -> Vec<PathBuf> {
         let p = PathBuf::from(p.to_string_lossy().split(['*', '?', '[']).next().unwrap_or(""));
         let p = tidy(&p);
         if p.as_os_str().is_empty() || allowed(&p, &root, &h) {
+            continue;
+        }
+        // `/## 3. Setup/`, `/^fn /`: a sed or awk pattern, not a place — nothing of it exists
+        // past the root (and a top-level folder can't be made without root's rights)
+        if p != Path::new("/") && existing(&p).is_some_and(|e| e == Path::new("/")) {
             continue;
         }
         if !out.contains(&p) {
@@ -241,6 +281,16 @@ mod tests {
         assert_eq!(outside_paths("rm -rf /home/someone/x", &root), vec![PathBuf::from("/home/someone/x")]);
         assert_eq!(outside_paths("cp a.txt --target-directory=/srv/data", &root), vec![PathBuf::from("/srv/data")]);
         assert_eq!(outside_paths("ls /", &root), vec![PathBuf::from("/")]);
+        // patterns that look like paths, and text a heredoc only writes out
+        for ok in ["sed -n '/## 3. Setup/,/## 4/p' README.md", "awk '/^fn main/ {print NR}' src/main.rs",
+                   "grep -n '/api/v1/users' src/*.js", "cat > notes.md <<'EOF'\nsee ~/Documents/x and /home/someone/y\nEOF",
+                   "tee docs/a.md <<EOF\nrm -rf /home/someone/z\nEOF\nls src"] {
+            assert!(outside_paths(ok, &root).is_empty(), "{ok}: {:?}", outside_paths(ok, &root));
+        }
+        // a heredoc that runs is code: what it names is asked for, and so is what follows a data heredoc
+        assert_eq!(outside_paths("bash <<'EOF'\ncat ~/Documents/n.txt\nEOF", &root), vec![h.join("Documents/n.txt")]);
+        assert_eq!(outside_paths("python3 - <<EOF\nopen('/home/someone/k')\nEOF", &root).len(), 1);
+        assert_eq!(outside_paths("cat > a <<EOF\nx\nEOF\ncat ~/secret.txt", &root), vec![h.join("secret.txt")]);
         assert!(mount_point(Path::new("/")).is_none());
         assert!(mount_point(&h.join("no-such-dir-xyz/file")).is_none(), "would be all of home");
         // /tmp: scratch is free; what is really there is asked for, and only it is mounted

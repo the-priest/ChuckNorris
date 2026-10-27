@@ -10,6 +10,6 @@ pub mod types;
 
 pub use donegate::{DoneGate, Phase, Progress, Scale, Stall, Unmet};
 pub use evidence::{Criterion, CriterionId, Evidence, EvidenceKind, Verdict};
-pub use fleet::{FleetConfig, Submission, Task, DEEPSEEK_MODEL, GLM_MODEL};
+pub use fleet::{FleetConfig, Submission, Task, DEEPSEEK_MODEL, GLM_MODEL, WORKER_MODEL};
 pub use kernel::{Kernel, ProcInfo, ProcState, Signal, SpawnSpec};
 pub use types::{tool_cap, AgentId, Caps, ModelFamily, Quota, Role, Spend};

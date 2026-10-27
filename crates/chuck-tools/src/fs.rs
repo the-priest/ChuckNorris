@@ -31,8 +31,9 @@ pub fn safe(root: &Path, rel: &str) -> Result<PathBuf, FsError> {
         let abs = PathBuf::from(abs);
         let resolved = resolve_existing(&abs);
         match resolved.strip_prefix(&base) {
-            Ok(r) if !r.as_os_str().is_empty() => {
-                rel_owned = r.to_string_lossy().into_owned();
+            Ok(r) => {
+                // the project folder itself, by its full path: "."
+                rel_owned = if r.as_os_str().is_empty() { ".".into() } else { r.to_string_lossy().into_owned() };
                 rel_owned.as_str()
             }
             _ => return Err(FsError::Refused(format!("give a path inside the project ({}), not {rel:?}",
@@ -44,7 +45,8 @@ pub fn safe(root: &Path, rel: &str) -> Result<PathBuf, FsError> {
     if rel.contains('\\') {
         return Err(FsError::Refused("use forward slashes".into()));
     }
-    for part in rel.split('/').filter(|p| !p.is_empty()) {
+    // `.` is here (`read .`, `./src/x`); `..` and its look-alikes never are
+    for part in rel.split('/').filter(|p| !p.is_empty() && *p != ".") {
         if part.chars().all(|c| c == '.') || part.starts_with("..") || part.contains('\0') {
             return Err(FsError::Refused(format!("path segment not allowed: {part:?}")));
         }
@@ -378,6 +380,15 @@ mod tests {
         assert!(write_file(&r, &inside, "ok\n").is_ok(), "an absolute path inside is fine");
         std::os::unix::fs::symlink("/etc", r.join("out")).unwrap();
         assert!(write_file(&r, "out/evil", "x").is_err(), "a link out is refused");
+        // `.` is the folder: it can be listed and named on the way in, never deleted or escaped
+        assert!(read_page(&r, ".", 4000).unwrap().contains("src/"));
+        assert!(read_page(&r, &r.canonicalize().unwrap().display().to_string(), 4000).unwrap().contains("b.py"));
+        assert!(read_page(&r, "./src/a.py", 4000).unwrap().contains("x = 1"));
+        assert!(delete_file(&r, ".").is_err() && delete_file(&r, "./").is_err());
+        assert!(write_file(&r, ".", "x").is_err());
+        for bad in ["./../x", "./..", "...", "src/./../../x"] {
+            assert!(safe(&r, bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

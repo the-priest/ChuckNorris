@@ -57,7 +57,7 @@ pub fn run(folder: Option<&Path>, mcp: Option<&chuck_mcp::Manager>) -> Vec<Check
                 let mut cfg = setup::fleet(&s);
                 let notes = cfg.resolve(&models);
                 out.push(c("Fleet models", if notes.is_empty() { State::Ok } else { State::Warn },
-                           if notes.is_empty() { format!("{} and {}", cfg.deepseek_model, cfg.glm_model) } else {
+                           if notes.is_empty() { format!("lead {}, workers {}, eyes {}", cfg.deepseek_model, cfg.worker_model, cfg.glm_model) } else {
                                notes.iter().map(|(a, b)| format!("{a} isn't on your account: {b} is used")).collect::<Vec<_>>().join("; ")
                            }));
             }

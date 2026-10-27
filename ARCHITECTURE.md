@@ -24,27 +24,29 @@ that isn't SiliconFlow unless the user explicitly overrides it.
 
 | Role | Count | Model (intended id) |
 |---|---:|---|
-| **Lead** — talks to the user, plans, writes acceptance criteria, assigns, is main developer on the critical path, reviews every result, owns *done* | 1 | `deepseek-ai/DeepSeek-V4.1-Flash-1017` |
-| **DeepSeek worker** — implementation, refactors, tests, tooling, hard logic | 4 | `deepseek-ai/DeepSeek-V4.1-Flash-1017` |
-| **GLM worker** — parallel implementation, exploration, alternate approaches, review and critique, docs, long-context sweeps | 4 | `zai-org/GLM-5.3-Flash` |
+| **Lead**: talks to the user, plans, writes acceptance criteria, assigns, reviews every result, merges, owns *done* | 1 | `deepseek-ai/DeepSeek-V4.1-Flash-1017` |
+| **Worker**: the heavy lifting (implementation, refactors, tests, tooling) | up to 8 (4 by default) | `deepseek-ai/DeepSeek-V4-Flash` |
+| **Eyes**: describe screenshots for the Lead | one per look | `zai-org/GLM-5.3-Flash` |
 
-A full team is **9 concurrent model-backed agents**. Model ids are resolved
-against the account's live model list at startup (`/models`): the intended
-id is used if present, otherwise the closest live id of the same family
-(`DeepSeek-V4.1-Flash*`, `GLM-5.3-Flash*`), and the resolution is shown in
-Settings and `/top`.
+Model ids are resolved against the account's live model list at startup
+(`/models`). The intended id is used if present. Otherwise Chuck uses the
+closest live id of the same family (`DeepSeek-V4.1-Flash*`, `DeepSeek-V4-Flash*`,
+`GLM-5.3-Flash*`), never a pricier `-Pro`/`-Max` sibling while another exists.
+The resolution is shown in Settings and `chuck models`. A GLM worker pool still
+exists for whoever sets `fleet_glm_pool`; by default GLM is only the eyes.
 
 ```
                          ┌──────────────────────────────┐
               user  ◄──► │  LEAD  (DeepSeek-V4.1-Flash)  │  plan · criteria · assign
-                         │  main developer · QA · DONE   │  review · accept / reject
+                         │  reviews · merges · DONE      │  waits while workers build
                          └──────────────┬───────────────┘
-                 assigns tasks          │          evidence + diffs back
-        ┌──────────┬──────────┬─────────┼─────────┬──────────┬──────────┬──────────┐
-        ▼          ▼          ▼         ▼         ▼          ▼          ▼          ▼
-     DS-1       DS-2       DS-3      DS-4      GLM-1      GLM-2      GLM-3      GLM-4
-   (copy 1)   (copy 2)   (copy 3)  (copy 4)  (copy 5)   (copy 6)   (copy 7)   (copy 8)
-        └────────── each in its own copy-on-write folder, sandboxed ───────────┘
+                 assigns tasks          │          submissions (evidence + diff)
+        ┌──────────┬──────────┬─────────┼─────────┬──────────┐
+        ▼          ▼          ▼         ▼         ▼          ▼
+      ds-1       ds-2       ds-3      ds-4      …ds-8
+   (copy 1)   (copy 2)   (copy 3)  (copy 4)
+        └── each in its own copy-on-write folder, jailed (DeepSeek-V4-Flash) ──┘
+        ◄──────────── the team channel: ```team``` posts, to all or @name ─────►
                          merge into the user's folder only through the Lead
                          + the test gate + the DoneGate
 ```
@@ -61,10 +63,24 @@ Settings and `/top`.
   evidence, re-runs the verification commands on the worker's copy, and
   either `Accept`s (the merge is then attempted through the test gate) or
   `Reject`s with concrete defects, which become the worker's next turn.
-- The Lead may give the same subproblem to a DeepSeek and a GLM worker
-  (`Assignment::Race`) and accept the better verified result.
-- The Lead scales the team to the job: a one-line fix uses no workers; the
-  default architecture always supports the full 1 + 4 + 4.
+- The Lead may give the same subproblem to two workers (```` ```assign race``` ````)
+  and accept the better verified result.
+- The Lead scales the team to the job: a one-line fix uses no workers.
+- **The team channel** (`chuck-runtime::team`): workers and the Lead post with
+  ```` ```team [@name] <message>``` ````. Each reader gets what it hasn't seen,
+  never its own posts. The Lead posts the lifecycle notes (started, merged,
+  cancelled). A new worker's first message lists who is on what and the latest
+  broadcasts.
+- **The Lead waits.** While a task runs and nothing waits for review, the Lead's
+  next model call happens only when a worker submits or ends, a post is
+  addressed to `@lead`, or the user types. A turn whose lead call was refused
+  is answered right away instead. While tasks run, the Lead's Exec has a
+  `hold`: writes are refused and commands run read-only. ```` ```cancel tN``` ````
+  stops a task's workers and fails the task.
+- A worker thread that ends without a word, or a model call that panics, is
+  reported to the Lead as a stopped task. It is never waited on.
+- The worker system prompt is identical for every worker; name, task and roster
+  come in the first message. One cached prefix serves the whole team.
 - Budgets: every agent is a process with a quota; spend is charged to it and
   every ancestor; a child can never spend more than its parent has left.
 

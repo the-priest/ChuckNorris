@@ -12,11 +12,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub const WORKER_TAGS: &[&str] = &["read", "grep", "glob", "map", "find", "def", "refs", "rename", "bash", "sh", "test", "search", "fetch",
-    "mcp", "browse", "submit"];
+    "mcp", "browse", "submit", "team"];
 pub const LEAD_TAGS: &[&str] = &["read", "grep", "glob", "map", "find", "def", "refs", "rename", "bash", "sh", "test", "search",
     "fetch", "mcp", "browse", "remember", "forget", "criteria", "plan", "assign",
-    "review", "justify", "done", "ask"];
-const CLIP: usize = 20_000;
+    "review", "justify", "done", "ask", "team", "cancel"];
+/// A file read comes back this long at most (the rest a page away): what
+/// stays in the conversation is re-sent with every call, so it's kept lean.
+const CLIP: usize = 12_000;
 /// A fetched page is handed over this many characters at a time.
 pub const PAGE_CHARS: usize = 12_000;
 
@@ -116,6 +118,11 @@ pub struct Exec<'a> {
     pub memory: Option<&'a chuck_store::memory::Memory>,
     /// Places outside the folder the user allowed for this job.
     pub allowed_outside: Option<&'a Mutex<Vec<std::path::PathBuf>>>,
+    /// The team's channel, and this agent's name on it.
+    pub team: Option<(&'a crate::team::Team, &'a str)>,
+    /// Why this agent may not change the project now (the lead, while its
+    /// workers own the changes): reads and checks still run.
+    pub hold: Option<String>,
 }
 
 /// How a command that reaches outside the folder may run.
@@ -208,6 +215,13 @@ pub fn parse_plan(body: &str) -> Vec<(String, bool)> {
 pub fn parse_criteria(body: &str) -> Vec<(String, Option<String>)> {
     body.lines().filter_map(|l| {
         let l = l.trim().trim_start_matches(['-', '*', '•']).trim();
+        // "1. x", "2) x", "[ ] x": the list's numbering or box isn't part of the criterion
+        let l = match l.split_once(['.', ')']) {
+            Some((n, rest)) if !n.is_empty() && n.len() <= 3 && n.chars().all(|c| c.is_ascii_digit())
+                && rest.starts_with(char::is_whitespace) => rest.trim(),
+            _ => l,
+        };
+        let l = l.strip_prefix("[ ]").or_else(|| l.strip_prefix("[x]")).unwrap_or(l).trim();
         if l.is_empty() || l.to_lowercase().starts_with("criteria") {
             return None;
         }
@@ -235,6 +249,9 @@ impl<'a> Exec<'a> {
     }
 
     fn mutation_ok(&self) -> Result<(), String> {
+        if let Some(why) = &self.hold {
+            return Err(why.clone());
+        }
         self.gate.lock().unwrap().allow_mutation().map_err(|unmet| {
             format!("[refused — nothing may change yet: {}]",
                     unmet.iter().map(Unmet::describe).collect::<Vec<_>>().join("; "))
@@ -251,7 +268,7 @@ impl<'a> Exec<'a> {
     /// Err: it must not run at all.
     fn jail(&self, reach: &Reach) -> Result<(Option<Wrap>, bool), String> {
         let s = self.sandbox;
-        let may_write = self.gate.lock().unwrap().allow_mutation().is_ok();
+        let may_write = self.hold.is_none() && self.gate.lock().unwrap().allow_mutation().is_ok();
         if s.worker {
             // a worker's copy is jailed whatever the folder's access; an offline folder keeps it offline
             let j = || match s.access {
@@ -692,6 +709,8 @@ impl<'a> Exec<'a> {
                 if looking {
                     res.feedback.push(if self.sandbox.access == Access::ReadOnly {
                         "[ran read-only: this folder's access lets commands look, never change]".into()
+                    } else if self.hold.is_some() {
+                        "[ran read-only: the workers own the project's changes until they hand in]".into()
                     } else {
                         "[ran read-only: nothing may change before the acceptance criteria exist]".into()
                     });
@@ -709,7 +728,10 @@ impl<'a> Exec<'a> {
                         .map(|c| c.id).collect()
                 };
                 let out = clip(&r.output, 6000);
-                if changed && g.allow_mutation().is_err() {
+                if changed && self.hold.is_some() {
+                    res.feedback.push("[warning: that command changed the project while workers are on it (no \
+                        sandbox here could stop it) — their merges may conflict with it]".into());
+                } else if changed && g.allow_mutation().is_err() {
                     res.feedback.push("[warning: that command changed files before acceptance criteria were \
                         written — the gate will not accept changes made without criteria]".into());
                 }
@@ -758,6 +780,22 @@ impl<'a> Exec<'a> {
             }
             "submit" => {
                 res.submit = Some(format!("{}\n{}", arg, t.body).trim().to_string());
+            }
+            "team" => {
+                let Some((team, me)) = self.team else {
+                    res.feedback.push("[team: there is no team on this job]".into());
+                    return;
+                };
+                let (to, text) = crate::team::addressee(arg, &t.body);
+                if text.is_empty() {
+                    res.feedback.push("[team: say something — ```team <message>``` or ```team @ds-2 <message>```]".into());
+                    return;
+                }
+                team.post(me, to.as_deref(), &text);
+                self.events.emit(Event::Team { from: me.to_string(), to: to.clone(), text: text.clone() });
+                res.actions.push(format!("team {}", clip(&text, 60)));
+                self.act("team", &to.as_ref().map_or_else(|| "everyone".into(), |t| format!("@{t}")), true, &clip(&text, 200));
+                res.feedback.push(format!("[sent to {}]", to.unwrap_or_else(|| "the team".into())));
             }
             "criteria" => {
                 // verify commands as the gate compares them (no redundant `cd <folder> &&`)
@@ -1146,6 +1184,9 @@ mod tests {
         assert_eq!(split_for("make test"), ("make test".into(), vec![]));
         assert_eq!(split_for("for c2"), ("".into(), vec![CriterionId(2)]), "the block form: ```test for c2```");
         assert_eq!(split_for("format check"), ("format check".into(), vec![]));
+        let n = parse_criteria("1. builds :: verify: cargo build\n2) 1.5x faster than before\n- [ ] docs updated");
+        assert_eq!(n, vec![("builds".to_string(), Some("cargo build".to_string())),
+                           ("1.5x faster than before".to_string(), None), ("docs updated".to_string(), None)]);
         let c = parse_criteria("- parser takes empty input :: verify: `pytest -q tests/p.py`\n- docs updated\n");
         assert_eq!(c, vec![("parser takes empty input".into(), Some("pytest -q tests/p.py".into())),
                            ("docs updated".into(), None)]);

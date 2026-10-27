@@ -20,28 +20,30 @@ fn heard(r: &ChatRequest, s: &str) -> bool {
 
 fn fleet_script(req: &ChatRequest) -> String {
     let sys = text(&req.messages[0]);
+    let me = req.messages.get(1).map(text).unwrap_or_default();
     let last = last_user(req);
     if sys.starts_with("You are an independent reviewer") {
         return "ACCEPT".into();
     }
-    if sys.contains("You are ds-") {
+    if me.starts_with("You are ds-") && me.contains("TASK t1") {
         return if req.messages.len() == 2 {
             "```read src/parse.py```\n```write src/parse.py\ndef parse(s):\n    if not s.strip():\n        return []\n    return [int(x) for x in s.split(',')]\n```\n\
              ```test python3 -m pytest -q```\n```submit\nEmpty input now returns []; a test covers it; 3 passed.\n```".into()
         } else { "ok".into() };
     }
-    if sys.contains("You are glm-") {
+    if me.starts_with("You are ds-") {
         return if req.messages.len() == 2 {
-            "```write tests/test_parse.py\nfrom src.parse import parse\n\ndef test_empty():\n    assert parse('') == []\n\ndef test_spaces():\n    assert parse('  ') == []\n\ndef test_numbers():\n    assert parse('1,2') == [1, 2]\n```\n\
+            "```team @ds-1 the tests import parse from src.parse and expect [] for blank input```\n\
+             ```write tests/test_parse.py\nfrom src.parse import parse\n\ndef test_empty():\n    assert parse('') == []\n\ndef test_spaces():\n    assert parse('  ') == []\n\ndef test_numbers():\n    assert parse('1,2') == [1, 2]\n```\n\
              ```test python3 -m pytest -q```\n```submit\nThree tests: empty, blank, numbers.\n```".into()
         } else { "ok".into() };
     }
     if req.messages.len() == 2 {
         return "The parser crashes on empty input: `int('')` raises. I'll fix it and cover it with tests, in parallel.\n\
             ```criteria\n- parse('') and parse('  ') return [] :: verify: python3 -m pytest -q\n- numbers still parse :: verify: python3 -m pytest -q\n```\n\
-            ```plan\n- [x] find why it crashes\n- [ ] t1: fix parse (DeepSeek)\n- [ ] t2: tests for empty, blank and numbers (GLM)\n- [ ] verify the whole suite\n```\n\
-            ```assign deepseek\ntitle: Empty input returns []\ncriteria:\n- parse('') returns [] :: verify: python3 -m pytest -q\nbrief: fix src/parse.py\n```\n\
-            ```assign glm\ntitle: Tests for the parser\ncriteria:\n- tests cover empty, blank and numbers :: verify: python3 -m pytest -q\nbrief: write tests/test_parse.py\n```".into();
+            ```plan\n- [x] find why it crashes\n- [ ] t1: fix parse\n- [ ] t2: tests for empty, blank and numbers\n- [ ] verify the whole suite\n```\n\
+            ```assign worker\ntitle: Empty input returns []\ncriteria:\n- parse('') returns [] :: verify: python3 -m pytest -q\nbrief: fix src/parse.py\n```\n\
+            ```assign worker\ntitle: Tests for the parser\ncriteria:\n- tests cover empty, blank and numbers :: verify: python3 -m pytest -q\nbrief: write tests/test_parse.py\n```".into();
     }
     let mut out = String::new();
     for t in ["t1", "t2"] {
@@ -54,7 +56,7 @@ fn fleet_script(req: &ChatRequest) -> String {
     }
     if heard(req, "t1 accepted") && heard(req, "t2 accepted") {
         return "Both are merged. Checking the whole suite in your folder:\n```test python3 -m pytest -q```\n\
-            ```plan\n- [x] find why it crashes\n- [x] t1: fix parse (DeepSeek)\n- [x] t2: tests for empty, blank and numbers (GLM)\n- [ ] verify the whole suite\n```\n\
+            ```plan\n- [x] find why it crashes\n- [x] t1: fix parse\n- [x] t2: tests for empty, blank and numbers\n- [ ] verify the whole suite\n```\n\
             ```justify proportion\nA one-line guard plus three tests is the whole fix.\n```\n\
             ```done\n**Fixed.** `parse('')` and `parse('  ')` now return `[]` instead of crashing.\n\n\
             - `src/parse.py`: guard for blank input\n- `tests/test_parse.py`: empty, blank and numbers\n\n\

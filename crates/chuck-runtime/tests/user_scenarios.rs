@@ -306,11 +306,12 @@ fn a_worker_that_writes_its_calls_wrong_is_corrected_and_the_job_finishes() {
     let dir = tmp("worker-malformed");
     let model = Arc::new(Scripted::new().respond(|req| {
         let sys = text(&req.messages[0]);
+        let me = req.messages.get(1).map(text).unwrap_or_default();
         let last = last_user(req);
         if sys.starts_with("You are an independent reviewer") {
             return "ACCEPT".into();
         }
-        if sys.contains("You are ds-") || sys.contains("You are glm-") {
+        if me.starts_with("You are ds-") || me.starts_with("You are glm-") {
             return if last.contains("NOTHING RAN") {
                 "Writing it.\n```write out.txt\nhello\n".into()
             } else if last.contains("NOT run") || last.contains("never closed") {

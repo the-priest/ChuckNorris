@@ -13,6 +13,7 @@ pub mod exec;
 pub mod lead;
 pub mod prompts;
 pub mod resume;
+pub mod team;
 pub mod setup;
 
 pub use agent::{Ctx, Halt};
@@ -50,7 +51,7 @@ pub struct RuntimeConfig {
     pub bwrap: bool,
     /// Where workers' copies live.
     pub store: PathBuf,
-    /// Model calls in flight at once (1 lead + 4 + 4).
+    /// Model calls in flight at once.
     pub slots: usize,
     /// The evidence ledger every command is recorded in (the window's).
     pub audit: Option<Arc<chuck_store::Ledger>>,
@@ -109,7 +110,7 @@ impl Default for RuntimeConfig {
             access: chuck_sandbox::Access::Full,
             bwrap: chuck_sandbox::bwrap().is_some(),
             store: default_store(),
-            slots: 9,
+            slots: 10, // the Lead, eight workers, and the eyes or the critic
             audit: None,
             spend: None,
             day_limit: 0.0,

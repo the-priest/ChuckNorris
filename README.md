@@ -60,9 +60,9 @@ your own API key:
 
 | Who | Model | What it does |
 |---|---|---|
-| **The Lead** | DeepSeek-V4.1-Flash | Talks to you. Writes the acceptance criteria and the plan. Hands out tasks, reviews every result, and is the only one who can finish a job. |
-| **Up to 4 DeepSeek workers** | DeepSeek-V4.1-Flash | Build and fix. Each works in its own copy of your project. |
-| **Up to 4 GLM workers** | GLM-5.3-Flash | Same job, a different model family: a second way of thinking about the problem, in parallel. |
+| **The Lead** | DeepSeek-V4.1-Flash | Talks to you. Writes the acceptance criteria and the plan. Hands out tasks, reviews every result, merges what passes, and is the only one who can finish a job. |
+| **Up to 8 workers** | DeepSeek-V4-Flash | Do the heavy lifting, on the cheaper model. Each builds in its own copy of your project, and they talk to each other while they work. |
+| **The eyes** | GLM-5.3-Flash | Look at screenshots of pages the team builds or reads, and describe what is there. |
 
 The thinking happens online. Everything Chuck *does* (commands, file changes, builds, tests)
 happens on your computer, in front of you.
@@ -77,17 +77,22 @@ happens on your computer, in front of you.
 3. **Criteria first.** The Lead writes down what "done" means, each item with a command that proves
    it, for example *"empty input returns `[]` — verify: `pytest -q`"*. Bigger jobs also get a plan.
    The plan sits at the top of the right panel and moves as steps are finished.
-4. **Work is split up.** The Lead does small things itself and hands larger pieces to workers. Each
-   worker gets its own copy of the project. Workers can't step on each other, or on your files,
-   while they work.
-5. **Workers prove their work.** A worker can only hand in a task once every criterion has
+4. **Work is split up.** The Lead does small things itself and hands larger pieces to workers, all
+   at once when they don't depend on each other. Each worker gets its own copy of the project, so
+   workers can't step on each other or on your files.
+5. **The team talks.** Workers post to a shared channel: what they provide ("`engine.js` exports
+   `create(seed)`"), a file they need from another task, a question for the Lead. The right panel's
+   **Team talk** shows every message. While workers build, the Lead waits: it wakes when one hands
+   in, asks it something, or you type. Until then it can look but not change your folder, so
+   nothing it does collides with their work. It can take a task back (`cancel`) and do it another way.
+6. **Workers prove their work.** A worker can only hand in a task once every criterion has
    evidence, and the verification passed *after* its last change.
-6. **The Lead checks before anything reaches your folder.** It re-runs the verification on the
+7. **The Lead checks before anything reaches your folder.** It re-runs the verification on the
    worker's copy. Then it reviews the change, and accepts it or sends it back with the defects
    listed. Only accepted work is merged into your folder.
-7. **The whole result is verified and reviewed.** After merging, the Lead runs the checks on your
+8. **The whole result is verified and reviewed.** After merging, the Lead runs the checks on your
    real folder. Then an independent critic reviews the whole change before the job may finish.
-8. **Done, with the evidence.** The job ends with a summary of what changed and how it was
+9. **Done, with the evidence.** The job ends with a summary of what changed and how it was
    verified. Every criterion and its evidence stays in the panel's Done gate.
 
 <img src="assets/screenshots/fleet-done.png" alt="A finished job: both tasks merged, the whole suite verified in the user's folder, the independent review accepted, and the DONE card with what changed and how it was verified" width="100%">
@@ -454,7 +459,7 @@ The gear icon, or Ctrl+P → Settings.
 | Group | Setting |
 |---|---|
 | SiliconFlow | Your API key. `chuck key` saves the same one. |
-| Fleet | How many DeepSeek and GLM workers (0–4 each). Spending cap per job. The longest one command may run. Keep going on its own when a job's budget runs out. |
+| Fleet | How many workers build at once (0–8; 0 means the Lead works alone). Spending cap per job. The longest one command may run. Keep going on its own when a job's budget runs out. |
 | Reasoning | How much the models may think (off to 32k tokens). The longest thinking time. When to give up on a silent connection. |
 | Spending limits | Daily and monthly, across everything (0 = no limit). |
 | This folder's access | The five modes in [Safety](#safety), per folder. |

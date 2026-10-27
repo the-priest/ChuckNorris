@@ -29,24 +29,25 @@ fn main() {
     }
     let model = Arc::new(Scripted::new().respond(move |req: &ChatRequest| {
         let sys = text(&req.messages[0]);
+        let me = req.messages.get(1).map(text).unwrap_or_default();
         let last = req.messages.iter().rev().find(|m| m["role"] == "user").map(text).unwrap_or_default();
         if sys.starts_with("You are an independent reviewer") {
             return "ACCEPT".into();
         }
-        if sys.contains("You are ds-") || sys.contains("You are glm-") {
+        if me.starts_with("You are ds-") {
             if req.messages.len() > 2 {
                 return "ok".into();
             }
             let t = text(&req.messages[1]);
-            let id = t.split_whitespace().nth(1).unwrap_or("t0").trim_end_matches(':').to_string();
+            let id = t.split("TASK ").nth(1).and_then(|r| r.split_whitespace().next()).unwrap_or("t0")
+                .trim_end_matches(':').to_string();
             let body: String = (0..30).map(|i| format!("line {i} of {id}\n")).collect();
             return format!("```write out/{id}.txt\n{body}```\n```test test -d out```\n```submit\n{id} written\n```");
         }
         if req.messages.len() == 2 {
             let mut s = String::from("```criteria\n- every part exists :: verify: test -d out\n```\n```plan\n- fan out\n```\n");
             for i in 0..n {
-                let who = if i % 2 == 0 { "deepseek" } else { "glm" };
-                s.push_str(&format!("```assign {who}\ntitle: part {i}\ncriteria:\n- the part exists :: verify: test -d out\nbrief: write it\n```\n"));
+                s.push_str(&format!("```assign worker\ntitle: part {i}\ncriteria:\n- the part exists :: verify: test -d out\nbrief: write it\n```\n"));
             }
             if n == 0 {
                 s.push_str("```bash\nmkdir -p out && seq 1 30 > out/solo.txt\n```\n```test test -d out```\n```done\nsolo part written (test -d out).\n```");

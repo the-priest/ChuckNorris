@@ -74,17 +74,17 @@ pub fn shape_problem(req: &ChatRequest) -> Option<String> {
 
 impl ChatModel for Scripted {
     fn chat(&self, req: &ChatRequest, sink: &mut dyn Sink) -> Result<Outcome, ModelError> {
-        self.seen.lock().unwrap().push(req.clone());
+        self.seen.lock().unwrap_or_else(|e| e.into_inner()).push(req.clone());
         if let Some(p) = shape_problem(req) {
             return Err(ModelError::Http { status: 400, message: format!("invalid messages: {p}") });
         }
         if sink.should_stop() {
             return Err(ModelError::Stopped);
         }
-        let text = self.queues.lock().unwrap().get_mut(&req.model).and_then(|q| q.pop_front())
-            .or_else(|| self.shared.lock().unwrap().pop_front())
-            .or_else(|| self.responder.as_ref().map(|f| f(req)))
-            .unwrap_or_else(|| "Done.".to_string());
+        // no lock is held while the responder runs: agents' calls go on in parallel, as on the real API
+        let queued = self.queues.lock().unwrap_or_else(|e| e.into_inner()).get_mut(&req.model).and_then(|q| q.pop_front());
+        let queued = queued.or_else(|| self.shared.lock().unwrap_or_else(|e| e.into_inner()).pop_front());
+        let text = queued.or_else(|| self.responder.as_ref().map(|f| f(req))).unwrap_or_else(|| "Done.".to_string());
         let chars: Vec<char> = text.chars().collect();
         for chunk in chars.chunks(40) {
             sink.delta(&chunk.iter().collect::<String>());
