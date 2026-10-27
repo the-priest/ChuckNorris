@@ -10,7 +10,28 @@ use std::path::{Component, Path, PathBuf};
 
 /// Places any command may name without asking.
 const SYSTEM: &[&str] = &["/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32", "/etc", "/opt", "/proc", "/sys",
-    "/dev", "/tmp", "/var/tmp", "/run", "/snap", "/nix", "/var/lib/flatpak", "/var/cache", "/var/log", "/srv/http"];
+    "/dev", "/snap", "/nix", "/var/lib/flatpak", "/var/cache", "/var/log", "/srv/http"];
+
+/// Each jailed command gets its own empty one of these: a path there is
+/// scratch (free to use) unless it names something that exists on this
+/// machine, which the command couldn't see without being given it.
+const PRIVATE: &[&str] = &["/tmp", "/var/tmp", "/run"];
+
+/// The private directory `p` is in, if any.
+fn private_root(p: &Path) -> Option<&'static Path> {
+    PRIVATE.iter().map(Path::new).find(|d| p.starts_with(d))
+}
+
+/// `p`, or the nearest of its ancestors that exists.
+fn existing(p: &Path) -> Option<PathBuf> {
+    let mut q = p.to_path_buf();
+    while q.symlink_metadata().is_err() {
+        if !q.pop() {
+            return None;
+        }
+    }
+    Some(q)
+}
 
 /// Words of a shell command, quotes and escapes resolved; operators split off.
 pub fn words(cmd: &str) -> Vec<String> {
@@ -93,6 +114,10 @@ fn allowed(p: &Path, root: &Path, home: &Path) -> bool {
         // /home lives under none of these
         return true;
     }
+    if let Some(d) = private_root(p) {
+        // scratch: nothing of it is on this machine (or it is the directory itself)
+        return existing(p).is_none_or(|e| e == d);
+    }
     TOOLCHAIN_DIRS.iter().chain(CACHE_DIRS).any(|d| p.starts_with(home.join(d)))
         || p.starts_with(home.join(".local/share/chucknorris/sandbox-cache"))
 }
@@ -165,6 +190,16 @@ pub fn free_to_reach(p: &Path, root: &Path) -> bool {
 /// (or the nearest one that exists). None when that would be all of home or
 /// the whole system (then the command runs outside the jail, once).
 pub fn mount_point(p: &Path) -> Option<PathBuf> {
+    if let Some(d) = private_root(p) {
+        // never the whole of /tmp (other programs' sockets live there): what is
+        // in it, or the entry right under it that holds it
+        let e = existing(p).filter(|e| e != d)?;
+        // a folder as it is; a file in a folder, its folder; a file right in /tmp, itself
+        return Some(match e.parent() {
+            Some(dir) if !e.is_dir() && dir != d => dir.to_path_buf(),
+            _ => e,
+        });
+    }
     let mut q = p.to_path_buf();
     while !q.is_dir() {
         if !q.pop() {
@@ -208,6 +243,23 @@ mod tests {
         assert_eq!(outside_paths("ls /", &root), vec![PathBuf::from("/")]);
         assert!(mount_point(Path::new("/")).is_none());
         assert!(mount_point(&h.join("no-such-dir-xyz/file")).is_none(), "would be all of home");
+        // /tmp: scratch is free; what is really there is asked for, and only it is mounted
+        let mine = std::env::temp_dir().join(format!("chuck-outside-real-{}", std::process::id()));
+        std::fs::create_dir_all(mine.join("sub")).unwrap();
+        std::fs::write(mine.join("sub/data.csv"), "x").unwrap();
+        let file = PathBuf::from(format!("/tmp/chuck-outside-file-{}.zip", std::process::id()));
+        std::fs::write(&file, "z").unwrap();
+        for free in ["/tmp/chuck-scratch-never-made/out.txt", "/tmp", "/var/tmp/build-xyz-none"] {
+            assert!(outside_paths(&format!("ls {free}"), &root).is_empty(), "{free}");
+        }
+        let csv = mine.join("sub/data.csv");
+        assert_eq!(outside_paths(&format!("cat {}", csv.display()), &root), vec![csv.clone()]);
+        assert_eq!(mount_point(&csv), Some(mine.join("sub")));
+        assert_eq!(outside_paths(&format!("unzip {}", file.display()), &root), vec![file.clone()]);
+        assert_eq!(mount_point(&file), Some(file.clone()), "a file right in /tmp: just that file");
+        assert_eq!(mount_point(Path::new("/tmp/chuck-scratch-never-made/x")), None);
+        let _ = std::fs::remove_dir_all(&mine);
+        let _ = std::fs::remove_file(&file);
         let _ = std::fs::remove_dir_all(root.parent().unwrap());
     }
 }

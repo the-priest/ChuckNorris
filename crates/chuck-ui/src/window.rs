@@ -1728,7 +1728,7 @@ fn settings_dialog(shared: &Shared) {
     let s = Settings::load();
     let page = adw::PreferencesPage::new();
     let api = adw::PreferencesGroup::builder().title("SiliconFlow")
-        .description("The whole fleet thinks on SiliconFlow, with your key. Shared with the Chuck window.").build();
+        .description("The whole fleet thinks on SiliconFlow, with your key. `chuck` in a terminal uses it too.").build();
     let key = adw::PasswordEntryRow::builder().title("API key").build();
     key.set_text(s.api_key().unwrap_or(""));
     api.add(&key);
@@ -1746,6 +1746,10 @@ fn settings_dialog(shared: &Shared) {
     cap.set_title("Spending cap per job ($)");
     cap.set_digits(2);
     cap.set_value(s.num("fleet_job_usd", 2.0, 0.01, 1000.0));
+    let cmd_min = adw::SpinRow::with_range(1.0, 1440.0, 5.0);
+    cmd_min.set_title("Longest one command may run (minutes)");
+    cmd_min.set_subtitle("A build, a test suite or an emulator boot that takes longer is stopped and reported");
+    cmd_min.set_value((s.num("command_timeout", 1800.0, 30.0, 86_400.0) / 60.0).round());
     let auto = adw::SwitchRow::builder().title("Keep going when a job's budget runs out")
         .subtitle("Carries on with another job budget, as often as needed, until it's done — never past the daily \
             limit, which this needs set (Spending limits below)")
@@ -1753,6 +1757,7 @@ fn settings_dialog(shared: &Shared) {
     fleet.add(&ds);
     fleet.add(&glm);
     fleet.add(&cap);
+    fleet.add(&cmd_min);
     fleet.add(&auto);
     page.add(&fleet);
 
@@ -1992,6 +1997,7 @@ fn settings_dialog(shared: &Shared) {
         s.set("fleet_glm_workers", (glm.value() as i64).into());
         s.set("fleet_job_usd", cap.value().into());
         s.set("fleet_auto_continue", auto.is_active().into());
+        s.set("command_timeout", ((cmd_min.value() * 60.0) as i64).into());
         s.set("reasoning_budget", (levels[rz.selected() as usize].1 as i64).into());
         s.set("max_think_seconds", (think.value() as i64).into());
         s.set("stall_seconds", (stall.value() as i64).into());

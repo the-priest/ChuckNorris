@@ -265,3 +265,26 @@ fn a_chat_search_in_a_native_format_is_corrected() {
     assert_eq!(asked.lock().unwrap().len(), 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A Lead that defined the work, failed at it and then just says "All
+/// done!" doesn't get to end it as an answer: it's told only ```done```
+/// finishes, and saying it again ends the job INCOMPLETE (resumable), never
+/// as if it were finished.
+#[test]
+fn a_lead_cannot_end_defined_work_with_a_plain_all_done() {
+    let dir = tmp("lead-prose-done");
+    let model = Arc::new(Scripted::new().replies([
+        "```criteria\n- out.txt holds the report :: verify: test -s out.txt\n```\n```bash\nfalse\n```",
+        "All done!",
+        "Done, really.",
+    ]));
+    let rt = Runtime::new(model.clone(), RuntimeConfig { store: dir.join("store"), access: chuck_sandbox::Access::Full,
+                                                         resume_dir: Some(dir.join("resume")), ..RuntimeConfig::default() },
+                          Events::none());
+    let r = rt.run(Job::new("write the report to out.txt", &dir));
+    let Outcome::Paused { gaps } = &r.outcome else { panic!("{:?}", r.outcome) };
+    assert!(gaps[0].contains("stopped without finishing") && gaps[0].contains("Done, really."), "{gaps:?}");
+    assert!(last_user(&model.seen.lock().unwrap()[2]).contains("ends only through ```done```"));
+    assert!(r.resume.is_some(), "Keep going can carry it on");
+    let _ = std::fs::remove_dir_all(&dir);
+}

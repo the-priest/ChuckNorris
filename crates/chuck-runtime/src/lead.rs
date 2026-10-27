@@ -1039,6 +1039,7 @@ impl<'a> LeadRun<'a> {
         let mut progress = Progress::default();
         let mut warned_term = false;
         let mut nudged = false;
+        let mut gate_nudged = false;
         // turns of work since the plan last changed: past a few, the lead is reminded to mark it
         let mut plan_stale = 0usize;
         let mut plan_seen = self.gate.lock().unwrap().plan_view();
@@ -1119,8 +1120,18 @@ impl<'a> LeadRun<'a> {
                     nudged = true;
                     fb.push("[you said what you'd do next but used no tool, so nothing happened — do it now with \
                         the tools. If that reply was your whole answer to the user, say so plainly instead.]".into());
-                } else if !self.mutated && self.tasks.is_empty() {
+                } else if !self.mutated && self.tasks.is_empty() && self.gate.lock().unwrap().criteria.is_empty() {
                     return Outcome::Answered { text: said.trim().to_string() };
+                } else if !self.mutated && self.tasks.is_empty() {
+                    // the work was defined (criteria): only ```done```, which the gate checks, ends it —
+                    // a plain "Done." would slip past the gate as an ordinary answer
+                    if gate_nudged {
+                        return self.pause(&format!("the Lead stopped without finishing: {}", clip(said.trim(), 300)));
+                    }
+                    gate_nudged = true;
+                    fb.push("[the criteria are set, so this job ends only through ```done``` (the gate checks the \
+                        evidence). Carry on with the tools; if it can't be done, say exactly why and what you need — \
+                        ```ask``` the user — rather than ending it in prose]".into());
                 } else if !reviews.is_empty() {
                     // the workers wait on you: waiting on them would wait forever
                     fb.push(format!("[{} waiting for your review — ```review <task> accept``` or ```review <task> \

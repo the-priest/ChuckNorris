@@ -32,7 +32,7 @@ USAGE
   chuck models      show the fleet's models, checked against your account
   chuck key         save your SiliconFlow API key (shared with the Chuck window)
   chuck doctor      check everything Chuck depends on (the API, sandbox, search, voice…)
-  chuck update      install the newest Chuck from its branch
+  chuck update      install the newest Chuck
   chuck daemons [rm N | pause N | resume N]   your daemons and reminders
   chuck inbox [read]   what daemons reported (they run while the window is open)
   chuck ledger [N]  verify the evidence chain and show the last N commands run
@@ -40,14 +40,13 @@ USAGE
                     (or checkpoint N); a rewind can itself be undone
   chuck version
 
-  `chucknorris` is the full Chuck window (research, voice, chats); `chuck` is
-  the fleet's own window.
+  `chucknorris` (and Chuck in your app menu) opens the same window as `chuck`.
 
 RUN
   -C, --dir DIR     the project folder (default: the current folder)
   --max-usd N       spending cap for this job, Lead and workers together
   -v, --verbose     also show what workers say and every command's output
-  The folder's access (set in the window with /access), the daily and monthly
+  The folder's access (set in the window's Settings), the daily and monthly
   spending limits, and the evidence ledger are the window's own.
   Ctrl-C stops every agent; the job ends INCOMPLETE with what is missing.
 
