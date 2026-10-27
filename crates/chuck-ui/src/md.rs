@@ -59,8 +59,9 @@ pub fn parse(text: &str) -> Vec<Part> {
     let mut prose: Vec<String> = Vec::new();
     let mut lines = text.lines().peekable();
     let flush = |prose: &mut Vec<String>, parts: &mut Vec<Part>| {
-        let joined = prose.join("\n").trim().to_string();
-        if !joined.is_empty() {
+        // blank lines around go, a first bullet keeps its indent
+        let joined = prose.join("\n").trim_end().trim_start_matches('\n').to_string();
+        if !joined.trim().is_empty() {
             parts.push(Part::Prose(joined));
         }
         prose.clear();
@@ -116,6 +117,11 @@ mod tests {
         assert_eq!(parse("x <y> & z"), vec![Part::Prose("x &lt;y&gt; &amp; z".into())]);
         assert_eq!(parse("a *b* c **d** e"), vec![Part::Prose("a <i>b</i> c <b>d</b> e".into())]);
         assert_eq!(parse("glob *.rs and 3*4*5"), vec![Part::Prose("glob *.rs and 3*4*5".into())]);
+    }
+
+    #[test]
+    fn a_list_first_keeps_its_indent() {
+        assert_eq!(parse("\n- one\n- two\n"), vec![Part::Prose("  •  one\n  •  two".into())]);
     }
 
     #[test]

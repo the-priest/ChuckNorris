@@ -119,6 +119,10 @@ struct State {
     heard: Option<Receiver<chuck_voice::Heard>>,
     /// Long-term memory (shared with every job).
     memory: Arc<chuck_store::memory::Memory>,
+    /// Cards still being worked out off the main thread (/doctor, /update).
+    later: Vec<Receiver<Entry>>,
+    /// A line for the status bar from a background check (an update is out).
+    notice: Option<Receiver<String>>,
     tokens: u64,
     spent: f64,
     /// Prompt tokens sent, and how many of them the API's cache served.
@@ -690,8 +694,8 @@ fn finished(st: &mut State, report: JobReport, shared: &Shared) {
         let head = format!("{kind} · {} tokens · {}", fmt_tokens(report.tokens), fmt_usd(report.usd));
         let mut text = reply.clone();
         if let Some(cp) = &report.checkpoint {
-            text.push_str(&format!("\n\nUndo the whole job: **Rewind** checkpoint `{}` (right panel, Checkpoints).",
-                                   &cp[..10.min(cp.len())]));
+            text.push_str(&format!("\n\nUndo the whole job: `/undo` (or **Rewind** checkpoint `{}` in the right panel); \
+                see every change: `/diff`.", &cp[..10.min(cp.len())]));
         }
         st.add(Entry::Card { kind: head, class: class.into(), text });
     }
@@ -707,6 +711,9 @@ fn finished(st: &mut State, report: JobReport, shared: &Shared) {
     }
     if matches!(report.outcome, Outcome::Done { .. } | Outcome::Answered { .. }) {
         speak(st, &reply);
+    }
+    if report.checkpoint.is_some() {
+        st.saved.progress.checkpoint = report.checkpoint.clone();
     }
     let done = matches!(report.outcome, Outcome::Done { .. });
     st.panel.job_finished(done);
@@ -734,6 +741,10 @@ fn start(shared: &Shared, text: String) {
     }
     st.add(Entry::User { text: text.clone() });
     st.voice.stop();
+    if text.starts_with('/') && slash(&mut st, shared, &text) {
+        st.save();
+        return;
+    }
     if let Some((cmd, arg)) = ["/remind", "/daemon"].iter().find_map(|c| {
         text.strip_prefix(c).filter(|r| r.is_empty() || r.starts_with(char::is_whitespace)).map(|r| (*c, r.trim()))
     }) {
@@ -839,6 +850,25 @@ fn pump(shared: &Shared) {
 fn tick(shared: &Shared) {
     let mut st = shared.borrow_mut();
     daemon_poll(&mut st, shared);
+    let mut arrived = Vec::new();
+    st.later.retain(|rx| match rx.try_recv() {
+        Ok(e) => {
+            arrived.push(e);
+            false
+        }
+        Err(std::sync::mpsc::TryRecvError::Empty) => true,
+        Err(_) => false,
+    });
+    for e in arrived {
+        st.add(e);
+        st.save();
+    }
+    if let Some(line) = st.notice.as_ref().and_then(|rx| rx.try_recv().ok()) {
+        st.notice = None;
+        if st.running.is_none() {
+            st.ui.status.set_label(&line);
+        }
+    }
     if let Some(run) = &st.running {
         let ps = run.kernel.ps(true);
         let elapsed = run.started.elapsed().as_secs();
@@ -1010,6 +1040,135 @@ fn hear(shared: &Shared) {
     if let Some(text) = send {
         start(shared, text);
     }
+}
+
+const HELP: &str = "\
+- `/remind <when>: <what>` — a reminder (in 20m, at 17:30, tomorrow at 9am, every day at 8:30)
+- `/daemon <when>: <what>` — something to look at when it happens (every 2h, when a service fails, \
+when disk / is above 90%, when ~/src changes…); it only looks and reports to the Inbox
+- `/undo` — put the folder back to before the last job · `/diff` — every change the last job made
+- `/doctor` — check everything Chuck depends on · `/update` — install the newest Chuck · `/restart`
+- `/export` — save this conversation as Markdown · `/cost` — what was spent · `/clear` — a new conversation
+- Ctrl+M talks · Esc stops (agents, commands and speech) · the right panel shows everything as it happens";
+
+/// A command typed into the composer. True: it was one (handled here).
+fn slash(st: &mut State, shared: &Shared, text: &str) -> bool {
+    let (cmd, arg) = text.split_once(char::is_whitespace).map_or((text, ""), |(c, a)| (c, a.trim()));
+    let card = |kind: &str, class: &str, text: String| Entry::Card { kind: kind.into(), class: class.into(), text };
+    match cmd {
+        "/help" | "/?" => st.add(card("COMMANDS", "ask-card", HELP.into())),
+        "/clear" | "/new" => {
+            st.save();
+            if let Some(k) = st.key() {
+                chat::archive(&k);
+            }
+            st.saved = Saved::default();
+            st.redraw();
+            st.panel.reset();
+        }
+        "/cost" => {
+            let spend = chuck_store::Spend::at(&chuck_store::Spend::default_path());
+            let now = chuck_sandbox::now_secs();
+            let s = Settings::load();
+            let lim = |v: f64| if v > 0.0 { format!(" of {}", fmt_usd(v)) } else { String::new() };
+            st.add(card("SPEND", "ask-card", format!("This window: {} tokens, {}\n\nToday: {}{}\nThis month: {}{}",
+                fmt_tokens(st.tokens), fmt_usd(st.spent), fmt_usd(spend.today(now)), lim(s.num("budget_day_usd", 0.0, 0.0, 1e5)),
+                fmt_usd(spend.month(now)), lim(s.num("budget_month_usd", 0.0, 0.0, 1e6)))));
+        }
+        "/export" => {
+            let dir = if arg.is_empty() { st.folder.clone().unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default())) }
+                else { PathBuf::from(arg) };
+            let path = dir.join(format!("chuck-chat-{}.md", chuck_store::ledger::local_stamp("%Y%m%d-%H%M")));
+            let out = match std::fs::write(&path, chat::markdown(&st.saved)) {
+                Ok(()) => card("EXPORTED", "ask-card", format!("The conversation is in `{}`.", path.display())),
+                Err(e) => card("NOT EXPORTED", "gap-card", format!("Couldn't write `{}`: {e}", path.display())),
+            };
+            st.add(out);
+        }
+        "/undo" | "/diff" => {
+            let (Some(folder), Some(cp)) = (st.folder.clone(), st.saved.progress.checkpoint.clone()) else {
+                st.add(card("NOTHING TO DO", "gap-card", "No job has changed this folder yet.".into()));
+                return true;
+            };
+            if cmd == "/undo" {
+                if st.running.is_some() {
+                    st.add(card("NOT NOW", "gap-card", "A job is running: stop it first (Esc).".into()));
+                    return true;
+                }
+                let sh = shared.clone();
+                glib::idle_add_local_once(move || rewind(&sh, &cp));
+            } else {
+                let diff = chuck_store::Shadow::new(&folder, &chuck_store::checkpoint::default_store())
+                    .map(|s| s.diff_since(&cp, 60_000)).unwrap_or_else(|e| format!("(couldn't read the checkpoint: {e})"));
+                st.add(card("CHANGES SINCE THE LAST JOB STARTED", "ask-card", if diff.trim().is_empty() {
+                    "Nothing has changed.".into() } else { format!("```diff\n{}\n```", diff.trim_end()) }));
+            }
+        }
+        "/doctor" => {
+            st.add(card("CHECKING", "ask-card", "Checking everything Chuck depends on…".into()));
+            let (tx, rx) = channel();
+            let (folder, mcp) = (st.folder.clone(), st.mcp.clone());
+            std::thread::Builder::new().name("doctor".into()).spawn(move || {
+                let checks = crate::doctor::run(folder.as_deref(), Some(&mcp));
+                let bad = checks.iter().filter(|c| c.state != crate::doctor::State::Ok).count();
+                let _ = tx.send(Entry::Card { kind: if bad == 0 { "ALL GOOD".into() } else { format!("{bad} TO LOOK AT") },
+                                              class: if bad == 0 { "done-card".into() } else { "gap-card".into() },
+                                              text: crate::doctor::report(&checks) });
+            }).ok();
+            st.later.push(rx);
+        }
+        "/update" => {
+            if st.running.is_some() {
+                st.add(card("NOT NOW", "gap-card", "A job is running: update when it's done.".into()));
+                return true;
+            }
+            st.add(card("UPDATING", "ask-card", "Looking for a newer Chuck…".into()));
+            let (tx, rx) = channel();
+            let (ntx, nrx) = channel();
+            std::thread::Builder::new().name("update".into()).spawn(move || {
+                let done = |kind: &str, class: &str, text: String| Entry::Card { kind: kind.into(), class: class.into(), text };
+                let e = match crate::update::check() {
+                    Err(e) => done("UPDATE", "gap-card", format!("Couldn't ask GitHub: {e}")),
+                    Ok(crate::update::Found::UpToDate(_)) => done("UP TO DATE", "done-card", "This is the newest Chuck.".into()),
+                    Ok(_) => match crate::update::run(&mut |l| { let _ = ntx.send(l.chars().take(140).collect()); }) {
+                        Ok(()) => done("UPDATED", "done-card", "The newest Chuck is installed. Type `/restart` to open it \
+                            (your conversation is saved).".into()),
+                        Err(e) => done("UPDATE FAILED", "gap-card", format!("{e}\n\nNothing changed: this Chuck still works. \
+                            The full installer is: `curl -fsSL https://raw.githubusercontent.com/{}/{}/install.sh | bash`",
+                            crate::update::REPO, crate::update::BRANCH)),
+                    },
+                };
+                let _ = tx.send(e);
+            }).ok();
+            st.later.push(rx);
+            st.notice = Some(nrx);
+        }
+        "/restart" => {
+            if st.running.is_some() {
+                st.add(card("NOT NOW", "gap-card", "A job is running: stop it first (Esc).".into()));
+                return true;
+            }
+            let exe = std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/bin/chuck")).filter(|p| p.exists())
+                .or_else(|| std::env::current_exe().ok());
+            if let Some(exe) = exe {
+                use std::os::unix::process::CommandExt;
+                let mut c = std::process::Command::new(exe);
+                unsafe {
+                    c.pre_exec(|| {
+                        libc::setsid();
+                        Ok(())
+                    });
+                }
+                if c.spawn().is_ok() {
+                    let w = st.ui.window.clone();
+                    let sh = shared.clone();
+                    glib::idle_add_local_once(move || quit(&w, &sh));
+                }
+            }
+        }
+        _ => return false,
+    }
+    true
 }
 
 /// The daemons and the inbox, in the panel.
@@ -1302,6 +1461,15 @@ fn settings_dialog(shared: &Shared) {
     access_group.add(&acc);
     page.add(&access_group);
 
+    let updates = adw::SwitchRow::builder().title("Check for a new version once a day")
+        .subtitle(match crate::update::installed() {
+            Some(h) => format!("This is {} from the {} branch ({}) · /update installs the newest", env!("CARGO_PKG_VERSION"),
+                               crate::update::BRANCH, &h[..10.min(h.len())]),
+            None => format!("This is {} built from source", env!("CARGO_PKG_VERSION")),
+        })
+        .active(s.map.get("check_updates").and_then(|v| v.as_bool()) != Some(false)).build();
+    let about = adw::PreferencesGroup::builder().title("Chuck").build();
+    about.add(&updates);
     let research = adw::PreferencesGroup::builder().title("Research")
         .description("How agents search the web and read pages.").build();
     let searx = adw::EntryRow::builder().title("Your own SearXNG (asked first; optional)")
@@ -1315,6 +1483,7 @@ fn settings_dialog(shared: &Shared) {
     research.add(&proxy);
     research.add(&sources);
     page.add(&research);
+    page.add(&about);
 
     let vp = chuck_voice::Prefs::from(&s);
     let voice = shared.borrow().voice.clone();
@@ -1464,6 +1633,7 @@ fn settings_dialog(shared: &Shared) {
         s.set("proxy", proxy.text().trim().into());
         s.set("research_sources", (sources.value() as i64).into());
         s.set("tts", tts.is_active().into());
+        s.set("check_updates", updates.is_active().into());
         s.set("voice_engine", engines[engine.selected() as usize].0.into());
         s.set("kokoro_voice", voices[kvoice.selected() as usize].0.into());
         s.set("voice_speed", speed.value().into());
@@ -1793,7 +1963,8 @@ pub fn build(app: &adw::Application, opts: Options) {
         daemons: chuck_daemon::Registry::load(&chuck_daemon::Registry::default_path()),
         inbox: chuck_daemon::Inbox::load(&chuck_daemon::Inbox::default_path(), 200), daemon_live: HashMap::new(),
         daemon_check: None, voice: chuck_voice::Voice::new(), ears: chuck_voice::Ears::new(), heard: None,
-        memory: Arc::new(chuck_store::memory::Memory::at(&chuck_store::memory::Memory::default_path())), tokens: 0,
+        memory: Arc::new(chuck_store::memory::Memory::at(&chuck_store::memory::Memory::default_path())),
+        later: Vec::new(), notice: None, tokens: 0,
         spent: 0.0, prompt: 0, cached: 0, unsaved: false,
     }));
     *slot.borrow_mut() = Some(shared.clone());
@@ -1950,6 +2121,16 @@ pub fn build(app: &adw::Application, opts: Options) {
     });
     let sh = shared.clone();
     glib::timeout_add_local_once(Duration::from_secs(3), move || daemon_tick(&sh));
+    // once a day: is there a newer Chuck? (Settings can turn this off; scripted runs never ask)
+    if opts.model.is_none() && crate::update::due() {
+        let (tx, rx) = channel();
+        std::thread::Builder::new().name("update-check".into()).spawn(move || {
+            if let Ok(crate::update::Found::Newer { latest, .. }) = crate::update::check() {
+                let _ = tx.send(format!("A newer Chuck is out ({}) — type /update to install it", &latest[..10.min(latest.len())]));
+            }
+        }).ok();
+        shared.borrow_mut().notice = Some(rx);
+    }
 
     // closing — the window, Ctrl-C, a logout's SIGTERM/SIGHUP — stops every agent and command first
     let sh = shared.clone();

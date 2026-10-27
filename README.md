@@ -416,6 +416,13 @@ facts relevant to what you asked go into a prompt, never the whole store. The pa
 lists every fact, with a button to forget each one. It is the Python app's memory file, so what it
 remembered carries over.
 
+**Commands in the box:** `/help`, `/undo` (put the folder back to before the last job), `/diff` (every change
+it made), `/doctor` (checks the API key, the sandbox, search, voice, MCP and language servers, disk and
+the evidence chain), `/update` (installs the newest Chuck from this branch, then `/restart`), `/export`
+(the conversation as Markdown), `/cost`, `/clear`, `/remind`, `/daemon`. Once a day Chuck asks GitHub
+whether a newer version is out (Settings can turn that off). From a terminal: `chuck doctor`,
+`chuck update`.
+
 What isn't ported to Rust yet, so isn't in this branch's app: a real browser for pages that need
 JavaScript, and images and video.
 [ARCHITECTURE.md](ARCHITECTURE.md) has the design and the plan.

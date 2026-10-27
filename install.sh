@@ -35,6 +35,9 @@ die(){  printf '\033[38;5;196m✗ %s\033[0m\n' "$1" >&2; exit 1; }
 
 mkdir -p "$APP_DIR" "$ASSET_DIR" "${HOME}/.local/bin" "${HOME}/.local/share/applications"
 
+if [ "${CHUCK_DEPS:-1}" = "0" ]; then
+  info "system packages skipped (CHUCK_DEPS=0: an update from inside Chuck)"
+else
 step "installing GTK4 + tools (screenshot, polkit, cleanup, GPU, pkgfile, voice, video)"
 SESS="${XDG_SESSION_TYPE:-}"; DE="${XDG_CURRENT_DESKTOP:-}"
 if command -v pacman >/dev/null; then
@@ -62,6 +65,7 @@ else
   die "unknown package manager — install python3-gi, GTK4, libadwaita, polkit, pciutils, espeak-ng, yt-dlp, grim/scrot"
 fi
 ok "dependencies ready"
+fi
 
 # code verifier linters (best-effort — the verifier degrades gracefully without them)
 if ! command -v ruff >/dev/null; then
@@ -106,13 +110,19 @@ trap 'rm -rf "$SRC_TMP"' EXIT
 SELF_DIR=""
 RUST_SRC=""
 RUST_OK=0
+COMMIT=""
+# the branch's newest commit, asked first so the archive is exactly that commit
+COMMIT="$(curl -fsSL -H 'Accept: application/vnd.github.sha' \
+          "https://api.github.com/repos/${REPO}/commits/${BRANCH}" 2>/dev/null | tr -cd '0-9a-f' | head -c 40 || true)"
+[ "${#COMMIT}" = "40" ] || COMMIT=""
 if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
   SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 fi
 if [ -n "$SELF_DIR" ] && [ -f "$SELF_DIR/chucknorris.py" ] && [ -d "$SELF_DIR/chucknorris_ext" ]; then
   install_tree "$SELF_DIR"                           # running from a clone
   RUST_SRC="$SELF_DIR"
-elif curl -fsSL "https://codeload.github.com/${REPO}/tar.gz/refs/heads/${BRANCH}" \
+  COMMIT="$(git -C "$SELF_DIR" rev-parse HEAD 2>/dev/null || true)"
+elif curl -fsSL "https://codeload.github.com/${REPO}/tar.gz/${COMMIT:-refs/heads/${BRANCH}}" \
         -o "${SRC_TMP}/src.tar.gz" \
      && tar -xzf "${SRC_TMP}/src.tar.gz" -C "$SRC_TMP" \
      && SRC_DIR="$(find "$SRC_TMP" -mindepth 1 -maxdepth 1 -type d | head -n 1)" \
@@ -243,6 +253,8 @@ libadwaita $(pkg-config --modversion libadwaita-1 2>/dev/null || echo none)) —
       # replace, never swap under a running copy: a new file, then a rename
       install -m 755 "${TARGET}/release/chuck" "${HOME}/.local/bin/.chuck.new"
       mv -f "${HOME}/.local/bin/.chuck.new" "${HOME}/.local/bin/chuck"
+      # which commit this is, so Chuck can tell when a newer one is out
+      if [ -n "$COMMIT" ]; then printf '%s\n' "$COMMIT" > "${DATA_DIR}/rust-commit"; else rm -f "${DATA_DIR}/rust-commit"; fi
       RUST_OK=1
       ok "$("${HOME}/.local/bin/chuck" version) installed"
     else

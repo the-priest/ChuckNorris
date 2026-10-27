@@ -29,6 +29,8 @@ USAGE
                     when it should be; it changes nothing (work goes to `chuck run`)
   chuck models      show the fleet's models, checked against your account
   chuck key         save your SiliconFlow API key (shared with the Chuck window)
+  chuck doctor      check everything Chuck depends on (the API, sandbox, search, voice…)
+  chuck update      install the newest Chuck from its branch
   chuck daemons [rm N | pause N | resume N]   your daemons and reminders
   chuck inbox [read]   what daemons reported (they run while the window is open)
   chuck ledger [N]  verify the evidence chain and show the last N commands run
@@ -428,6 +430,35 @@ fn main() {
             0
         }
         Some("rewind") => cmd_rewind(&args[1..]),
+        Some("doctor") => {
+            let folder = std::env::current_dir().ok();
+            let mcp = chuck_mcp::Manager::new(chuck_mcp::config_path());
+            if mcp.configured() {
+                mcp.start_all();
+            }
+            let checks = chuck_ui::doctor::run(folder.as_deref(), Some(&mcp));
+            for k in &checks {
+                println!("{} {:<16} {}", match k.state { chuck_ui::doctor::State::Ok => "✓", chuck_ui::doctor::State::Warn => "!",
+                    chuck_ui::doctor::State::Fail => "✗" }, k.name, k.detail);
+            }
+            mcp.stop_all();
+            chuck_tools::kill_all();
+            i32::from(checks.iter().any(|k| k.state == chuck_ui::doctor::State::Fail))
+        }
+        Some("update") => match chuck_ui::update::check() {
+            Err(e) => fail(&format!("couldn't ask GitHub: {e}")),
+            Ok(chuck_ui::update::Found::UpToDate(_)) => {
+                println!("This is the newest Chuck.");
+                0
+            }
+            Ok(_) => match chuck_ui::update::run(&mut |l| println!("  {l}")) {
+                Ok(()) => {
+                    println!("Updated. Open Chuck again to use the new version.");
+                    0
+                }
+                Err(e) => fail(&e),
+            },
+        },
         Some("daemons") => cmd_daemons(&args[1..]),
         Some("inbox") => cmd_inbox(args.get(1).map(String::as_str)),
         Some("ledger") => cmd_ledger(args.get(1).and_then(|n| n.parse().ok()).unwrap_or(15)),

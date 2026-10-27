@@ -277,6 +277,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "ureq",
 ]
 
 [[package]]

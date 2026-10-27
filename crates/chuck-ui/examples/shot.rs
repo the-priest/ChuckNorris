@@ -176,6 +176,7 @@ fn main() {
         "confirm" => Some("Clean the build output".to_string()),
         "research" | "chat" => Some("Why does int() fail on an empty string? Check the docs.".to_string()),
         "voice" => Some("What does ls -la show?".to_string()),
+        "help" => Some("/help".to_string()),
         _ => Some("The parser crashes on empty input. Fix it and add tests.".to_string()),
     };
     let ms = match mode.as_str() {

@@ -232,6 +232,24 @@ impl Shadow {
         self.names(&["diff", "--cached", "--name-only", "--no-renames", sha])
     }
 
+    /// What changed since a snapshot, as a unified diff (at most `max`
+    /// bytes; binary files are named, not shown).
+    pub fn diff_since(&self, sha: &str, max: usize) -> String {
+        self.unlock();
+        let _ = self.git(&["add", "-A", "--ignore-errors"], false);
+        let out = self.git_raw(&["diff", "--cached", "--no-renames", "--no-color", "--no-ext-diff", sha], false)
+            .unwrap_or_default();
+        let text = String::from_utf8_lossy(&out);
+        if text.len() <= max {
+            return text.into_owned();
+        }
+        let mut cut = max;
+        while !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        format!("{}\n… ({} more bytes of diff)", &text[..cut], text.len() - cut)
+    }
+
     /// The checkpoints, newest first.
     pub fn points(&self, n: usize) -> Vec<Point> {
         if !self.git_dir.join("HEAD").exists() {

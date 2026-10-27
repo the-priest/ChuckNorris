@@ -83,6 +83,8 @@ impl Usage {
 }
 
 pub fn fmt_usd(x: f64) -> String {
+    // -0.0 (an empty sum) is zero dollars, not "$-0.0000"
+    let x = if x == 0.0 { 0.0 } else { x };
     if x < 0.01 {
         format!("${x:.4}")
     } else if x < 0.1 {
@@ -124,6 +126,8 @@ mod tests {
         let c = u.cost(price_for("deepseek-ai/deepseek-v4.1-flash")).unwrap();
         assert!((c - (200.0 * 0.158 + 800.0 * 0.01 + 200.0 * 0.633) / 1e6).abs() < 1e-12);
         assert_eq!(fmt_usd(0.0042), "$0.0042");
+        assert_eq!(fmt_usd(-0.0), "$0.0000");
+        assert_eq!(fmt_usd([0.0f64; 0].iter().sum::<f64>()), "$0.0000");
         assert_eq!(fmt_tokens(12_500), "12.5k");
     }
 }

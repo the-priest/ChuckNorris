@@ -50,6 +50,9 @@ pub struct Progress {
     pub phase: String,
     pub unmet: Vec<String>,
     pub board: Vec<(String, String, Option<String>, Vec<String>)>,
+    /// The checkpoint taken before the last job touched anything (/undo, /diff).
+    #[serde(default)]
+    pub checkpoint: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -60,6 +63,47 @@ pub struct Saved {
     pub entries: Vec<Entry>,
     #[serde(default)]
     pub progress: Progress,
+}
+
+/// The conversation as Markdown (/export): what was said, what the fleet
+/// did, the cards.
+pub fn markdown(s: &Saved) -> String {
+    let plain = |m: &str| {
+        let mut out = String::new();
+        let mut tag = false;
+        for c in m.chars() {
+            match c {
+                '<' => tag = true,
+                '>' if tag => tag = false,
+                c if !tag => out.push(c),
+                _ => {}
+            }
+        }
+        out.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&amp;", "&")
+    };
+    let mut out = format!("# Chuck — {}\n\n", if s.folder.is_empty() { "Chat".to_string() } else { s.folder.clone() });
+    let mut in_lane = false;
+    for e in &s.entries {
+        if !matches!(e, Entry::Act { .. }) && in_lane {
+            out.push('\n');
+            in_lane = false;
+        }
+        match e {
+            Entry::User { text } => out.push_str(&format!("**You:** {}\n\n", text.trim())),
+            Entry::Steer { text } => out.push_str(&format!("**You (while it worked):** {}\n\n", text.trim())),
+            Entry::Lead { text, model, chat } => out.push_str(&format!("**{}**{}\n\n{}\n\n", if *chat { "Chuck" } else { "Lead" },
+                if model.is_empty() { String::new() } else { format!(" · {model}") }, text.trim())),
+            Entry::Act { markup } => {
+                in_lane = true;
+                out.push_str(&format!("    {}\n", plain(markup).trim()));
+            }
+            Entry::Card { kind, text, .. } => {
+                out.push_str(&format!("> **{kind}**\n>\n{}\n\n", text.trim().lines().map(|l| format!("> {l}")).collect::<Vec<_>>().join("\n")));
+            }
+            Entry::Handoff { request } => out.push_str(&format!("> **FOR THE FLEET**\n>\n> {}\n\n", request.trim())),
+        }
+    }
+    out
 }
 
 /// The key Chat-mode conversations without a project folder are kept under.
@@ -125,8 +169,11 @@ mod tests {
                                       Entry::Card { kind: "DONE".into(), class: "done-card".into(), text: "ok".into() }],
                         progress: Progress { plan: vec![("a".into(), true)], finished: true, ..Default::default() } };
         save(&folder, &s);
-        assert_eq!(load(&folder), Some(s));
+        assert_eq!(load(&folder), Some(s.clone()));
         archive(&folder);
+        let md = markdown(&s);
+        assert!(md.contains("**You:** hi") && md.contains("**Chuck** · m\n\n**hello**") && md.contains("    x")
+                && md.contains("> **DONE**") && md.contains("> **FOR THE FLEET**"), "{md}");
         assert_eq!(load(&folder), None);
         // an old file, from before Chat mode, still opens
         std::fs::write(path_for(&folder), r#"{"folder":"x","history":[],"entries":[{"k":"lead","text":"t","model":"m"}]}"#).unwrap();

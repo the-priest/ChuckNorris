@@ -81,12 +81,13 @@ impl Spend {
     }
 
     pub fn today(&self, at: i64) -> f64 {
-        self.book.lock().unwrap().days.get(&day_of(at)).copied().unwrap_or(0.0)
+        self.book.lock().unwrap().days.get(&day_of(at)).copied().unwrap_or(0.0).max(0.0)
     }
 
     pub fn month(&self, at: i64) -> f64 {
         let m = day_of(at)[..7].to_string();
-        self.book.lock().unwrap().days.iter().filter(|(d, _)| d.starts_with(&m)).map(|(_, v)| v).sum()
+        // an empty sum of f64 is -0.0, which prints as "$-0.0000"
+        self.book.lock().unwrap().days.iter().filter(|(d, _)| d.starts_with(&m)).map(|(_, v)| v).sum::<f64>().max(0.0)
     }
 
     /// A limit reached (with the user's allowances on top), or None. A
