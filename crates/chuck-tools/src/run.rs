@@ -112,7 +112,8 @@ pub fn bash(cmd: &str, mut o: RunOpts<'_>) -> RunResult {
         match rx.recv_timeout(Duration::from_millis(50)) {
             Ok(chunk) => {
                 if let Some(f) = o.on_chunk.as_mut() {
-                    f(&String::from_utf8_lossy(&chunk));
+                    // a NUL can't be shown (GTK refuses it): live output leaves it out
+                    f(&String::from_utf8_lossy(&chunk).replace('\0', ""));
                 }
                 cap.push(&chunk);
             }

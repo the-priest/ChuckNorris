@@ -192,3 +192,35 @@ pub fn chunks(text: &str, size: usize, first: Option<usize>) -> Vec<String> {
     }
     out
 }
+
+#[cfg(test)]
+mod fuzz {
+    use super::*;
+
+    /// Any reply is cleaned and chunked without a panic, every chunk within its size.
+    #[test]
+    fn any_reply_is_spoken_in_chunks_that_fit() {
+        const P: &[&str] = &["```", "```py\n", "\n", " ", "|", "| a | b |\n", "|---|---|\n", "**", "*", "_", "`", "#",
+            "- ", "1. ", "> ", "[t](https://x.org)", "https://a.org/b?c=1", "/home/u/a/b/c.rs", "~/x", "->", "=>", "&",
+            " >= ", " < ", "3*4", "C#", "v1.2.3", "Dr.", "U.S.", "e.g.", ".", "!", "?", ":", ";", "é", "😀", "中文",
+            "\u{0}", "\u{200d}", "\r", "\t", "word", "Sentence one.", "verylongwordwithoutanyspaces"];
+        let mut x = 0x9e3779b97f4a7c15u64;
+        let mut below = |n: usize| { x ^= x << 13; x ^= x >> 7; x ^= x << 17; (x % n as u64) as usize };
+        for i in 0..6000 {
+            let n = below(40) + 1;
+            let s: String = (0..n).map(|_| {
+                let p = P[below(P.len())];
+                if below(12) == 0 { p.repeat(below(50) + 1) } else { p.to_string() }
+            }).collect();
+            let c = std::panic::catch_unwind(|| clean(&s)).unwrap_or_else(|_| panic!("clean panicked on #{i}: {s:?}"));
+            for (size, first) in [(200, Some(80)), (120, None), (1, None), (7, Some(3))] {
+                let ch = std::panic::catch_unwind(|| chunks(&c, size, first))
+                    .unwrap_or_else(|_| panic!("chunks({size}) panicked on #{i}: {c:?}"));
+                for (k, piece) in ch.iter().enumerate() {
+                    let cap = if k == 0 { first.unwrap_or(size).min(size) } else { size };
+                    assert!(char_len(piece) <= cap.max(size), "#{i}: a chunk of {} > {cap}: {piece:?}", char_len(piece));
+                }
+            }
+        }
+    }
+}

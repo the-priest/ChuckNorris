@@ -151,7 +151,8 @@ type Shared = Rc<RefCell<State>>;
 type Checked = (i64, bool, String, serde_json::Value);
 
 fn label(text: &str, classes: &[&str]) -> gtk::Label {
-    let l = gtk::Label::builder().label(text).xalign(0.0).wrap(true).wrap_mode(pango::WrapMode::WordChar).build();
+    let text = crate::shown(text);
+    let l = gtk::Label::builder().label(&*text).xalign(0.0).wrap(true).wrap_mode(pango::WrapMode::WordChar).build();
     for c in classes {
         l.add_css_class(c);
     }
@@ -197,7 +198,7 @@ fn read_aloud(voice: &chuck_voice::Voice, status: &gtk::Label, text: &str) -> gt
 
 fn markup(m: &str, classes: &[&str]) -> gtk::Label {
     let l = label("", classes);
-    l.set_markup(m);
+    l.set_markup(&crate::shown(m));
     l
 }
 

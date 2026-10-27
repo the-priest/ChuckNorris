@@ -332,8 +332,10 @@ impl<'a> Exec<'a> {
     }
 
     fn act(&self, tool: &str, arg: &str, ok: bool, summary: &str) {
-        self.events.emit(Event::Action { id: self.id, tool: tool.into(), arg: arg.chars().take(200).collect(),
-                                         ok, summary: summary.chars().take(300).collect() });
+        // what reaches the window is text it can show (a NUL from a binary file would bring GTK down)
+        let shown = |s: &str, n: usize| s.chars().filter(|c| *c != '\0').take(n).collect();
+        self.events.emit(Event::Action { id: self.id, tool: tool.into(), arg: shown(arg, 200), ok,
+                                         summary: shown(summary, 300) });
     }
 
     /// The jail for a command now. Before the acceptance criteria exist a

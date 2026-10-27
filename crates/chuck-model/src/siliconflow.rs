@@ -316,7 +316,10 @@ fn stream(resp: ureq::http::Response<ureq::Body>, req: &ChatRequest, sink: &mut 
             finished = true;
         }
         let delta = ch.get("delta").cloned().unwrap_or(Value::Null);
-        if let Some(r) = delta.get("reasoning_content").and_then(|r| r.as_str()) {
+        // a NUL in what a model streams can't be shown or stored as text: it never gets further
+        let nul = |s: &str| if s.contains('\0') { s.replace('\0', "") } else { s.to_string() };
+        if let Some(r) = delta.get("reasoning_content").and_then(|r| r.as_str()).map(nul) {
+            let r = r.as_str();
             if !r.is_empty() {
                 heard = Instant::now();
                 sink.think(r);
@@ -333,7 +336,8 @@ fn stream(resp: ureq::http::Response<ureq::Body>, req: &ChatRequest, sink: &mut 
                 }
             }
         }
-        if let Some(c) = delta.get("content").and_then(|c| c.as_str()) {
+        if let Some(c) = delta.get("content").and_then(|c| c.as_str()).map(nul) {
+            let c = c.as_str();
             if !c.is_empty() {
                 heard = Instant::now();
                 sink.delta(c);

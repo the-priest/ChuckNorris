@@ -16,6 +16,12 @@ mod window;
 
 pub use window::Options;
 
+/// Text a GTK widget can take: GTK refuses a NUL (a panic, and the window
+/// gone), whatever a model, a command or a file put in it.
+pub(crate) fn shown(s: &str) -> std::borrow::Cow<'_, str> {
+    if s.contains('\0') { s.replace('\0', "").into() } else { s.into() }
+}
+
 use adw::prelude::*;
 
 /// Open the window; returns when it's closed — and nothing the fleet started

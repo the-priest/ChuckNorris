@@ -79,6 +79,14 @@ Chuck is now a Rust app (`crates/`), and the installer puts it over any earlier 
 - Races:
   - The first entry through its gate is reviewed at once; accepting it stops the other entrant.
   - The Lead races only a small, risky piece, never a whole build.
+- Bugs found by new generated tests (tens of thousands of hostile replies: cut and nested fences,
+  multi-byte text at every cut, call markup in five dialects, NULs, escape codes):
+  - a NUL in a reply, a command's output, a diff, a web page or an MCP result crashed the window
+    (GTK refuses it): it is dropped where text comes in, and the window's labels guard too;
+  - a web address followed by `code` swallowed the code into the link: the reply showed nothing;
+  - the placeholder characters the renderer uses could be faked by a reply.
+  The tests check every parser, cutter and cleaner, the Markdown → markup (always valid Pango),
+  the safety classifier, and that no file op writes through a link out of the folder.
 - Every worker gets a part, and good work is merged at once: a hand-in that passes its gate and its
   re-run checks goes straight into the project, without waiting for the Lead's turn (Settings ›
   Merge good work at once). The Lead sees each one with its diff and fixes or reassigns what's wrong;

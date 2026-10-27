@@ -18,7 +18,8 @@ const RECENT_KEEP: usize = 60;
 const TAIL_BYTES: usize = 6_000;
 
 fn label(text: &str, classes: &[&str]) -> gtk::Label {
-    let l = gtk::Label::builder().label(text).xalign(0.0).wrap(true).wrap_mode(pango::WrapMode::WordChar).build();
+    let text = crate::shown(text);
+    let l = gtk::Label::builder().label(&*text).xalign(0.0).wrap(true).wrap_mode(pango::WrapMode::WordChar).build();
     for c in classes {
         l.add_css_class(c);
     }

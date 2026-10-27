@@ -413,6 +413,12 @@ pub fn read_page(root: &Path, spec: &str, limit: usize) -> Result<String, FsErro
 
 /// A unified diff and its +/- counts. `None` sides mean created/deleted.
 pub fn unified(rel: &str, before: Option<&str>, after: Option<&str>) -> (String, usize, usize) {
+    let (d, a, r) = unified_raw(rel, before, after);
+    // shown in the window and kept as evidence: as text (a binary file's NULs left out)
+    (if d.contains('\0') { d.replace('\0', "") } else { d }, a, r)
+}
+
+fn unified_raw(rel: &str, before: Option<&str>, after: Option<&str>) -> (String, usize, usize) {
     let a = before.unwrap_or("");
     let b = after.unwrap_or("");
     let d = similar::TextDiff::from_lines(a, b);

@@ -21,7 +21,9 @@ fn inline(line: &str) -> String {
     // code spans step aside (as placeholders no mark or link can match) while the rest is styled
     let mut codes = Vec::new();
     let mut held = String::new();
-    let mut rest = line;
+    // the placeholders' own characters, should a reply contain them, can't pose as one
+    let line = line.replace(['\u{E000}', '\u{E001}'], "\u{FFFD}");
+    let mut rest = line.as_str();
     while let Some(a) = rest.find('`') {
         let Some(b) = rest[a + 1..].find('`') else { break };
         held.push_str(&rest[..a]);
@@ -91,7 +93,8 @@ fn links(s: &str) -> String {
     use std::sync::OnceLock;
     static RX: OnceLock<regex::Regex> = OnceLock::new();
     let rx = RX.get_or_init(|| regex::Regex::new(
-        r#"\[([^\]]+)\]\((https?://[^\s)"]+)\)|(https?://[^\s<>()"]*[^\s<>()".,;:!?'])"#).unwrap());
+        r#"\[([^\]]+)\]\((https?://[^\s)"\x{E000}\x{E001}]+)\)|(https?://[^\s<>()"\x{E000}\x{E001}]*[^\s<>()".,;:!?'\x{E000}\x{E001}])"#)
+        .unwrap()); // (an address ends where code begins: the code's placeholder is never part of a link)
     rx.replace_all(s, |c: &regex::Captures| match (c.get(1), c.get(2), c.get(3)) {
         (Some(t), Some(u), _) => format!("<a href=\"{}\">{}</a>", u.as_str(), t.as_str()),
         (_, _, Some(u)) => format!("<a href=\"{0}\">{0}</a>", u.as_str()),
@@ -101,6 +104,7 @@ fn links(s: &str) -> String {
 
 /// Parse a reply.
 pub fn parse(text: &str) -> Vec<Part> {
+    let text = &*crate::shown(text);
     let mut parts = Vec::new();
     let mut prose: Vec<String> = Vec::new();
     let mut lines = text.lines().peekable();
@@ -224,5 +228,60 @@ mod tests {
                                      <a href=\"http://b.org\">http://b.org</a>.".into())]);
         assert_eq!(parse("`https://in.code`"), vec![Part::Prose("<tt>https://in.code</tt>".into())]);
         assert_eq!(parse("[not a link](javascript:alert(1))"), vec![Part::Prose("[not a link](javascript:alert(1))".into())]);
+    }
+}
+
+#[cfg(test)]
+mod fuzz {
+    use super::*;
+
+    struct Rng(u64);
+    impl Rng {
+        fn below(&mut self, n: usize) -> usize {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 % n as u64) as usize
+        }
+    }
+
+    const PIECES: &[&str] = &["**", "*", "_", "`", "``", "```", "```py\n", "\n", "\n\n", " ", "  ", "|", "| a | b |\n",
+        "|---|---|\n", "|:--|--:|\n", "\\|", "# ", "## ", "#### ", "- ", "  - ", "* ", "+ ", "1. ", "2) ", "> ", "&gt; ", "---",
+        "[x] ", "[ ] ", "<", ">", "&", "&amp;", "<b>", "</i>", "<span>", "\"", "'", "[", "](", ")", "(", "https://a.org/x?q=1&r=2",
+        "[t](https://b.org)", "[t](javascript:x)", "é", "😀", "中", "\u{0}", "\u{E000}", "\u{E001}", "\u{E000}0\u{E001}",
+        "word", "Qwen3.5", "9B", ":", "~", "\t", "\r"];
+
+    /// Whatever a model writes, every piece of markup handed to a label is
+    /// markup Pango accepts (else the label shows nothing, or raw tags).
+    #[test]
+    fn any_markdown_renders_to_valid_markup() {
+        let a_tags = regex::Regex::new(r#"<a href="[^"]*">|</a>"#).unwrap();
+        for seed in [1u64, 2, 3, 4, 5] {
+            let mut r = Rng(seed);
+            for i in 0..4000 {
+                let n = r.below(30) + 1;
+                let s: String = (0..n).map(|_| PIECES[r.below(PIECES.len())]).collect();
+                let parts = std::panic::catch_unwind(|| parse(&s)).unwrap_or_else(|_| panic!("parse panicked on {s:?}"));
+                for p in parts {
+                    let marks: Vec<String> = match p {
+                        Part::Prose(m) => vec![m],
+                        Part::Code { .. } => vec![],
+                        Part::Table { head, rows } => head.into_iter().chain(rows.into_iter().flatten())
+                            .chain(std::iter::once(String::new())).collect(),
+                    };
+                    for m in marks {
+                        let bolded = format!("<b>{m}</b>"); // table headers are wrapped so
+                        for x in [&m, &bolded] {
+                            // links are the label's own markup (Pango alone doesn't know <a>)
+                            let x = &a_tags.replace_all(x, "").into_owned();
+                            assert!(gtk::pango::parse_markup(x, '\0').is_ok(),
+                                    "#{i} (seed {seed}): {s:?}\n  gave markup Pango refuses: {x:?}");
+                        }
+                    }
+                }
+                let g = crate::buddy::gist(&s);
+                assert!(g.chars().count() <= 262, "the bubble overflowed: {} chars", g.chars().count());
+            }
+        }
     }
 }

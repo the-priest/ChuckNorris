@@ -437,7 +437,7 @@ impl Server {
                 texts.push(serde_json::to_string_pretty(sc).unwrap_or_default().chars().take(20_000).collect());
             }
         }
-        Ok(Reply { ok: r.get("isError").and_then(Value::as_bool) != Some(true), text: texts.join("\n"), images })
+        Ok(Reply { ok: r.get("isError").and_then(Value::as_bool) != Some(true), text: texts.join("\n").replace('\0', ""), images })
     }
 
     /// Close its stdin (the protocol's "please exit"), then end its group.

@@ -150,6 +150,12 @@ pub fn cut(s: &str, n: usize) -> &str {
 /// Bytes to text in the page's own charset: the Content-Type header, else a
 /// `<meta charset>` near the top, else UTF-8 (windows-1252 when that fails).
 pub fn decode(body: &[u8], content_type: &str) -> String {
+    // a page's NULs aren't text (and nothing past here could show them)
+    let t = decode_raw(body, content_type);
+    if t.contains('\0') { t.replace('\0', "") } else { t }
+}
+
+fn decode_raw(body: &[u8], content_type: &str) -> String {
     static CS: OnceLock<Regex> = OnceLock::new();
     static META: OnceLock<regex::bytes::Regex> = OnceLock::new();
     let cs = CS.get_or_init(|| re(r#"(?i)charset=["']?([\w.:-]+)"#));
