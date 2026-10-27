@@ -308,8 +308,19 @@ one-line summary until you click it open, so nothing is hidden and nothing piles
 <img src="assets/screenshots/fleet-midrun.png" alt="Mid-job: the plan at step 2 of 4, two tasks running in parallel on a DeepSeek and a GLM worker, and each agent's state in the right panel" width="100%">
 
 Type while the fleet works to steer the Lead; it reads your words at its next step. Critical
-commands stop and ask for your yes right in the conversation. Conversations are saved per folder.
-Closing the window stops every agent and ends every command it started; nothing keeps running.
+commands stop and ask for your yes right in the conversation. Every conversation is listed on the
+left (**Recent**, searchable, including the Python app's chats); the plan on the right moves as the
+Lead marks steps done. Closing the window stops every agent and ends everything it started, including
+what was left running in the background or detached itself (an emulator started with `nohup … &`, an
+`adb` server); nothing keeps running.
+
+**Work goes on until it's genuinely done.** There's no step or time limit: a big job can take hours or
+days of turns. Only real limits pause it: the job's budget, your daily or monthly limit, or the Lead being
+stuck (repeating itself after being told to replan). Exploring a large project is never mistaken for being
+stuck. An API outage is waited out (up to six hours, retrying). A paused job keeps everything: the INCOMPLETE
+card says why it paused, and **Keep going** (or `/continue`, or `chuck continue`) carries on exactly where it
+stopped, with the same criteria, evidence and conversation, even after Chuck was closed. Settings › Fleet can
+keep going on its own when only the job's budget ran out, never past your daily limit.
 
 <img src="assets/screenshots/fleet-critical.png" alt="A critical command (curl piped into bash) waiting in the conversation for the user to press Run it or Refuse" width="100%">
 
@@ -342,8 +353,13 @@ Safety follows the same rules as the window:
 - **Workers run jailed.** Each one works in its own copy under bubblewrap: the rest of the system is
   read-only, credentials (`~/.ssh`, keyrings, browser profiles, the API key) are hidden, and git
   hooks can't be planted.
-- **The Lead follows your folder's access setting** (full, sandboxed, offline or read-only). Until the
-  criteria exist, its commands run with your folder mounted read-only.
+- **This folder freely, anything outside it only with your yes** (the default access). Commands run
+  jailed: the project folder is fully writable, the rest of your home is hidden (your toolchains
+  stay readable and build caches writable, so builds work), the system is read-only. A command that
+  names a path outside the folder (`../tools`, `~/notes`, `/home/…`) waits for you: **Refuse**,
+  **Allow once**, or **Allow for this job**. Chuck's own read, grep, write and edit ask the same way.
+  Workers can't ask: they're refused and report it to the Lead. Settings also offers full access,
+  sandboxed, offline and read-only. Until the criteria exist, commands run with the folder read-only.
 - **Critical commands wait for you.** Disk wipes, `rm -rf ~` and `curl | sh` run only after you type
   `yes`, and never from a worker or with nobody at the keyboard. The classifier is a line-by-line
   port of the window's, checked for identical verdicts on 1,371 commands.
