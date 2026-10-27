@@ -379,7 +379,8 @@ pub fn think_with(ctx: &Ctx, id: AgentId, model: &str, convo: &Convo, tags: &[&s
         }
         ctx.kernel.note(id, "waiting for the model's first word");
         let mut req = ChatRequest::new(model, msgs.clone());
-        req.reasoning = ctx.cfg.reasoning;
+        req.reasoning = if ctx.kernel.role(id).is_some_and(|r| r.is_worker()) { ctx.cfg.worker_reasoning } else {
+            ctx.cfg.reasoning };
         req.max_tokens = ctx.cfg.max_tokens;
         // a continuation goes on as text (a cut function call can't be continued as one)
         req.tools = if round == 0 { tools.clone() } else { None };
@@ -606,6 +607,14 @@ pub fn run_worker(ctx: Ctx, w: WorkerSpec) {
             }
             let mut fb = r.feedback.clone();
             let idle = w.pulse.lock().unwrap_or_else(|e| e.into_inner()).idle;
+            if idle == crate::lead::PUSH_TURNS {
+                // the Lead pushes, on the team channel where everyone (the user too) sees it
+                let text = format!("@{} hurry up on {}: {idle} turns without a change or a passing check (last: {}). \
+                    Stop reading around — make the change now and check it. Blocked? Tell me what you need.",
+                    w.name, w.task.id, chuck_core::evidence::clip(r.actions.last().map(String::as_str).unwrap_or("no tool call"), 80));
+                w.team.post("lead", Some(&w.name), &text);
+                ctx.events.emit(Event::Team { from: "lead".into(), to: Some(w.name.clone()), text });
+            }
             if idle == crate::lead::WARN_TURNS {
                 crate::snag(&ctx.events, w.id, &w.name, "stuck",
                             &format!("{idle} turns without a change or a passing check (last: {})", r.actions.last()

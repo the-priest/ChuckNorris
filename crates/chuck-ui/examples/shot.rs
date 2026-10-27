@@ -155,6 +155,7 @@ fn main() {
         let _ = std::fs::remove_file(cfg.join("inbox.json"));
     }
     let model: Arc<dyn chuck_model::ChatModel> = match mode.as_str() {
+        "table" => Arc::new(Scripted::new().replies(["**Top pick: Qwen3.5 9B** — `ollama pull qwen3.5:9b`. Brand new, and at 9B it's right at your ceiling.\n\n### Why it wins\n| | Qwen3.5 9B | Qwen3.5 4B | Gemma 4 E4B | Phi-4-mini |\n|---|---|---|---|---|\n| Download | 6.6–7.6GB | 3.3–4.0GB | 9.6GB | ~2.2GB |\n| Params | 9B | 4B | ~4.5B eff. | 3.8B |\n| Context | **256K** | 256K | — | 128K |\n| Input | **Text + image** | Text + image | Text | Text |\n\n**If you're on 8GB VRAM, drop to `qwen3.5:4b`** (3.3–4.0GB).\n\n### Runners-up\n- **`gemma4:e4b`** — April 2026, Apache 2.0, built for 8GB machines\n- *phi-4-mini* — small and quick\n1. pull it\n2. run it\n> numbers from the Ollama library"])),
         "voice" => Arc::new(Scripted::new().replies([
             "The `ls -la` command lists every file, hidden ones included, with permissions, owner, size and date."])),
         "daemons" => Arc::new(Scripted::new().replies([
@@ -238,6 +239,7 @@ fn main() {
         "paused" => Some("The parser crashes on empty input. Fix it.".to_string()),
         "research" | "chat" | "badchat" => Some("Why does int() fail on an empty string? Check the docs.".to_string()),
         "voice" => Some("What does ls -la show?".to_string()),
+        "table" => Some("Which small local model should I run?".to_string()),
         "pictures" => Some("Show me red pandas".to_string()),
         "browse" => Some("Does adding a task work on the page?".to_string()),
         "help" => Some("/help".to_string()),
@@ -266,7 +268,7 @@ fn main() {
     let code = chuck_ui::run(chuck_ui::Options { model, folder: Some(proj), send,
                                                  shot: Some((out, ms)), width: 1280, height: 860,
                                                  settings: mode == "settings", open: Some(open), web,
-                                                 chat: Some(matches!(mode.as_str(), "chat" | "badchat" | "voice" | "pictures")),
+                                                 chat: Some(matches!(mode.as_str(), "chat" | "badchat" | "voice" | "pictures" | "table")),
                                                  listen: mode == "voice",
                                                  palette: (mode == "palette").then(|| "do".to_string()),
                                                  poke: (mode == "wave").then_some((400.0, 380.0)) });

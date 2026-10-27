@@ -73,6 +73,7 @@ pub struct Point {
     pub label: String,
 }
 
+#[derive(Clone, Debug)]
 pub struct Shadow {
     pub work: PathBuf,
     pub git_dir: PathBuf,

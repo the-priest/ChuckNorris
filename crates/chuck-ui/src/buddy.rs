@@ -45,7 +45,8 @@ fn plain_words(text: &str) -> String {
             fenced = !fenced;
             continue;
         }
-        if fenced || t.is_empty() {
+        // a table doesn't read as speech: the chat shows it
+        if fenced || t.is_empty() || t.starts_with('|') {
             continue;
         }
         let t = t.trim_start_matches('#').trim_start_matches(['-', '*', '•', '>']).trim();
@@ -273,5 +274,6 @@ mod tests {
         let g = gist(&long);
         assert!(g.chars().count() <= BUBBLE_CHARS + 2 && g.ends_with('…') && g.starts_with("First sentence here."), "{g}");
         assert!(gist("   ").is_empty());
+        assert_eq!(gist("Why it wins\n| a | b |\n|---|---|\n| 1 | 2 |\nDone."), "Why it wins. Done.");
     }
 }

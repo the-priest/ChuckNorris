@@ -128,8 +128,13 @@ pub fn from_settings(s: &Settings, folder: &Path, max_usd: Option<f64>) -> Resul
     // what gets in the agents' way is written down (always: it costs nothing), for it to be fixed
     chuck_store::snags::set_path(Some(chuck_store::snags::default_path()));
     cfg.reasoning = Reasoning {
-        budget: s.num("reasoning_budget", 4096.0, 0.0, 32768.0) as u32,
-        max_think_secs: s.num("max_think_seconds", 120.0, 0.0, 1800.0) as u32,
+        budget: s.num("reasoning_budget", 2048.0, 0.0, 32768.0) as u32,
+        max_think_secs: s.num("max_think_seconds", 90.0, 0.0, 1800.0) as u32,
+    };
+    // workers build from a brief: light thinking, and never long (each minute of it is a minute of waiting)
+    cfg.worker_reasoning = Reasoning {
+        budget: s.num("worker_reasoning_budget", 1024.0, 0.0, 32768.0) as u32,
+        max_think_secs: (cfg.reasoning.max_think_secs).min(45),
     };
     let mut usd = max_usd.unwrap_or_else(|| s.num("fleet_job_usd", 2.0, 0.01, 1000.0));
     // the window's evidence chain and day/month spend: one history, one budget

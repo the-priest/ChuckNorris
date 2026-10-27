@@ -94,6 +94,10 @@ headerbar { background-color: @bg; border-bottom: 1px solid @line; box-shadow: n
 .thinking { color: @faint; font-size: 12px; font-style: italic; }
 
 .code-block { background-color: @term; border: 1px solid @line; border-radius: 10px; }
+.md-table-frame { border: 1px solid @line; border-radius: 10px; padding: 2px 12px; }
+.md-cell { padding: 6px 4px; }
+.md-head { border-bottom: 1px solid @line; color: @ink; }
+.md-alt  { color: @body; }
 .code-body  { font-family: "JetBrains Mono", "Fira Code", "DejaVu Sans Mono", monospace; font-size: 12.5px;
               color: #DCDCF0; padding: 10px 12px; }
 

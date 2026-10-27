@@ -78,34 +78,90 @@ fn files(root: &Path) -> Result<Vec<String>, CowError> {
     Ok(out)
 }
 
-fn copy_tree(src: &Path, dst: &Path) -> Result<(), CowError> {
-    let mut size = 0u64;
-    fs::create_dir_all(dst).map_err(|e| CowError::Io(e.to_string()))?;
-    for rel in files(src)? {
-        let (s, d) = (src.join(&rel), dst.join(&rel));
-        if let Some(p) = d.parent() {
-            let _ = fs::create_dir_all(p);
+/// Give `p` the modified time `t` (its access time untouched).
+fn set_mtime(p: &Path, t: std::time::SystemTime) {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(d) = t.duration_since(std::time::UNIX_EPOCH) else { return };
+    let Ok(c) = std::ffi::CString::new(p.as_os_str().as_bytes()) else { return };
+    let times = [libc::timespec { tv_sec: 0, tv_nsec: libc::UTIME_OMIT },
+                 libc::timespec { tv_sec: d.as_secs() as libc::time_t, tv_nsec: d.subsec_nanos() as _ }];
+    unsafe { libc::utimensat(libc::AT_FDCWD, c.as_ptr(), times.as_ptr(), 0) };
+}
+
+/// One file copied with its modified time kept, so an untouched copy is
+/// told apart from a changed one without reading either (see `same_file`).
+/// Not for a file changed in the last moments: the clock that stamps files
+/// is coarse, so a second change within the same tick would keep the same
+/// time — such a copy keeps its own time, and is compared by its contents.
+fn copy_file(s: &Path, d: &Path) -> std::io::Result<u64> {
+    let n = fs::copy(s, d)?;
+    if let Ok(t) = fs::metadata(s).and_then(|m| m.modified()) {
+        if t.elapsed().is_ok_and(|age| age > std::time::Duration::from_secs(2)) {
+            set_mtime(d, t);
         }
-        if s.is_symlink() {
-            if let Ok(t) = fs::read_link(&s) {
-                let _ = std::os::unix::fs::symlink(t, &d);
-            }
-            continue;
-        }
-        size += fs::metadata(&s).map(|m| m.len()).unwrap_or(0);
-        if size > MAX_BYTES {
-            return Err(CowError::Refused(format!("the folder is over {} MB (not counting dependencies) — too big to copy",
-                                                 MAX_BYTES >> 20)));
-        }
-        let _ = fs::copy(&s, &d); // unreadable: the worker won't have it
     }
+    Ok(n)
+}
+
+fn copy_tree(src: &Path, dst: &Path) -> Result<(), CowError> {
+    fs::create_dir_all(dst).map_err(|e| CowError::Io(e.to_string()))?;
+    let list = files(src)?;
+    // too big is said before anything is copied
+    let size: u64 = list.iter().filter_map(|r| fs::symlink_metadata(src.join(r)).ok())
+        .filter(|m| m.is_file()).map(|m| m.len()).sum();
+    if size > MAX_BYTES {
+        return Err(CowError::Refused(format!("the folder is over {} MB (not counting dependencies) — too big to copy",
+                                             MAX_BYTES >> 20)));
+    }
+    let dirs: BTreeSet<PathBuf> = list.iter().filter_map(|r| dst.join(r).parent().map(Path::to_path_buf)).collect();
+    for d in dirs {
+        let _ = fs::create_dir_all(d);
+    }
+    // the top folder's time marks when copying began (see `kept_before`): set again once it's done, as
+    // files going into it move it on
+    let began = std::time::SystemTime::now();
+    // the copying on every core: a worker starts in a fraction of the time
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 8).min(list.len().max(1));
+    std::thread::scope(|sc| {
+        for _ in 0..threads {
+            sc.spawn(|| loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(rel) = list.get(i) else { break };
+                let (s, d) = (src.join(rel), dst.join(rel));
+                if s.is_symlink() {
+                    if let Ok(t) = fs::read_link(&s) {
+                        let _ = std::os::unix::fs::symlink(t, &d);
+                    }
+                } else {
+                    let _ = copy_file(&s, &d); // unreadable: the worker won't have it
+                }
+            });
+        }
+    });
+    set_mtime(dst, began);
     Ok(())
 }
 
-fn same_file(a: &Path, b: &Path) -> bool {
+/// Before when a modified time is one a copy kept from its original (see
+/// `copy_file`): copying began when the copy's folders were made, so its
+/// top folder's time; a kept time is older than that by the margin.
+fn kept_before(copy: &Path) -> Option<std::time::SystemTime> {
+    fs::metadata(copy).and_then(|m| m.modified()).ok()?.checked_sub(std::time::Duration::from_secs(2))
+}
+
+/// The same contents? A copy whose size and kept modified time are still
+/// its original's is (every edit moves the time on past the copy); anything
+/// else is read and compared.
+fn same_file(a: &Path, b: &Path, kept: Option<std::time::SystemTime>) -> bool {
     if let (Ok(x), Ok(y)) = (fs::metadata(a), fs::metadata(b)) {
         if x.len() != y.len() {
             return false; // cheap, and the common case for a changed file
+        }
+        if let (Ok(p), Ok(q), Some(k)) = (x.modified(), y.modified(), kept) {
+            if p == q && p < k {
+                return true;
+            }
         }
     }
     match (fs::read(a), fs::read(b)) {
@@ -197,6 +253,7 @@ impl Workspace {
     pub fn merge(&self, only: Option<&[String]>) -> Result<MergeResult, CowError> {
         let mut res = MergeResult::default();
         let cdir = self.source.join(".chuck-conflicts");
+        let kept = kept_before(&self.base);
         for (rel, kind) in self.changes()? {
             if only.is_some_and(|o| !o.contains(&rel)) {
                 res.skipped.push(rel);
@@ -214,7 +271,7 @@ impl Workspace {
                 continue;
             }
             let mine_now = mine.exists();
-            let mine_same_as_base = mine_now && base.exists() && same_file(&mine, &base);
+            let mine_same_as_base = mine_now && base.exists() && same_file(&mine, &base, kept);
             let io = |e: std::io::Error| CowError::Io(format!("{rel}: {e}"));
             match kind {
                 ChangeKind::Added => {
@@ -224,7 +281,7 @@ impl Workspace {
                         }
                         fs::copy(&theirs, &mine).map_err(io)?;
                         res.applied.push(rel);
-                    } else if same_file(&mine, &theirs) {
+                    } else if same_file(&mine, &theirs, kept) {
                         res.kept.push(rel);
                     } else {
                         park(&cdir, &rel, &theirs);
@@ -248,7 +305,7 @@ impl Workspace {
                     } else if mine_same_as_base {
                         fs::copy(&theirs, &mine).map_err(io)?;
                         res.applied.push(rel);
-                    } else if same_file(&mine, &theirs) {
+                    } else if same_file(&mine, &theirs, kept) {
                         res.kept.push(rel);
                     } else if let Some(merged) = merge3(&mine, &base, &theirs) {
                         fs::write(&mine, merged).map_err(io)?;
@@ -314,6 +371,7 @@ impl Workspace {
 
 /// What changed from `base` to `other`.
 pub fn changes_between(base_dir: &Path, other: &Path) -> Result<BTreeMap<String, ChangeKind>, CowError> {
+    let kept = kept_before(base_dir);
     let base: BTreeSet<String> = files(base_dir)?.into_iter().collect();
     let work: BTreeSet<String> = files(other)?.into_iter().collect();
     let mut out = BTreeMap::new();
@@ -328,7 +386,7 @@ pub fn changes_between(base_dir: &Path, other: &Path) -> Result<BTreeMap<String,
         let changed = if b.is_symlink() || w.is_symlink() {
             b.is_symlink() != w.is_symlink() || fs::read_link(&b).ok() != fs::read_link(&w).ok()
         } else {
-            !same_file(&b, &w)
+            !same_file(&b, &w, kept)
         };
         if changed {
             out.insert(r.clone(), ChangeKind::Modified);

@@ -30,7 +30,7 @@ pub struct Reasoning {
 
 impl Default for Reasoning {
     fn default() -> Reasoning {
-        Reasoning { budget: 4096, max_think_secs: 120 }
+        Reasoning { budget: 2048, max_think_secs: 90 }
     }
 }
 

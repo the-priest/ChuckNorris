@@ -237,6 +237,36 @@ fn render(text: &str) -> gtk::Box {
                 frame.append(&sc);
                 b.append(&frame);
             }
+            Part::Table { head, rows } => {
+                let grid = gtk::Grid::builder().column_spacing(18).row_spacing(0).build();
+                grid.add_css_class("md-table");
+                let cell = |m: &str, head: bool, row: usize| {
+                    let l = markup(&if head { format!("<b>{m}</b>") } else { m.to_string() }, &["prose", "md-cell"]);
+                    l.set_selectable(true);
+                    l.set_max_width_chars(28);
+                    l.set_valign(gtk::Align::Start);
+                    if head {
+                        l.add_css_class("md-head");
+                    } else if row % 2 == 1 {
+                        l.add_css_class("md-alt");
+                    }
+                    l
+                };
+                for (c, h) in head.iter().enumerate() {
+                    grid.attach(&cell(h, true, 0), c as i32, 0, 1, 1);
+                }
+                for (r, row) in rows.iter().enumerate() {
+                    for (c, v) in row.iter().enumerate() {
+                        grid.attach(&cell(v, false, r), c as i32, r as i32 + 1, 1, 1);
+                    }
+                }
+                // framed, as wide as it needs up to the chat's width (long cells wrap)
+                let frame = gtk::Box::new(gtk::Orientation::Vertical, 0);
+                frame.add_css_class("md-table-frame");
+                frame.set_halign(gtk::Align::Start);
+                frame.append(&grid);
+                b.append(&frame);
+            }
         }
     }
     b
@@ -1866,19 +1896,24 @@ fn settings_dialog(shared: &Shared) {
     page.add(&fleet);
 
     let reason = adw::PreferencesGroup::builder().title("Reasoning").build();
-    let levels = [("Off — answer straight away", 0.0), ("Light (1k tokens)", 1024.0), ("Normal (4k)", 4096.0),
+    let levels = [("Off — answer straight away", 0.0), ("Light (1k tokens)", 1024.0), ("Quick (2k)", 2048.0), ("Normal (4k)", 4096.0),
                   ("Deep (8k)", 8192.0), ("Deeper (16k)", 16384.0), ("Max (32k)", 32768.0)];
     let names: Vec<&str> = levels.iter().map(|(n, _)| *n).collect();
-    let rz = adw::ComboRow::builder().title("Max reasoning").model(&gtk::StringList::new(&names)).build();
-    let cur = s.num("reasoning_budget", 4096.0, 0.0, 32768.0);
+    let rz = adw::ComboRow::builder().title("The Lead's reasoning").model(&gtk::StringList::new(&names)).build();
+    let cur = s.num("reasoning_budget", 2048.0, 0.0, 32768.0);
     rz.set_selected(levels.iter().position(|(_, v)| *v >= cur).unwrap_or(2) as u32);
+    let wz = adw::ComboRow::builder().title("Workers' reasoning")
+        .subtitle("They build from the Lead's brief: light thinking keeps them fast").model(&gtk::StringList::new(&names)).build();
+    let wcur = s.num("worker_reasoning_budget", 1024.0, 0.0, 32768.0);
+    wz.set_selected(levels.iter().position(|(_, v)| *v >= wcur).unwrap_or(1) as u32);
     let think = adw::SpinRow::with_range(0.0, 1800.0, 10.0);
     think.set_title("Max thinking time (s)");
-    think.set_value(s.num("max_think_seconds", 120.0, 0.0, 1800.0));
+    think.set_value(s.num("max_think_seconds", 90.0, 0.0, 1800.0));
     let stall = adw::SpinRow::with_range(20.0, 600.0, 10.0);
     stall.set_title("Give up on a silent connection after (s)");
     stall.set_value(s.num("stall_seconds", 90.0, 20.0, 600.0));
     reason.add(&rz);
+    reason.add(&wz);
     reason.add(&think);
     reason.add(&stall);
     page.add(&reason);
@@ -2149,6 +2184,7 @@ fn settings_dialog(shared: &Shared) {
         s.set("fleet_auto_continue", auto.is_active().into());
         s.set("command_timeout", ((cmd_min.value() * 60.0) as i64).into());
         s.set("reasoning_budget", (levels[rz.selected() as usize].1 as i64).into());
+        s.set("worker_reasoning_budget", (levels[wz.selected() as usize].1 as i64).into());
         s.set("max_think_seconds", (think.value() as i64).into());
         s.set("stall_seconds", (stall.value() as i64).into());
         s.set("budget_day_usd", day.value().into());

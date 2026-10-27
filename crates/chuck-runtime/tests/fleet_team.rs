@@ -123,10 +123,11 @@ fn workers_talk_and_the_lead_waits_answers_and_merges() {
     assert_eq!(std::fs::read_to_string(dir.join("hack.txt")).unwrap(), "mine\n");
     let seen = model.seen.lock().unwrap();
     let lead: Vec<&ChatRequest> = seen.iter().filter(|r| is_lead(r)).collect();
-    // it woke for the question, the submissions and the end: never just to say "Waiting."
-    assert!(lead.len() <= 6, "the Lead polled: {} turns", lead.len());
-    assert!(!lead.iter().any(|r| r.messages.iter().any(|m| m["role"] == "assistant" && text(m) == "Waiting.")),
-            "a turn spent waiting");
+    // it woke for the question, the submissions and the end, and heard back at once on its own write
+    // (one turn that ends its own work): never polling
+    assert!(lead.len() <= 7, "the Lead polled: {} turns", lead.len());
+    let waits = lead.last().map_or(0, |r| r.messages.iter().filter(|m| m["role"] == "assistant" && text(m) == "Waiting.").count());
+    assert!(waits <= 1, "{waits} turns spent waiting");
     // the talk is on the record, the lifecycle notes too
     let talk: Vec<(String, Option<String>, String)> = events.iter().filter_map(|e| match e {
         Event::Team { from, to, text } => Some((from.clone(), to.clone(), text.clone())),
@@ -518,10 +519,16 @@ fn a_stuck_worker_is_warned_then_replaced_and_a_step_that_stalls_twice_comes_bac
     assert_eq!(std::fs::read_to_string(dir.join("two.txt")).unwrap(), "2\n");
     let seen = model.seen.lock().unwrap();
     assert!(seen.iter().any(|r| !worker(r).is_empty() && last_user(r).contains("[supervisor: 8 turns")), "warned first");
+    // before that, the Lead pushed it, on the team channel, once per idle streak
+    assert!(seen.iter().any(|r| !worker(r).is_empty() && last_user(r).contains("lead → ds-1: @ds-1 hurry up on t1")),
+            "pushed at 4 turns");
+    let events: Vec<Event> = rx.try_iter().collect();
+    let pushes = events.iter().filter(|e| matches!(e, Event::Team { from, to: Some(to), text }
+        if from == "lead" && to == "ds-1" && text.contains("hurry up"))).count();
+    assert_eq!(pushes, 1, "one push per idle streak");
     let lead: Vec<String> = seen.iter().filter(|r| is_lead(r)).map(last_user).collect();
     assert!(lead.iter().any(|l| l.contains("the supervisor replaced it with")), "{lead:?}");
     // stopped workers never got past the limit: none read more than 12 times in a row
-    let events: Vec<Event> = rx.try_iter().collect();
     assert!(events.iter().filter(|e| matches!(e, Event::Notice { text, .. } if text.starts_with("stopped by the supervisor"))).count() >= 3);
     let _ = std::fs::remove_dir_all(&dir);
 }

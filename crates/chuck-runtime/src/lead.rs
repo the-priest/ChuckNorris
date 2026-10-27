@@ -77,6 +77,10 @@ struct Worker {
 pub const STALL_TURNS: u32 = 12;
 /// Turns without progress after which the worker is warned (fair, before ruthless).
 pub const WARN_TURNS: u32 = 8;
+/// Turns without progress after which the Lead tells a worker to hurry.
+pub const PUSH_TURNS: u32 = 4;
+/// While the Lead waits, how often it looks over a slow fleet.
+pub const WATCH_EVERY: Duration = Duration::from_secs(90);
 /// Workers a task gets before it comes back to the Lead.
 pub const ATTEMPTS: u32 = 2;
 
@@ -99,6 +103,11 @@ pub struct LeadRun<'a> {
     rejected_at: Option<(usize, String)>,
     /// The folder as the job found it: the real diff is measured against it.
     snapshot: Option<Snapshot>,
+    /// The snapshot being taken (a big folder takes seconds): it runs while
+    /// the Lead thinks, and is waited for before anything can change.
+    snapshot_job: Option<JoinHandle<Option<Snapshot>>>,
+    /// The first checkpoint being taken (see `checkpoint_soon`).
+    checkpoint_job: Option<JoinHandle<Result<String, String>>>,
     /// The folder's rewind history (the window's shadow repo).
     shadow: Option<chuck_store::Shadow>,
     pub first_checkpoint: Option<String>,
@@ -121,6 +130,8 @@ pub struct LeadRun<'a> {
     team: Arc<Team>,
     /// The last post the Lead has read.
     heard: u64,
+    /// When the Lead last woke to look over its workers.
+    watched: std::time::Instant,
 }
 
 /// A lead call that didn't do what was asked: the Lead must hear it now,
@@ -312,20 +323,24 @@ impl<'a> LeadRun<'a> {
     pub fn new(ctx: &'a Ctx, id: AgentId, root: &Path, ask: &str, answers: Option<Receiver<String>>) -> LeadRun<'a> {
         let (tx, rx) = channel();
         let store = ctx.cfg.store.join(format!("job-{}-{}", std::process::id(), id));
-        let snapshot = Snapshot::take(root, &store.join("snapshot")).ok();
+        let (src, dst) = (root.to_path_buf(), store.join("snapshot"));
+        let snapshot_job = std::thread::Builder::new().name("chuck-snapshot".into())
+            .spawn(move || Snapshot::take(&src, &dst).ok()).ok();
         LeadRun { ctx, id, root: root.to_path_buf(), gate: Arc::new(Mutex::new(DoneGate::new(ask, Scale::Small))),
                   tasks: Vec::new(), workers: HashMap::new(), tx, rx, answers: answers.map(|a| Arc::new(Mutex::new(a))),
                   store, mutated: false,
-                  critic_rounds: 0, rejected_at: None, snapshot,
+                  critic_rounds: 0, rejected_at: None, snapshot: None, snapshot_job, checkpoint_job: None,
                   shadow: ctx.cfg.checkpoints.as_ref().filter(|_| ctx.cfg.access != chuck_sandbox::Access::ReadOnly)
                       .and_then(|store| chuck_store::Shadow::new(root, store).ok()),
                   first_checkpoint: None, steer: None, resume: None, task_base: 0, resumed: false, last_msgs: Vec::new(), last_head: 1,
-                  paused_why: None, outside: Arc::default(), team: Arc::default(), heard: 0 }
+                  paused_why: None, outside: Arc::default(), team: Arc::default(), heard: 0,
+                  watched: std::time::Instant::now() }
     }
 
     /// Snapshot the folder before a step that may change it. A failure turns
     /// checkpoints off for this job (said once), never the job itself.
     fn checkpoint(&mut self, label: &str) {
+        self.checkpointed();
         let Some(sh) = &self.shadow else { return };
         match sh.snapshot(&format!("chuck: {label}")) {
             Ok(sha) => {
@@ -397,7 +412,38 @@ impl<'a> LeadRun<'a> {
     }
 
     /// The real change to the folder since the job began, when measurable.
-    fn measure(&self) -> Option<(String, usize)> {
+    /// The job's first checkpoint (of a big folder, seconds the first time):
+    /// taken while the Lead thinks, waited for before anything can change.
+    fn checkpoint_soon(&mut self, label: &str) {
+        let Some(sh) = self.shadow.clone() else { return };
+        let label = format!("chuck: {label}");
+        self.checkpoint_job = std::thread::Builder::new().name("chuck-checkpoint".into())
+            .spawn(move || sh.snapshot(&label).map_err(|e| e.to_string())).ok();
+    }
+
+    fn checkpointed(&mut self) {
+        let Some(j) = self.checkpoint_job.take() else { return };
+        match j.join() {
+            Ok(Ok(sha)) => {
+                self.first_checkpoint.get_or_insert(sha);
+            }
+            Ok(Err(e)) => {
+                self.ctx.events.emit(Event::Notice { id: self.id, text: format!("rewind is off for this folder: {e}") });
+                self.shadow = None;
+            }
+            Err(_) => self.shadow = None,
+        }
+    }
+
+    /// The folder as the job found it, once its snapshot is taken.
+    fn snapped(&mut self) {
+        if let Some(j) = self.snapshot_job.take() {
+            self.snapshot = j.join().ok().flatten();
+        }
+    }
+
+    fn measure(&mut self) -> Option<(String, usize)> {
+        self.snapped();
         // a continued job: against the checkpoint the whole job started from
         if self.resumed {
             if let (Some(sh), Some(cp)) = (&self.shadow, &self.first_checkpoint) {
@@ -1145,6 +1191,21 @@ impl<'a> LeadRun<'a> {
         }
     }
 
+    /// Every worker at work, as the Lead watches them: its task, its turns,
+    /// how many went by without a change or a passing check, what it did last.
+    fn watch(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for t in self.tasks.iter().filter(|t| t.state == TaskState::Running) {
+            for w in t.workers.iter().filter_map(|id| self.workers.get(id)).filter(|w| w.live) {
+                let p = w.pulse.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                out.push(format!("{} on {}: turn {}, {} without progress{}{}", w.name, t.task.id, p.turns, p.idle,
+                    if p.last.is_empty() { String::new() } else { format!(", last: {}", clip(&p.last, 70)) },
+                    if p.idle >= PUSH_TURNS { " — SLOW" } else { "" }));
+            }
+        }
+        out
+    }
+
     /// The supervisor: a worker that has gone `STALL_TURNS` turns without
     /// changing or verifying anything is stopped, and its step goes to a
     /// fresh worker told what the last one tried; a step that stalls its
@@ -1230,6 +1291,15 @@ impl<'a> LeadRun<'a> {
                 Err(RecvTimeoutError::Timeout) => {
                     let mut out = self.crashed();
                     out.extend(self.supervise());
+                    // a while without news and someone is slow: the Lead looks at them (push, take over, cancel)
+                    if out.is_empty() && self.watched.elapsed() >= WATCH_EVERY {
+                        let w = self.watch();
+                        if w.iter().any(|l| l.ends_with("SLOW")) {
+                            out.push(format!("[FLEET WATCH — workers falling behind. Push them (```team @name <the \
+                                next step, now>```), take a piece over yourself, or ```cancel``` it:\n- {}]", w.join("\n- ")));
+                        }
+                        self.watched = std::time::Instant::now();
+                    }
                     if !out.is_empty() {
                         self.publish();
                         break Ok(out);
@@ -1239,6 +1309,7 @@ impl<'a> LeadRun<'a> {
             }
         };
         self.ctx.kernel.unblock(self.id);
+        self.watched = std::time::Instant::now();
         r
     }
 
@@ -1278,6 +1349,8 @@ impl<'a> LeadRun<'a> {
                 let _ = j.join();
             }
         }
+        self.snapped();
+        self.checkpointed();
         if let Some(s) = &self.snapshot {
             s.remove();
         }
@@ -1336,7 +1409,7 @@ impl<'a> LeadRun<'a> {
             }
         }
         let ask = self.gate.lock().unwrap().ask.clone();
-        self.checkpoint(&format!("before \"{}\"", clip(&ask, 60)));
+        self.checkpoint_soon(&format!("before \"{}\"", clip(&ask, 60)));
         let mut progress = Progress::default();
         let mut warned_term = false;
         let mut nudged = false;
@@ -1372,6 +1445,8 @@ impl<'a> LeadRun<'a> {
             let reply = chuck_tools::normalize_calls(&reply, LEAD_TAGS).0;
             let reply = chuck_tools::without_made_up_turns(&reply).to_string();
             convo.assistant(&reply);
+            // the first checkpoint, taken while it thought: in place before anything this reply does
+            self.checkpointed();
             let said = chuck_tools::prose(&reply, LEAD_TAGS);
             if !said.trim().is_empty() {
                 ctx.events.emit(Event::Said { id: self.id, text: said.clone() });
@@ -1385,6 +1460,9 @@ impl<'a> LeadRun<'a> {
                     .unwrap_or_default();
                 self.checkpoint(&format!("before {}", clip(&what, 80)));
             }
+            // nothing changes before the folder as it was is kept
+            self.snapped();
+            self.checkpointed();
             let (root_dir, job_gate, outside, team) = (self.root.clone(), self.gate.clone(), self.outside.clone(),
                                                        self.team.clone());
             // while workers build, the files they have changed: the Lead may change them too (it's the boss),
@@ -1433,18 +1511,20 @@ impl<'a> LeadRun<'a> {
             let mut waited = false;
             // a turn that read or ran something gets its answer now, not when a worker next hands in
             // (a few in a row, though, is polling: then it waits too)
-            let looked = r.actions.iter().any(|a| {
+            // its own work (reading, building, checking) goes on while the workers build; only a turn of
+            // nothing but talk waits for them — and so do several turns in a row of only looking (polling)
+            let worked = r.actions.iter().any(|a| {
                 let tag = a.split_whitespace().next().unwrap_or("");
-                ["read", "bash", "sh", "test", "grep", "glob", "map", "def", "refs", "find", "search", "fetch", "browse",
-                 "mcp"].contains(&tag)
+                !["team", "plan", "criteria", "snag", "remember", "forget", "remind", "daemon"].contains(&tag)
             });
+            let looked = worked && !r.mutated && !r.verified;
             looked_busy = if looked && self.busy() { looked_busy + 1 } else { 0 };
             if r.acted() {
                 nudged = false; // it works again: a later announcement gets its nudge too
                 gate_nudged = false;
             }
             if self.busy() && self.awaiting_review().is_empty() && !refused && !r.malformed
-                && (!looked || looked_busy > 3) {
+                && (!worked || looked_busy > 3) {
                 match self.wait_for_worker() {
                     Ok(m) => fb.extend(m),
                     Err(h) => return self.pause(&h.describe()),
@@ -1541,8 +1621,13 @@ impl<'a> LeadRun<'a> {
             fb.push(exec.gate_line());
             let open = self.open_tasks();
             if !open.is_empty() {
-                fb.push(format!("FLEET: {} open — {}", open.len(), self.tasks.iter().filter(|t| t.open())
-                    .map(|t| format!("{} {:?}", t.task.id, t.state).to_lowercase()).collect::<Vec<_>>().join(", ")));
+                let mut line = format!("FLEET: {} open — {}", open.len(), self.tasks.iter().filter(|t| t.open())
+                    .map(|t| format!("{} {:?}", t.task.id, t.state).to_lowercase()).collect::<Vec<_>>().join(", "));
+                let w = self.watch();
+                if !w.is_empty() {
+                    line.push_str(&format!("\nFLEET WATCH:\n- {}", w.join("\n- ")));
+                }
+                fb.push(line);
             }
             convo.user(&fb.join("\n\n"));
             self.last_msgs = convo.msgs.clone();

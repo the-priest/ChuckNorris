@@ -79,6 +79,21 @@ Chuck is now a Rust app (`crates/`), and the installer puts it over any earlier 
 - Races:
   - The first entry through its gate is reviewed at once; accepting it stops the other entrant.
   - The Lead races only a small, risky piece, never a whole build.
+- Faster:
+  - workers think lightly (Settings › Reasoning › Workers' reasoning, 1k by default) and never for
+    more than 45 s; the Lead's default is 2k;
+  - a worker's copy of the project is made on every core, and what it changed is found from file
+    times, not by reading every file (a 190 MB project: copy 3.5 s → 0.5 s, changes 245 → 75 ms);
+  - the job's snapshot and first checkpoint are taken while the Lead thinks, not before;
+  - grep searches on every core.
+- The Lead works too: what it reads, writes or runs while workers build comes back at once. It
+  watches them (FLEET WATCH: each worker's turns and how many went by without progress); a worker
+  4 turns without progress is told to hurry, on the team channel; the Lead is woken to deal with
+  workers falling behind.
+- Replies render right: tables as tables, **bold** around `code`, numbered lists, quotes, rules,
+  nested bullets and checkboxes. Chuck's bubble leaves tables out.
+- A merge never takes a worker's version over a change of yours made in the same instant the copy
+  was taken (the file clock's coarseness can't hide it).
 - The old Python app is gone from the repository (about 40,000 lines with its tests). Chuck is the
   Rust app only: the installer builds it, sets the voice up with `chuck voice install`, and removes
   the old app's code. What is still Python is the three small helpers around Python-only libraries

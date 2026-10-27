@@ -1,30 +1,76 @@
 //! Just enough Markdown for an engineer's replies: paragraphs, headings,
-//! lists, **bold**, *italic*, `code`, links and fenced code blocks.
+//! lists, quotes, tables, **bold**, *italic*, `code`, links and fenced code
+//! blocks.
 
 /// A reply split into prose (as Pango markup) and code blocks.
 #[derive(Debug, PartialEq)]
 pub enum Part {
     Prose(String),
     Code { lang: String, text: String },
+    /// A table: its header and rows, each cell as Pango markup.
+    Table { head: Vec<String>, rows: Vec<Vec<String>> },
 }
 
 pub fn escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
-/// Inline marks on one escaped line: `code` first (nothing inside it is
-/// styled), then **bold** and *italic*.
+/// Inline marks on one escaped line: `code` (nothing inside it is styled),
+/// **bold** and *italic* — across code too (`**run `x` now**`) — and links.
 fn inline(line: &str) -> String {
-    let mut out = String::new();
+    // code spans step aside (as placeholders no mark or link can match) while the rest is styled
+    let mut codes = Vec::new();
+    let mut held = String::new();
     let mut rest = line;
     while let Some(a) = rest.find('`') {
         let Some(b) = rest[a + 1..].find('`') else { break };
-        out.push_str(&emphasis(&rest[..a]));
-        out.push_str(&format!("<tt>{}</tt>", &rest[a + 1..a + 1 + b]));
+        held.push_str(&rest[..a]);
+        held.push_str(&format!("\u{E000}{}\u{E001}", codes.len()));
+        codes.push(format!("<tt>{}</tt>", &rest[a + 1..a + 1 + b]));
         rest = &rest[a + 2 + b..];
     }
-    out.push_str(&emphasis(rest));
+    held.push_str(rest);
+    let mut out = emphasis(&held);
+    for (i, c) in codes.iter().enumerate() {
+        out = out.replacen(&format!("\u{E000}{i}\u{E001}"), c, 1);
+    }
     out
+}
+
+/// A table row's cells (`| a | b |`): pipes inside `code` or escaped (`\|`) stay in their cell.
+fn cells(line: &str) -> Vec<String> {
+    let t = line.trim();
+    let t = t.strip_prefix('|').unwrap_or(t);
+    let t = t.strip_suffix('|').filter(|r| !r.ends_with('\\')).unwrap_or(t);
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut code = false;
+    let mut chars = t.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if chars.peek() == Some(&'|') => {
+                cur.push('|');
+                chars.next();
+            }
+            '`' => {
+                code = !code;
+                cur.push(c);
+            }
+            '|' if !code => out.push(std::mem::take(&mut cur).trim().to_string()),
+            _ => cur.push(c),
+        }
+    }
+    out.push(cur.trim().to_string());
+    out
+}
+
+/// `|---|:---:|` — the line under a table's header.
+fn table_rule(line: &str) -> bool {
+    let c = cells(line);
+    line.contains('-') && !c.is_empty() && c.iter().all(|x| {
+        let x = x.trim_matches(':');
+        !x.is_empty() && x.chars().all(|ch| ch == '-')
+    })
 }
 
 fn emphasis(s: &str) -> String {
@@ -68,6 +114,21 @@ pub fn parse(text: &str) -> Vec<Part> {
     };
     while let Some(line) = lines.next() {
         let t = line.trim_start();
+        // a table: a row of cells, then its rule line, then rows
+        if t.starts_with('|') && lines.peek().is_some_and(|n| table_rule(n)) {
+            flush(&mut prose, &mut parts);
+            let head: Vec<String> = cells(line).iter().map(|c| inline(&escape(c))).collect();
+            lines.next();
+            let mut rows = Vec::new();
+            while let Some(n) = lines.peek().filter(|n| n.trim_start().starts_with('|')) {
+                let mut r: Vec<String> = cells(n).iter().map(|c| inline(&escape(c))).collect();
+                r.resize(head.len().max(r.len()), String::new());
+                rows.push(r);
+                lines.next();
+            }
+            parts.push(Part::Table { head, rows });
+            continue;
+        }
         if let Some(lang) = t.strip_prefix("```") {
             flush(&mut prose, &mut parts);
             let mut code = Vec::new();
@@ -82,11 +143,23 @@ pub fn parse(text: &str) -> Vec<Part> {
         }
         let e = escape(line);
         let te = e.trim_start();
-        let rendered = if let Some(h) = te.strip_prefix("### ").or_else(|| te.strip_prefix("## "))
-            .or_else(|| te.strip_prefix("# ")) {
+        let numbered = te.split_once(['.', ')']).filter(|(n, r)| !n.is_empty() && n.len() <= 3
+            && n.chars().all(|c| c.is_ascii_digit()) && r.starts_with(' '));
+        let rendered = if let Some(h) = ["#### ", "### ", "## ", "# "].iter().find_map(|p| te.strip_prefix(p)) {
             format!("<b>{}</b>", inline(h))
-        } else if let Some(item) = te.strip_prefix("- ").or_else(|| te.strip_prefix("* ")) {
-            format!("  •  {}", inline(item))
+        } else if let Some(item) = te.strip_prefix("- ").or_else(|| te.strip_prefix("* ")).or_else(|| te.strip_prefix("+ ")) {
+            let item = item.strip_prefix("[ ] ").map(|r| format!("☐ {r}"))
+                .or_else(|| item.strip_prefix("[x] ").or_else(|| item.strip_prefix("[X] ")).map(|r| format!("☑ {r}")))
+                .unwrap_or_else(|| item.to_string());
+            // a nested item sits further in
+            let depth = (e.len() - te.len()) / 2;
+            format!("{}  •  {}", "    ".repeat(depth.min(4)), inline(&item))
+        } else if let Some((n, r)) = numbered {
+            format!("  {n}.  {}", inline(r.trim_start()))
+        } else if let Some(q) = te.strip_prefix("&gt; ").or_else(|| (te == "&gt;").then_some("")) {
+            format!("<span foreground=\"#9A97B0\">┃ <i>{}</i></span>", inline(q))
+        } else if !te.is_empty() && te.chars().all(|c| c == '-' || c == '*' || c == '_') && te.len() >= 3 {
+            "<span foreground=\"#3A3650\">────────────────────</span>".to_string()
         } else {
             inline(&e)
         };
@@ -117,6 +190,24 @@ mod tests {
         assert_eq!(parse("x <y> & z"), vec![Part::Prose("x &lt;y&gt; &amp; z".into())]);
         assert_eq!(parse("a *b* c **d** e"), vec![Part::Prose("a <i>b</i> c <b>d</b> e".into())]);
         assert_eq!(parse("glob *.rs and 3*4*5"), vec![Part::Prose("glob *.rs and 3*4*5".into())]);
+    }
+
+    #[test]
+    fn bold_around_code_and_tables_render() {
+        assert_eq!(parse("**If on 8GB, drop to `qwen3.5:4b`** (3.3GB)"),
+                   vec![Part::Prose("<b>If on 8GB, drop to <tt>qwen3.5:4b</tt></b> (3.3GB)".into())]);
+        assert_eq!(parse("- **`gemma4:e4b`** — April"), vec![Part::Prose("  •  <b><tt>gemma4:e4b</tt></b> — April".into())]);
+        assert_eq!(parse("`**not bold**`"), vec![Part::Prose("<tt>**not bold**</tt>".into())]);
+        let p = parse("Why it wins\n| | Qwen 9B | Gemma |\n|---|---|:---:|\n| Size | **9B** | `a|b` |\n| Ctx | 256K |\nafter");
+        assert_eq!(p[0], Part::Prose("Why it wins".into()));
+        assert_eq!(p[1], Part::Table { head: vec!["".into(), "Qwen 9B".into(), "Gemma".into()],
+            rows: vec![vec!["Size".into(), "<b>9B</b>".into(), "<tt>a|b</tt>".into()],
+                       vec!["Ctx".into(), "256K".into(), "".into()]] });
+        assert_eq!(p[2], Part::Prose("after".into()));
+        // a line with pipes but no rule under it is prose
+        assert_eq!(parse("a | b"), vec![Part::Prose("a | b".into())]);
+        assert_eq!(parse("1. one\n2) two\n> said\n---"), vec![Part::Prose("  1.  one\n  2.  two\n\
+            <span foreground=\"#9A97B0\">┃ <i>said</i></span>\n<span foreground=\"#3A3650\">────────────────────</span>".into())]);
     }
 
     #[test]
