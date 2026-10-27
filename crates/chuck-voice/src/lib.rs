@@ -1,6 +1,6 @@
 //! Chuck's voice: replies read aloud (Kokoro, else Piper, else espeak-ng)
 //! and talking to Chuck (Moonshine, on this machine). The engines are the
-//! ones the installer set up for the Python app; nothing leaves the machine.
+//! ones `chuck voice install` sets up; nothing leaves the machine.
 
 pub mod clean;
 pub mod install;

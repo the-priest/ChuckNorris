@@ -5,13 +5,11 @@
 #  One line:
 #    curl -fsSL https://raw.githubusercontent.com/the-priest/ChuckNorris/main/install.sh | bash
 #
-#  Chuck IS the Rust app: it is built from the branch into
-#  ~/.local/bin/chuck, and the menu entry and the `chucknorris` command open
-#  it, replacing whatever Chuck was installed before. The Python app is still
-#  installed alongside: it is what opens (and sets the voice up) only if the
-#  Rust build fails, and the installer says so loudly. CHUCK_RUST=0 skips it.
+#  Chuck is built from the branch's source into ~/.local/bin/chuck, and the
+#  menu entry and the `chucknorris` command open it, replacing whatever Chuck
+#  was installed before (the old Python app included).
 #
-#  Installs GTK4 + libadwaita (+ the PyGObject cairo bridge), screenshot tool,
+#  Installs GTK4 + libadwaita, a screenshot tool,
 #  polkit, pacman-contrib, pciutils, pkgfile, espeak-ng (voice) and yt-dlp
 #  (video), then the app, its icon, a launcher and a .desktop entry.
 #  SiliconFlow backend (reuses Basilisk's key). Commands run on their own;
@@ -41,7 +39,7 @@ ok(){   printf '%s✓ %s%s\n' "$c2" "$1" "$c0"; }
 info(){ printf '%s  %s%s\n' "$cd" "$1" "$c0"; }
 die(){  printf '%s✗ %s%s\n' "$cr" "$1" "$c0" >&2; exit 1; }
 
-mkdir -p "$APP_DIR" "$ASSET_DIR" "${HOME}/.local/bin" "${HOME}/.local/share/applications"
+mkdir -p "$ASSET_DIR" "${HOME}/.local/bin" "${HOME}/.local/share/applications"
 
 if [ "${CHUCK_DEPS:-1}" = "0" ]; then
   info "system packages skipped (CHUCK_DEPS=0: an update from inside Chuck)"
@@ -49,7 +47,7 @@ else
 step "installing GTK4 + tools (screenshot, polkit, cleanup, GPU, pkgfile, voice, video)"
 SESS="${XDG_SESSION_TYPE:-}"; DE="${XDG_CURRENT_DESKTOP:-}"
 if command -v pacman >/dev/null; then
-  PKGS="gcc pkgconf python-gobject python-cairo gtk4 libadwaita adwaita-icon-theme polkit pciutils pacman-contrib pkgfile espeak-ng yt-dlp alsa-utils python-pip whois bind traceroute wget openbsd-netcat nodejs shellcheck ruff bubblewrap gtk3 dbus-glib libxt nss"
+  PKGS="gcc pkgconf python gtk4 libadwaita adwaita-icon-theme polkit pciutils pacman-contrib pkgfile espeak-ng yt-dlp alsa-utils python-pip whois bind traceroute wget openbsd-netcat nodejs shellcheck ruff bubblewrap gtk3 dbus-glib libxt nss"
   if [ "$SESS" = "wayland" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then PKGS="$PKGS grim"; else PKGS="$PKGS scrot"; fi
   case "$DE" in *KDE*|*kde*|*plasma*|*Plasma*) PKGS="$PKGS spectacle" ;; esac
   # shellcheck disable=SC2086
@@ -60,7 +58,7 @@ if command -v pacman >/dev/null; then
   sudo pkgfile --update 2>/dev/null || true
 elif command -v apt-get >/dev/null; then
   sudo apt-get update
-  PKGS="build-essential pkg-config libgtk-4-dev libadwaita-1-dev python3-venv python3-gi python3-gi-cairo gir1.2-gtk-4.0 gir1.2-adw-1 adwaita-icon-theme libgtk-4-1 libadwaita-1-0 policykit-1 pciutils espeak-ng yt-dlp whois dnsutils traceroute wget netcat-openbsd bubblewrap"
+  PKGS="build-essential pkg-config libgtk-4-dev libadwaita-1-dev python3-venv adwaita-icon-theme libgtk-4-1 libadwaita-1-0 policykit-1 pciutils espeak-ng yt-dlp whois dnsutils traceroute wget netcat-openbsd bubblewrap"
   if [ "$SESS" = "wayland" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then PKGS="$PKGS grim"; else PKGS="$PKGS scrot"; fi
   # shellcheck disable=SC2086
   sudo apt-get install -y $PKGS || die "apt install failed"
@@ -68,14 +66,14 @@ elif command -v apt-get >/dev/null; then
   sudo apt-get install -y libgtk-3-0 libdbus-glib-1-2 libxt6 libasound2 libnss3 >/dev/null 2>&1 \
     || info "some of Camoufox's libraries didn't install (libgtk-3-0 libdbus-glib-1-2 libxt6 libasound2) — it may not start"
 elif command -v dnf >/dev/null; then
-  PKGS="gcc pkgconf-pkg-config gtk4-devel libadwaita-devel python3-gobject python3-cairo gtk4 libadwaita adwaita-icon-theme polkit pciutils espeak-ng yt-dlp whois bind-utils traceroute wget nmap-ncat bubblewrap"
+  PKGS="gcc pkgconf-pkg-config gtk4-devel libadwaita-devel python3 gtk4 libadwaita adwaita-icon-theme polkit pciutils espeak-ng yt-dlp whois bind-utils traceroute wget nmap-ncat bubblewrap"
   if [ "$SESS" = "wayland" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then PKGS="$PKGS grim"; else PKGS="$PKGS scrot"; fi
   # shellcheck disable=SC2086
   sudo dnf install -y $PKGS || die "dnf install failed"
   sudo dnf install -y gtk3 dbus-glib libXt alsa-lib nss >/dev/null 2>&1 \
     || info "some of Camoufox's libraries didn't install (gtk3 dbus-glib libXt alsa-lib) — it may not start"
 else
-  die "unknown package manager — install python3-gi, GTK4, libadwaita, polkit, pciutils, espeak-ng, yt-dlp, grim/scrot"
+  die "unknown package manager — install a C compiler, pkg-config, GTK4 + libadwaita (with headers), python3, bubblewrap, espeak-ng, yt-dlp, grim/scrot"
 fi
 ok "dependencies ready"
 fi
@@ -148,25 +146,15 @@ else
   info "no Brave/Chromium/Chrome found — page checks and pages that need JavaScript stay off until one is installed (e.g. pacman -Syu chromium)"
 fi
 
-step "installing Chuck"
-# Copy a whole source tree into place: the app, its package, its art.
-install_tree() {
-  cp "$1/chucknorris.py" "${APP_DIR}/chucknorris.py"
-  rm -rf "${APP_DIR}/chucknorris_ext"
-  cp -r "$1/chucknorris_ext" "${APP_DIR}/chucknorris_ext"
-  rm -rf "${APP_DIR}/chucknorris_ext/__pycache__"
-  cp -r "$1"/assets/* "${ASSET_DIR}/" 2>/dev/null || true
-}
+step "getting Chuck's source"
 SRC_TMP="$(mktemp -d)"
 trap 'rm -rf "$SRC_TMP"' EXIT
 # A local tree only when THIS script was run from a clone (./install.sh):
-# piped from curl, BASH_SOURCE is empty, and a chucknorris.py that merely
-# happens to be in the current folder (an old clone) must not be installed
-# over the latest release.
+# piped from curl, BASH_SOURCE is empty, and a Cargo.toml that merely
+# happens to be in the current folder must not be built over the latest release.
 SELF_DIR=""
 RUST_SRC=""
 RUST_OK=0
-COMMIT=""
 # the branch's newest commit, asked first so the archive is exactly that commit
 COMMIT="$(curl -fsSL -H 'Accept: application/vnd.github.sha' \
           "https://api.github.com/repos/${REPO}/commits/${BRANCH}" 2>/dev/null | tr -cd '0-9a-f' | head -c 40 || true)"
@@ -174,180 +162,99 @@ COMMIT="$(curl -fsSL -H 'Accept: application/vnd.github.sha' \
 if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
   SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 fi
-if [ -n "$SELF_DIR" ] && [ -f "$SELF_DIR/chucknorris.py" ] && [ -d "$SELF_DIR/chucknorris_ext" ]; then
-  install_tree "$SELF_DIR"                           # running from a clone
-  RUST_SRC="$SELF_DIR"
+if [ -n "$SELF_DIR" ] && [ -f "$SELF_DIR/Cargo.toml" ] && [ -d "$SELF_DIR/crates/chuck" ]; then
+  RUST_SRC="$SELF_DIR"                               # running from a clone
   COMMIT="$(git -C "$SELF_DIR" rev-parse HEAD 2>/dev/null || true)"
 elif curl -fsSL "https://codeload.github.com/${REPO}/tar.gz/${COMMIT:-refs/heads/${BRANCH}}" \
         -o "${SRC_TMP}/src.tar.gz" \
      && tar -xzf "${SRC_TMP}/src.tar.gz" -C "$SRC_TMP" \
      && SRC_DIR="$(find "$SRC_TMP" -mindepth 1 -maxdepth 1 -type d | head -n 1)" \
-     && [ -f "${SRC_DIR}/chucknorris.py" ] && [ -d "${SRC_DIR}/chucknorris_ext" ]; then
-  # ONE archive of the branch, so every file comes from the same commit.
-  # Fetching files one by one from raw.githubusercontent.com could mix
-  # versions: its CDN caches each file separately for minutes, so right after
-  # a release you could get the new app with an old module list — and an app
-  # that would not start.
-  install_tree "$SRC_DIR"
+     && [ -f "${SRC_DIR}/Cargo.toml" ] && [ -d "${SRC_DIR}/crates/chuck" ]; then
+  # ONE archive of the branch, so every file comes from the same commit
   RUST_SRC="$SRC_DIR"
 else
-  info "archive download failed — falling back to fetching files one by one"
-  curl -fsSL "https://raw.githubusercontent.com/${REPO}/${BRANCH}/chucknorris.py" \
-    -o "${APP_DIR}/chucknorris.py" || die "could not fetch chucknorris.py"
-  mkdir -p "${APP_DIR}/chucknorris_ext"
-  # config/net/safety/web/voice/chats are REQUIRED — the app won't import
-  # without them, so a missing one must be a hard error, not a quiet "skipped".
-  #
-  # This list is hand-maintained and it has drifted before: ledger.py and
-  # compress.py both shipped in 12.0.3 and were never added here, so every
-  # curl-installed copy silently ran with no evidence ledger and no context
-  # compression while the git-cloned copy had both. If you add a module, add it
-  # HERE as well — the check below exists because that is easy to forget.
-  for f in __init__ config net safety web voice chats pricing \
-           skills specs memory codecheck skill_library builder \
-           ledger compress agents browser diagnose mcp crashlog update pysession lsp codesearch checkpoint listen kokoro_server stt_server kernel cow worker daemons governor programs hibernate missions budget palette aiwatch; do
-    curl -fsSL "https://raw.githubusercontent.com/${REPO}/${BRANCH}/chucknorris_ext/${f}.py" \
-      -o "${APP_DIR}/chucknorris_ext/${f}.py" \
-      || case "$f" in
-           __init__|config|net|safety|web|voice|chats|pricing)
-             die "could not fetch required module chucknorris_ext/${f}.py" ;;
-           *) info "could not fetch chucknorris_ext/${f}.py (that feature will be limited)" ;;
-         esac
-  done
-  for a in chucknorris-icon gi-mark \
-           chucknorris-icon-256 chucknorris-icon-128 chucknorris-icon-64 \
-           chucknorris-icon-48 chucknorris-icon-32; do
-    curl -fsSL "https://raw.githubusercontent.com/${REPO}/${BRANCH}/assets/${a}.png" \
-      -o "${ASSET_DIR}/${a}.png" 2>/dev/null || true
-  done
+  die "couldn't download Chuck's source (https://codeload.github.com/${REPO}) — check the connection and run the installer again"
 fi
-# Every module the app imports must be here. A partial install is caught NOW,
-# with a clear message, instead of as a traceback the first time you launch.
-missing=""
-for m in $(grep -oE '(from chucknorris_ext import [a-z_]+|_optional\("[a-z_]+"\))' \
-             "${APP_DIR}/chucknorris.py" | grep -oE '[a-z_]+("?\))?$' | tr -d '")' | sort -u); do
-  [ -f "${APP_DIR}/chucknorris_ext/${m}.py" ] || missing="${missing} ${m}"
-done
-[ -z "$missing" ] || die "install incomplete — missing modules:${missing}. Re-run the installer."
-python3 -m py_compile "${APP_DIR}/chucknorris.py" "${APP_DIR}"/chucknorris_ext/*.py \
-  || die "a downloaded file is corrupt (did not compile). Re-run the installer."
-ok "app installed"
+cp -r "$RUST_SRC"/assets/* "${ASSET_DIR}/" 2>/dev/null || true
+ok "source ready${COMMIT:+ (${COMMIT:0:12})}"
 
-# Chuck, the Rust app.
+# Chuck: built from the source, into ~/.local/bin/chuck.
 RUST_MIN="1.88.0"     # what its dependencies need (Cargo.toml's rust-version)
 RUST_WHY=""
-if [ "${CHUCK_RUST:-1}" = "1" ]; then
-  step "building Chuck (Rust) from the ${BRANCH} branch (a few minutes the first time)"
-  cargo_ok() {
-    command -v cargo >/dev/null || return 1
-    v="$(cargo --version 2>/dev/null | awk '{print $2}')"
-    [ -n "$v" ] && [ "$(printf '%s\n%s\n' "$v" "$RUST_MIN" | sort -V | head -n 1)" = "$RUST_MIN" ]
-  }
-  [ -f "${HOME}/.cargo/env" ] && . "${HOME}/.cargo/env"
-  # rustup with no toolchain, or one that's too old: bring stable up to date
-  # (installing the distro's `rust` next to rustup would conflict)
-  if ! cargo_ok && command -v rustup >/dev/null; then
-    info "updating Rust with rustup (Chuck needs ${RUST_MIN} or newer)"
-    rustup toolchain install stable --profile minimal >/dev/null 2>&1 || rustup update stable >/dev/null 2>&1 || true
-    rustup default stable >/dev/null 2>&1 || true
-  fi
-  if ! cargo_ok && ! command -v rustup >/dev/null; then
-    if command -v pacman >/dev/null; then sudo pacman -Syu --needed --noconfirm rust >/dev/null 2>&1 || true
-    elif command -v dnf >/dev/null; then sudo dnf install -y rust cargo >/dev/null 2>&1 || true
-    fi
-  fi
-  if ! cargo_ok; then
-    # the distro's Rust is missing or too old: the official rustup,
-    # downloaded to a file first (never piped into a shell), user-local only
-    info "Rust ${RUST_MIN}+ not found — installing it with rustup into ~/.cargo"
-    RUSTUP="${SRC_TMP}/rustup-init.sh"
-    if curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs -o "$RUSTUP" \
-       && sh "$RUSTUP" -y --profile minimal --no-modify-path >/dev/null; then
-      . "${HOME}/.cargo/env"
-    fi
-  fi
-  if ! cargo_ok; then
-    RUST_WHY="Rust ${RUST_MIN} or newer couldn't be installed (cargo: $(cargo --version 2>/dev/null || echo none))"
-  elif [ -z "$RUST_SRC" ] || [ ! -f "${RUST_SRC}/Cargo.toml" ]; then
-    RUST_WHY="the source archive of the ${BRANCH} branch couldn't be downloaded"
-  elif ! pkg-config --atleast-version=4.14 gtk4 2>/dev/null || ! pkg-config --atleast-version=1.5 libadwaita-1 2>/dev/null; then
-    RUST_WHY="Chuck needs GTK 4.14+ and libadwaita 1.5+ (found GTK $(pkg-config --modversion gtk4 2>/dev/null || echo none), \
-libadwaita $(pkg-config --modversion libadwaita-1 2>/dev/null || echo none)) — a newer distribution release has them"
-  else
-    TARGET="${HOME}/.cache/chuck/cargo-target"
-    BUILD_LOG="${DATA_DIR}/rust-build.log"
-    if ( cd "$RUST_SRC" && CARGO_NET_RETRY=5 CARGO_TARGET_DIR="$TARGET" cargo build --release --locked -p chuck ) \
-         2>&1 | tee "$BUILD_LOG" | grep -E '^\s*(Compiling chuck|Finished|error)' ; [ "${PIPESTATUS[0]}" = "0" ] \
-       && "${TARGET}/release/chuck" version >/dev/null 2>&1; then
-      # replace, never swap under a running copy: a new file, then a rename
-      install -m 755 "${TARGET}/release/chuck" "${HOME}/.local/bin/.chuck.new"
-      mv -f "${HOME}/.local/bin/.chuck.new" "${HOME}/.local/bin/chuck"
-      # which commit this is, so Chuck can tell when a newer one is out
-      if [ -n "$COMMIT" ]; then printf '%s\n' "$COMMIT" > "${DATA_DIR}/rust-commit"; else rm -f "${DATA_DIR}/rust-commit"; fi
-      RUST_OK=1
-      ok "$("${HOME}/.local/bin/chuck" version) installed"
-    else
-      RUST_WHY="the build failed — the last lines of ${BUILD_LOG}:
-$(grep -E '^error' -A6 "$BUILD_LOG" 2>/dev/null | head -n 20 || tail -n 15 "$BUILD_LOG")"
-    fi
-  fi
-else
-  RUST_WHY="skipped (CHUCK_RUST=0)"
+step "building Chuck from the ${BRANCH} branch (a few minutes the first time)"
+cargo_ok() {
+  command -v cargo >/dev/null || return 1
+  v="$(cargo --version 2>/dev/null | awk '{print $2}')"
+  [ -n "$v" ] && [ "$(printf '%s\n%s\n' "$v" "$RUST_MIN" | sort -V | head -n 1)" = "$RUST_MIN" ]
+}
+[ -f "${HOME}/.cargo/env" ] && . "${HOME}/.cargo/env"
+# rustup with no toolchain, or one that's too old: bring stable up to date
+# (installing the distro's `rust` next to rustup would conflict)
+if ! cargo_ok && command -v rustup >/dev/null; then
+  info "updating Rust with rustup (Chuck needs ${RUST_MIN} or newer)"
+  rustup toolchain install stable --profile minimal >/dev/null 2>&1 || rustup update stable >/dev/null 2>&1 || true
+  rustup default stable >/dev/null 2>&1 || true
 fi
+if ! cargo_ok && ! command -v rustup >/dev/null; then
+  if command -v pacman >/dev/null; then sudo pacman -Syu --needed --noconfirm rust >/dev/null 2>&1 || true
+  elif command -v dnf >/dev/null; then sudo dnf install -y rust cargo >/dev/null 2>&1 || true
+  fi
+fi
+if ! cargo_ok; then
+  # the distro's Rust is missing or too old: the official rustup,
+  # downloaded to a file first (never piped into a shell), user-local only
+  info "Rust ${RUST_MIN}+ not found — installing it with rustup into ~/.cargo"
+  RUSTUP="${SRC_TMP}/rustup-init.sh"
+  if curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs -o "$RUSTUP" \
+     && sh "$RUSTUP" -y --profile minimal --no-modify-path >/dev/null; then
+    . "${HOME}/.cargo/env"
+  fi
+fi
+if ! cargo_ok; then
+  RUST_WHY="Rust ${RUST_MIN} or newer couldn't be installed (cargo: $(cargo --version 2>/dev/null || echo none))"
+elif ! pkg-config --atleast-version=4.14 gtk4 2>/dev/null || ! pkg-config --atleast-version=1.5 libadwaita-1 2>/dev/null; then
+  RUST_WHY="Chuck needs GTK 4.14+ and libadwaita 1.5+ (found GTK $(pkg-config --modversion gtk4 2>/dev/null || echo none), \
+libadwaita $(pkg-config --modversion libadwaita-1 2>/dev/null || echo none)) — a newer distribution release has them"
+else
+  TARGET="${HOME}/.cache/chuck/cargo-target"
+  BUILD_LOG="${DATA_DIR}/rust-build.log"
+  if ( cd "$RUST_SRC" && CARGO_NET_RETRY=5 CARGO_TARGET_DIR="$TARGET" cargo build --release --locked -p chuck ) \
+       2>&1 | tee "$BUILD_LOG" | grep -E '^\s*(Compiling chuck|Finished|error)' ; [ "${PIPESTATUS[0]}" = "0" ] \
+     && "${TARGET}/release/chuck" version >/dev/null 2>&1; then
+    # replace, never swap under a running copy: a new file, then a rename
+    install -m 755 "${TARGET}/release/chuck" "${HOME}/.local/bin/.chuck.new"
+    mv -f "${HOME}/.local/bin/.chuck.new" "${HOME}/.local/bin/chuck"
+    # which commit this is, so Chuck can tell when a newer one is out
+    if [ -n "$COMMIT" ]; then printf '%s\n' "$COMMIT" > "${DATA_DIR}/rust-commit"; else rm -f "${DATA_DIR}/rust-commit"; fi
+    RUST_OK=1
+    ok "$("${HOME}/.local/bin/chuck" version) installed"
+  else
+    RUST_WHY="the build failed — the last lines of ${BUILD_LOG}:
+$(grep -E '^error' -A6 "$BUILD_LOG" 2>/dev/null | head -n 20 || tail -n 15 "$BUILD_LOG")"
+  fi
+fi
+[ "$RUST_OK" = "1" ] || die "Chuck wasn't installed: ${RUST_WHY}"
 
 # The natural voice (Kokoro) and voice input (Moonshine): both run on this
-# machine, in a private venv. Set up by Chuck itself (`chuck voice install`,
-# also Settings › Voice › Set up); by the Python app's code only when the
-# Rust Chuck couldn't be built. Safe to re-run: nothing whole is fetched twice.
+# machine, in a private venv, set up by Chuck itself (`chuck voice install`,
+# also Settings › Voice › Set up). Safe to re-run: nothing whole is fetched twice.
 if [ "${CHUCK_VOICE:-1}" = "1" ]; then
   step "setting up the natural voice + voice input (Kokoro + Moonshine, about 600 MB, all local)"
   info "this is the big download; CHUCK_VOICE=0 skips it (then: chuck voice install)"
-  if [ "$RUST_OK" = "1" ]; then
-    "${HOME}/.local/bin/chuck" voice install \
-      || info "voice setup didn't finish — Settings › Voice › Set up, or: chuck voice install"
-  else
-  ( cd "${APP_DIR}" && python3 - <<'PYEOF'
-import sys
-from chucknorris_ext import voice, listen
-def say(m):
-    end = "\r" if m.startswith("downloading") else "\n"
-    sys.stdout.write("\r\033[K  " + m + end)
-    sys.stdout.flush()
-try:
-    ok1, m1 = voice.install_kokoro(say)
-    say(("✓ " if ok1 else "✗ ") + m1)
-    ok2, m2 = listen.install(say)
-    say(("✓ " if ok2 else "✗ ") + m2)
-finally:
-    voice.KOKORO.stop()
-    listen.EARS.stop()
-PYEOF
-  ) || info "voice setup didn't finish — run /voice in the app to retry"
-  fi
+  "${HOME}/.local/bin/chuck" voice install \
+    || info "voice setup didn't finish — Settings › Voice › Set up, or: chuck voice install"
 else
   info "voice setup skipped (CHUCK_VOICE=0) — chuck voice install sets it up"
 fi
 
-# What "Chuck" opens: the Rust app when it built, the
-# Python window only when it couldn't be built. The menu entry and the
-# `chucknorris` command are rewritten on every install, so nothing is left
-# pointing at an old build.
-if [ "$RUST_OK" = "1" ]; then
-  cat > "$LAUNCH" <<EOF
+# What "Chuck" opens: the menu entry and the `chucknorris` command are
+# rewritten on every install, so nothing is left pointing at an old build.
+cat > "$LAUNCH" <<EOF
 #!/usr/bin/env bash
-# Chuck (Rust), installed from the ${BRANCH} branch. Re-run the installer to update.
+# Chuck, installed from the ${BRANCH} branch. Re-run the installer to update.
 exec "${HOME}/.local/bin/chuck" "\$@"
 EOF
-  COMMENT="One lead and eight workers on SiliconFlow; work is done only when it is verified"
-else
-  cat > "$LAUNCH" <<EOF
-#!/usr/bin/env bash
-# installed from the ${BRANCH} branch: the in-app updater stays on it
-export CHUCK_BRANCH="\${CHUCK_BRANCH:-${BRANCH}}"
-exec python3 "${APP_DIR}/chucknorris.py" "\$@"
-EOF
-  COMMENT="A coding and system agent for your desktop: runs commands, edits code, researches, sees screenshots"
-fi
+COMMENT="One lead and a fleet of workers on SiliconFlow; work is done only when it is verified"
 chmod +x "$LAUNCH"
 cat > "$DESKTOP" <<EOF
 [Desktop Entry]
@@ -402,11 +309,11 @@ for pid in $(pgrep -u "$(id -u)" -f 'chucknorris\.py' 2>/dev/null); do
   argv1="$(tr '\0' '\n' < "/proc/${pid}/cmdline" 2>/dev/null | sed -n 2p)"
   case "${argv0##*/}" in python*) case "$argv1" in *chucknorris.py) OLD_PY="${OLD_PY} ${pid}" ;; esac ;; esac
 done
-if [ "$RUST_OK" = "1" ] && [ -n "${OLD_RUST// /}" ]; then
+if [ -n "${OLD_RUST// /}" ]; then
   # shellcheck disable=SC2086
   kill -TERM $OLD_RUST 2>/dev/null && info "closed the Chuck window that was open (the previous build): open Chuck again"
 fi
-if [ "$RUST_OK" = "1" ] && [ -n "${OLD_PY// /}" ]; then
+if [ -n "${OLD_PY// /}" ]; then
   ans="n"
   # only with a terminal to ask on (opening /dev/tty fails without one)
   if { exec 3<>/dev/tty; } 2>/dev/null; then
@@ -422,16 +329,13 @@ if [ "$RUST_OK" = "1" ] && [ -n "${OLD_PY// /}" ]; then
   esac
 fi
 
-if [ "$RUST_OK" = "1" ]; then
-  # what opens, checked: the menu entry and `chucknorris` both reach the new binary
-  grep -q "${HOME}/.local/bin/chuck\"" "$LAUNCH" && grep -q "^Exec=${LAUNCH}$" "$DESKTOP" \
-    || die "the launcher wasn't written as expected (${LAUNCH}, ${DESKTOP})"
-  printf '\n%s%s installed (%s branch) — this is the Rust Chuck.%s  Open Chuck from your app menu, or run:  %schuck%s\n' \
-    "$c1" "$("${HOME}/.local/bin/chuck" version)" "$BRANCH" "$c0" "$c2" "$c0"
-  info "the app menu's Chuck and the chucknorris command both open it"
-  info "add a SiliconFlow key in Settings (gear icon), or: chuck key"
-else
-  printf '\n%s!! The Rust Chuck was NOT installed: %s%s\n' "$cr" "$RUST_WHY" "$c0"
-  printf '%s   Chuck opens the older Python window until this is fixed. Re-run the installer afterwards.%s\n' "$c1" "$c0"
-  info "the Python window: chucknorris (or Chuck in the app menu)"
-fi
+# the old Python app's code (an install from before Chuck was Rust): nothing runs it now
+[ -z "${OLD_PY// /}" ] && rm -rf "${APP_DIR}"
+
+# what opens, checked: the menu entry and `chucknorris` both reach the new binary
+grep -q "${HOME}/.local/bin/chuck\"" "$LAUNCH" && grep -q "^Exec=${LAUNCH}$" "$DESKTOP" \
+  || die "the launcher wasn't written as expected (${LAUNCH}, ${DESKTOP})"
+printf '\n%s%s installed (%s branch).%s  Open Chuck from your app menu, or run:  %schuck%s\n' \
+  "$c1" "$("${HOME}/.local/bin/chuck" version)" "$BRANCH" "$c0" "$c2" "$c0"
+info "the app menu's Chuck and the chucknorris command both open it"
+info "add a SiliconFlow key in Settings (gear icon), or: chuck key"

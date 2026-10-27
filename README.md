@@ -414,7 +414,8 @@ history carry over. What it does, in order:
 3. Builds Chuck from the exact commit it downloaded, into `~/.local/bin/chuck`.
 4. Sets up Camoufox in an environment of its own, `~/.local/share/chucknorris/camoufox` (about
    300 MB). No system Python is touched. `CHUCK_CAMOUFOX=0` skips this.
-5. Sets up the local voice models (about 600 MB). `CHUCK_VOICE=0` skips this.
+5. Sets up the local voice models (about 600 MB) with `chuck voice install`. `CHUCK_VOICE=0`
+   skips this; Settings › Voice › Set up, or `chuck voice install`, does it later.
 6. Writes the menu entry, the icon and the `chucknorris` launcher.
 
 Prefer to read it first? Clone and run it:
@@ -441,9 +442,8 @@ better way, because it also sets up the menu entry, bubblewrap and voice.
 **Updating.** Chuck checks once a day whether a newer version is out (Settings can turn that off).
 `/update` in the window, or `chuck update`, rebuilds it in place; `/restart` opens the new one.
 
-**An older Chuck** (the Python app) offers the switch by itself. Its update brings in the new files,
-and the next time it starts it offers **Install it**. That stays installed as a fallback: it is
-what opens only if the Rust build fails, and the installer says so loudly.
+**Coming from the old Python Chuck?** Run the installer: it builds this one, points the menu entry
+and `chucknorris` at it, and removes the old app's code. Settings, key, chats and memory carry over.
 
 **Uninstalling:**
 
@@ -499,7 +499,7 @@ and language servers, disk space and the evidence chain, and says what to do abo
 | A command fails with *No such file* for a path outside the project | You pressed Refuse, or the path doesn't exist. Commands only see the folder plus what you allowed. |
 | `/doctor`: *Blocked pages: read with Brave…* | Camoufox isn't set up, so pages that turn bots away are read with Chromium. Re-run the installer; what went wrong is in `~/.local/share/chucknorris/camoufox-setup.log`. |
 | *bubblewrap isn't installed* | Install it (`sudo pacman -Syu bubblewrap` / `sudo apt install bubblewrap`). Until then, sandboxed modes refuse to run commands. |
-| The installer says the Rust build failed | The last lines of the error are shown, and the whole log is in `~/.local/share/chucknorris/rust-build.log`. The older Python window opens meanwhile. |
+| The installer says the Rust build failed | The last lines of the error are shown, and the whole log is in `~/.local/share/chucknorris/rust-build.log`. Nothing is replaced until a build succeeds: the Chuck you had keeps working. |
 | *Needs GTK 4.14+ and libadwaita 1.5+* | Your distribution release is too old for the Rust app. |
 
 ## Building and testing
@@ -520,7 +520,7 @@ about messages as the real API, and it misbehaves the way real models do. It:
 - stops halfway.
 
 A local HTTP server stands in for the web. `crates/chuck-runtime/tests/user_scenarios.rs` replays
-sessions the way people have them. `./run_tests.sh` runs the older Python app's suites.
+sessions the way people have them.
 
 | Crate | What |
 |---|---|

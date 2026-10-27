@@ -26,8 +26,8 @@ pub const KOKORO_VOICES: &[(&str, &str)] = &[
     ("bm_fable", "Fable — British storyteller"), ("bf_emma", "Emma — British"),
 ];
 
-const KOKORO_SERVER: &str = include_str!("../../../chucknorris_ext/kokoro_server.py");
-pub(crate) const STT_SERVER: &str = include_str!("../../../chucknorris_ext/stt_server.py");
+const KOKORO_SERVER: &str = include_str!("kokoro_server.py");
+pub(crate) const STT_SERVER: &str = include_str!("stt_server.py");
 
 // ── where things are (the installer's places, shared with the Python app) ──
 

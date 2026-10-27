@@ -453,7 +453,7 @@ fn cmd_voice(arg: Option<&str>) -> i32 {
                 if tty && m.starts_with("downloading") {
                     print!("\r\x1b[K  {m}");
                 } else {
-                    print!("{}  {m}\n", if tty { "\r\x1b[K" } else { "" });
+                    println!("{}  {m}", if tty { "\r\x1b[K" } else { "" });
                 }
                 let _ = std::io::stdout().flush();
             };

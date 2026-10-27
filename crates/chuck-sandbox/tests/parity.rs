@@ -1,6 +1,7 @@
 //! The Rust classifier must say exactly what the Python one says, on every
 //! command the Python tests use and a generated corpus around them.
-//! Regenerate the expectations with `python3 tools/safety_parity.py`.
+//! parity.json was generated from the Python classifier when the app was
+//! ported; it is the golden record of what every command must classify as.
 
 use chuck_sandbox::{add_noconfirm, classify_code, classify_command, enforce_syu};
 

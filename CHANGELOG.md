@@ -79,6 +79,15 @@ Chuck is now a Rust app (`crates/`), and the installer puts it over any earlier 
 - Races:
   - The first entry through its gate is reviewed at once; accepting it stops the other entrant.
   - The Lead races only a small, risky piece, never a whole build.
+- The old Python app is gone from the repository (about 40,000 lines with its tests). Chuck is the
+  Rust app only: the installer builds it, sets the voice up with `chuck voice install`, and removes
+  the old app's code. What is still Python is the three small helpers around Python-only libraries
+  (Kokoro's and Moonshine's model runners, the Camoufox bridge), compiled into the binary.
+- `chuck voice [install]`, and Settings › Voice › Set up: the voice is set up (or repaired) from
+  the app, with checksummed downloads that are never kept half-done.
+- While workers build, what the Lead reads or runs comes back to it at once (before, it waited for
+  the next hand-in to see it).
+- A race never stalls: when one entry is sent back, the other's hand-in is reviewed next.
 - A reply caught in a loop (the same text written thousands of times) is cut as soon as it starts
   repeating. What came before is kept, the agent is told, and a snag is noted. Before, one such reply
   ran 8 minutes and 30k tokens.
