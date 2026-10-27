@@ -65,7 +65,9 @@ pub const HIDE_FILES: &[&str] = &[".netrc", ".git-credentials", ".pypirc", ".npm
 /// SDKs, version managers).
 pub const TOOLCHAIN_DIRS: &[&str] = &[".cargo", ".rustup", ".local/bin", ".local/lib", ".local/share/pnpm", ".nvm",
     ".pyenv", ".rbenv", ".sdkman", ".deno", ".bun", ".volta", ".nimble", ".ghcup", ".elan", ".juliaup", "go/bin",
-    "go/pkg", ".jdks", ".java", "Android/Sdk", "android-sdk", ".dotnet", "flutter", ".pub-cache", ".zig"];
+    "go/pkg", ".jdks", ".java", "Android/Sdk", "android-sdk", ".dotnet", "flutter", ".pub-cache", ".zig",
+    // who you are to git, and your tools' own settings (never credentials: those stay hidden)
+    ".gitconfig", ".config/git", ".gitignore_global", ".editorconfig", ".config/pip"];
 /// Build caches a jailed build writes (downloads, compiled dependencies,
 /// emulators' disks): reused, never your documents.
 pub const CACHE_DIRS: &[&str] = &[".cache", ".gradle", ".m2", ".ivy2", ".sbt", ".npm", ".yarn", ".android", ".konan",
