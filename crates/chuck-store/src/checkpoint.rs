@@ -176,7 +176,10 @@ impl Shadow {
             if !e.file_type().is_dir() {
                 continue;
             }
-            if e.file_name() == ".git" {
+            // .git, and what the snapshot leaves out (node_modules…): never walked — tens of thousands of folders
+            // a restore doesn't touch, and they'd use up the count before the project's own
+            let name = e.file_name().to_string_lossy();
+            if e.depth() > 0 && (name == ".git" || EXCLUDE.lines().any(|x| x.strip_suffix('/') == Some(name.as_ref()))) {
                 it.skip_current_dir();
                 continue;
             }
