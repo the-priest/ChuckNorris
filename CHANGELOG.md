@@ -33,7 +33,12 @@ Chuck is now a Rust app (`crates/`), and the installer puts it over any earlier 
   - Each agent's line shows what it is typing, live.
   - **Chuck pops up** in the corner with what the Lead has to say: its news, its questions, the
     finished job. His mouth moves while it's read aloud, and Settings › Voice turns him off.
-  - The Lead fixes a bug or small change itself instead of handing it out.
+  - The Lead fixes a bug or small change itself instead of handing it out. Anything bigger it plans
+    whole and spreads over every worker at once (6 by default).
+  - **A supervisor.** A worker 8 turns without changing or verifying anything is warned. At 12 it
+    is replaced by a fresh worker told what the last one tried. A worker that ends unfinished
+    (stuck, out of steps, crashed) is replaced the same way. A step that fails a second worker comes
+    back to the Lead to take over or re-split, never waited on.
   - The plan ticks off a step when its task merges.
 - Tool calls in DeepSeek's own format (DSML, `<invoke>`, `<tool_call>`) run as the blocks they
   mean, for workers too. Before this, workers' calls were dropped, so the Lead ended up doing all

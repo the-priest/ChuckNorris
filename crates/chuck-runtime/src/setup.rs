@@ -51,7 +51,7 @@ pub fn fleet(s: &Settings) -> FleetConfig {
     if let Some(m) = s.str("fleet_glm_model") {
         f.glm_model = m.to_string();
     }
-    f.deepseek_workers = s.num("fleet_deepseek_workers", 4.0, 0.0, 8.0) as u8;
+    f.deepseek_workers = s.num("fleet_deepseek_workers", 6.0, 0.0, 8.0) as u8;
     // GLM is the eyes. (`fleet_glm_workers`, which older windows saved as 4 for everyone, no longer makes it
     // a worker pool; `fleet_glm_pool` does, for whoever really wants one.)
     f.glm_workers = s.num("fleet_glm_pool", 0.0, 0.0, 4.0) as u8;

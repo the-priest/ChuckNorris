@@ -25,7 +25,7 @@ that isn't SiliconFlow unless the user explicitly overrides it.
 | Role | Count | Model (intended id) |
 |---|---:|---|
 | **Lead**: talks to the user, plans, writes acceptance criteria, assigns, reviews every result, merges, owns *done* | 1 | `deepseek-ai/DeepSeek-V4.1-Flash-1017` |
-| **Worker**: the heavy lifting (implementation, refactors, tests, tooling) | up to 8 (4 by default) | `deepseek-ai/DeepSeek-V4-Flash` |
+| **Worker**: the heavy lifting (implementation, refactors, tests, tooling) | up to 8 (6 by default) | `deepseek-ai/DeepSeek-V4-Flash` |
 | **Eyes**: describe screenshots for the Lead | one per look | `zai-org/GLM-5.3-Flash` |
 
 Model ids are resolved against the account's live model list at startup
@@ -81,6 +81,13 @@ exists for whoever sets `fleet_glm_pool`; by default GLM is only the eyes.
   ```` ```cancel tN``` ```` stops a task's workers, fails the task, and frees its files.
 - A worker thread that ends without a word, or a model call that panics, is
   reported to the Lead as a stopped task. It is never waited on.
+- **The supervisor** (`LeadRun::supervise`, every 200 ms while the Lead waits).
+  Each worker keeps a `Pulse`: turns in a row with no file changed and no check
+  passed. At 8 the worker is warned; at 12 it is retired. A worker that ends
+  unfinished goes through the same `replace`: a fresh worker on the same step,
+  from the project as it is now, its brief noting what the last one tried. A
+  step's second failure fails the task back to the Lead. A worker stopped by
+  budget or by the user is never replaced.
 - Tools are also offered as API functions (`chuck-runtime::schemas`). A call comes back parsed and
   is turned into the fenced block it means (`chuck_tools::native::call_block`). Text calls in any
   format are normalized the same way, so the gate, the jail and the evidence see one thing.

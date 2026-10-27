@@ -418,6 +418,16 @@ pub fn in_copy(text: &str, source: &std::path::Path, copy: &std::path::Path) -> 
     rx.replace_all(text, |c: &regex::Captures| format!("{}{}", copy.display(), &c[1])).into_owned()
 }
 
+/// A worker's heartbeat, read by the Lead's supervisor: how many turns it
+/// has gone without changing or verifying anything, and what it did last.
+#[derive(Clone, Debug, Default)]
+pub struct Pulse {
+    pub turns: u32,
+    /// Turns in a row with no file changed and no check passed.
+    pub idle: u32,
+    pub last: String,
+}
+
 /// The most a worker's conversation holds (characters).
 pub const WORKER_CONTEXT: usize = 240_000;
 
@@ -456,6 +466,8 @@ pub struct WorkerSpec {
     pub heard: u64,
     /// The project's dependency (and history) folders its copy borrows.
     pub lent: Vec<std::path::PathBuf>,
+    /// Its heartbeat, for the Lead's supervisor.
+    pub pulse: Arc<Mutex<Pulse>>,
 }
 
 fn describe(gaps: &[Unmet]) -> Vec<String> {
@@ -509,7 +521,20 @@ pub fn run_worker(ctx: Ctx, w: WorkerSpec) {
                               memory: ctx.cfg.memory.as_deref(), allowed_outside: None,
                               team: Some((&w.team, &w.name)), hold: None, lent: &w.lent, claimed: &[] };
             let r = exec.run(&reply);
+            {
+                let mut p = w.pulse.lock().unwrap_or_else(|e| e.into_inner());
+                p.turns += 1;
+                // a change, a passing check or a hand-in is progress; reading and talking alone aren't
+                p.idle = if r.mutated || r.verified || r.submit.is_some() { 0 } else { p.idle + 1 };
+                p.last = r.actions.last().cloned().unwrap_or_else(|| "no tool call".into());
+            }
             let mut fb = r.feedback.clone();
+            let idle = w.pulse.lock().unwrap_or_else(|e| e.into_inner()).idle;
+            if idle == crate::lead::WARN_TURNS {
+                fb.push(format!("[supervisor: {idle} turns without changing or verifying anything. Change the code and \
+                    check it now, or ask the Lead (```team @lead```) what you're missing — at {} you are replaced]",
+                    crate::lead::STALL_TURNS));
+            }
             if let Some(report) = &r.submit {
                 // judged on the copy as it really is, not on the history of edits
                 let (diff, lines) = w.ws.diff(400_000).unwrap_or_else(|e| (format!("(diff failed: {e})"), 0));
@@ -557,11 +582,8 @@ pub fn run_worker(ctx: Ctx, w: WorkerSpec) {
                 fb.push("[no tool calls in that reply — keep working with the tools, or ```submit``` when every \
                     criterion has evidence]".into());
             }
+            // going in circles: told so; stopping a stuck worker is the supervisor's call (see lead.rs)
             if let Stall::Replan(why) = progress.turn(r.mutated, r.verified, &r.actions) {
-                if progress.stalls() > crate::lead::MAX_STALLS {
-                    break 'life ("paused", Some(format!("stuck: {} replans in a row without progress ({why})",
-                                                        progress.stalls())));
-                }
                 fb.push(format!("[you are going in circles ({why}). Stop and re-think: what exactly is still \
                     missing for each criterion, and what is the next concrete change or check?]"));
             }

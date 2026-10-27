@@ -1819,7 +1819,7 @@ fn settings_dialog(shared: &Shared) {
     let ds = adw::SpinRow::with_range(0.0, 8.0, 1.0);
     ds.set_title("Workers");
     ds.set_subtitle("How many build at once. 0: the Lead does the work itself");
-    ds.set_value(s.num("fleet_deepseek_workers", 4.0, 0.0, 8.0));
+    ds.set_value(s.num("fleet_deepseek_workers", 6.0, 0.0, 8.0));
     let cap = adw::SpinRow::with_range(0.05, 100.0, 0.05);
     cap.set_title("Spending cap per job ($)");
     cap.set_digits(2);

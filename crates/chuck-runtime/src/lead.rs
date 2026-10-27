@@ -47,6 +47,8 @@ struct TaskSlot {
     pending: Option<Submission>,
     /// The last thing worth knowing: the defects it was sent back with.
     note: String,
+    /// Workers it has had (a stalled one replaced counts).
+    attempts: u32,
 }
 
 impl TaskSlot {
@@ -66,7 +68,17 @@ struct Worker {
     live: bool,
     /// The project folders its copy borrows (see `Workspace::lend`).
     lent: Vec<PathBuf>,
+    /// Its heartbeat (see `Pulse`).
+    pulse: Arc<Mutex<crate::agent::Pulse>>,
 }
+
+/// Turns in a row a worker may go without changing or verifying anything
+/// before the supervisor replaces it.
+pub const STALL_TURNS: u32 = 12;
+/// Turns without progress after which the worker is warned (fair, before ruthless).
+pub const WARN_TURNS: u32 = 8;
+/// Workers a task gets before it comes back to the Lead.
+pub const ATTEMPTS: u32 = 2;
 
 pub struct LeadRun<'a> {
     ctx: &'a Ctx,
@@ -419,10 +431,13 @@ impl<'a> LeadRun<'a> {
         self.workers.values().filter(|w| w.live && w.role == role).count()
     }
 
+    /// A name nobody on this job has had (a replacement isn't mistaken for
+    /// the one it replaced), else one nobody has now.
     fn free_name(&self, role: Role) -> String {
         let prefix = if role == Role::GlmWorker { "glm" } else { "ds" };
-        (1..=8).map(|i| format!("{prefix}-{i}"))
-            .find(|n| !self.workers.values().any(|w| w.live && &w.name == n))
+        let names = || (1..=64).map(|i| format!("{prefix}-{i}"));
+        names().find(|n| !self.workers.values().any(|w| &w.name == n))
+            .or_else(|| names().find(|n| !self.workers.values().any(|w| w.live && &w.name == n)))
             .unwrap_or_else(|| format!("{prefix}-x"))
     }
 
@@ -449,9 +464,11 @@ impl<'a> LeadRun<'a> {
         let gate = Arc::new(Mutex::new(g));
         let (wtx, wrx) = channel();
         let stop = Arc::new(AtomicBool::new(false));
+        let pulse: Arc<Mutex<crate::agent::Pulse>> = Arc::default();
         let spec = WorkerSpec { id, role, name: name.clone(), task: task.clone(), ws: ws.clone(), gate: gate.clone(),
                                 stop: stop.clone(), to_lead: self.tx.clone(), inbox: wrx, team: self.team.clone(),
-                                roster: self.roster(&name), heard: self.team.cursor(), lent: lent.clone() };
+                                roster: self.roster(&name), heard: self.team.cursor(), lent: lent.clone(),
+                                pulse: pulse.clone() };
         let ctx = self.ctx.clone();
         // announced here, before Assigned: whoever listens knows the name first
         self.ctx.events.emit(Event::AgentStarted { id, role, name: name.clone(),
@@ -462,7 +479,7 @@ impl<'a> LeadRun<'a> {
             .map_err(|e| format!("couldn't start {name}: {e}"))?;
         self.ctx.events.emit(Event::Assigned { task: task.id.clone(), title: task.title.clone(), worker: id, role });
         self.workers.insert(id, Worker { role, name, ws, gate, tx: wtx, stop, join: Some(join),
-                                         live: true, lent });
+                                         live: true, lent, pulse });
         Ok(id)
     }
 
@@ -650,20 +667,20 @@ impl<'a> LeadRun<'a> {
                 let name = self.workers.get(&worker).map(|w| w.name.clone()).unwrap_or_default();
                 self.retire(worker);
                 let Some(slot) = self.tasks.iter_mut().find(|t| t.task.id == task) else { return out };
-                slot.workers.retain(|w| *w != worker);
-                if !slot.workers.is_empty() {
+                if slot.workers.len() > 1 {
                     // the race goes on with the other entrant (or its held submission)
+                    slot.workers.retain(|w| *w != worker);
                     out.push(format!("[{task}: {name} stopped ({why}); the other entrant continues]"));
                     if let Some(h) = slot.held.pop() {
                         out.push(self.present(h));
                     }
                     return out;
                 }
-                slot.state = TaskState::Failed(gaps.clone());
-                self.team.post("lead", None, &format!("{task} stopped unfinished ({name}: {})", clip(&why, 120)));
-                out.push(format!("[{task}: {name} stopped without finished work ({why}). Still missing:\n- {}\n\
-                    Reassign it with tighter criteria, do it yourself, or say in your summary that it isn't done]",
-                    if gaps.is_empty() { "(nothing listed)".into() } else { gaps.join("\n- ") }));
+                let mut line = self.replace(&task, worker, &name, &why);
+                if self.tasks.iter().any(|t| t.task.id == task && matches!(t.state, TaskState::Failed(_))) && !gaps.is_empty() {
+                    line.push_str(&format!("\nStill missing there:\n- {}", gaps.join("\n- ")));
+                }
+                out.push(line);
             }
         }
         out.extend(self.start_ready());
@@ -904,7 +921,7 @@ impl<'a> LeadRun<'a> {
             .map(|(i, (text, verify))| Criterion { id: CriterionId(i as u16 + 1), text, verify }).collect();
         let task = Task { id: id.clone(), title: spec.title, brief: spec.brief, criteria, scale: spec.scale,
                           prefer: spec.prefer, race: spec.race, deps: spec.after };
-        self.tasks.push(TaskSlot { task, state: TaskState::Queued, workers: Vec::new(), held: Vec::new(),
+        self.tasks.push(TaskSlot { task, state: TaskState::Queued, workers: Vec::new(), held: Vec::new(), attempts: 0,
                                    pending: None, note: String::new() });
         let mut out = self.start_ready();
         if self.tasks.last().is_some_and(|t| t.state == TaskState::Queued) {
@@ -1063,6 +1080,78 @@ impl<'a> LeadRun<'a> {
             out.extend(self.on_worker(m));
         }
         out.extend(self.crashed());
+        out.extend(self.supervise());
+        out
+    }
+
+    /// A step whose worker stopped unfinished (stuck, out of steps, crashed):
+    /// a fresh worker takes it over, told what the last one tried; one that
+    /// fails its second worker too comes back to the Lead. The worker must
+    /// already be retired. Returns what the Lead hears.
+    fn replace(&mut self, tid: &str, id: AgentId, name: &str, why: &str) -> String {
+        let Some(i) = self.tasks.iter().position(|t| t.task.id == tid) else { return String::new() };
+        self.tasks[i].workers.retain(|w| *w != id);
+        if !self.tasks[i].workers.is_empty() {
+            return format!("[{tid}: {name} stopped ({why}); the other entrant goes on]");
+        }
+        self.tasks[i].attempts += 1;
+        // what money or the user stopped is not a worker's failing: nobody else is sent
+        let low = why.to_lowercase();
+        let hopeless = ["budget", "spending limit", "stopped by you", "quota"].iter().any(|w| low.contains(w));
+        if hopeless || self.tasks[i].attempts >= ATTEMPTS {
+            self.tasks[i].state = TaskState::Failed(vec![why.to_string()]);
+            self.announce(&format!("{tid} stopped unfinished ({name}); the Lead takes it from here"));
+            return if hopeless {
+                format!("[{tid}: {name} stopped ({why})]")
+            } else {
+                format!("[{tid} stalled twice ({name}: {why}). It's yours now: do it yourself, or split it differently \
+                    and assign the parts]")
+            };
+        }
+        // a fresh worker, from the project as it is now, told what didn't work
+        self.tasks[i].task.brief.push_str(&format!("\n\nA worker before you ({name}) was stopped for being stuck: \
+            {why}. Don't repeat what it did: read only what you need, then change the code and check it."));
+        let task = self.tasks[i].task.clone();
+        let role = self.ctx.cfg.fleet.pool(task.prefer);
+        match self.spawn_worker(&task, role) {
+            Ok(new) => {
+                let nn = self.workers.get(&new).map(|w| w.name.clone()).unwrap_or_default();
+                self.tasks[i].workers.push(new);
+                self.tasks[i].state = TaskState::Running;
+                self.announce(&format!("{tid}: {name} was stuck — {nn} takes over"));
+                format!("[{tid}: {name} was stuck ({why}) — the supervisor replaced it with {nn}, who starts fresh \
+                    from the project as it is now]")
+            }
+            Err(e) => {
+                self.tasks[i].state = TaskState::Failed(vec![why.to_string()]);
+                format!("[{tid}: {name} was stuck ({why}), and no replacement could start ({e}). It's yours now]")
+            }
+        }
+    }
+
+    /// The supervisor: a worker that has gone `STALL_TURNS` turns without
+    /// changing or verifying anything is stopped, and its step goes to a
+    /// fresh worker told what the last one tried; a step that stalls its
+    /// second worker too comes back to the Lead, never waited on.
+    fn supervise(&mut self) -> Vec<String> {
+        let stalled: Vec<(String, AgentId, String, crate::agent::Pulse)> = self.tasks.iter()
+            .filter(|t| t.state == TaskState::Running)
+            .flat_map(|t| t.workers.iter().map(move |id| (t.task.id.clone(), *id)))
+            .filter_map(|(tid, id)| {
+                let w = self.workers.get(&id).filter(|w| w.live)?;
+                let p = w.pulse.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                (p.idle >= STALL_TURNS).then(|| (tid, id, w.name.clone(), p))
+            }).collect();
+        let mut out = Vec::new();
+        for (tid, id, name, p) in stalled {
+            let why = format!("{} turns without changing or verifying anything (last: {})", p.idle, clip(&p.last, 80));
+            self.retire(id);
+            self.ctx.events.emit(Event::Notice { id, text: format!("stopped by the supervisor: {why}") });
+            out.push(self.replace(&tid, id, &name, &why));
+        }
+        if !out.is_empty() {
+            self.publish();
+        }
         out
     }
 
@@ -1122,7 +1211,8 @@ impl<'a> LeadRun<'a> {
                     }
                 }
                 Err(RecvTimeoutError::Timeout) => {
-                    let out = self.crashed();
+                    let mut out = self.crashed();
+                    out.extend(self.supervise());
                     if !out.is_empty() {
                         self.publish();
                         break Ok(out);

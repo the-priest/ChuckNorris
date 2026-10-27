@@ -468,3 +468,61 @@ fn the_lead_is_the_boss_its_change_stands_and_the_worker_is_told() {
     assert!(seen.iter().filter(|r| is_lead(r)).any(|r| last_user(r).contains("ds-1 is changing a.txt too (t1)")));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_stuck_worker_is_warned_then_replaced_and_a_step_that_stalls_twice_comes_back() {
+    // ds-1 only ever reads: warned, then replaced; t1's second worker gets it done. t2's both workers loop:
+    // the step comes back to the Lead, who does it itself
+    let dir = tmp("supervisor");
+    let model = Arc::new(Scripted::new().respond(|req| {
+        if text(&req.messages[0]) == chuck_runtime::prompts::CRITIC {
+            return "ACCEPT".into();
+        }
+        let me = worker(req);
+        if !me.is_empty() {
+            if me.contains("TASK t1") && me.contains("was stopped for being stuck") {
+                return if req.messages.len() == 2 {
+                    "```write one.txt\n1\n```\n```test grep -qx 1 one.txt```\n```submit\none.txt says 1\n```".into()
+                } else { "ok".into() };
+            }
+            return "```read .```".into(); // going nowhere
+        }
+        let last = last_user(req);
+        if req.messages.len() == 2 {
+            return "```criteria\n- one says 1 :: verify: grep -qx 1 one.txt\n- two says 2 :: verify: grep -qx 2 two.txt\n```\n\
+                ```plan\n- t1: one\n- t2: two\n```\n\
+                ```assign worker\ntitle: one\ncriteria:\n- one says 1 :: verify: grep -qx 1 one.txt\nbrief: write one.txt\n```\n\
+                ```assign worker\ntitle: two\ncriteria:\n- two says 2 :: verify: grep -qx 2 two.txt\nbrief: write two.txt\n```".into();
+        }
+        let mut out = String::new();
+        if last.contains("SUBMISSION t1") {
+            out.push_str("```review t1 accept\nok\n```\n");
+        }
+        if last.contains("t2 stalled twice") {
+            out.push_str("```write two.txt\n2\n```\n```test grep -qx 2 two.txt```\n");
+        }
+        if !out.is_empty() {
+            return out;
+        }
+        if heard(req, "t1 accepted") && heard(req, "t2 stalled twice") {
+            return "```test grep -qx 1 one.txt```\n```test grep -qx 2 two.txt```\n```justify proportion\ntwo lines\n```\n\
+                ```done\none says 1 and two says 2 (both greps pass).\n```".into();
+        }
+        "Waiting.".into()
+    }));
+    let (tx, rx) = channel();
+    let rt = Runtime::new(model.clone(), RuntimeConfig { store: dir.join("store"), ..RuntimeConfig::default() },
+                          Events(Some(tx)));
+    let (report, _) = run_within(60, rt, Job::new("write one and two", &dir));
+    assert!(matches!(report.outcome, Outcome::Done { .. }), "{:?}", report.outcome);
+    assert_eq!(std::fs::read_to_string(dir.join("one.txt")).unwrap(), "1\n");
+    assert_eq!(std::fs::read_to_string(dir.join("two.txt")).unwrap(), "2\n");
+    let seen = model.seen.lock().unwrap();
+    assert!(seen.iter().any(|r| !worker(r).is_empty() && last_user(r).contains("[supervisor: 8 turns")), "warned first");
+    let lead: Vec<String> = seen.iter().filter(|r| is_lead(r)).map(last_user).collect();
+    assert!(lead.iter().any(|l| l.contains("the supervisor replaced it with")), "{lead:?}");
+    // stopped workers never got past the limit: none read more than 12 times in a row
+    let events: Vec<Event> = rx.try_iter().collect();
+    assert!(events.iter().filter(|e| matches!(e, Event::Notice { text, .. } if text.starts_with("stopped by the supervisor"))).count() >= 3);
+    let _ = std::fs::remove_dir_all(&dir);
+}

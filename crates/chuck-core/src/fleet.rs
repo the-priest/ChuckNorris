@@ -40,7 +40,7 @@ impl Default for FleetConfig {
             deepseek_model: DEEPSEEK_MODEL.into(),
             worker_model: WORKER_MODEL.into(),
             glm_model: GLM_MODEL.into(),
-            deepseek_workers: 4,
+            deepseek_workers: 6,
             glm_workers: 0,
         }
     }
@@ -171,7 +171,7 @@ mod tests {
         assert_eq!(f.model_for(Role::DeepSeekWorker), WORKER_MODEL);
         assert_eq!(f.model_for(Role::Daemon), WORKER_MODEL);
         assert_eq!(f.model_for(Role::GlmWorker), GLM_MODEL);
-        assert_eq!((f.max_workers(Role::DeepSeekWorker), f.max_workers(Role::GlmWorker)), (4, 0));
+        assert_eq!((f.max_workers(Role::DeepSeekWorker), f.max_workers(Role::GlmWorker)), (6, 0));
         // GLM is the eyes: a task asked of a GLM pool that isn't there goes to the workers
         assert_eq!(f.pool(Role::GlmWorker), Role::DeepSeekWorker);
         let eight = FleetConfig { deepseek_workers: 8, ..FleetConfig::default() };
