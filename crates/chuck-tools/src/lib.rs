@@ -2,12 +2,14 @@
 //! files safely, run commands, and work in isolated copies.
 
 pub mod blocks;
+pub mod native;
 pub mod cow;
 pub mod fs;
 pub mod patch;
 pub mod run;
 pub mod search;
 
+pub use native::normalize_calls;
 pub use blocks::{clean_head, edit_pairs, file_blocks, prose, native_tool_markup, tool_blocks, unclosed, without_made_up_turns, FileBlock, ToolBlock};
 pub use cow::{changes_between, diff_between, ChangeKind, MergeResult, Snapshot, Workspace};
 pub use fs::{delete_file, edit_file, read_page, safe, unified, write_file, Change, FsError};

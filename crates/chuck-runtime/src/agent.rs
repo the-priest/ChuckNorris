@@ -405,6 +405,9 @@ pub fn run_worker(ctx: Ctx, w: WorkerSpec) {
                 Ok(r) => r,
                 Err(h) => break 'life ("paused", Some(h.describe())),
             };
+            // calls in the model's own format (DeepSeek's DSML…) run as the blocks they mean
+            let reply = chuck_tools::normalize_calls(&reply, WORKER_TAGS).0;
+            let reply = chuck_tools::without_made_up_turns(&reply).to_string();
             convo.assistant(&reply);
             let said = chuck_tools::prose(&reply, WORKER_TAGS);
             if !said.trim().is_empty() {

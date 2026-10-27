@@ -72,6 +72,6 @@ fn a_daemon_whose_call_is_malformed_is_told_and_its_report_is_the_real_one() {
     assert_eq!((r.status, r.report.as_str()), (0, "Disk is fine: disk-ok."));
     let seen = model.seen.lock().unwrap();
     assert!(last_user(&seen[1]).contains("NOT run"), "{}", last_user(&seen[1]));
-    assert!(last_user(&seen[2]).contains("NOTHING RAN"), "{}", last_user(&seen[2]));
+    assert!(last_user(&seen[2]).contains("Mounted on"), "the call in its own format ran: {}", last_user(&seen[2]));
     let _ = std::fs::remove_dir_all(&dir);
 }

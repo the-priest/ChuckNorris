@@ -106,6 +106,7 @@ impl Runtime {
                     Err(Halt::Stopped) => break 'run (1, "(stopped)".to_string()),
                     Err(h) => break 'run (1, format!("(stopped: {})", h.describe())),
                 };
+                let reply = chuck_tools::normalize_calls(&reply, TAGS).0;
                 let reply = chuck_tools::without_made_up_turns(&reply).to_string();
                 convo.assistant(&reply);
                 let calls = tool_blocks(&reply, TAGS);

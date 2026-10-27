@@ -1069,7 +1069,9 @@ impl<'a> LeadRun<'a> {
                 Ok(r) => r,
                 Err(h) => return self.pause(&h.describe()),
             };
-            // what it wrote as the user's next words (and anything after) is invented
+            // calls in the model's own format run as the blocks they mean; what it wrote as the
+            // user's next words (and anything after) is invented
+            let reply = chuck_tools::normalize_calls(&reply, LEAD_TAGS).0;
             let reply = chuck_tools::without_made_up_turns(&reply).to_string();
             convo.assistant(&reply);
             let said = chuck_tools::prose(&reply, LEAD_TAGS);

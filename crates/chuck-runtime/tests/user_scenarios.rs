@@ -219,17 +219,19 @@ fn a_very_long_chat_never_loses_the_question() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The Lead's first move written wrong (a command with no closing fence,
-/// then a call in its own format): neither is taken as its answer, and it
-/// is told each time how to write it.
+/// The Lead's moves written in other ways than a block: a command with no
+/// closing fence is reported (it may be cut off), a call in DeepSeek's DSML
+/// runs as what it means, a function it has no tool for is reported. None
+/// of them is taken as its answer.
 #[test]
 fn a_fleet_lead_that_writes_its_calls_wrong_is_corrected_not_finished() {
     let dir = tmp("lead-malformed");
     std::fs::write(dir.join("notes.txt"), "the parser lives in src/parse.rs\n").unwrap();
     let model = Arc::new(Scripted::new().replies([
         "Let me look at the folder.\n```bash ls -la</parameter>",
-        "Checking.\n<function_calls>\n<invoke name=\"bash\">\n<parameter name=\"command\">ls</parameter>\n</invoke>\n</function_calls>",
-        "```bash\ncat notes.txt\n```",
+        "Checking.\n<｜DSML｜function_calls>\n<｜DSML｜invoke name=\"bash\">\n<｜DSML｜parameter name=\"command\" \
+         string=\"true\">cat notes.txt</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜function_calls>",
+        "<invoke name=\"launch_rocket\"><parameter name=\"x\">1</parameter></invoke>",
         "The parser lives in src/parse.rs (from notes.txt).",
     ]));
     let (tx, rx) = channel();
@@ -239,29 +241,29 @@ fn a_fleet_lead_that_writes_its_calls_wrong_is_corrected_not_finished() {
     assert_eq!(r.outcome, Outcome::Answered { text: "The parser lives in src/parse.rs (from notes.txt).".into() });
     let seen = model.seen.lock().unwrap();
     assert!(last_user(&seen[1]).contains("NOT run"), "{}", last_user(&seen[1]));
-    assert!(last_user(&seen[2]).contains("NOTHING RAN"), "{}", last_user(&seen[2]));
-    assert!(last_user(&seen[3]).contains("src/parse.rs"), "the real command ran: {}", last_user(&seen[3]));
+    assert!(last_user(&seen[2]).contains("src/parse.rs"), "the DSML command ran: {}", last_user(&seen[2]));
+    assert!(last_user(&seen[3]).contains("NOTHING RAN"), "{}", last_user(&seen[3]));
+    // what it wrote is kept as the block it meant: the model sees the format that works
+    assert!(seen[2].messages.iter().any(|m| m["role"] == "assistant" && text(m).contains("```bash\ncat notes.txt\n```")));
     let said: Vec<String> = rx.try_iter().filter_map(|e| match e { Event::Said { text, .. } => Some(text), _ => None }).collect();
     assert!(said.iter().all(|s| !s.contains("<invoke") && !s.contains("parameter")), "{said:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Chat: a search in the model's own format is answered with how to write
-/// it, then runs.
+/// Chat: a search written in the model's own format runs.
 #[test]
 fn a_chat_search_in_a_native_format_is_corrected() {
     let (base, asked) = serve();
     let dir = tmp("chat-native");
     let model = Arc::new(Scripted::new().replies([
-        "<tool_call>{\"name\": \"search\", \"arguments\": {\"query\": \"rathkeale\"}}</tool_call>",
-        "```search rathkeale```",
+        "<tool_call>{\"name\": \"web_search\", \"arguments\": {\"query\": \"rathkeale\"}}</tool_call>",
         "A two-year-old died near Rathkeale.",
     ]));
     let cfg = RuntimeConfig { store: dir.join("store"), web: Some(web(&base)), ..RuntimeConfig::default() };
     let rt = Runtime::new(model.clone(), cfg, Events::none());
     let r = rt.chat(Job::new("what happened in Rathkeale?", &dir));
     assert_eq!(r.outcome, Outcome::Answered { text: "A two-year-old died near Rathkeale.".into() });
-    assert!(last_user(&model.seen.lock().unwrap()[1]).contains("NOTHING RAN"));
+    assert!(last_user(&model.seen.lock().unwrap()[1]).contains("Toddler dies in Rathkeale"));
     assert_eq!(asked.lock().unwrap().len(), 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -293,10 +295,12 @@ fn text(m: &serde_json::Value) -> String {
     m["content"].as_str().unwrap_or("").to_string()
 }
 
-/// A whole fleet job where the worker misbehaves the way models do: its
-/// first move in its own tool format, its second never closed. It is told
-/// each time, does it properly, and the work is reviewed, merged, verified
-/// in the user's folder and finished through the gate.
+/// A whole fleet job where the worker writes the way DeepSeek does when it
+/// reaches for function calling: its first move a call it can't complete
+/// (a write with no content: told it didn't run), then a block never
+/// closed (told), then everything in DSML. That runs, and the work is
+/// reviewed, merged, verified in the user's folder and finished through
+/// the gate.
 #[test]
 fn a_worker_that_writes_its_calls_wrong_is_corrected_and_the_job_finishes() {
     let dir = tmp("worker-malformed");
@@ -310,7 +314,11 @@ fn a_worker_that_writes_its_calls_wrong_is_corrected_and_the_job_finishes() {
             return if last.contains("NOTHING RAN") {
                 "Writing it.\n```write out.txt\nhello\n".into()
             } else if last.contains("NOT run") || last.contains("never closed") {
-                "```write out.txt\nhello\n```\n```test grep -q hello out.txt```\n```submit\nout.txt says hello; verified.\n```".into()
+                "<｜DSML｜function_calls>\n<｜DSML｜invoke name=\"write_file\">\n<｜DSML｜parameter name=\"path\" string=\"true\">out.txt\
+                 </｜DSML｜parameter>\n<｜DSML｜parameter name=\"content\" string=\"true\">hello\n</｜DSML｜parameter>\n</｜DSML｜invoke>\n\
+                 <｜DSML｜invoke name=\"test\">\n<｜DSML｜parameter name=\"command\" string=\"true\">grep -q hello out.txt</｜DSML｜parameter>\n\
+                 </｜DSML｜invoke>\n<｜DSML｜invoke name=\"submit\">\n<｜DSML｜parameter name=\"report\" string=\"true\">out.txt says hello; \
+                 verified.</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜function_calls>".into()
             } else if req.messages.len() == 2 {
                 "<function_calls>\n<invoke name=\"write\">\n<parameter name=\"path\">out.txt</parameter>\n</invoke>\n</function_calls>".into()
             } else {

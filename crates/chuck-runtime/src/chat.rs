@@ -176,6 +176,7 @@ impl Runtime {
                     Err(h) => break 'turn Outcome::Failed { error: h.describe() },
                 };
                 // what it wrote as the user's next words (and anything after) is invented
+                let reply = chuck_tools::normalize_calls(&reply, CHAT_TAGS).0;
                 let reply = without_made_up_turns(&reply).to_string();
                 convo.assistant(&reply);
                 let said = prose(&reply, CHAT_TAGS);

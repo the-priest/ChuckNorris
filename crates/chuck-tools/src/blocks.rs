@@ -341,6 +341,11 @@ pub fn tool_blocks(text: &str, tags: &[&str]) -> Vec<ToolBlock> {
 /// Blocks that open but never close (or otherwise weren't read as calls):
 /// each as its opening line. Nothing in them ran, and the agent must hear so.
 pub fn unclosed(text: &str, tags: &[&str]) -> Vec<String> {
+    unclosed_at(text, tags).into_iter().map(|(_, l)| l).collect()
+}
+
+/// Where each block that never closes starts (byte offset), with its line.
+fn unclosed_at(text: &str, tags: &[&str]) -> Vec<(usize, String)> {
     let mut spans: Vec<(usize, usize)> = file_blocks(text).iter().map(|b| (b.start, b.end)).collect();
     spans.extend(tool_blocks(text, tags).iter().map(|b| (b.start, b.end)));
     // fenced examples in prose (```python … ```) are skipped the way tool_blocks skips them
@@ -366,7 +371,7 @@ pub fn unclosed(text: &str, tags: &[&str]) -> Vec<String> {
             continue;
         }
         if file_fence(l).is_some() || tags.contains(&tag) {
-            out.push(l.trim().chars().take(80).collect());
+            out.push((off, l.trim().chars().take(80).collect()));
         } else if !tag.is_empty() || t.trim() == "```" {
             in_other = !(t.trim().len() > 3 && t.trim().ends_with("```"));
         }
@@ -420,7 +425,8 @@ pub fn without_made_up_turns(text: &str) -> &str {
 /// regions of it, outside fenced blocks. None of it runs here.
 fn native_regions(text: &str) -> Vec<(usize, usize)> {
     static R: OnceLock<regex::Regex> = OnceLock::new();
-    let r = R.get_or_init(|| re(r"(?s)<function_calls>.*?(?:</function_calls>|\z)|<tool_call>.*?(?:</tool_call>|\z)|<｜tool▁calls▁begin｜>.*?(?:<｜tool▁calls▁end｜>|\z)|<｜tool▁call▁begin｜>.*?(?:<｜tool▁call▁end｜>|\z)|<(?:antml:)?invoke\s+name=.*?(?:</(?:antml:)?invoke>|\z)|</?(?:antml:)?parameter\b[^>]*>"));
+    let r = R.get_or_init(|| re(r"(?s)<function_calls>.*?(?:</function_calls>|\z)|<tool_call>.*?(?:</tool_call>|\z)|<｜tool▁calls▁begin｜>.*?(?:<｜tool▁calls▁end｜>|\z)|<｜tool▁call▁begin｜>.*?(?:<｜tool▁call▁end｜>|\z)|<(?:antml:)?invoke\s+name=.*?(?:</(?:antml:)?invoke>|\z)|</?(?:antml:)?parameter\b[^>]*>\
+|(?s)<\s*[|｜]\s*DSML\s*[|｜]\s*invoke.*?(?:<\s*/\s*[|｜]\s*DSML\s*[|｜]\s*invoke\s*>|\z)|<\s*/?\s*[|｜]\s*DSML\s*[|｜][^>]*>"));
     let fences = fenced_spans(text);
     r.find_iter(text).map(|m| (m.start(), m.end()))
         .filter(|(a, _)| !fences.iter().any(|(fa, fb)| a >= fa && a < fb)).collect()
@@ -458,6 +464,10 @@ pub fn prose(text: &str, tags: &[&str]) -> String {
     let mut spans: Vec<(usize, usize)> = file_blocks(text).iter().map(|b| (b.start, b.end)).collect();
     spans.extend(tool_blocks(text, tags).iter().map(|b| (b.start, b.end)));
     spans.extend(native_regions(text));
+    // a block that never closed is a call that didn't run, not words for the user: it and what follows
+    if let Some((at, _)) = unclosed_at(text, tags).first() {
+        spans.push((*at, text.len()));
+    }
     spans.sort();
     let mut out = String::new();
     let mut pos = 0;
@@ -564,6 +574,9 @@ mod tests {
         let t = "Let me check.\n<function_calls>\n<invoke name=\"search\">\n<parameter name=\"query\">rathkeale</parameter>\n</invoke>\n</function_calls>";
         assert!(native_tool_markup(t));
         assert_eq!(prose(t, &["search"]), "Let me check.");
+        let dsml = "Looking.\n<｜DSML｜invoke name=\"unknown_tool\">\n<｜DSML｜parameter name=\"x\" string=\"true\">1</｜DSML｜parameter>\n</｜DSML｜invoke>";
+        assert!(native_tool_markup(dsml));
+        assert_eq!(prose(dsml, &["search"]), "Looking.");
         let d = "On it.<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>search\n{\"q\":\"x\"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>";
         assert!(native_tool_markup(d));
         assert_eq!(prose(d, &["search"]), "On it.");
