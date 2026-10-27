@@ -1110,7 +1110,9 @@ impl<'a> LeadRun<'a> {
             let waiting = !self.open_tasks().is_empty();
             if !r.acted() {
                 let reviews = self.awaiting_review();
-                if said.trim().is_empty() {
+                if r.malformed {
+                    // it meant to act: what it wrote is not an answer (the feedback says how to write it)
+                } else if said.trim().is_empty() {
                     fb.push("[your reply was empty — answer the user, or carry on with the tools]".into());
                 } else if promised(&said) && !nudged {
                     // "Let me look at the project first." with no tool: not an answer — don't stop there

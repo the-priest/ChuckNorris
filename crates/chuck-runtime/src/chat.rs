@@ -8,7 +8,7 @@ use crate::events::{Event, Outcome};
 use crate::exec::research;
 use crate::{first_message, Job, JobReport, Runtime};
 use chuck_core::{Caps, DoneGate, Role, Scale, SpawnSpec};
-use chuck_tools::{prose, tool_blocks, unclosed, without_made_up_turns};
+use chuck_tools::{native_tool_markup, prose, tool_blocks, unclosed, without_made_up_turns};
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
@@ -182,6 +182,9 @@ impl Runtime {
                 let calls = tool_blocks(&reply, CHAT_TAGS);
                 let mut feedback = Vec::new();
                 if step < CHAT_STEPS {
+                    if calls.is_empty() && native_tool_markup(&reply) {
+                        feedback.push(crate::exec::NATIVE_CALLS.to_string());
+                    }
                     for open in unclosed(&reply, CHAT_TAGS) {
                         feedback.push(format!("[NOT run: `{open}` was never closed — write each call on its own line as \
                             ```search your query``` (three backticks before and after), nothing else on the line]"));

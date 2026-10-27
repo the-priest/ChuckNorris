@@ -36,6 +36,9 @@ pub struct StepResult {
     pub actions: Vec<String>,
     pub submit: Option<String>,
     pub lead_calls: Vec<LeadCall>,
+    /// The reply tried to call a tool but wrote it so nothing could run
+    /// (a block never closed, a call in the model's own format).
+    pub malformed: bool,
 }
 
 impl StepResult {
@@ -43,6 +46,11 @@ impl StepResult {
         !self.actions.is_empty() || self.submit.is_some() || !self.lead_calls.is_empty()
     }
 }
+
+/// What an agent hears when it called a tool in its own native format.
+pub const NATIVE_CALLS: &str = "[NOTHING RAN: that tool call was written in a function-call format this system \
+    doesn't read. Tools here are fenced blocks in your reply text — three backticks, the tool name, its argument, \
+    three backticks — e.g. ```search your query``` or\n```bash\nls -la\n```\nSend it again that way]";
 
 /// Asks the user whether a critical command may run (true: yes, typed).
 pub type Approve = Arc<dyn Fn(&str, &str, &[String]) -> Grant + Send + Sync>;
@@ -373,11 +381,16 @@ impl<'a> Exec<'a> {
             Tool(chuck_tools::ToolBlock),
         }
         for open in chuck_tools::unclosed(reply, tags) {
+            res.malformed = true;
             res.feedback.push(format!("[NOT run: `{open}` was never closed with ``` (or ```` for a four-backtick \
                 block), so nothing in it was done — send it again, closed]"));
         }
         let mut items: Vec<(usize, Item)> = file_blocks(reply).into_iter().map(|b| (b.start, Item::File(b))).collect();
         items.extend(tool_blocks(reply, tags).into_iter().map(|b| (b.start, Item::Tool(b))));
+        if items.is_empty() && chuck_tools::native_tool_markup(reply) {
+            res.malformed = true;
+            res.feedback.push(NATIVE_CALLS.into());
+        }
         items.sort_by_key(|(s, _)| *s);
         let all_criteria: Vec<CriterionId> = self.gate.lock().unwrap().criteria.iter().map(|c| c.id).collect();
         for (_, item) in items {

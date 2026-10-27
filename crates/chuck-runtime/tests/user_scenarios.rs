@@ -218,3 +218,50 @@ fn a_very_long_chat_never_loses_the_question() {
     assert!(seen[0].messages.iter().all(|m| !m["content"].as_str().unwrap_or("").contains("turn 0 ")), "the oldest are not");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The Lead's first move written wrong (a command with no closing fence,
+/// then a call in its own format): neither is taken as its answer, and it
+/// is told each time how to write it.
+#[test]
+fn a_fleet_lead_that_writes_its_calls_wrong_is_corrected_not_finished() {
+    let dir = tmp("lead-malformed");
+    std::fs::write(dir.join("notes.txt"), "the parser lives in src/parse.rs\n").unwrap();
+    let model = Arc::new(Scripted::new().replies([
+        "Let me look at the folder.\n```bash ls -la</parameter>",
+        "Checking.\n<function_calls>\n<invoke name=\"bash\">\n<parameter name=\"command\">ls</parameter>\n</invoke>\n</function_calls>",
+        "```bash\ncat notes.txt\n```",
+        "The parser lives in src/parse.rs (from notes.txt).",
+    ]));
+    let (tx, rx) = channel();
+    let rt = Runtime::new(model.clone(), RuntimeConfig { store: dir.join("store"), access: chuck_sandbox::Access::Full,
+                                                         ..RuntimeConfig::default() }, Events(Some(tx)));
+    let r = rt.run(Job::new("where is the parser?", &dir));
+    assert_eq!(r.outcome, Outcome::Answered { text: "The parser lives in src/parse.rs (from notes.txt).".into() });
+    let seen = model.seen.lock().unwrap();
+    assert!(last_user(&seen[1]).contains("NOT run"), "{}", last_user(&seen[1]));
+    assert!(last_user(&seen[2]).contains("NOTHING RAN"), "{}", last_user(&seen[2]));
+    assert!(last_user(&seen[3]).contains("src/parse.rs"), "the real command ran: {}", last_user(&seen[3]));
+    let said: Vec<String> = rx.try_iter().filter_map(|e| match e { Event::Said { text, .. } => Some(text), _ => None }).collect();
+    assert!(said.iter().all(|s| !s.contains("<invoke") && !s.contains("parameter")), "{said:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Chat: a search in the model's own format is answered with how to write
+/// it, then runs.
+#[test]
+fn a_chat_search_in_a_native_format_is_corrected() {
+    let (base, asked) = serve();
+    let dir = tmp("chat-native");
+    let model = Arc::new(Scripted::new().replies([
+        "<tool_call>{\"name\": \"search\", \"arguments\": {\"query\": \"rathkeale\"}}</tool_call>",
+        "```search rathkeale```",
+        "A two-year-old died near Rathkeale.",
+    ]));
+    let cfg = RuntimeConfig { store: dir.join("store"), web: Some(web(&base)), ..RuntimeConfig::default() };
+    let rt = Runtime::new(model.clone(), cfg, Events::none());
+    let r = rt.chat(Job::new("what happened in Rathkeale?", &dir));
+    assert_eq!(r.outcome, Outcome::Answered { text: "A two-year-old died near Rathkeale.".into() });
+    assert!(last_user(&model.seen.lock().unwrap()[1]).contains("NOTHING RAN"));
+    assert_eq!(asked.lock().unwrap().len(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}

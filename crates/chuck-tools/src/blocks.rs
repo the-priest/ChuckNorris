@@ -415,10 +415,49 @@ pub fn without_made_up_turns(text: &str) -> &str {
     text
 }
 
+/// Tool calls written in a model's own native format (`<invoke …>`,
+/// `<tool_call>`, `<function_calls>`, DeepSeek's `<｜tool▁calls▁begin｜>`):
+/// regions of it, outside fenced blocks. None of it runs here.
+fn native_regions(text: &str) -> Vec<(usize, usize)> {
+    static R: OnceLock<regex::Regex> = OnceLock::new();
+    let r = R.get_or_init(|| re(r"(?s)<function_calls>.*?(?:</function_calls>|\z)|<tool_call>.*?(?:</tool_call>|\z)|<｜tool▁calls▁begin｜>.*?(?:<｜tool▁calls▁end｜>|\z)|<｜tool▁call▁begin｜>.*?(?:<｜tool▁call▁end｜>|\z)|<(?:antml:)?invoke\s+name=.*?(?:</(?:antml:)?invoke>|\z)|</?(?:antml:)?parameter\b[^>]*>"));
+    let fences = fenced_spans(text);
+    r.find_iter(text).map(|m| (m.start(), m.end()))
+        .filter(|(a, _)| !fences.iter().any(|(fa, fb)| a >= fa && a < fb)).collect()
+}
+
+/// Byte spans of fenced blocks (``` … ```), whatever their tag.
+fn fenced_spans(text: &str) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut open: Option<usize> = None;
+    let mut pos = 0;
+    for l in text.split('\n') {
+        let t = l.trim();
+        if t.starts_with("```") {
+            match open {
+                None if !(t.len() > 6 && t.ends_with("```")) => open = Some(pos),
+                Some(a) if t.trim_matches('`').is_empty() => {
+                    out.push((a, pos + l.len()));
+                    open = None;
+                }
+                _ => {}
+            }
+        }
+        pos += l.len() + 1;
+    }
+    out
+}
+
+/// The reply tried to call a tool in its own native format.
+pub fn native_tool_markup(text: &str) -> bool {
+    !native_regions(text).is_empty()
+}
+
 /// The reply with every tool and file block removed: what the user reads.
 pub fn prose(text: &str, tags: &[&str]) -> String {
     let mut spans: Vec<(usize, usize)> = file_blocks(text).iter().map(|b| (b.start, b.end)).collect();
     spans.extend(tool_blocks(text, tags).iter().map(|b| (b.start, b.end)));
+    spans.extend(native_regions(text));
     spans.sort();
     let mut out = String::new();
     let mut pos = 0;
@@ -518,6 +557,20 @@ mod tests {
                      "Now: the fix.", "user: at the very start is the text", "Fields:\n\nuser: name\n\nhost: db"] {
             assert_eq!(without_made_up_turns(keep), keep, "{keep}");
         }
+    }
+
+    #[test]
+    fn native_tool_calls_are_seen_and_never_shown() {
+        let t = "Let me check.\n<function_calls>\n<invoke name=\"search\">\n<parameter name=\"query\">rathkeale</parameter>\n</invoke>\n</function_calls>";
+        assert!(native_tool_markup(t));
+        assert_eq!(prose(t, &["search"]), "Let me check.");
+        let d = "On it.<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>search\n{\"q\":\"x\"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>";
+        assert!(native_tool_markup(d));
+        assert_eq!(prose(d, &["search"]), "On it.");
+        // explaining the format in a code block is just an answer
+        let e = "The API looks like:\n```xml\n<invoke name=\"x\"><parameter name=\"a\">1</parameter></invoke>\n```";
+        assert!(!native_tool_markup(e));
+        assert!(prose(e, &["search"]).contains("<invoke"));
     }
 
     #[test]
