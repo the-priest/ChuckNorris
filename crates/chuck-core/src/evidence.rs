@@ -101,6 +101,20 @@ pub fn clip(s: &str, n: usize) -> String {
     }
 }
 
+/// Command output at most `n` characters, keeping its end: what failed (a
+/// compiler error, a failing test, the summary) is at the end of a long log.
+pub fn clip_ends(s: &str, n: usize) -> String {
+    let total = s.chars().count();
+    if total <= n {
+        return s.to_string();
+    }
+    let head = n / 4;
+    let tail = n - head;
+    let a: String = s.chars().take(head).collect();
+    let b: String = s.chars().skip(total - tail).collect();
+    format!("{a}\n… ({} characters left out) …\n{b}", total - head - tail)
+}
+
 /// Pull "N passed, M failed" out of common test runners' output.
 pub fn test_counts(output: &str) -> (Option<u32>, Option<u32>) {
     let num = |pat: &str| -> Option<u32> {
@@ -116,6 +130,14 @@ pub fn test_counts(output: &str) -> (Option<u32>, Option<u32>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_long_log_keeps_its_end() {
+        let log = format!("{}error[E0308]: mismatched types at src/main.rs:12", "Compiling crate…\n".repeat(2000));
+        let c = clip_ends(&log, 6000);
+        assert!(c.chars().count() < 6100 && c.ends_with("src/main.rs:12") && c.contains("characters left out"));
+        assert_eq!(clip_ends("short", 6000), "short");
+    }
 
     #[test]
     fn counts_from_runners() {

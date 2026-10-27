@@ -760,7 +760,7 @@ impl<'a> LeadRun<'a> {
                     let r = self.run_check(cmd, &work, &lent);
                     let (passed, nfail) = test_counts(&r.output);
                     gate.lock().unwrap().record(self.id, ids.clone(), EvidenceKind::Test {
-                        cmd: cmd.clone(), exit: r.exit, passed, failed: nfail, output: clip(&r.output, 6000) }, false);
+                        cmd: cmd.clone(), exit: r.exit, passed, failed: nfail, output: chuck_core::evidence::clip_ends(&r.output, 6000) }, false);
                     if !r.ok() {
                         failed.push(format!("re-running `{cmd}` on your copy failed (exit {}): {}", r.exit,
                                             tail(&r.output, 600)));

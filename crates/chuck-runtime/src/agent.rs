@@ -233,9 +233,54 @@ impl Convo {
     }
 }
 
+/// Where a reply that has started repeating itself (a model stuck in a
+/// loop, writing the same line thousands of times) should be cut: after its
+/// first copy of what repeats. None: it isn't. A short unit must repeat 30
+/// times and a long one 8 (a 22-row board literal is code, not a loop).
+pub fn runaway_at(s: &str) -> Option<usize> {
+    let n = s.len();
+    if n < 2000 {
+        return None;
+    }
+    let base = n.saturating_sub(12_000);
+    let b = &s.as_bytes()[base..];
+    let m = b.len();
+    for l in 1..=400usize {
+        if l * 8 > m {
+            break;
+        }
+        let unit = &b[m - l..];
+        let mut k = 1;
+        while (k + 1) * l <= m && &b[m - (k + 1) * l..m - k * l] == unit {
+            k += 1;
+        }
+        let span = k * l;
+        let looping = if l <= 64 { k >= 30 && span >= 2000 } else { k >= 8 && span >= 3000 };
+        if looping {
+            // where it really began: back through the whole reply, past the window looked at
+            let full = s.as_bytes();
+            let mut start = n - span;
+            while start >= l && &full[start - l..start] == unit {
+                start -= l;
+            }
+            let mut at = start + l;
+            while at < n && !s.is_char_boundary(at) {
+                at += 1;
+            }
+            return Some(at);
+        }
+    }
+    None
+}
+
 struct AgentSink<'a> {
     id: AgentId,
     ctx: &'a Ctx,
+    /// The reply as it streams in, and where it began repeating itself (the
+    /// call is stopped there).
+    got: String,
+    checked: usize,
+    runaway: Option<usize>,
     /// When the call began, what has streamed in so far (characters of
     /// reasoning, of reply), and when the agent's line last said so.
     t0: std::time::Instant,
@@ -269,6 +314,11 @@ impl Sink for AgentSink<'_> {
         self.ctx.events.emit(Event::Thinking { id: self.id, chunk: c.into() });
     }
     fn delta(&mut self, c: &str) {
+        self.got.push_str(c);
+        if self.runaway.is_none() && self.got.len() >= self.checked + 512 {
+            self.checked = self.got.len();
+            self.runaway = runaway_at(&self.got);
+        }
         self.wrote += c.len();
         self.progress();
         self.ctx.events.emit(Event::Delta { id: self.id, chunk: c.into() });
@@ -284,7 +334,7 @@ impl Sink for AgentSink<'_> {
         self.ctx.events.emit(Event::Notice { id: self.id, text });
     }
     fn should_stop(&self) -> bool {
-        self.ctx.stop.load(Ordering::Relaxed) || self.ctx.kernel.should_stop(self.id)
+        self.runaway.is_some() || self.ctx.stop.load(Ordering::Relaxed) || self.ctx.kernel.should_stop(self.id)
     }
 }
 
@@ -333,9 +383,24 @@ pub fn think_with(ctx: &Ctx, id: AgentId, model: &str, convo: &Convo, tags: &[&s
         req.max_tokens = ctx.cfg.max_tokens;
         // a continuation goes on as text (a cut function call can't be continued as one)
         req.tools = if round == 0 { tools.clone() } else { None };
-        let mut sink = AgentSink { id, ctx, t0: std::time::Instant::now(), thought: 0, wrote: 0, shown: None };
+        let mut sink = AgentSink { id, ctx, got: String::new(), checked: 0, runaway: None,
+                                   t0: std::time::Instant::now(), thought: 0, wrote: 0, shown: None };
         let r = chuck_model::chat_interruptible(&ctx.model, &req, &mut sink);
         ctx.kernel.release(id);
+        // a reply caught in a loop: stopped at once, what came before the loop kept, the agent told
+        let r = match (r, sink.runaway) {
+            (Ok(_) | Err(ModelError::Stopped), Some(at)) if !ctx.stop.load(Ordering::Relaxed) && !ctx.kernel.should_stop(id) => {
+                let who = ctx.kernel.ps(true).into_iter().find(|p| p.pid == id).map(|p| p.name).unwrap_or_default();
+                crate::snag(&ctx.events, id, &who, "runaway reply", &format!("it began repeating itself after {} \
+                    characters: {}", at, chuck_core::evidence::clip(&sink.got[at..], 120)));
+                let kept = format!("{}\n\n[cut: this reply began repeating the same text over and over, so it was \
+                    stopped there]", &sink.got[..at]);
+                let usage = Usage::estimate(req.sent_chars(), sink.got.len());
+                Ok(chuck_model::Outcome { text: kept, usage: Some(usage), finish: Some("stop".into()),
+                                          model: req.model.clone(), ..Default::default() })
+            }
+            (r, _) => r,
+        };
         let out = match r {
             Ok(o) => {
                 outage = Duration::ZERO;
@@ -636,6 +701,24 @@ pub fn run_worker(ctx: Ctx, w: WorkerSpec) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_reply_caught_in_a_loop_is_cut_and_code_is_not() {
+        // the reply in a real job: one call, written thousands of times
+        let good = "Let me read the hook section.\n```read index.html:760-800```\n";
+        let mut looped = good.to_string();
+        for _ in 0..400 {
+            looped.push_str("```read index.html:70300000```\n");
+        }
+        let at = runaway_at(&looped).expect("a loop");
+        assert!(looped[..at].starts_with(good) && looped[..at].matches("70300000").count() == 1, "{}", &looped[..at]);
+        assert!(runaway_at(&"0".repeat(5000)).is_some());
+        // a 22-row board literal and a long ordinary file are code
+        let board = format!("const board = [\n{}];\n", "  [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],\n".repeat(22));
+        assert!(runaway_at(&board).is_none());
+        let code: String = (0..400).map(|i| format!("function f{i}(x) {{ return x + {i}; }}\n")).collect();
+        assert!(runaway_at(&code).is_none());
+    }
 
     #[test]
     fn the_projects_path_means_the_copy() {

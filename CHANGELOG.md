@@ -79,6 +79,17 @@ Chuck is now a Rust app (`crates/`), and the installer puts it over any earlier 
 - Races:
   - The first entry through its gate is reviewed at once; accepting it stops the other entrant.
   - The Lead races only a small, risky piece, never a whole build.
+- A reply caught in a loop (the same text written thousands of times) is cut as soon as it starts
+  repeating. What came before is kept, the agent is told, and a snag is noted. Before, one such reply
+  ran 8 minutes and 30k tokens.
+- Commands can't hang waiting for a person: editors, git prompts, npm/pip questions all answer
+  themselves (GIT_EDITOR, GIT_TERMINAL_PROMPT=0, npm_config_yes, PIP_NO_INPUT…).
+- Command output reads clean: colour codes, progress-bar redraws and control characters are stripped.
+- A long log keeps its end (where the error is), not just its start.
+- A minified line (a whole bundle on one line) is shown in part instead of flooding the reply.
+- `read file.js:70-90` and its other spellings always find the file.
+- A command that never stops (a dev server, a watcher) is explained when it times out, with the
+  way to run it in the background.
 - `test` as a function call can name the criteria it proves.
 - Workers change files with edit/patch instead of rewriting them whole.
 - `read .` lists the folder.

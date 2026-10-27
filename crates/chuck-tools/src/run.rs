@@ -63,7 +63,12 @@ pub fn bash(cmd: &str, mut o: RunOpts<'_>) -> RunResult {
     tag(&mut c);
     c.args(&argv[1..]).current_dir(o.cwd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped())
         .env("CI", "1").env("PAGER", "cat").env("GIT_PAGER", "cat").env("TERM", "dumb")
-        .env("DEBIAN_FRONTEND", "noninteractive");
+        .env("DEBIAN_FRONTEND", "noninteractive")
+        // nothing may wait for a person who isn't there: no editor (`git commit` without -m), no password or
+        // "Ok to proceed?" prompt, no colour codes in what the agent reads, output as it happens
+        .env("GIT_EDITOR", "true").env("EDITOR", "true").env("VISUAL", "true").env("GIT_TERMINAL_PROMPT", "0")
+        .env("npm_config_yes", "true").env("PIP_NO_INPUT", "1").env("NO_COLOR", "1").env("FORCE_COLOR", "0")
+        .env("CARGO_TERM_COLOR", "never").env("PYTHONUNBUFFERED", "1");
     for (k, v) in &o.env {
         c.env(k, v);
     }
@@ -144,9 +149,11 @@ pub fn bash(cmd: &str, mut o: RunOpts<'_>) -> RunResult {
     while let Ok(chunk) = rx.try_recv() {
         cap.push(&chunk);
     }
-    let mut output = cap.text();
+    let mut output = readable(&cap.text());
     if timed_out {
-        output.push_str(&format!("\n(timed out after {} s — the whole process tree was stopped)", o.timeout.as_secs()));
+        output.push_str(&format!("\n(timed out after {} s — the whole process tree was stopped. A server or a watcher \
+            doesn't stop by itself: start it in the background and check it in the same command, e.g. `npm run dev > \
+            /tmp/dev.log 2>&1 & sleep 3; curl -s localhost:5173`)", o.timeout.as_secs()));
     }
     if lingered {
         output.push_str("\n(the command finished, but processes it started in the background kept running and were \
@@ -159,6 +166,21 @@ pub fn bash(cmd: &str, mut o: RunOpts<'_>) -> RunResult {
     };
     let exit = if (timed_out || stopped) && exit == 0 { 124 } else { exit };
     RunResult { exit, output, timed_out, stopped, ms: t0.elapsed().as_millis() as u64 }
+}
+
+/// Output as a person (and a model) reads it: colour and cursor codes out,
+/// a progress bar redrawn with `\r` down to what it showed last, other
+/// control characters gone.
+pub fn readable(s: &str) -> String {
+    static ESC: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let esc = ESC.get_or_init(|| regex::Regex::new(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][A-Z0-9]|\x1b[=>78]")
+        .expect("valid regex"));
+    let s = esc.replace_all(s, "");
+    s.split('\n').map(|line| {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let last = line.rsplit('\r').find(|p| !p.trim().is_empty()).unwrap_or("");
+        last.chars().filter(|c| !c.is_control() || *c == '\t').collect::<String>()
+    }).collect::<Vec<_>>().join("\n")
 }
 
 /// How long background stragglers may keep the output open after the
@@ -363,6 +385,22 @@ fn kill_group(pgid: i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nothing_waits_for_a_person_and_output_reads_clean() {
+        let d = std::env::temp_dir().join(format!("chuck-run-prompt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        // `git commit` without -m opens an editor: here it can't wait for one
+        let mut o = RunOpts::new(&d);
+        o.timeout = Duration::from_secs(20);
+        let r = bash("git init -q && git -c user.email=a@b -c user.name=a commit -q --allow-empty; echo exit=$?", o);
+        assert!(!r.timed_out && r.ms < 15_000, "{r:?}");
+        let _ = std::fs::remove_dir_all(&d);
+        // colours, cursor moves and a progress bar redrawn with \r: what it last showed, plainly
+        let raw = "\x1b[1;32mok\x1b[0m done\nDownloading  10%\rDownloading  55%\rDownloading 100%\r\n\x1b[2Kerror: \x1b[31mboom\x1b[39m\x07";
+        assert_eq!(readable(raw), "ok done\nDownloading 100%\nerror: boom");
+    }
 
     #[test]
     fn runs_with_exit_code_and_output() {

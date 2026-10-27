@@ -658,8 +658,8 @@ impl<'a> Exec<'a> {
                     return;
                 }
                 let target = if tag == "read" { if arg.is_empty() { t.body.trim() } else { arg } } else { arg };
-                let target = target.rsplit_once(':').filter(|(_, r)| r.chars().next().is_some_and(|c| c.is_ascii_digit()))
-                    .map_or(target, |(p, _)| p);
+                // the file a read names, however its range is written (as read_page reads it)
+                let target = if tag == "read" { chuck_tools::fs::page_spec(self.root, target).0 } else { target };
                 if self.sandbox.access != Access::Full && !target.is_empty()
                     && chuck_tools::safe(self.root, target).is_ok_and(|p| secret_path(&p))
                 {
@@ -828,7 +828,7 @@ impl<'a> Exec<'a> {
                     g.criteria.iter().filter(|c| c.verify.as_deref().is_some_and(|v| as_checked(v, self.root) == checked))
                         .map(|c| c.id).collect()
                 };
-                let out = clip(&r.output, 6000);
+                let out = chuck_core::evidence::clip_ends(&r.output, 6000);
                 if changed && self.hold.is_some() {
                     res.feedback.push("[warning: that command changed the project while workers are on it (no \
                         sandbox here could stop it) — their merges may conflict with it]".into());

@@ -40,17 +40,6 @@ pub struct DaemonReport {
     pub usd: f64,
 }
 
-fn clip(s: &str, n: usize) -> String {
-    if s.len() <= n {
-        return s.to_string();
-    }
-    let mut k = n;
-    while !s.is_char_boundary(k) {
-        k -= 1;
-    }
-    format!("{}\n… ({} more characters)", &s[..k], s.len() - k)
-}
-
 /// A daemon's command: only if it only looks, then with the system read-only.
 fn look(root: &Path, cmd: &str, stop: &Arc<AtomicBool>) -> String {
     let jail = chuck_sandbox::bwrap().is_some();
@@ -69,7 +58,7 @@ fn look(root: &Path, cmd: &str, stop: &Arc<AtomicBool>) -> String {
     o.wrap = jail.then(|| chuck_sandbox::Jail::new(root).read_only().wrap());
     o.stop = Some(stop.clone());
     let r = chuck_tools::bash(cmd, o);
-    format!("exit {}{}\n{}", r.exit, if r.timed_out { " (timed out)" } else { "" }, clip(&r.output, 12_000))
+    format!("exit {}{}\n{}", r.exit, if r.timed_out { " (timed out)" } else { "" }, chuck_core::evidence::clip_ends(&r.output, 12_000))
 }
 
 impl Runtime {

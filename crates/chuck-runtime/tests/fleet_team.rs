@@ -69,9 +69,8 @@ fn workers_talk_and_the_lead_waits_answers_and_merges() {
             if req.messages.len() == 2 {
                 return "```team @lead which port should the server listen on?```\n```read .```".into();
             }
-            if heard(req, "lead → ds-2: use 8080") {
-                assert!(req.messages.iter().any(|m| text(m).contains("engine.js exports create(seed)")),
-                        "what ds-1 said reached ds-2");
+            // it builds once it has both the Lead's answer and what ds-1 provides (they arrive in either order)
+            if heard(req, "lead → ds-2: use 8080") && req.messages.iter().any(|m| text(m).contains("engine.js exports create(seed)")) {
                 return "```write server.js\nimport { create } from './engine.js';\nlisten(8080);\n```\n\
                     ```test grep -q 8080 server.js```\n```submit\nserver.js on 8080, using create()\n```".into();
             }
@@ -555,5 +554,30 @@ fn what_gets_in_an_agents_way_is_written_down() {
     assert!(kinds.contains(&"edit missed".to_string()) && kinds.contains(&"said".to_string()), "{kinds:?}");
     let written = chuck_store::snags::read(&log, 100);
     assert!(written.iter().any(|s| s.kind == "said" && s.who == "lead" && s.text.contains("miss message")), "{written:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_reply_stuck_repeating_itself_is_cut_and_the_job_goes_on() {
+    let dir = tmp("runaway");
+    let model = Arc::new(Scripted::new().respond(|req| {
+        if text(&req.messages[0]) == chuck_runtime::prompts::CRITIC {
+            return "ACCEPT".into();
+        }
+        if req.messages.len() == 2 {
+            // what a model in a loop writes: the same call, over and over
+            return format!("```criteria\n- a says 1 :: verify: grep -qx 1 a.txt\n```\n{}",
+                           "```read index.html:70300000```\n".repeat(600));
+        }
+        let last = last_user(req);
+        assert!(req.messages.iter().any(|m| text(m).contains("[cut: this reply began repeating")), "it is told");
+        assert!(!req.messages.iter().any(|m| text(m).matches("70300000").count() > 1), "the loop isn't kept: {last}");
+        "```write a.txt\n1\n```\n```test grep -qx 1 a.txt```\n```done\na says 1 (grep passes).\n```".into()
+    }));
+    let (tx, rx) = channel();
+    let rt = Runtime::new(model, RuntimeConfig { store: dir.join("store"), ..RuntimeConfig::default() }, Events(Some(tx)));
+    let (report, _) = run_within(30, rt, Job::new("make a say 1", &dir));
+    assert!(matches!(report.outcome, Outcome::Done { .. }), "{:?}", report.outcome);
+    assert!(rx.try_iter().any(|e| matches!(e, Event::Snag { kind, .. } if kind == "runaway reply")));
     let _ = std::fs::remove_dir_all(&dir);
 }

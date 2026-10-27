@@ -359,6 +359,9 @@ pub fn page_spec<'a>(root: &Path, spec: &'a str) -> (&'a str, usize, Option<usiz
     }
 }
 
+/// The most of one line a read shows.
+const LONG_LINE: usize = 2000;
+
 pub fn read_page(root: &Path, spec: &str, limit: usize) -> Result<String, FsError> {
     let (path, start, end) = page_spec(root, spec);
     let p = safe(root, path)?;
@@ -388,6 +391,13 @@ pub fn read_page(root: &Path, spec: &str, limit: usize) -> Result<String, FsErro
         if end.is_some_and(|e| i + 1 > e) {
             break;
         }
+        // one line of a minified or generated file can be a megabyte: shown in part, and said so
+        let l: std::borrow::Cow<str> = if l.chars().count() > LONG_LINE {
+            format!("{} … (this line is {} characters: a minified or generated file? grep in it for what you need)",
+                    l.chars().take(LONG_LINE).collect::<String>(), l.chars().count()).into()
+        } else {
+            (*l).into()
+        };
         let row = format!("{:>5}  {l}\n", i + 1);
         if out.len() + row.len() > limit && !out.is_empty() {
             break;
@@ -447,6 +457,14 @@ mod tests {
         assert!(!fs::read_dir(&r).unwrap().flatten().any(|e| e.file_name().to_string_lossy().contains("chuck-")),
                 "no temp file left behind");
         let _ = fs::remove_dir_all(&r);
+    }
+
+    #[test]
+    fn a_minified_line_is_shown_in_part() {
+        let r = tmp();
+        fs::write(r.join("app.min.js"), format!("{}\nsecond line\n", "x".repeat(500_000))).unwrap();
+        let p = read_page(&r, "app.min.js", 12_000).unwrap();
+        assert!(p.len() < 4000 && p.contains("500000 characters") && p.contains("second line"), "{}", p.len());
     }
 
     #[test]
