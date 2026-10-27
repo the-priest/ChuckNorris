@@ -59,6 +59,9 @@ pub struct RuntimeConfig {
     pub spend: Option<Arc<chuck_store::Spend>>,
     pub day_limit: f64,
     pub month_limit: f64,
+    /// Read the day/month limits from the settings before every model call
+    /// (the window's and `chuck`'s jobs), not once when the job starts.
+    pub live_limits: bool,
     /// Where the folder's checkpoints go (the window's store): the lead
     /// snapshots before every step that acts. None: no checkpoints.
     pub checkpoints: Option<PathBuf>,
@@ -111,6 +114,7 @@ impl Default for RuntimeConfig {
             spend: None,
             day_limit: 0.0,
             month_limit: 0.0,
+            live_limits: false,
             checkpoints: None,
             web: None,
             sources: 6,

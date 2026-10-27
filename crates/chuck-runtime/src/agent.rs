@@ -209,7 +209,14 @@ pub fn think(ctx: &Ctx, id: AgentId, model: &str, convo: &Convo) -> Result<Strin
     let mut outage = Duration::ZERO;
     let mut round = 0;
     while round < 3 {
-        if let Some(over) = ctx.cfg.spend.as_ref().and_then(|s| s.over(ctx.cfg.day_limit, ctx.cfg.month_limit)) {
+        // the limits as they are now: one changed in Settings mid-job applies to the next call
+        let (day, month) = if ctx.cfg.live_limits {
+            let s = chuck_store::Settings::load();
+            (s.num("budget_day_usd", 0.0, 0.0, 100_000.0), s.num("budget_month_usd", 0.0, 0.0, 1_000_000.0))
+        } else {
+            (ctx.cfg.day_limit, ctx.cfg.month_limit)
+        };
+        if let Some(over) = ctx.cfg.spend.as_ref().and_then(|s| s.over(day, month)) {
             return Err(Halt::Killed(format!("the {} spending limit ({}) is reached — only you can raise it, in \
                 Settings", if over.scope == "day" { "daily" } else { "monthly" }, chuck_model::fmt_usd(over.limit))));
         }

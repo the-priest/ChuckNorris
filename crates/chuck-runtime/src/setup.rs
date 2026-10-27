@@ -126,6 +126,7 @@ pub fn from_settings(s: &Settings, folder: &Path, max_usd: Option<f64>) -> Resul
     let spend = Arc::new(Spend::at(&Spend::default_path()));
     cfg.day_limit = s.num("budget_day_usd", 0.0, 0.0, 100_000.0);
     cfg.month_limit = s.num("budget_month_usd", 0.0, 0.0, 1_000_000.0);
+    cfg.live_limits = true;
     if let Some(o) = spend.over(cfg.day_limit, cfg.month_limit) {
         return Err(format!("the {} spending limit ({}) is reached ({} spent) — raise it in Settings to go on",
                            if o.scope == "day" { "daily" } else { "monthly" }, fmt_usd(o.limit), fmt_usd(o.spent)));
