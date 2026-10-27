@@ -27,6 +27,47 @@ pub enum Entry {
     Act { markup: String },
     /// A card: DONE, INCOMPLETE, a question and its answer, a rewind.
     Card { kind: String, class: String, text: String },
+    /// What the Lead saw in the browser.
+    Browser(Box<Browsed>),
+    /// Pictures Chat found.
+    Gallery { query: String, items: Vec<Picture> },
+    /// Videos Chat found.
+    Videos { query: String, items: Vec<Video> },
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Picture {
+    pub path: String,
+    pub src: String,
+    pub page: String,
+    pub title: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Video {
+    pub title: String,
+    pub url: String,
+    pub thumb: Option<String>,
+    pub length: Option<String>,
+}
+
+/// One ```browse```, as the card shows it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Browsed {
+    pub url: String,
+    pub title: String,
+    pub size: (u32, u32),
+    pub ms: u64,
+    pub engine: String,
+    pub errors: Vec<String>,
+    pub failed: Vec<String>,
+    pub warnings: Vec<String>,
+    pub steps: Vec<String>,
+    pub refused: Vec<String>,
+    /// The screenshot (it may be gone by the time the chat is reopened).
+    pub shot: Option<String>,
+    /// What the vision model saw.
+    pub look: Option<String>,
 }
 
 /// A task, as last shown.
@@ -101,6 +142,32 @@ pub fn markdown(s: &Saved) -> String {
                 out.push_str(&format!("> **{kind}**\n>\n{}\n\n", text.trim().lines().map(|l| format!("> {l}")).collect::<Vec<_>>().join("\n")));
             }
             Entry::Handoff { request } => out.push_str(&format!("> **FOR THE FLEET**\n>\n> {}\n\n", request.trim())),
+            Entry::Gallery { query, items } => {
+                out.push_str(&format!("> **PICTURES** — {query}\n"));
+                for p in items {
+                    out.push_str(&format!("> - [{}]({}) ({})\n", if p.title.is_empty() { "picture" } else { &p.title }, p.src, p.page));
+                }
+                out.push('\n');
+            }
+            Entry::Videos { query, items } => {
+                out.push_str(&format!("> **VIDEOS** — {query}\n"));
+                for v in items {
+                    out.push_str(&format!("> - [{}]({}){}\n", if v.title.is_empty() { &v.url } else { &v.title }, v.url,
+                                          v.length.as_ref().map(|l| format!(" ({l})")).unwrap_or_default()));
+                }
+                out.push('\n');
+            }
+            Entry::Browser(b) => {
+                out.push_str(&format!("> **BROWSER** {} ({}×{}, {} JS error{})\n", b.url, b.size.0, b.size.1, b.errors.len(),
+                                      if b.errors.len() == 1 { "" } else { "s" }));
+                for x in b.errors.iter().chain(&b.failed) {
+                    out.push_str(&format!("> - {x}\n"));
+                }
+                if let Some(l) = &b.look {
+                    out.push_str(&format!(">\n> {}\n", l.trim().replace('\n', "\n> ")));
+                }
+                out.push('\n');
+            }
         }
     }
     out

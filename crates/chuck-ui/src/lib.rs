@@ -5,6 +5,7 @@ mod chat;
 pub mod doctor;
 pub mod update;
 mod md;
+mod media;
 mod panel;
 mod style;
 mod window;

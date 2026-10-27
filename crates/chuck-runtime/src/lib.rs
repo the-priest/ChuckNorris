@@ -5,6 +5,7 @@
 //! through the Done gate and an independent critic pass.
 
 pub mod agent;
+pub mod browse;
 pub mod chat;
 pub mod daemon;
 pub mod events;
@@ -14,7 +15,7 @@ pub mod prompts;
 pub mod setup;
 
 pub use agent::{Ctx, Halt};
-pub use events::{Event, Events, Outcome, TaskView};
+pub use events::{Event, Events, Outcome, Picture, TaskView, Video};
 
 use chuck_core::{AgentId, DoneGate, FleetConfig, Kernel, Quota, Role, SpawnSpec};
 use chuck_model::{ChatModel, Reasoning};
@@ -68,6 +69,9 @@ pub struct RuntimeConfig {
     /// Long-term memory: recalled into the lead's and Chat's prompts, kept
     /// with ```remember``` / ```forget```.
     pub memory: Option<Arc<chuck_store::memory::Memory>>,
+    /// The lead's ```browse``` drives this browser ("auto", "brave",
+    /// "chromium", "chrome" or a path; None: no browse this run).
+    pub browser: Option<String>,
 }
 
 pub fn default_store() -> PathBuf {
@@ -104,6 +108,7 @@ impl Default for RuntimeConfig {
             mcp: None,
             lsp: None,
             memory: None,
+            browser: None,
         }
     }
 }

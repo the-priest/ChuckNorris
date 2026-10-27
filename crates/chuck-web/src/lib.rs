@@ -12,11 +12,14 @@
 //! - Identical reads within ten minutes are served from memory, so paging
 //!   through a long page or re-reading a source costs nothing.
 
+pub mod browser;
 pub mod html;
+pub mod media;
 
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::net::{IpAddr, ToSocketAddrs};
+use std::path::PathBuf;
 use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -59,6 +62,10 @@ pub struct Config {
     /// prompt injected into a web page reaches inside the network).
     pub allow_private: bool,
     pub timeout: Duration,
+    /// A page a plain read can't (empty until its scripts run, or behind a
+    /// bot check) is read in a real browser: which one ("auto", "brave",
+    /// "chromium", "chrome" or a path). None: never.
+    pub browser: Option<String>,
 }
 
 impl Default for Config {
@@ -70,6 +77,7 @@ impl Default for Config {
             proxy: Proxy::Env,
             allow_private: false,
             timeout: Duration::from_secs(8),
+            browser: Some("auto".into()),
         }
     }
 }
@@ -87,6 +95,8 @@ pub struct Page {
     pub url: String,
     pub title: Option<String>,
     pub text: String,
+    /// Read in a real browser ("Chromium"), not by a plain fetch.
+    pub via: Option<String>,
 }
 
 /// Why a fetch read nothing.
@@ -123,7 +133,11 @@ pub struct Web {
     cfg: Config,
     agent: ureq::Agent,
     cache: Mutex<HashMap<String, Cached>>,
+    /// Browsers open at once for reads (each is a few hundred MB).
+    slots: Arc<(Mutex<usize>, std::sync::Condvar)>,
 }
+
+const BROWSER_SLOTS: usize = 2;
 
 fn agent(cfg: &Config, timeout: Duration) -> ureq::Agent {
     let proxy = match &cfg.proxy {
@@ -148,7 +162,7 @@ fn agent(cfg: &Config, timeout: Duration) -> ureq::Agent {
 impl Web {
     pub fn new(cfg: Config) -> Web {
         let agent = agent(&cfg, cfg.timeout);
-        Web { cfg, agent, cache: Mutex::new(HashMap::new()) }
+        Web { cfg, agent, cache: Mutex::new(HashMap::new()), slots: Arc::default() }
     }
 
     pub fn config(&self) -> &Config {
@@ -175,8 +189,16 @@ impl Web {
     }
 
     fn searx(&self, query: &str, n: usize, categories: &str) -> Vec<Hit> {
+        self.searx_with(query, n, categories, hits_of)
+    }
+
+    /// SearXNG, the user's own instance first, then four public ones at
+    /// once; `parse` turns an answer into results (empty: ask the next).
+    pub(crate) fn searx_with<T: Send + 'static>(&self, query: &str, n: usize, categories: &str,
+                                                parse: fn(&serde_json::Value, usize) -> Vec<T>) -> Vec<T> {
+        let searcher = Searcher { agent: self.agent.clone() };
         if let Some(own) = self.cfg.searx_own.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-            if let Ok(h) = self.searx_one(own, query, n, categories) {
+            if let Ok(h) = searcher.searx_json(own, query, categories).map(|v| parse(&v, n)) {
                 if !h.is_empty() {
                     return h;
                 }
@@ -193,13 +215,13 @@ impl Web {
             return Vec::new();
         }
         let (tx, rx) = channel();
-        let me = Arc::new(Searcher { agent: self.agent.clone() });
+        let me = Arc::new(searcher);
         for h in hosts {
             let (tx, me, q, c) = (tx.clone(), me.clone(), query.to_string(), categories.to_string());
             // Not joined: a straggler finishes within its own timeout and its
             // answer is dropped. Waiting for it would undo the whole point.
             std::thread::Builder::new().name("searx".into()).spawn(move || {
-                let _ = tx.send(me.searx_one(&h, &q, n, &c).unwrap_or_default());
+                let _ = tx.send(me.searx_json(&h, &q, &c).map(|v| parse(&v, n)).unwrap_or_default());
             }).ok();
         }
         drop(tx);
@@ -212,10 +234,6 @@ impl Web {
             }
         }
         Vec::new()
-    }
-
-    fn searx_one(&self, host: &str, query: &str, n: usize, categories: &str) -> Result<Vec<Hit>, String> {
-        Searcher { agent: self.agent.clone() }.searx_one(host, query, n, categories)
     }
 
     fn ddg(&self, query: &str, n: usize) -> Vec<Hit> {
@@ -251,7 +269,10 @@ impl Web {
                 return r.clone();
             }
         }
-        let r = self.fetch_now(&url);
+        let r = match self.fetch_now(&url) {
+            Err(why @ (Why::Script | Why::Blocked(_))) => self.in_browser(&url).unwrap_or(Err(why)),
+            r => r,
+        };
         let mut c = self.cache.lock().unwrap();
         if c.len() >= CACHE_MAX {
             if let Some(oldest) = c.iter().min_by_key(|(_, (t, _))| *t).map(|(k, _)| k.clone()) {
@@ -263,6 +284,49 @@ impl Web {
             c.insert(url, (Instant::now(), r.clone()));
         }
         r
+    }
+
+    /// The page read in a real browser. None: no browser to read it with
+    /// (the plain read's answer stands).
+    fn in_browser(&self, url: &str) -> Option<Result<Page, Why>> {
+        let exe = browser::find(self.cfg.browser.as_deref()?).ok()?;
+        let (lock, cv) = &*self.slots;
+        {
+            let mut n = lock.lock().unwrap();
+            let end = Instant::now() + Duration::from_secs(90);
+            while *n >= BROWSER_SLOTS {
+                let left = end.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    return None;
+                }
+                n = cv.wait_timeout(n, left).unwrap().0;
+            }
+            *n += 1;
+        }
+        let mut o = browser::Options::new(exe);
+        o.net = if self.cfg.allow_private { browser::Net::Any } else { browser::Net::Public(self.cfg.proxy.clone()) };
+        o.proxy = Some(self.cfg.proxy.clone()).filter(|p| *p != Proxy::Env);
+        o.files = browser::Files { root: Some(PathBuf::from("/nonexistent")), hidden: Vec::new() };
+        o.timeout = Duration::from_secs(45);
+        let r = browser::read_page(url, &o);
+        *lock.lock().unwrap() -= 1;
+        cv.notify_one();
+        let (r, blocked) = r.ok()?;
+        let name = r.engine.clone();
+        if blocked {
+            return Some(Err(Why::Blocked(0)));
+        }
+        match r.status {
+            Some(st) if BLOCK_CODES.contains(&st) => return Some(Err(Why::Blocked(st))),
+            Some(st) if st >= 400 => return Some(Err(Why::Unreachable(format!("HTTP {st}")))),
+            _ => {}
+        }
+        if r.text.trim().is_empty() {
+            return None;
+        }
+        let text: String = r.text.chars().take(MAX_TEXT).collect();
+        Some(Ok(Page { url: if r.final_url.starts_with("http") { r.final_url } else { url.into() },
+                       title: Some(r.title).filter(|t| !t.trim().is_empty()), text, via: Some(name) }))
     }
 
     fn fetch_now(&self, start: &str) -> Result<Page, Why> {
@@ -300,35 +364,39 @@ impl Web {
         Err(Why::Unreachable(format!("more than {MAX_REDIRECTS} redirects")))
     }
 
-    /// Never a local or private address, by name or by what the name
-    /// resolves to. Behind a proxy the proxy resolves names, so only the
-    /// literal ones can be judged here.
     fn address_ok(&self, url: &str) -> Result<(), Why> {
         if self.cfg.allow_private {
             return Ok(());
         }
-        let (host, port) = host_port(url).ok_or_else(|| Why::Refused("no host in the address".into()))?;
-        let bare = host.trim_start_matches('[').trim_end_matches(']');
-        let refuse = || Why::Refused(format!("{host} is a local or private address; web reads stay on the public internet"));
-        if let Ok(ip) = bare.parse::<IpAddr>() {
-            return if private(ip) { Err(refuse()) } else { Ok(()) };
-        }
-        let name = bare.to_ascii_lowercase();
-        let name = name.trim_end_matches('.');
-        if name == "localhost" || [".localhost", ".local", ".internal", ".lan", ".home.arpa"].iter().any(|s| name.ends_with(s))
-            || !name.contains('.')
-        {
-            return Err(refuse());
-        }
-        if self.cfg.proxy == Proxy::None || ureq::Proxy::try_from_env().is_none() {
-            if let Ok(addrs) = (name, port).to_socket_addrs() {
-                if addrs.into_iter().any(|a| private(a.ip())) {
-                    return Err(refuse());
-                }
+        public_address(url, &self.cfg.proxy)
+    }
+}
+
+/// Never a local or private address, by name or by what the name resolves
+/// to. Behind a proxy the proxy resolves names, so only the literal ones can
+/// be judged here.
+pub fn public_address(url: &str, proxy: &Proxy) -> Result<(), Why> {
+    let (host, port) = host_port(url).ok_or_else(|| Why::Refused("no host in the address".into()))?;
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    let refuse = || Why::Refused(format!("{host} is a local or private address; web reads stay on the public internet"));
+    if let Ok(ip) = bare.parse::<IpAddr>() {
+        return if private(ip) { Err(refuse()) } else { Ok(()) };
+    }
+    let name = bare.to_ascii_lowercase();
+    let name = name.trim_end_matches('.');
+    if name == "localhost" || [".localhost", ".local", ".internal", ".lan", ".home.arpa"].iter().any(|s| name.ends_with(s))
+        || !name.contains('.')
+    {
+        return Err(refuse());
+    }
+    if *proxy == Proxy::None || ureq::Proxy::try_from_env().is_none() {
+        if let Ok(addrs) = (name, port).to_socket_addrs() {
+            if addrs.into_iter().any(|a| private(a.ip())) {
+                return Err(refuse());
             }
         }
-        Ok(())
     }
+    Ok(())
 }
 
 /// The search half, shareable with the threads that ask instances at once.
@@ -336,8 +404,22 @@ struct Searcher {
     agent: ureq::Agent,
 }
 
+/// Web results from a SearXNG answer.
+fn hits_of(v: &serde_json::Value, n: usize) -> Vec<Hit> {
+    v.get("results").and_then(|r| r.as_array()).map(|rs| {
+        rs.iter().take(n * 2).filter_map(|r| {
+            let u = r.get("url")?.as_str()?;
+            u.starts_with("http").then(|| Hit {
+                title: html::strip(r.get("title").and_then(|t| t.as_str()).unwrap_or("")),
+                url: u.to_string(),
+                snippet: html::strip(r.get("content").and_then(|t| t.as_str()).unwrap_or("")),
+            })
+        }).collect()
+    }).unwrap_or_default()
+}
+
 impl Searcher {
-    fn searx_one(&self, host: &str, query: &str, n: usize, categories: &str) -> Result<Vec<Hit>, String> {
+    fn searx_json(&self, host: &str, query: &str, categories: &str) -> Result<serde_json::Value, String> {
         let url = format!("{}/search?format=json&safesearch=0&categories={}&q={}", host.trim_end_matches('/'),
                           enc(categories), enc(query));
         let mut resp = self.agent.get(&url).header("Accept", "application/json").call().map_err(|e| e.to_string())?;
@@ -346,17 +428,7 @@ impl Searcher {
         }
         let mut body = Vec::new();
         resp.body_mut().as_reader().take(MAX_SEARCH_BYTES as u64).read_to_end(&mut body).map_err(|e| e.to_string())?;
-        let v: serde_json::Value = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
-        Ok(v.get("results").and_then(|r| r.as_array()).map(|rs| {
-            rs.iter().take(n * 2).filter_map(|r| {
-                let u = r.get("url")?.as_str()?;
-                u.starts_with("http").then(|| Hit {
-                    title: html::strip(r.get("title").and_then(|t| t.as_str()).unwrap_or("")),
-                    url: u.to_string(),
-                    snippet: html::strip(r.get("content").and_then(|t| t.as_str()).unwrap_or("")),
-                })
-            }).collect()
-        }).unwrap_or_default())
+        serde_json::from_slice(&body).map_err(|e| e.to_string())
     }
 }
 
@@ -374,7 +446,7 @@ fn read(url: &str, raw: &str, mime: &str) -> Result<Page, Why> {
     let markup = mime.is_empty() && raw.trim_start().starts_with('<') || mime.contains("html") || mime.contains("xml");
     if !markup {
         let text = html::cut(raw, MAX_TEXT * 4).chars().take(MAX_TEXT).collect::<String>();
-        return Ok(Page { url: url.into(), title: None, text: text.trim().to_string() });
+        return Ok(Page { url: url.into(), title: None, text: text.trim().to_string(), via: None });
     }
     let text = html::readable(raw, MAX_TEXT);
     let wall = WALL.get_or_init(|| regex::Regex::new(
@@ -389,7 +461,7 @@ fn read(url: &str, raw: &str, mime: &str) -> Result<Page, Why> {
     if text.chars().count() < 200 && (shell.is_match(raw) || raw.matches("<script").count() >= 3) {
         return Err(Why::Script);
     }
-    Ok(Page { url: url.into(), title: html::title(raw), text })
+    Ok(Page { url: url.into(), title: html::title(raw), text, via: None })
 }
 
 /// http(s) only; a bare "example.com/x" is read as https.

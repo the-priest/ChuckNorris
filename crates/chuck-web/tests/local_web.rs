@@ -59,6 +59,9 @@ fn serve() -> Server {
                     "/loop" => reply("302 Found", "text/html", "Location: /loop\r\n", b""),
                     "/wall" => reply("200 OK", "text/html", "", b"<html><head><title>Just a moment...</title></head>\
                         <body><div id=challenge-platform></div></body></html>"),
+                    "/app" => reply("200 OK", "text/html", "", b"<html><title>App</title><body><div id=\"root\"></div>\
+                        <script>document.getElementById('root').innerHTML='<main>Only a browser reads this: forty-two.</main>'</script>\
+                        <script></script><script></script></body></html>"),
                     "/spa" => reply("200 OK", "text/html", "", b"<html><body><div id=\"root\"></div>\
                         <script src=a.js></script></body></html>"),
                     "/pdf" => reply("200 OK", "application/pdf", "", b"%PDF-1.4"),
@@ -98,7 +101,7 @@ fn serve() -> Server {
 }
 
 fn web(cfg: Config) -> Web {
-    Web::new(Config { proxy: Proxy::None, allow_private: true, timeout: Duration::from_secs(3), ..cfg })
+    Web::new(Config { proxy: Proxy::None, allow_private: true, timeout: Duration::from_secs(3), browser: None, ..cfg })
 }
 
 #[test]
@@ -182,4 +185,26 @@ fn the_users_own_instance_goes_first_and_duckduckgo_is_the_fallback() {
     let w = web(Config { searx: vec![], ddg: vec![format!("{}/gone", s.base)], ..Config::default() });
     assert!(w.search("q", 8).is_err());
     assert!(w.search("   ", 8).is_err());
+}
+
+#[test]
+fn what_a_plain_read_cant_see_is_read_in_a_real_browser() {
+    let Ok(_) = chuck_web::browser::find("auto") else {
+        eprintln!("skipped: no browser here");
+        return;
+    };
+    let s = serve();
+    let w = Web::new(Config { proxy: Proxy::None, allow_private: true, timeout: Duration::from_secs(3), ..Config::default() });
+    let p = w.fetch(&format!("{}/app", s.base)).unwrap();
+    assert_eq!(p.text, "Only a browser reads this: forty-two.");
+    assert_eq!(p.title.as_deref(), Some("App"));
+    assert!(p.via.is_some(), "{p:?}");
+    // still a wall in the browser, still nothing to read, still a refusal
+    assert_eq!(w.fetch(&format!("{}/wall", s.base)), Err(Why::Blocked(0)));
+    assert_eq!(w.fetch(&format!("{}/spa", s.base)), Err(Why::Script));
+    assert_eq!(w.fetch(&format!("{}/forbidden", s.base)), Err(Why::Blocked(403)));
+    // a plain page never starts a browser
+    let t = Instant::now();
+    assert!(w.fetch(&format!("{}/article", s.base)).unwrap().via.is_none());
+    assert!(t.elapsed() < Duration::from_secs(1));
 }

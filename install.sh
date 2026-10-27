@@ -88,8 +88,14 @@ if [ "${CHUCK_CAMOUFOX:-0}" = "1" ]; then
     info "Camoufox install skipped (pip failed) — browse will use Brave/Chromium"
   fi
 fi
-if command -v brave >/dev/null || command -v brave-browser >/dev/null; then
-  info "Brave found — browse will use it"
+BROWSER_FOUND=""
+for b in brave brave-browser chromium chromium-browser google-chrome google-chrome-stable microsoft-edge vivaldi; do
+  if command -v "$b" >/dev/null 2>&1; then BROWSER_FOUND="$b"; break; fi
+done
+if [ -n "$BROWSER_FOUND" ]; then
+  info "browser: $BROWSER_FOUND — the Lead's page checks and script-only pages will use it"
+else
+  info "no Brave/Chromium/Chrome found — page checks and pages that need JavaScript stay off until one is installed (e.g. pacman -S chromium)"
 fi
 
 step "installing Chuck"

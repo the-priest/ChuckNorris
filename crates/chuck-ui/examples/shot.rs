@@ -83,7 +83,26 @@ fn research_web() -> (Option<Arc<chuck_web::Web>>, String) {
                 }
             }
             let path = line.split_whitespace().nth(1).unwrap_or("/").to_string();
-            let (status, ctype, body) = if path.starts_with("/search") {
+            // pictures: CHUCK_SHOT_MEDIA holds 1.jpg… (any JPEGs) for the gallery render
+            if let Some(n) = path.strip_prefix("/img/") {
+                let dir = std::env::var_os("CHUCK_SHOT_MEDIA").map(std::path::PathBuf::from).unwrap_or_default();
+                let body = std::fs::read(dir.join(n)).unwrap_or_default();
+                let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                            body.len()).as_bytes());
+                let _ = s.write_all(&body);
+                continue;
+            }
+            let (status, ctype, body) = if path.starts_with("/search") && path.contains("categories=images") {
+                let titles = ["Red panda on a branch", "Red panda eating bamboo", "Two red pandas", "Red panda close-up",
+                              "Red panda in snow", "Red panda cub"];
+                let rows: Vec<String> = titles.iter().enumerate().map(|(i, t)| format!(
+                    r#"{{"url":"https://site{}.example/panda/{i}","title":"{t}","img_src":"{b}/img/{}.jpg"}}"#, i % 4, i + 1)).collect();
+                ("200 OK", "application/json", format!(r#"{{"results":[{}]}}"#, rows.join(",")))
+            } else if path.starts_with("/search") && path.contains("categories=videos") {
+                ("200 OK", "application/json", format!(r#"{{"results":[
+                  {{"url":"https://www.youtube.com/watch?v=panda1","title":"Red pandas playing in the snow","thumbnail":"{b}/img/5.jpg","length":"3:12"}},
+                  {{"url":"https://vimeo.com/2002","title":"The secret life of the red panda (documentary)","thumbnail":"{b}/img/1.jpg","length":2765}}]}}"#))
+            } else if path.starts_with("/search") {
                 ("200 OK", "application/json", format!(r#"{{"results":[
                   {{"url":"{b}/docs/functions","title":"Built-in Functions — Python 3 documentation","content":"int(x) … If x is not a number or if base is given, then x must be a string representing an integer literal"}},
                   {{"url":"{b2}/howto/robust-parsing","title":"Parsing numbers robustly in Python","content":"Empty fields and whitespace are the usual culprits"}},
@@ -118,7 +137,7 @@ fn main() {
     std::fs::write(proj.join("src/parse.py"), "def parse(s):\n    return [int(x) for x in s.split(',')]\n").unwrap();
     // a stand-in pytest so the render doesn't depend on one being installed
     std::fs::write(proj.join("pytest.sh"), "#!/bin/sh\necho '3 passed in 0.02s'\n").unwrap();
-    let (web, base) = if mode == "research" || mode == "chat" { research_web() } else { (None, String::new()) };
+    let (web, base) = if mode == "research" || mode == "chat" || mode == "pictures" { research_web() } else { (None, String::new()) };
     if mode == "daemons" {
         // a reminder and a daemon, both due: the window's first check fires them
         let cfg = chuck_store::settings::config_dir();
@@ -150,6 +169,23 @@ fn main() {
              Want it fixed in your parser, with tests? The fleet can do that:\n\
              ```agent\nIn src/parse.py, make parse() skip empty and blank fields instead of crashing, and add tests for \
              empty input, blank fields and normal numbers.\n```")])),
+        "browse" => {
+            std::fs::write(proj.join("index.html"), "<!doctype html><title>Todo</title><style>body{font:16px sans-serif;\
+                margin:40px;background:#f6f6fb}h1{color:#5b3fd6}</style><h1>Todo</h1><input id=t placeholder='New task'>\
+                <button id=add onclick='addTask()'>Add</button><ul id=l></ul><script src=app.js></script>").unwrap();
+            let f = chuck_core::FleetConfig::default();
+            Arc::new(Scripted::new()
+                .for_model(&f.deepseek_model, ["Let me load the page and try adding a task.\n```browse index.html 1024x640\n\
+                    click #t\ntype Buy milk\nclick #add\n```",
+                    "The page loads, but **Add does nothing**: `addTask` is never defined because `app.js` is missing \
+                    (404), so clicking the button throws. Want me to write `app.js`?"])
+                .for_model(&f.glm_model, ["A light page with a purple \"Todo\" heading, a text field holding \"Buy milk\" \
+                    and an Add button. The list under them is empty: nothing was added."]))
+        }
+        "pictures" => Arc::new(Scripted::new().replies([
+            "```images red panda```\n```videos red panda```",
+            "Red pandas are small tree-dwelling mammals of the eastern Himalayas — above are pictures, and two videos \
+             (the documentary is the deeper one)."])),
         "research" => Arc::new(Scripted::new().replies([
             "Let me check what the docs say first.\n```search python int parse empty string ValueError```".to_string(),
             format!("```fetch {base}/docs/functions```\n```fetch {base}/howto/robust-parsing```\n```fetch {base}/blocked```"),
@@ -176,6 +212,8 @@ fn main() {
         "confirm" => Some("Clean the build output".to_string()),
         "research" | "chat" => Some("Why does int() fail on an empty string? Check the docs.".to_string()),
         "voice" => Some("What does ls -la show?".to_string()),
+        "pictures" => Some("Show me red pandas".to_string()),
+        "browse" => Some("Does adding a task work on the page?".to_string()),
         "help" => Some("/help".to_string()),
         _ => Some("The parser crashes on empty input. Fix it and add tests.".to_string()),
     };
@@ -183,13 +221,14 @@ fn main() {
         "welcome" | "settings" => 900,
         "midrun" => 1500,
         "daemons" => 6000,
+        "browse" => 9000,
         "longcmd" => 600_000,
         _ => 2500,
     };
     let open: Vec<String> = match mode.as_str() {
         "run" | "live" => vec!["plan", "tasks", "gate"],
         "midrun" => vec!["plan", "tasks", "agents", "commands"],
-        "research" | "chat" => vec!["research"],
+        "research" | "chat" | "pictures" => vec!["research"],
         "daemons" => vec!["inbox", "daemons"],
         _ => vec!["plan"],
     }.into_iter().map(String::from).collect();
@@ -200,7 +239,7 @@ fn main() {
     let code = chuck_ui::run(chuck_ui::Options { model, folder: Some(proj), send,
                                                  shot: Some((out, ms)), width: 1280, height: 860,
                                                  settings: mode == "settings", open: Some(open), web,
-                                                 chat: Some(mode == "chat" || mode == "voice"),
+                                                 chat: Some(mode == "chat" || mode == "voice" || mode == "pictures"),
                                                  listen: mode == "voice" });
     if std::env::var_os("CHUCK_SHOT_FOLDER").is_none() {
         let _ = std::fs::remove_dir_all(&dir);

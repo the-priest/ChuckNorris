@@ -92,6 +92,13 @@ pub fn run(folder: Option<&Path>, mcp: Option<&chuck_mcp::Manager>) -> Vec<Check
         Ok(h) => out.push(c("Web search", State::Ok, format!("{} results", h.len()))),
         Err(e) => out.push(c("Web search", State::Warn, format!("{e} — set your own SearXNG in Settings › Research"))),
     }
+    let pref = setup::browser_pref(&s);
+    match chuck_web::browser::find(&pref) {
+        Ok(p) => out.push(c("Browser", State::Ok, format!("{} ({}) — page checks and pages that need JavaScript",
+                                                          chuck_web::browser::engine_name(&p), p.display()))),
+        Err(e) => out.push(c("Browser", State::Warn, format!("{e}: the Lead can't check web pages, and pages that need \
+            JavaScript can't be read"))),
+    }
     // voice
     let vp = chuck_voice::Prefs::from(&s);
     let voice = chuck_voice::Voice::new();

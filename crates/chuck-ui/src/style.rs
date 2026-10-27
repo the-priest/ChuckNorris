@@ -104,6 +104,10 @@ headerbar { background-color: @bg; border-bottom: 1px solid @line; box-shadow: n
 .done-card .card-kind { color: @good; }
 .gap-card  { border-color: alpha(@warn, 0.5); }
 .gap-card .card-kind { color: @warn; }
+.gal-pic   { border-radius: 8px; }
+.gal-cap   { color: @mute; font-size: 11.5px; }
+.thumb-btn { padding: 0; border-radius: 8px; }
+.video-row { padding: 6px 0; border-bottom: 1px solid @line; }
 .cmd-text  { font-family: "JetBrains Mono", "Fira Code", "DejaVu Sans Mono", monospace; color: #E2E2F2; font-size: 12.5px; }
 
 .composer { background-color: @surface; border: 1px solid @line2; border-radius: 14px; padding: 8px 10px; }

@@ -72,8 +72,16 @@ pub fn web(s: &Settings) -> chuck_web::Web {
         searx_own: s.str("searx_url").map(|u| u.trim().trim_end_matches('/').to_string()).filter(|u| !u.is_empty()),
         proxy,
         timeout: std::time::Duration::from_secs_f64(s.num("fetch_timeout", 8.0, 3.0, 30.0)),
+        browser: (s.map.get("stealth_fetch").and_then(|v| v.as_bool()) != Some(false)).then(|| browser_pref(s)),
         ..chuck_web::Config::default()
     })
+}
+
+/// Which browser drives ```browse``` and reads the pages a plain fetch can't
+/// (Settings › Research; the Python app's `browser` setting).
+pub fn browser_pref(s: &Settings) -> String {
+    s.str("browser").map(str::trim).filter(|b| !b.is_empty() && !b.eq_ignore_ascii_case("camoufox"))
+        .unwrap_or("auto").to_string()
 }
 
 /// Language servers, with the user's choices (settings `lsp_servers`:
@@ -132,6 +140,7 @@ pub fn from_settings(s: &Settings, folder: &Path, max_usd: Option<f64>) -> Resul
     }
     cfg.job_quota = Quota { usd: Some(usd), ..cfg.job_quota };
     cfg.web = Some(Arc::new(web(s)));
+    cfg.browser = Some(browser_pref(s));
     cfg.memory = Some(Arc::new(chuck_store::memory::Memory::at(&chuck_store::memory::Memory::default_path())));
     cfg.sources = s.num("research_sources", 6.0, 1.0, 10.0) as usize;
     cfg.access = access_of(s, folder);

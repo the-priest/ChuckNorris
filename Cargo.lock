@@ -295,7 +295,10 @@ dependencies = [
 name = "chuck-web"
 version = "18.0.0-alpha.1"
 dependencies = [
+ "base64",
+ "chuck-tools",
  "encoding_rs",
+ "libc",
  "regex",
  "serde_json",
  "ureq",

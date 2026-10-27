@@ -375,7 +375,12 @@ impl Panel {
         }
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         row.add_css_class("panel-row");
-        let mark = gtk::Image::from_icon_name(if tool == "search" { "system-search-symbolic" } else { "text-x-generic-symbolic" });
+        let mark = gtk::Image::from_icon_name(match tool {
+            "search" => "system-search-symbolic",
+            "images" => "image-x-generic-symbolic",
+            "videos" => "video-x-generic-symbolic",
+            _ => "text-x-generic-symbolic",
+        });
         mark.add_css_class(if ok { "research-ok" } else { "research-fail" });
         mark.set_valign(gtk::Align::Start);
         mark.set_margin_top(2);
@@ -383,9 +388,9 @@ impl Panel {
         let text = gtk::Box::new(gtk::Orientation::Vertical, 1);
         text.set_hexpand(true);
         let url = what.split_whitespace().next().unwrap_or("");
-        let head = if tool == "search" {
+        let head = if tool != "fetch" {
             self.searches += 1;
-            format!("<b>{}</b>", escape(what))
+            format!("<b>{}</b>{}", escape(what), if tool == "search" { String::new() } else { format!(" · {tool}") })
         } else {
             self.pages += 1;
             let shown = if summary.is_empty() || !ok { url.to_string() } else { summary.to_string() };
@@ -401,7 +406,7 @@ impl Panel {
         h.set_wrap(false);
         h.set_tooltip_text(Some(url));
         text.append(&h);
-        let sub = if tool == "search" { format!("{who} · {summary}") } else if ok { format!("{who} · {url}") }
+        let sub = if tool != "fetch" { format!("{who} · {summary}") } else if ok { format!("{who} · {url}") }
             else { format!("{who} · {summary}") };
         let d = label(&sub, &["panel-dim"]);
         d.set_ellipsize(pango::EllipsizeMode::End);

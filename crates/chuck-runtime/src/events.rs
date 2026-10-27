@@ -50,7 +50,36 @@ pub enum Event {
     /// Chat mode: a reminder ("remind") or a daemon ("report") to keep —
     /// already checked, for whoever holds the daemons to add.
     Schedule { kind: String, when: serde_json::Value, what: String },
+    /// The lead looked at a page in the browser.
+    Browsed { id: AgentId, url: String, title: String, size: (u32, u32), ms: u64, engine: String, errors: Vec<String>,
+              failed: Vec<String>, warnings: Vec<String>, steps: Vec<String>, refused: Vec<String>,
+              /// The screenshot, saved.
+              shot: Option<std::path::PathBuf>,
+              /// What the vision model saw in it.
+              look: Option<String> },
+    /// Chat mode: pictures found for the user (downloaded and checked).
+    Gallery { query: String, items: Vec<Picture> },
+    /// Chat mode: videos found for the user.
+    Videos { query: String, items: Vec<Video> },
     Finished(Outcome),
+}
+
+/// A picture on disk, and where it came from.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Picture {
+    pub path: std::path::PathBuf,
+    pub src: String,
+    pub page: String,
+    pub title: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Video {
+    pub title: String,
+    pub url: String,
+    /// Its poster, downloaded.
+    pub thumb: Option<std::path::PathBuf>,
+    pub length: Option<String>,
 }
 
 /// A task as the panel shows it.

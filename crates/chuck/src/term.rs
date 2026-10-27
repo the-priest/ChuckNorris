@@ -112,6 +112,35 @@ impl View {
                 };
                 format!("  {mark} {} {} {}", st.dim(&format!("{who:<6}")), tool, st.dim(&what))
             }
+            Event::Gallery { query, items } => {
+                let mut s = format!("  {} {query}", st.accent(&format!("◉ {} pictures", items.len())));
+                for p in items {
+                    s.push_str(&format!("\n      {} {}", p.path.display(), st.dim(&format!("({})", p.page))));
+                }
+                s
+            }
+            Event::Videos { query, items } => {
+                let mut s = format!("  {} {query}", st.accent(&format!("◉ {} videos", items.len())));
+                for v in items {
+                    s.push_str(&format!("\n      {}{} {}", v.title, v.length.as_ref().map(|l| format!(" ({l})")).unwrap_or_default(),
+                                        st.dim(&v.url)));
+                }
+                s
+            }
+            Event::Browsed { url, errors, failed, shot, look, .. } => {
+                let mut s = format!("  {} {url}: {} JS error{}, {} failed request{}", st.accent("◉ browser"), errors.len(),
+                                    if errors.len() == 1 { "" } else { "s" }, failed.len(), if failed.len() == 1 { "" } else { "s" });
+                for e in errors.iter().take(5) {
+                    s.push_str(&format!("\n      {}", st.bad(&one_line(e, 140))));
+                }
+                if let Some(l) = look {
+                    s.push_str(&format!("\n      {}", st.dim(&one_line(l, 200))));
+                }
+                if let Some(p) = shot {
+                    s.push_str(&format!("\n      {}", st.dim(&format!("screenshot: {}", p.display()))));
+                }
+                s
+            }
             Event::Output { chunk, .. } => {
                 if !self.verbose {
                     return;

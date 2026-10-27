@@ -12,9 +12,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub const WORKER_TAGS: &[&str] = &["read", "grep", "glob", "map", "def", "refs", "rename", "bash", "sh", "test", "search", "fetch",
-    "mcp", "submit"];
+    "mcp", "browse", "submit"];
 pub const LEAD_TAGS: &[&str] = &["read", "grep", "glob", "map", "def", "refs", "rename", "bash", "sh", "test", "search",
-    "fetch", "mcp", "remember", "forget", "criteria", "plan", "assign",
+    "fetch", "mcp", "browse", "remember", "forget", "criteria", "plan", "assign",
     "review", "justify", "done", "ask"];
 const CLIP: usize = 20_000;
 /// A fetched page is handed over this many characters at a time.
@@ -463,6 +463,11 @@ impl<'a> Exec<'a> {
                 self.act(tag, what, ok, &summary);
                 res.feedback.push(text);
             }
+            "browse" if self.sandbox.worker => {
+                res.actions.push(format!("browse {arg}"));
+                res.feedback.push("[browse: the browser is the lead's (it runs outside your jail) — check pages with \
+                    the project's own tests, or say in your submission what the lead should look at]".into());
+            }
             "submit" => {
                 res.submit = Some(format!("{}\n{}", arg, t.body).trim().to_string());
             }
@@ -786,8 +791,10 @@ pub fn research(web: Option<&chuck_web::Web>, sources: usize, tag: &str, what: &
             Ok(p) => {
                 let (window, pages) = chuck_web::window(&p.text, page, PAGE_CHARS);
                 let page = page.clamp(1, pages);
-                let mut out = format!("PAGE {}{}{}\n", p.url, p.title.as_ref().map(|t| format!(" — {t}")).unwrap_or_default(),
-                                      if pages > 1 { format!(" (part {page} of {pages})") } else { String::new() });
+                let mut out = format!("PAGE {}{}{}{}\n", p.url, p.title.as_ref().map(|t| format!(" — {t}")).unwrap_or_default(),
+                                      if pages > 1 { format!(" (part {page} of {pages})") } else { String::new() },
+                                      p.via.as_ref().map(|v| format!(" [read in {v}: a plain read saw only a bot check or an \
+                                          empty page]")).unwrap_or_default());
                 out.push_str(if window.trim().is_empty() { "(no readable text)" } else { &window });
                 if page < pages {
                     out.push_str(&format!("\n… ```fetch {} {}``` for the next part", p.url, page + 1));

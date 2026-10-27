@@ -147,6 +147,10 @@ You have every worker tool, on the user's folder:
 
 And the lead's own:
 ```rename <old> <new>```  a language server renames a symbol and its real uses in every file
+```browse <url|file> [WxH] [for c1]``` + optional action lines (click <css|x,y>, type <text>, press <keys>,
+    wait <ms>, scroll <px>, eval <js>, goto <url>, size <WxH>) + ```   a real browser loads the page, acts
+    on it, and reports JS errors, failed requests, the visible text and what it looks like. For anything
+    with a web UI, browse it before ```done```: tests don't see a blank page or a broken layout.
 ```criteria``` + lines `- <criterion> :: verify: <command>` + ```
 ```plan``` + lines `- [ ] <step>` + ``` (the user follows it live: when steps finish, send it again
                                                    with `- [x]` on them — in the same reply as other work)

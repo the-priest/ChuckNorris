@@ -213,6 +213,63 @@ fn card(kind: &str, class: &str) -> (gtk::Box, gtk::Box, gtk::Box) {
     (c, body, foot)
 }
 
+/// What the Lead saw in the browser: errors up top, the page as a picture,
+/// what a vision model made of it, and the rest one click away.
+fn browser_card(b: &chat::Browsed) -> gtk::Box {
+    let n = b.errors.len();
+    let (c, body, _foot) = card("BROWSER", if n > 0 || !b.failed.is_empty() { "gap-card" } else { "ask-card" });
+    let top = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let chip = label(&if n > 0 { format!("{n} JS error{}", if n == 1 { "" } else { "s" }) } else { "no JS errors".into() },
+                     &["chip", if n > 0 { "chip-bad" } else { "chip-ok" }]);
+    chip.set_wrap(false);
+    chip.set_valign(gtk::Align::Center);
+    top.append(&chip);
+    let what = label(&format!("{} · {}×{} · {:.1}s{}{}", b.url, b.size.0, b.size.1, b.ms as f64 / 1000.0,
+                              if b.engine.is_empty() { String::new() } else { format!(" · {}", b.engine) },
+                              if b.title.is_empty() { String::new() } else { format!(" · {}", b.title) }), &["cmd-text"]);
+    what.set_hexpand(true);
+    what.set_selectable(true);
+    top.append(&what);
+    body.append(&top);
+    for e in b.errors.iter().take(5) {
+        body.append(&markup(&format!("<span foreground=\"#F87171\">✗</span> {}", md::escape(e)), &["cmd-text"]));
+    }
+    if let Some(p) = b.shot.as_deref().filter(|p| Path::new(p).is_file()) {
+        let pic = gtk::Picture::for_filename(p);
+        pic.set_content_fit(gtk::ContentFit::Contain);
+        pic.set_can_shrink(true);
+        pic.set_halign(gtk::Align::Start);
+        // as wide as the card allows, never taller than this
+        let h = (b.size.1 as f64 * 620.0 / b.size.0.max(1) as f64).clamp(120.0, 320.0);
+        pic.set_size_request(-1, h as i32);
+        pic.set_tooltip_text(Some(p));
+        body.append(&pic);
+    }
+    if let Some(l) = &b.look {
+        body.append(&markup(&format!("<span foreground=\"#8E8E9E\">What it looks like:</span> {}", md::escape(l.trim())),
+                            &["prose"]));
+    }
+    let more = |title: String, items: &[String]| {
+        let inner = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        for it in items {
+            let l = label(it, &["cmd-text"]);
+            l.set_selectable(true);
+            inner.append(&l);
+        }
+        let e = gtk::Expander::new(Some(&title));
+        e.set_child(Some(&inner));
+        e.set_expanded(false);
+        e
+    };
+    for (name, items) in [("JS errors", &b.errors), ("Failed requests", &b.failed), ("Warnings", &b.warnings),
+                          ("Actions", &b.steps), ("Not allowed to reach", &b.refused)] {
+        if !items.is_empty() && !(name == "JS errors" && items.len() <= 5) {
+            body.append(&more(format!("{name} ({})", items.len()), items));
+        }
+    }
+    c
+}
+
 impl State {
     fn append(&mut self, w: &impl IsA<gtk::Widget>) {
         self.ui.transcript.append(w);
@@ -310,6 +367,26 @@ impl State {
             Entry::Card { kind, class, text } => {
                 let (c, body, _foot) = card(kind, class);
                 body.append(&render(text));
+                self.append(&c);
+                self.lane = None;
+            }
+            Entry::Gallery { query, items } => {
+                let (c, body, _foot) = card(&format!("PICTURES · {}", items.len()), "ask-card");
+                body.append(&label(query, &["panel-dim"]));
+                crate::media::gallery(&body, items);
+                self.append(&c);
+                self.lane = None;
+            }
+            Entry::Videos { query, items } => {
+                let (c, body, _foot) = card(&format!("VIDEOS · {}", items.len()), "ask-card");
+                body.append(&label(query, &["panel-dim"]));
+                let proxy = Settings::load().str("proxy").map(String::from);
+                crate::media::videos(&body, items, proxy);
+                self.append(&c);
+                self.lane = None;
+            }
+            Entry::Browser(b) => {
+                let c = browser_card(b);
                 self.append(&c);
                 self.lane = None;
             }
@@ -528,10 +605,10 @@ fn on_event(st: &mut State, e: Event, shared: &Shared) {
                 _ if summary.is_empty() => one_line(&arg, 100),
                 _ => one_line(&summary, 120),
             };
-            if tool == "bash" || tool == "test" || tool == "mcp" {
+            if tool == "bash" || tool == "test" || tool == "mcp" || tool == "browse" {
                 st.panel.command_finished(id, ok, &summary);
             }
-            if tool == "search" || tool == "fetch" {
+            if matches!(tool.as_str(), "search" | "fetch" | "images" | "videos") {
                 st.panel.research(&who, &tool, &arg, ok, &summary);
             }
             st.panel.log(&who, format!("{} {tool} {what}", if ok { "✓" } else { "✗" }));
@@ -596,6 +673,20 @@ fn on_event(st: &mut State, e: Event, shared: &Shared) {
             st.saved.progress.tasks = t.iter().map(|t| chat::TaskSnap { id: t.id.clone(), title: t.title.clone(),
                 state: t.state.clone(), workers: t.workers.clone(), deps: t.deps.clone(), criteria: t.criteria.clone(),
                 note: t.note.clone() }).collect();
+        }
+        Event::Browsed { id, url, title, size, ms, engine, errors, failed, warnings, steps, refused, shot, look } => {
+            let who = st.who(id);
+            st.panel.log(&who, format!("browsed {url}: {} JS errors, {} failed requests", errors.len(), failed.len()));
+            st.add(Entry::Browser(Box::new(chat::Browsed { url, title, size, ms, engine, errors, failed, warnings, steps, refused,
+                                                           shot: shot.map(|p| p.display().to_string()), look })));
+        }
+        Event::Gallery { query, items } => {
+            st.add(Entry::Gallery { query, items: items.into_iter().map(|p| chat::Picture {
+                path: p.path.display().to_string(), src: p.src, page: p.page, title: p.title }).collect() });
+        }
+        Event::Videos { query, items } => {
+            st.add(Entry::Videos { query, items: items.into_iter().map(|v| chat::Video {
+                title: v.title, url: v.url, thumb: v.thumb.map(|t| t.display().to_string()), length: v.length }).collect() });
         }
         Event::Ask { question, .. } => {
             let (c, body, foot) = card("THE LEAD ASKS", "ask-card");
@@ -790,6 +881,7 @@ fn start(shared: &Shared, text: String) {
         (Some(m), _) => (m.clone(), chuck_runtime::RuntimeConfig { access: setup::access_of(&settings, &folder),
                                                                   web: st.opts.web.clone(), mcp: Some(st.mcp.clone()),
                                                                   lsp: Some(st.lsp.clone()), memory: Some(st.memory.clone()),
+                                                                  browser: Some(setup::browser_pref(&settings)),
                                                                   ..Default::default() }),
         (None, Ok(s)) => {
             for n in &s.notes {
@@ -1479,9 +1571,28 @@ fn settings_dialog(shared: &Shared) {
     let sources = adw::SpinRow::with_range(1.0, 10.0, 1.0);
     sources.set_title("Results per search");
     sources.set_value(s.num("research_sources", 6.0, 1.0, 10.0));
+    let browsers = [("auto", "Automatic (Brave, Chromium, then Chrome)"), ("brave", "Brave"), ("chromium", "Chromium"),
+                    ("chrome", "Chrome")];
+    let pref = chuck_runtime::setup::browser_pref(&s);
+    let browser = adw::ComboRow::builder().title("Browser")
+        .subtitle(match chuck_web::browser::find(&pref) {
+            Ok(p) => format!("{} · {} — for the Lead's page checks and pages that need JavaScript",
+                             chuck_web::browser::engine_name(&p), p.display()),
+            Err(e) => e,
+        })
+        .model(&gtk::StringList::new(&browsers.iter().map(|b| b.1).collect::<Vec<_>>())).build();
+    // a path typed into settings.json stays as it is unless a choice here is made
+    let custom = !browsers.iter().any(|b| b.0 == pref);
+    browser.set_selected(browsers.iter().position(|b| b.0 == pref).unwrap_or(0) as u32);
+    let stealth = adw::SwitchRow::builder().title("Read blocked and script-only pages in the browser")
+        .subtitle("When a plain read sees only a bot check or an empty page, the page is loaded in the browser \
+            (public addresses only)")
+        .active(s.map.get("stealth_fetch").and_then(|v| v.as_bool()) != Some(false)).build();
     research.add(&searx);
     research.add(&proxy);
     research.add(&sources);
+    research.add(&browser);
+    research.add(&stealth);
     page.add(&research);
     page.add(&about);
 
@@ -1632,6 +1743,10 @@ fn settings_dialog(shared: &Shared) {
         s.set("searx_url", searx.text().trim().into());
         s.set("proxy", proxy.text().trim().into());
         s.set("research_sources", (sources.value() as i64).into());
+        if !custom || browser.selected() != 0 {
+            s.set("browser", browsers[browser.selected() as usize].0.into());
+        }
+        s.set("stealth_fetch", stealth.is_active().into());
         s.set("tts", tts.is_active().into());
         s.set("check_updates", updates.is_active().into());
         s.set("voice_engine", engines[engine.selected() as usize].0.into());

@@ -423,8 +423,31 @@ the evidence chain), `/update` (installs the newest Chuck from this branch, then
 whether a newer version is out (Settings can turn that off). From a terminal: `chuck doctor`,
 `chuck update`.
 
-What isn't ported to Rust yet, so isn't in this branch's app: a real browser for pages that need
-JavaScript, and images and video.
+**A real browser.** The Lead checks anything with a web UI the way a person would:
+```` ```browse index.html 1024x640``` ```` with action lines under it (click, type, press keys, scroll, wait,
+evaluate) loads the page in your own Brave, Chromium or Chrome, headless, and reports every uncaught
+exception, console error and failed request with its file and line, the visible text, and a screenshot.
+The Lead's model can't see, so GLM-5.3-Flash looks at the screenshot and describes it in a few lines
+(one cheap call). A clean look counts as evidence for the criteria it names; a page with errors never does.
+The browser starts with a throwaway profile and nothing that phones home, can't download anything, and is
+killed with its whole process group when the call ends. In a restricted folder it opens only that folder's
+files; in an offline folder the page reaches no network at all.
+
+![The Lead browses a page: a JS error with its line, the screenshot, and what the vision model saw](assets/screenshots/fleet-browse.png)
+
+When ```` ```fetch``` ```` meets a page that is empty until its scripts run, or a bot check that clears
+itself in a real browser, it reads the page in the browser instead and says so. Every request that page
+makes is checked first: only public addresses, however it redirects. Settings › Research picks the
+browser or turns this off.
+
+**Pictures and videos in Chat.** Ask to see something and Chat shows a gallery: pictures found through
+SearXNG's image search (DuckDuckGo's as the fallback), downloaded only from public addresses, at most
+12 MB each, and kept only if the bytes really are a picture (never SVG). A click opens the page each came
+from. Videos come as cards with their poster and length, an **Open** button, and **Download**, which saves
+one video (at most 1080p and 2 GB) to your Downloads folder with yt-dlp and stops if you close Chuck.
+
+What isn't ported to Rust yet, so isn't in this branch's app: Camoufox (a Firefox build) as the browser,
+ranked code search (```` ```find``` ````) and ```` ```patch``` ````, the crash log, and the command palette.
 [ARCHITECTURE.md](ARCHITECTURE.md) has the design and the plan.
 
 Arch and CachyOS are first-class; apt and dnf are supported. The installer sets up GTK4 and libadwaita, bubblewrap, a screenshot tool, the local voice models (about 600 MB, skip with `CHUCK_VOICE=0`) and the linters Chuck uses to check code. At runtime Chuck needs only Python's standard library and GTK; everything optional degrades gracefully when it's missing.

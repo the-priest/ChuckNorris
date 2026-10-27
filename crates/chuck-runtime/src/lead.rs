@@ -1010,6 +1010,7 @@ impl<'a> LeadRun<'a> {
                     "assign" => self.assign(call),
                     "review" => self.review(call),
                     "justify" => self.justify(call),
+                    "browse" => crate::browse::browse(ctx, self.id, &self.root, &self.gate, call),
                     "ask" => self.ask(call),
                     "done" => match self.done(call) {
                         Ok(Ok(o)) => return o,
