@@ -125,12 +125,23 @@ pub struct Jail {
     /// Hide your home folder but for the working folder, your toolchains and
     /// build caches (the "ask outside the folder" mode).
     pub hide_home: bool,
+    /// What a command starts in the background (a server, an emulator) may
+    /// outlive it for the next command to use. Without this the jail has
+    /// its own process namespace and everything in it ends with the command.
+    /// Either way, quitting Chuck ends it.
+    pub keep_background: bool,
 }
 
 impl Jail {
     pub fn new(root: &Path) -> Jail {
         Jail { root: root.to_path_buf(), write: true, net: true, writable: Vec::new(), cache: Some(default_cache()),
-               extra_ro: Vec::new(), persistent: false, hide_home: false }
+               extra_ro: Vec::new(), persistent: false, hide_home: false, keep_background: false }
+    }
+
+    /// Background processes may outlive the command (the lead's commands).
+    pub fn keep_background(mut self) -> Jail {
+        self.keep_background = true;
+        self
     }
 
     /// Only the folder (and what was allowed): the rest of home hidden.
@@ -159,8 +170,11 @@ impl Jail {
     pub fn argv(&self, bwrap: &Path, inner: &[String]) -> Vec<String> {
         let s = |p: &Path| p.display().to_string();
         let mut a: Vec<String> = [s(bwrap).as_str(), "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc",
-            "--tmpfs", "/tmp", "--tmpfs", "/var/tmp", "--tmpfs", "/run", "--unshare-pid", "--new-session"]
+            "--tmpfs", "/tmp", "--tmpfs", "/var/tmp", "--tmpfs", "/run", "--new-session"]
             .iter().map(|x| x.to_string()).collect();
+        if !self.keep_background {
+            a.push("--unshare-pid".into());
+        }
         if !self.persistent {
             a.push("--die-with-parent".into());
         }

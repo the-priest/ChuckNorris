@@ -261,22 +261,22 @@ impl<'a> Exec<'a> {
                 Reach::Unjailed => (None, false),
                 _ if !s.bwrap => (None, false),
                 Reach::Mount(m) => {
-                    let j = Jail::new(self.root).guarded().allow(&allowed).allow(m);
+                    let j = Jail::new(self.root).keep_background().guarded().allow(&allowed).allow(m);
                     if may_write { (Some(j.wrap()), false) } else { look(j) }
                 }
                 Reach::Inside => {
-                    let j = Jail::new(self.root).guarded().allow(&allowed);
+                    let j = Jail::new(self.root).keep_background().guarded().allow(&allowed);
                     if may_write { (Some(j.wrap()), false) } else { look(j) }
                 }
             });
         }
         match s.access {
-            Access::Full if !may_write && s.bwrap => Ok(look(Jail::new(self.root))),
+            Access::Full if !may_write && s.bwrap => Ok(look(Jail::new(self.root).keep_background())),
             Access::Full | Access::Guarded => Ok((None, false)),
             Access::SandboxNet | Access::Sandbox if !s.bwrap => Err("[not run: this folder is sandboxed but \
                 bubblewrap isn't installed — install bubblewrap, or give the folder full access]".into()),
             Access::SandboxNet | Access::Sandbox => {
-                let mut j = Jail::new(self.root);
+                let mut j = Jail::new(self.root).keep_background();
                 if s.access == Access::Sandbox {
                     j = j.offline();
                 }
@@ -284,7 +284,7 @@ impl<'a> Exec<'a> {
             }
             Access::ReadOnly if !s.bwrap => Err("[not run: this folder is read-only, and commands can only be \
                 kept from changing it inside bubblewrap, which isn't installed]".into()),
-            Access::ReadOnly => Ok(look(Jail::new(self.root).offline())),
+            Access::ReadOnly => Ok(look(Jail::new(self.root).keep_background().offline())),
         }
     }
 
