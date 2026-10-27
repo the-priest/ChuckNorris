@@ -1,8 +1,11 @@
-# A tag like v18.0.0 builds Chuck and publishes the GitHub release, with the
-# notes from docs/RELEASE-<version>.md and a prebuilt x86_64 binary.
+# Builds Chuck and publishes the GitHub release v<version> (the version in
+# Cargo.toml), with the notes from docs/RELEASE-<version>.md and a prebuilt
+# x86_64 binary. Start it from the Actions tab (Run workflow, on main), or
+# push a tag like v18.0.0; the tag is created with the release if it's new.
 name: release
 
 on:
+  workflow_dispatch:
   push:
     tags: ["v*"]
 
@@ -20,18 +23,19 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config libgtk-4-dev libadwaita-1-dev
       - uses: dtolnay/rust-toolchain@stable
-      - name: The tag matches the version
+      - name: The version, and its notes
         run: |
-          v="${GITHUB_REF_NAME#v}"
-          grep -q "^version = \"${v}\"" Cargo.toml || { echo "Cargo.toml isn't version ${v}"; exit 1; }
+          v="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "${GITHUB_REF_NAME}" != "v${v}" ]; then
+            echo "the tag ${GITHUB_REF_NAME} isn't Cargo.toml's version ${v}"; exit 1
+          fi
           test -f "docs/RELEASE-${v}.md" || { echo "docs/RELEASE-${v}.md is missing"; exit 1; }
           echo "VERSION=${v}" >> "$GITHUB_ENV"
       - name: Build
         run: cargo build --release --locked -p chuck
       - name: Package
         run: |
-          v="${GITHUB_REF_NAME#v}"
-          d="chuck-${v}-linux-x86_64"
+          d="chuck-${VERSION}-linux-x86_64"
           mkdir "$d"
           cp target/release/chuck "$d/"
           strip "$d/chuck"
@@ -43,6 +47,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           name: Chuck ${{ env.VERSION }}
+          tag_name: v${{ env.VERSION }}
+          target_commitish: ${{ github.sha }}
           body_path: docs/RELEASE-${{ env.VERSION }}.md
           files: |
             chuck-*-linux-x86_64.tar.gz
