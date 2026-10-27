@@ -146,6 +146,26 @@ pub fn split_for(arg: &str) -> (String, Vec<CriterionId>) {
 
 /// A "verification" that can't fail: `true`, `echo ok`, `exit 0`, `sleep 1`…
 /// It is recorded as a plain command, never as a passing test.
+/// A command as the gate compares it: a leading `cd <the project folder> &&`
+/// (commands already run there) left out, spacing normalized.
+pub fn as_checked(cmd: &str, root: &Path) -> String {
+    static RX: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let rx = RX.get_or_init(|| regex::Regex::new(r#"^\s*cd\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))\s*(?:&&|;)\s*"#).unwrap());
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let mut c = cmd.trim().to_string();
+    while let Some(m) = rx.captures(&c) {
+        let dir = m.get(1).or(m.get(2)).or(m.get(3)).map_or("", |d| d.as_str());
+        let p = Path::new(dir);
+        let p = if p.is_absolute() { p.to_path_buf() } else { root.join(p) };
+        if p.canonicalize().unwrap_or(p) != root {
+            break;
+        }
+        let end = m.get(0).unwrap().end();
+        c = c[end..].to_string();
+    }
+    c.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 pub fn proves_nothing(cmd: &str) -> bool {
     let segs: Vec<&str> = cmd.split([';', '&', '|', '\n']).map(str::trim)
         .filter(|s| !s.is_empty()).collect();
@@ -640,7 +660,8 @@ impl<'a> Exec<'a> {
                 let t_start = now_secs();
                 let started = chuck_store::ledger::local_stamp("%Y-%m-%dT%H:%M:%S%z");
                 self.events.emit(Event::Running { id: self.id, tool: tag.into(), cmd: cmd.clone() });
-                let r = self.run_cmd(&cmd, wrap);
+                // a verification's exit status must be the whole pipeline's: `make test | tail` can't pass a failure
+                let r = self.run_cmd(&if tag == "test" { format!("set -o pipefail\n{cmd}") } else { cmd.clone() }, wrap);
                 let changed = fingerprint(self.root) != before;
                 if let Some((ledger, who)) = &self.audit {
                     // every command that ran, whatever the agent later says about it (recorded after
@@ -664,14 +685,15 @@ impl<'a> Exec<'a> {
                 }
                 self.kernel.syscall(self.id, tag, &cmd, r.ms as f64, r.output.len(), false);
                 let mut g = self.gate.lock().unwrap();
-                let criteria = if !linked.is_empty() {
+                let explicit = !linked.is_empty();
+                let checked = as_checked(&cmd, self.root);
+                let criteria = if explicit {
                     linked
                 } else if tag == "test" {
                     g.criteria.iter().map(|c| c.id).collect()
                 } else {
-                    let n = cmd.split_whitespace().collect::<Vec<_>>().join(" ");
-                    g.criteria.iter().filter(|c| c.verify.as_deref()
-                        .is_some_and(|v| v.split_whitespace().collect::<Vec<_>>().join(" ") == n)).map(|c| c.id).collect()
+                    g.criteria.iter().filter(|c| c.verify.as_deref().is_some_and(|v| as_checked(v, self.root) == checked))
+                        .map(|c| c.id).collect()
                 };
                 let out = clip(&r.output, 6000);
                 if changed && g.allow_mutation().is_err() {
@@ -681,12 +703,16 @@ impl<'a> Exec<'a> {
                 let hollow = tag == "test" && proves_nothing(&cmd);
                 let kind = if tag == "test" && !hollow {
                     let (passed, failed) = test_counts(&r.output);
-                    EvidenceKind::Test { cmd: cmd.clone(), exit: r.exit, passed, failed, output: out.clone() }
+                    EvidenceKind::Test { cmd: checked.clone(), exit: r.exit, passed, failed, output: out.clone() }
                 } else {
-                    EvidenceKind::Command { cmd: cmd.clone(), exit: r.exit, output: out.clone() }
+                    EvidenceKind::Command { cmd: checked.clone(), exit: r.exit, output: out.clone() }
                 };
                 let verified = tag == "test" && !hollow && r.ok();
-                g.record(self.id, if hollow { Vec::new() } else { criteria }, kind, changed);
+                if explicit && !hollow {
+                    g.record_linked(self.id, criteria, kind, changed);
+                } else {
+                    g.record(self.id, if hollow { Vec::new() } else { criteria }, kind, changed);
+                }
                 drop(g);
                 res.mutated |= changed;
                 res.verified |= verified;
@@ -721,7 +747,9 @@ impl<'a> Exec<'a> {
                 res.submit = Some(format!("{}\n{}", arg, t.body).trim().to_string());
             }
             "criteria" => {
-                let items = parse_criteria(&t.body);
+                // verify commands as the gate compares them (no redundant `cd <folder> &&`)
+                let items: Vec<(String, Option<String>)> = parse_criteria(&t.body).into_iter()
+                    .map(|(c, v)| (c, v.map(|v| as_checked(&v, self.root)))).collect();
                 if items.is_empty() {
                     res.feedback.push("[criteria: none given — one per line: `- <criterion> :: verify: <command>`]".into());
                     return;
@@ -1114,6 +1142,18 @@ mod tests {
     fn plans_with_progress() {
         assert_eq!(parse_plan("- [x] read the parser\n- [ ] fix it\n3. verify\n* [X] two"), vec![
             ("read the parser".into(), true), ("fix it".into(), false), ("verify".into(), false), ("two".into(), true)]);
+    }
+
+    #[test]
+    fn the_folder_cd_is_left_out_of_what_the_gate_compares() {
+        let d = std::env::temp_dir().join(format!("chuck-checked-{}", std::process::id()));
+        std::fs::create_dir_all(d.join("sub")).unwrap();
+        let r = d.display().to_string();
+        assert_eq!(as_checked(&format!("cd \"{r}\" && ./gradlew   test"), &d), "./gradlew test");
+        assert_eq!(as_checked(&format!("cd {r}; cd {r}/ && make"), &d), "make");
+        assert_eq!(as_checked("cd sub && make", &d), "cd sub && make", "another folder is a different command");
+        assert_eq!(as_checked("make test", &d), "make test");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

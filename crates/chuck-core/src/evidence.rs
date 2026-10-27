@@ -85,6 +85,10 @@ pub struct Evidence {
     /// Which criteria this backs (empty: general).
     pub criteria: Vec<CriterionId>,
     pub kind: EvidenceKind,
+    /// The agent said which criteria this run checks (`for c1,c2`), rather
+    /// than a test run counting for every criterion by default.
+    #[serde(default)]
+    pub explicit: bool,
 }
 
 pub fn clip(s: &str, n: usize) -> String {

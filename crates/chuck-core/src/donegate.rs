@@ -89,7 +89,8 @@ impl Unmet {
                 "nothing was verified (tests/build/run) after the last change".into()
             }
             Unmet::VerifyCommandNotRun(c, cmd) => {
-                format!("{c}'s verification `{}` hasn't passed since the last change", clip(cmd, 70))
+                format!("{c}'s verification `{}` hasn't passed since the last change (run it, or an equivalent check \
+                    with `for {c}`)", clip(cmd, 70))
             }
             Unmet::VerificationFailing(cmd) => format!("verification is failing: {}", clip(cmd, 80)),
             Unmet::Craftsmanship(why) => format!("unfinished code: {why}"),
@@ -306,9 +307,20 @@ impl DoneGate {
             }
         }
         let verified_now = matches!(&kind, EvidenceKind::Test { exit: 0, .. });
-        self.evidence.push(Evidence { seq, by, criteria, kind });
+        self.evidence.push(Evidence { seq, by, criteria, kind, explicit: false });
         if verified_now && self.phase == Phase::Working && self.verified_since_change() {
             self.phase = Phase::Verifying;
+        }
+        seq
+    }
+
+    /// Record a run the agent linked to these criteria itself (`for c1`):
+    /// passing after the last change, it verifies them as their own verify
+    /// command would.
+    pub fn record_linked(&mut self, by: AgentId, criteria: Vec<CriterionId>, kind: EvidenceKind, mutates: bool) -> u64 {
+        let seq = self.record(by, criteria, kind, mutates);
+        if let Some(e) = self.evidence.last_mut() {
+            e.explicit = true;
         }
         seq
     }
@@ -405,7 +417,7 @@ impl DoneGate {
             if let Some(cmd) = &c.verify {
                 let ran = self.evidence.iter().any(|e| e.seq > self.last_mutation && match &e.kind {
                     EvidenceKind::Test { cmd: c2, exit: 0, .. } | EvidenceKind::Command { cmd: c2, exit: 0, .. } => {
-                        norm(c2) == norm(cmd)
+                        norm(c2) == norm(cmd) || (e.explicit && e.criteria.contains(&c.id))
                     }
                     _ => false,
                 });
