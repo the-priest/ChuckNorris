@@ -46,6 +46,8 @@ pub enum Event {
     Tasks(Vec<TaskView>),
     /// A message on the team's channel (to: one reader, or everyone).
     Team { from: String, to: Option<String>, text: String },
+    /// Something got in an agent's way (debug: see `chuck_store::snags`).
+    Snag { id: AgentId, who: String, kind: String, text: String },
     /// A command started (it ends with an Action for the same agent).
     Running { id: AgentId, tool: String, cmd: String },
     /// Chat mode: something to be done on the machine, for the fleet — sent

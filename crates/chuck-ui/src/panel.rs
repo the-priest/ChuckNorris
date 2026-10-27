@@ -141,6 +141,9 @@ pub struct Panel {
     tasks: Section,
     team: Section,
     team_posts: usize,
+    debug: Section,
+    /// Snags this job: (kind, count), most recent kind last.
+    snag_kinds: Vec<(String, usize)>,
     agents: Section,
     commands: Section,
     running_box: gtk::Box,
@@ -186,6 +189,9 @@ impl Panel {
 
         let tasks = mk("tasks", "TASKS");
         tasks.body.append(&label("Work the Lead hands to the fleet appears here.", &["panel-dim"]));
+        let debug = mk("debug", "DEBUG — WHAT GOT IN THE WAY");
+        debug.body.append(&label("What slows the agents down, limits them or goes wrong shows here, to be fixed. \
+            Settings › Debug mode asks them to report their own too.", &["panel-dim"]));
         let team = mk("team", "TEAM TALK");
         team.body.append(&label("What the workers and the Lead say to each other appears here.", &["panel-dim"]));
         let agents = mk("agents", "AGENTS");
@@ -217,11 +223,11 @@ impl Panel {
         let daemons = mk("daemons", "DAEMONS & REMINDERS");
         let memory = mk("memory", "MEMORY");
 
-        for s in [&plan, &tasks, &team, &agents, &commands, &research, &gate, &spend, &checkpoints, &inbox, &daemons, &memory] {
+        for s in [&plan, &tasks, &team, &agents, &debug, &commands, &research, &gate, &spend, &checkpoints, &inbox, &daemons, &memory] {
             side.append(&s.root);
         }
         let root = gtk::ScrolledWindow::builder().child(&side).hscrollbar_policy(gtk::PolicyType::Never).build();
-        let p = Panel { root, plan, plan_bar, plan_now, tasks, team, team_posts: 0, agents, commands, running_box, recent_box,
+        let p = Panel { root, plan, plan_bar, plan_now, tasks, team, team_posts: 0, debug, snag_kinds: Vec::new(), agents, commands, running_box, recent_box,
                         research, searches: 0, pages: 0, gate,
                         gate_phase, gate_unmet, gate_criteria, spend, checkpoints, inbox, daemons, memory, steps: Vec::new(), finished: false,
                         logs: HashMap::new(), running: HashMap::new(), recent: VecDeque::new(), recent_dirty: false,
@@ -229,6 +235,7 @@ impl Panel {
         p.plan.summary.set_label("no plan yet");
         p.tasks.summary.set_label("none");
         p.team.summary.set_label("quiet");
+        p.debug.summary.set_label("none");
         p.agents.summary.set_label("idle");
         p.commands.summary.set_label("none yet");
         p.research.summary.set_label("none");
@@ -247,6 +254,11 @@ impl Panel {
         self.agents_sig.clear();
         self.set_plan(Vec::new());
         self.set_tasks(&[]);
+        clear(&self.debug.body);
+        self.snag_kinds.clear();
+        self.debug.summary.set_label("none");
+        self.debug.body.append(&label("What slows the agents down, limits them or goes wrong shows here, to be fixed.",
+                                      &["panel-dim"]));
         clear(&self.team.body);
         self.team_posts = 0;
         self.team.summary.set_label("quiet");
@@ -375,6 +387,33 @@ impl Panel {
             }
             self.tasks.body.append(&expander(head.upcast_ref(), body.upcast_ref()));
         }
+    }
+
+    // ── debug: snags ──
+
+    /// Something got in an agent's way.
+    pub fn snag(&mut self, who: &str, kind: &str, text: &str) {
+        if self.snag_kinds.is_empty() {
+            clear(&self.debug.body);
+        }
+        match self.snag_kinds.iter_mut().find(|(k, _)| k == kind) {
+            Some(e) => e.1 += 1,
+            None => self.snag_kinds.push((kind.to_string(), 1)),
+        }
+        let head = label("", &["team-head"]);
+        head.set_markup(&format!("<b>{}</b> <span foreground=\"#F5B454\">{}</span>", escape(who), escape(kind)));
+        head.set_wrap(false);
+        self.debug.body.append(&head);
+        self.debug.body.append(&label(&one_line(text, 300), &["panel-text"]));
+        while self.debug.body.observe_children().n_items() > 200 {
+            if let Some(first) = self.debug.body.first_child() {
+                self.debug.body.remove(&first);
+            }
+        }
+        let n: usize = self.snag_kinds.iter().map(|(_, c)| c).sum();
+        let mut top = self.snag_kinds.clone();
+        top.sort_by_key(|e| std::cmp::Reverse(e.1));
+        self.debug.summary.set_label(&format!("{n} · most: {} ×{}", top[0].0, top[0].1));
     }
 
     // ── the team's talk ──

@@ -27,6 +27,8 @@ reviews and merges it.
 - Read what the task needs, not the whole project: ```map```, ```grep```, ```def``` to find it, then those \
 parts. Don't read a file again that you already have.
 - Do the whole task for real: edge cases and error handling. No TODOs, stubs, placeholders or elided code.
+- Change an existing file with ```edit``` or ```patch```, never by writing it all again: a rewrite of a big \
+file takes minutes and costs a fortune. A new big file: ```write``` the first part, ```append``` the rest.
 - Verify after your last change: the tests/build and each criterion's verify command. Read the output, \
 fix, run again.
 - Stay inside your task. Other workers build the other parts at the same time.
@@ -50,6 +52,13 @@ task truly needs one, say so in your report).";
 pub fn worker() -> String {
     WORKER.replace("{TOOLS}", WORKER_TOOLS)
 }
+
+/// Debug mode's ask, at the end of any agent's prompt.
+pub const DEBUG: &str = "\
+DEBUG MODE: Chuck is being improved. Whenever something slows you down, limits you or goes wrong — a tool \
+that can't do what you need, a confusing message, a refusal you think is wrong, missing information, a slow \
+command — note it in one line with ```snag <what happened, and what would have helped>```, then carry on. \
+Be specific; don't stop working to write them.";
 
 /// A worker's first message: who it is, its task, its team.
 pub fn worker_first(name: &str, model: &str, task: &Task, root: &str, roster: &str) -> String {
@@ -165,7 +174,8 @@ untested paths, swallowed errors, rough UX.
 ```browse``` anything with a web UI), then ```done``` + a summary. The runtime refuses `done` without \
 evidence, verification after the last change, and an independent review's yes.
 
-Never say something works without having run it. No step or time limit: big work takes as many turns \
+When the user complains or tells you something mid-job, act on it at once: don't answer with a menu of \
+options. Never say something works without having run it. No step or time limit: big work takes as many turns \
 as it needs; never cut scope, stub or finish early. A paused job carries on from your whole conversation. \
 A plain answer with no tool is fine for a question; once anything changed, only ```done``` finishes. Your \
 commands follow the folder's access setting; before the criteria exist they only look. Critical commands \
@@ -180,7 +190,8 @@ and what it looks like
 ```criteria``` + lines `- <criterion> :: verify: <command>` + ```
 ```plan``` + lines `- [ ] <step>` + ```   then ```plan done N``` as steps finish
 ```assign worker [after t1,t2]``` + `title:` / `criteria:` lines / `brief:` + the work + ```   \
-(```assign race``` puts two workers on one risky task; the better verified result wins)
+(```assign race```: two workers on one small, risky piece, the first good result wins — never a whole build, \
+it doubles the cost)
 ```review tN accept``` | ```review tN reject``` + `- <defect>` lines + ```
 ```team [@name] <message>```   ```cancel tN <why>```
 ```justify proportion``` + why a small change fully solves a large ask + ```

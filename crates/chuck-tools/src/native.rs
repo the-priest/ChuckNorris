@@ -130,7 +130,15 @@ fn block(tag: &str, p: &Params) -> Option<String> {
         "bash" | "sh" | "test" => {
             let cmd = p.get(&["command", "cmd", "script", "code", "commands", "bash", "shell", "input", "args", "arguments"])
                 .or_else(|| p.only())?;
-            Some(if cmd.contains('\n') || tag != "test" { with_body("", &cmd) } else { one(&cmd) })
+            // `for c1,c3`: the criteria a check proves (as a test block names them)
+            let ids: Vec<String> = if tag == "test" {
+                p.get(&["criteria", "for", "proves", "criterion"]).map(|c| c.split(|ch: char| !ch.is_ascii_alphanumeric())
+                    .filter(|x| !x.is_empty()).map(|x| if x.starts_with(['c', 'C']) { x.to_lowercase() } else { format!("c{x}") })
+                    .collect()).unwrap_or_default()
+            } else { Vec::new() };
+            let link = if ids.is_empty() { String::new() } else { format!("for {}", ids.join(",")) };
+            Some(if cmd.contains('\n') || tag != "test" { with_body(&link, &cmd) }
+                 else if link.is_empty() { one(&cmd) } else { one(&format!("{cmd} {link}")) })
         }
         "read" => {
             let path = p.get(&["path", "file", "file_path", "filepath", "filename", "target", "dir", "directory", "target_file"])

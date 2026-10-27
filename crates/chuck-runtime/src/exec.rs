@@ -12,10 +12,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub const WORKER_TAGS: &[&str] = &["read", "grep", "glob", "map", "find", "def", "refs", "rename", "bash", "sh", "test", "search", "fetch",
-    "mcp", "browse", "submit", "team"];
+    "mcp", "browse", "submit", "team", "snag"];
 pub const LEAD_TAGS: &[&str] = &["read", "grep", "glob", "map", "find", "def", "refs", "rename", "bash", "sh", "test", "search",
     "fetch", "mcp", "browse", "remember", "forget", "criteria", "plan", "assign",
-    "review", "justify", "done", "ask", "team", "cancel"];
+    "review", "justify", "done", "ask", "team", "cancel", "snag"];
 /// A file read comes back this long at most (the rest a page away): what
 /// stays in the conversation is re-sent with every call, so it's kept lean.
 const CLIP: usize = 12_000;
@@ -174,6 +174,28 @@ pub fn copy_env(root: &Path, lent: &[std::path::PathBuf]) -> Vec<(String, String
         paths.push(old.to_string_lossy().into_owned());
     }
     vec![("PYTHONPATH".into(), paths.join(":"))]
+}
+
+/// What sort of snag a line of feedback is, if it is one.
+pub fn friction(line: &str) -> Option<&'static str> {
+    let l = line.trim_start();
+    Some(if l.starts_with("[NOT run") || l.starts_with("[NOTHING") || l.contains("NOTHING RAN") {
+        "call not run"
+    } else if l.contains("SEARCH text not found") || l.contains("SEARCH matches") {
+        "edit missed"
+    } else if l.contains("failed, nothing was changed") || l.contains("patch NOT applied") || l.contains("read failed") {
+        "file op failed"
+    } else if l.starts_with("[refused") || l.contains(" denied: ") {
+        "refused"
+    } else if l.contains("proves nothing") || l.contains("doesn't count as verification") {
+        "check not counted"
+    } else if l.contains("(timed out)") {
+        "timed out"
+    } else if l.starts_with("[snag noted") {
+        return None; // written down already, as the agent's own
+    } else {
+        return None;
+    })
 }
 
 /// How a command that reaches outside the folder may run.
@@ -442,7 +464,20 @@ impl<'a> Exec<'a> {
         bash(cmd, o)
     }
 
+    /// Run every call in `reply`. What got in the agent's way is written
+    /// down as a snag (see `chuck_store::snags`) on the way out.
     pub fn run(&self, reply: &str) -> StepResult {
+        let res = self.run_calls(reply);
+        let who = self.team.map(|(_, n)| n.to_string()).unwrap_or_else(|| self.role.label().to_lowercase());
+        for line in &res.feedback {
+            if let Some(kind) = friction(line) {
+                crate::snag(self.events, self.id, &who, kind, line);
+            }
+        }
+        res
+    }
+
+    fn run_calls(&self, reply: &str) -> StepResult {
         let mut res = StepResult::default();
         let tags: &[&str] = if self.role == Role::Lead { LEAD_TAGS } else { WORKER_TAGS };
         enum Item {
@@ -861,6 +896,18 @@ impl<'a> Exec<'a> {
             }
             "submit" => {
                 res.submit = Some(format!("{}\n{}", arg, t.body).trim().to_string());
+            }
+            "snag" => {
+                // the agent's own word on what got in its way (debug mode asks for these)
+                let what = format!("{arg} {}", t.body).trim().to_string();
+                if what.is_empty() {
+                    res.feedback.push("[snag: say what got in your way — ```snag <what>```]".into());
+                    return;
+                }
+                let who = self.team.map(|(_, n)| n.to_string()).unwrap_or_else(|| self.role.label().to_lowercase());
+                crate::snag(self.events, self.id, &who, "said", &what);
+                res.actions.push(format!("snag {}", clip(&what, 60)));
+                res.feedback.push("[snag noted — carry on]".into());
             }
             "team" => {
                 let Some((team, me)) = self.team else {

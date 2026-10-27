@@ -14,6 +14,13 @@ pub mod lead;
 pub mod prompts;
 pub mod resume;
 pub mod schemas;
+
+/// Write a snag down and tell whoever watches (the panel's DEBUG section).
+pub fn snag(events: &events::Events, id: chuck_core::AgentId, who: &str, kind: &str, text: &str) {
+    let text = chuck_core::evidence::clip(text.trim(), 400);
+    chuck_store::snags::record(who, kind, &text);
+    events.emit(events::Event::Snag { id, who: who.to_string(), kind: kind.to_string(), text });
+}
 pub mod team;
 pub mod setup;
 
@@ -35,6 +42,9 @@ pub struct RuntimeConfig {
     /// Offer agents their tools as functions the API parses (see `schemas`);
     /// off, they write every call as a fenced block.
     pub native_tools: bool,
+    /// Debug mode: the agents are asked to note whatever slows them down,
+    /// limits them or goes wrong (```snag```), for it to be fixed.
+    pub debug: bool,
     pub max_tokens: u32,
     pub lead_steps: usize,
     pub worker_steps: usize,
@@ -101,6 +111,7 @@ impl Default for RuntimeConfig {
             fleet: FleetConfig::default(),
             reasoning: Reasoning::default(),
             native_tools: true,
+            debug: false,
             // a reply's ceiling, not its size (only what's written is billed): a big file fits in one
             max_tokens: 32768,
             // no real cap: work ends when it's done, out of budget or stuck — never on a step count

@@ -990,6 +990,10 @@ fn on_event(st: &mut State, e: Event, shared: &Shared) {
             st.act(format!("<span foreground=\"#7DD3FC\">✉ {} → {}: {}</span>", esc(&from),
                            esc(to.as_deref().unwrap_or("everyone")), esc(&one_line(&text, 140))));
         }
+        Event::Snag { who, kind, text, .. } => {
+            st.panel.snag(&who, &kind, &text);
+            st.panel.log(&who, format!("⚠ {kind}: {}", one_line(&text, 160)));
+        }
         Event::Handoff { request } => {
             st.add(Entry::Handoff { request });
             st.save();
@@ -1466,6 +1470,7 @@ when disk / is above 90%, when ~/src changes…); it only looks and reports to t
 - `/undo` — put the folder back to before the last job · `/diff` — every change the last job made
 - `/doctor` — check everything Chuck depends on · `/update` — install the newest Chuck · `/restart`
 - `/export` — save this conversation as Markdown · `/cost` — what was spent · `/clear` — a new conversation
+- `/snags` — what keeps getting in the agents' way (Settings › Fleet › Debug mode asks them to report it)
 - Ctrl+P finds any command · Ctrl+M talks · Esc stops (agents, commands and speech) · the right panel shows \
 everything as it happens";
 
@@ -1483,6 +1488,23 @@ fn slash(st: &mut State, shared: &Shared, text: &str) -> bool {
             st.saved = Saved::default();
             st.redraw();
             st.panel.reset();
+        }
+        "/snags" => {
+            // what keeps getting in the agents' way, across every job: to be fixed
+            let p = chuck_store::snags::default_path();
+            let all = chuck_store::snags::read(&p, 5000);
+            let text = if all.is_empty() {
+                "No snags recorded yet. They're written down as the agents work (Settings › Debug mode asks them to \
+                 report their own too).".to_string()
+            } else {
+                let mut t = format!("{} snags recorded — most often first:\n\n", all.len());
+                for (kind, n, last) in chuck_store::snags::summary(&all).into_iter().take(15) {
+                    t.push_str(&format!("- **{kind}** ×{n} — latest: {}\n", md::escape(&one_line(&last, 220))));
+                }
+                t.push_str(&format!("\nThe whole log: `{}` — send it in to have these fixed.", p.display()));
+                t
+            };
+            st.add(card("SNAGS", "ask-card", text));
         }
         "/cost" => {
             let spend = chuck_store::Spend::at(&chuck_store::Spend::default_path());
@@ -1833,6 +1855,11 @@ fn settings_dialog(shared: &Shared) {
             limit, which this needs set (Spending limits below)")
         .active(s.map.get("fleet_auto_continue").and_then(|v| v.as_bool()) == Some(true)).build();
     fleet.add(&ds);
+    let debug_row = adw::SwitchRow::builder().title("Debug mode")
+        .subtitle("The agents note whatever slows them down, limits them or goes wrong (right panel › Debug, /snags) \
+                   — for it to be fixed")
+        .active(s.map.get("debug").and_then(|v| v.as_bool()) == Some(true)).build();
+    fleet.add(&debug_row);
     fleet.add(&cap);
     fleet.add(&cmd_min);
     fleet.add(&auto);
@@ -2092,6 +2119,7 @@ fn settings_dialog(shared: &Shared) {
         }
         s.set("stealth_fetch", stealth.is_active().into());
         s.set("tts", tts.is_active().into());
+        s.set("debug", debug_row.is_active().into());
         s.set("buddy", buddy_row.is_active().into());
         s.set("check_updates", updates.is_active().into());
         s.set("voice_engine", engines[engine.selected() as usize].0.into());

@@ -124,6 +124,9 @@ pub fn from_settings(s: &Settings, folder: &Path, max_usd: Option<f64>) -> Resul
     }
     // the tools as functions the API parses (off: every call written as a fenced block)
     cfg.native_tools = s.map.get("native_tools").and_then(|v| v.as_bool()).unwrap_or(true);
+    cfg.debug = s.map.get("debug").and_then(|v| v.as_bool()).unwrap_or(false);
+    // what gets in the agents' way is written down (always: it costs nothing), for it to be fixed
+    chuck_store::snags::set_path(Some(chuck_store::snags::default_path()));
     cfg.reasoning = Reasoning {
         budget: s.num("reasoning_budget", 4096.0, 0.0, 32768.0) as u32,
         max_think_secs: s.num("max_think_seconds", 120.0, 0.0, 1800.0) as u32,

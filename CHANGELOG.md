@@ -70,6 +70,17 @@ Chuck is now a Rust app (`crates/`), and the installer puts it over any earlier 
   - A worker that stops says why.
 - **Camoufox is set up once.** It is launched with the browser it has, and never downloads at
   launch. The installer leaves a working setup alone.
+- **Debug: what gets in the agents' way is written down.**
+  - What the runtime sees, always: calls that didn't run, missed edits, refusals, checks that don't
+    count, refused hand-ins, stuck and replaced workers, rejections, API trouble, cut replies.
+  - Settings › Fleet › Debug mode also asks every agent to note its own (`snag`).
+  - Where it shows: the right panel's Debug section, `/snags` for what keeps happening, and
+    `~/.local/state/chucknorris/snags.jsonl` to send in.
+- Races:
+  - The first entry through its gate is reviewed at once; accepting it stops the other entrant.
+  - The Lead races only a small, risky piece, never a whole build.
+- `test` as a function call can name the criteria it proves.
+- Workers change files with edit/patch instead of rewriting them whole.
 - `read .` lists the folder.
 - A sed/awk pattern like `'/## 3. Setup/'`, or text a heredoc only writes out, is no longer taken for
   a path outside the folder. Numbered criteria (`1. …`) parse.

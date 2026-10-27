@@ -362,6 +362,7 @@ sandbox, so the rules are stricter than for commands:
 | `/daemon <when>: <what>` | something to look at when it happens; it reports to the Inbox |
 | `/doctor` | check the API key, the sandbox, search, voice, MCP, language servers, disk and the ledger |
 | `/cost` | what this window, today and this month cost |
+| `/snags` | what keeps getting in the agents' way (Settings › Fleet › Debug mode asks them to report it) |
 | `/export` | save the conversation as Markdown |
 | `/clear` | start a new conversation (the old one stays in Recent) |
 | `/update` · `/restart` | install the newest Chuck · restart into it |

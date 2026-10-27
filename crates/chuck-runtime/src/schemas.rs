@@ -37,7 +37,9 @@ fn one(tag: &str) -> Option<Value> {
         "bash" => f("bash", "Run shell commands in the project folder (no sudo). Output comes back.",
                     json!({"command": s("the commands")}), &["command"]),
         "test" => f("test", "Run a verification (the tests, a build, a linter, a criterion's verify command).",
-                    json!({"command": s("the command")}), &["command"]),
+                    json!({"command": s("the command"),
+                           "criteria": s("the criteria it proves, e.g. `c1,c3` — needed when the command isn't \
+                                          exactly a criterion's verify command")}), &["command"]),
         "read" => f("read", "Read a file (a page at a time) or list a folder.",
                     json!({"path": s("file or folder, relative to the project"), "start_line": json!({"type": "integer"}),
                            "end_line": json!({"type": "integer"})}), &["path"]),
@@ -65,6 +67,8 @@ fn one(tag: &str) -> Option<Value> {
         "videos" => block("videos", "Show the user videos.", "what of", "", &["arg"]),
         "submit" => f("submit", "Hand your task to the Lead: what changed, how each criterion was verified.",
                       json!({"report": s("the report")}), &["report"]),
+        "snag" => block("snag", "Note what slowed you down, limited you or went wrong (it gets fixed); then carry on.",
+                        "what, in one line", "", &["arg"]),
         "team" => f("team", "Message the team: everyone, or one (`ds-2`, `lead`).",
                     json!({"to": s("one name (optional: everyone)"), "message": s("short and concrete")}), &["message"]),
         "browse" => block("browse", "Load a page or file in a real browser: JS errors, failed requests, text, a look.",
@@ -134,6 +138,12 @@ mod tests {
         let r = w("review", json!({"arg": "t1 reject", "body": "- no test"})).unwrap();
         assert_eq!(chuck_tools::tool_blocks(&r, LEAD_TAGS)[0].body, "- no test");
         assert_eq!(w("map", json!({})).unwrap(), "```map```");
+        // the criteria a check proves, in either spelling
+        assert_eq!(w("test", json!({"command": "grep -q x a && echo ok", "criteria": "c3, c4"})).unwrap(),
+                   "```test grep -q x a && echo ok for c3,c4```");
+        assert_eq!(w("test", json!({"command": "npm test", "criteria": "2"})).unwrap(), "```test npm test for c2```");
+        let (cmd, ids) = crate::exec::split_for("grep -q x a && echo ok for c3,c4");
+        assert_eq!((cmd.as_str(), ids.len()), ("grep -q x a && echo ok", 2));
         assert!(w("launch_rocket", json!({})).is_none());
     }
 }

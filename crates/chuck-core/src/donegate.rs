@@ -90,8 +90,9 @@ impl Unmet {
                  again (```test <command>```)".into()
             }
             Unmet::VerifyCommandNotRun(c, cmd) => {
-                format!("{c}'s verification `{}` hasn't passed since the last change (run it, or an equivalent check \
-                    with `for {c}`)", clip(cmd, 70))
+                format!("{c}'s verification `{}` hasn't passed since the last change (run exactly that with ```test```, \
+                    or a check of your own named for it: ```test <command> for {c}```, or the test tool's `criteria`)",
+                        clip(cmd, 70))
             }
             Unmet::VerificationFailing(cmd) => format!("verification is failing: {}", clip(cmd, 80)),
             Unmet::Craftsmanship(why) => format!("unfinished code: {why}"),

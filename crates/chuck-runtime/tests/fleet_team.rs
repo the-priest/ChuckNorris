@@ -526,3 +526,34 @@ fn a_stuck_worker_is_warned_then_replaced_and_a_step_that_stalls_twice_comes_bac
     assert!(events.iter().filter(|e| matches!(e, Event::Notice { text, .. } if text.starts_with("stopped by the supervisor"))).count() >= 3);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn what_gets_in_an_agents_way_is_written_down() {
+    let dir = tmp("snags");
+    std::fs::write(dir.join("a.txt"), "old\n").unwrap();
+    let log = dir.join("snags.jsonl");
+    chuck_store::snags::set_path(Some(log.clone()));
+    let model = Arc::new(Scripted::new().respond(|req| {
+        if text(&req.messages[0]) == chuck_runtime::prompts::CRITIC {
+            return "ACCEPT".into();
+        }
+        assert!(text(&req.messages[0]).contains("DEBUG MODE"), "debug mode asks every agent for snags");
+        if req.messages.len() == 2 {
+            // an edit that misses, a tool call written wrong, and the agent's own word
+            return "```criteria\n- a says new :: verify: grep -qx new a.txt\n```\n\
+                    ```edit a.txt\n<<<<<<< SEARCH\nolder\n=======\nnew\n>>>>>>> REPLACE\n```\n\
+                    ```snag the edit tool's miss message doesn't show the file's lines\n```".into();
+        }
+        "```write a.txt\nnew\n```\n```test grep -qx new a.txt```\n```done\na says new (grep passes).\n```".into()
+    }));
+    let (tx, rx) = channel();
+    let cfg = RuntimeConfig { store: dir.join("store"), debug: true, ..RuntimeConfig::default() };
+    let rt = Runtime::new(model, cfg, Events(Some(tx)));
+    let (report, _) = run_within(30, rt, Job::new("make a say new", &dir));
+    assert!(matches!(report.outcome, Outcome::Done { .. }), "{:?}", report.outcome);
+    let kinds: Vec<String> = rx.try_iter().filter_map(|e| match e { Event::Snag { kind, .. } => Some(kind), _ => None }).collect();
+    assert!(kinds.contains(&"edit missed".to_string()) && kinds.contains(&"said".to_string()), "{kinds:?}");
+    let written = chuck_store::snags::read(&log, 100);
+    assert!(written.iter().any(|s| s.kind == "said" && s.who == "lead" && s.text.contains("miss message")), "{written:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

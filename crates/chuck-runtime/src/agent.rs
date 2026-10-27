@@ -279,6 +279,8 @@ impl Sink for AgentSink<'_> {
             Notice::Retrying { attempt, why } => format!("retrying ({attempt}): {why}"),
             Notice::OptionDropped(o) => format!("the API refused `{o}`; sent without it"),
         };
+        let who = self.ctx.kernel.ps(true).into_iter().find(|p| p.pid == self.id).map(|p| p.name).unwrap_or_default();
+        crate::snag(&self.ctx.events, self.id, &who, "api", &text);
         self.ctx.events.emit(Event::Notice { id: self.id, text });
     }
     fn should_stop(&self) -> bool {
@@ -396,6 +398,11 @@ pub fn think_with(ctx: &Ctx, id: AgentId, model: &str, convo: &Convo, tags: &[&s
             text.push_str(&format!("\n<tool_call>{}</tool_call>\n", json!({"name": name, "arguments": args})));
         }
         if !out.was_cut() || round == 2 {
+            if out.was_cut() {
+                crate::snag(&ctx.events, id, &ctx.kernel.ps(true).into_iter().find(|p| p.pid == id).map(|p| p.name)
+                    .unwrap_or_default(), "reply cut", "a reply ran past the length limit three times: what it wrote was \
+                    cut short");
+            }
             break;
         }
         msgs.push(json!({"role": "assistant", "content": text.clone()}));
@@ -479,7 +486,11 @@ pub fn run_worker(ctx: Ctx, w: WorkerSpec) {
     let model = ctx.cfg.fleet.model_for(w.role).to_string();
     let root = w.ws.work.display().to_string();
     // the project's own rules (its CHUCK.md / AGENTS.md is in the copy too)
-    let system = prompts::with_context(prompts::worker(), &prompts::instructions(Some(&w.ws.work)), "");
+    let mut system = prompts::with_context(prompts::worker(), &prompts::instructions(Some(&w.ws.work)), "");
+    if ctx.cfg.debug {
+        system.push_str("\n\n");
+        system.push_str(prompts::DEBUG);
+    }
     let mut convo = Convo::new(&system, &prompts::worker_first(&w.name, &model, &w.task, &root, &w.roster));
     let mut heard = w.heard;
     let mut progress = Progress::default();
@@ -531,6 +542,9 @@ pub fn run_worker(ctx: Ctx, w: WorkerSpec) {
             let mut fb = r.feedback.clone();
             let idle = w.pulse.lock().unwrap_or_else(|e| e.into_inner()).idle;
             if idle == crate::lead::WARN_TURNS {
+                crate::snag(&ctx.events, w.id, &w.name, "stuck",
+                            &format!("{idle} turns without a change or a passing check (last: {})", r.actions.last()
+                                .map(String::as_str).unwrap_or("no tool call")));
                 fb.push(format!("[supervisor: {idle} turns without changing or verifying anything. Change the code and \
                     check it now, or ask the Lead (```team @lead```) what you're missing — at {} you are replaced]",
                     crate::lead::STALL_TURNS));
@@ -544,8 +558,11 @@ pub fn run_worker(ctx: Ctx, w: WorkerSpec) {
                     g.submit()
                 };
                 match sub {
-                    Err(gaps) => fb.push(format!("[submission REFUSED by the gate — still missing:\n- {}\nFinish \
-                        these, then submit again]", describe(&gaps).join("\n- "))),
+                    Err(gaps) => {
+                        crate::snag(&ctx.events, w.id, &w.name, "hand-in refused", &describe(&gaps).join("; "));
+                        fb.push(format!("[submission REFUSED by the gate — still missing:\n- {}\nFinish these, then \
+                            submit again]", describe(&gaps).join("\n- ")))
+                    }
                     Ok(()) => {
                         let evidence = w.gate.lock().unwrap().evidence.clone();
                         ctx.events.emit(Event::Submitted { task: w.task.id.clone(), worker: w.id, lines });
@@ -579,6 +596,7 @@ pub fn run_worker(ctx: Ctx, w: WorkerSpec) {
                     }
                 }
             } else if !r.acted() {
+                crate::snag(&ctx.events, w.id, &w.name, "no tool call", &chuck_core::evidence::clip(&reply, 200));
                 fb.push("[no tool calls in that reply — keep working with the tools, or ```submit``` when every \
                     criterion has evidence]".into());
             }

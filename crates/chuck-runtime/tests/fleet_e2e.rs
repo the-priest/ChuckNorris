@@ -296,7 +296,7 @@ fn a_race_keeps_the_better_verified_entry() {
                 ```assign race\ntitle: Set n\ncriteria:\n- n.txt holds 7 :: verify: grep -qx 7 n.txt\nbrief: write 7\n```".into();
         }
         if last.contains("SUBMISSION t1") {
-            assert!(last.contains("from ds-1"), "the entry with more passing checks wins: {last}");
+            // the first entry through its gate is reviewed at once, not held for the other
             return "```review t1 accept\ngood\n```".into();
         }
         if heard(req, "t1 accepted") {
@@ -318,7 +318,15 @@ fn a_race_keeps_the_better_verified_entry() {
     // no GLM pool (GLM is the eyes): a race is two workers on the workhorse
     assert_eq!(roles, vec![chuck_core::Role::DeepSeekWorker, chuck_core::Role::DeepSeekWorker]);
     assert_eq!(events.iter().filter(|e| matches!(e, Event::Merged { .. })).count(), 1);
+    // one entry merged; the other entrant was stopped, never left running
+    assert!(rt_workers_done(&events));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn rt_workers_done(events: &[Event]) -> bool {
+    let started = events.iter().filter(|e| matches!(e, Event::AgentStarted { name, .. } if name.starts_with("ds-"))).count();
+    let ended = events.iter().filter(|e| matches!(e, Event::AgentEnded { .. })).count();
+    started == 2 && ended >= 2
 }
 
 /// Run a job on its own thread; a hang is a failure, not a stuck test suite.

@@ -7,6 +7,7 @@ pub mod crashlog;
 pub mod ledger;
 pub mod memory;
 pub mod settings;
+pub mod snags;
 
 pub use budget::{Over, Spend};
 pub use checkpoint::{CheckpointError, Point, Shadow};
