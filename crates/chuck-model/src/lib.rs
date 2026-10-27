@@ -42,12 +42,17 @@ pub struct ChatRequest {
     pub temperature: f32,
     pub max_tokens: u32,
     pub reasoning: Reasoning,
+    /// Functions the model may call (OpenAI-style `tools`): what it calls
+    /// comes back in [`Outcome::calls`], parsed by the API rather than
+    /// written out as text. A server that refuses them gets the request
+    /// without them.
+    pub tools: Option<Value>,
 }
 
 impl ChatRequest {
     pub fn new(model: impl Into<String>, messages: Vec<Value>) -> ChatRequest {
         ChatRequest { model: model.into(), messages, temperature: 0.35, max_tokens: 8192,
-                      reasoning: Reasoning::default() }
+                      reasoning: Reasoning::default(), tools: None }
     }
 
     pub fn sent_chars(&self) -> usize {
@@ -110,6 +115,8 @@ pub struct Outcome {
     pub finish: Option<String>,
     /// The model that actually answered.
     pub model: String,
+    /// Functions it called: (name, arguments as the JSON text it sent).
+    pub calls: Vec<(String, String)>,
 }
 
 impl Outcome {

@@ -1237,7 +1237,7 @@ impl<'a> LeadRun<'a> {
                 }
             }
             convo.fit(ctx.cfg.context_chars);
-            let reply = match think(ctx, self.id, &model, &convo) {
+            let reply = match crate::agent::think_with(ctx, self.id, &model, &convo, LEAD_TAGS) {
                 Ok(r) => r,
                 Err(h) => return self.pause(&h.describe()),
             };

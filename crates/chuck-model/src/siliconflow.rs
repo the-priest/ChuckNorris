@@ -32,6 +32,8 @@ pub struct SiliconFlow {
     attempts: u32,
     no_stream_opts: AtomicBool,
     no_think_opts: Mutex<HashSet<String>>,
+    /// Models whose server refused `tools`: asked without them since.
+    no_tools: Mutex<HashSet<String>>,
     /// The longest a reply may go without a word before it is tried again.
     stall: Duration,
 }
@@ -62,6 +64,7 @@ impl SiliconFlow {
             attempts: 3,
             no_stream_opts: AtomicBool::new(false),
             no_think_opts: Mutex::new(HashSet::new()),
+            no_tools: Mutex::new(HashSet::new()),
             stall: stall.max(Duration::from_secs(1)),
         })
     }
@@ -80,6 +83,10 @@ impl SiliconFlow {
         });
         if !self.no_stream_opts.load(Ordering::Relaxed) {
             p["stream_options"] = json!({"include_usage": true});
+        }
+        if let Some(t) = req.tools.as_ref().filter(|_| !self.no_tools.lock().unwrap().contains(&req.model)) {
+            p["tools"] = t.clone();
+            p["tool_choice"] = json!("auto");
         }
         if !self.no_think_opts.lock().unwrap().contains(&req.model) {
             if !think_on || req.reasoning.budget == 0 {
@@ -167,6 +174,11 @@ impl ChatModel for SiliconFlow {
                         sink.notice(Notice::OptionDropped("stream_options"));
                         continue;
                     }
+                    if payload.get("tools").is_some() && (low.contains("tool") || low.contains("function")) {
+                        self.no_tools.lock().unwrap().insert(req.model.clone());
+                        sink.notice(Notice::OptionDropped("tools"));
+                        continue;
+                    }
                     if (payload.get("thinking_budget").is_some() || payload.get("enable_thinking").is_some())
                         && (low.contains("thinking") || low.contains("reasoning"))
                     {
@@ -242,6 +254,7 @@ fn stream(resp: ureq::http::Response<ureq::Body>, req: &ChatRequest, sink: &mut 
     // bytes that carry no words (keep-alive lines while the server queues the request, empty
     // deltas) don't count as an answer: past `stall` without one word, the call is tried again
     let mut heard = Instant::now();
+    let mut calls: Vec<(String, String)> = Vec::new();
     let reader = resp.into_body().into_reader();
     let mut lines = BufReader::new(reader.take(MAX_STREAM_BYTES as u64));
     let mut out = Outcome::default();
@@ -313,9 +326,29 @@ fn stream(resp: ureq::http::Response<ureq::Body>, req: &ChatRequest, sink: &mut 
                 out.text.push_str(c);
             }
         }
+        // function calls arrive in pieces, by index: the name once, the arguments a bit at a time
+        if let Some(tcs) = delta.get("tool_calls").and_then(|t| t.as_array()) {
+            for (k, tc) in tcs.iter().enumerate() {
+                let i = tc.get("index").and_then(|i| i.as_u64()).map_or(k, |i| i as usize).min(255);
+                while calls.len() <= i {
+                    calls.push((String::new(), String::new()));
+                }
+                let f = tc.get("function").cloned().unwrap_or(Value::Null);
+                if let Some(n) = f.get("name").and_then(|n| n.as_str()) {
+                    calls[i].0.push_str(n);
+                }
+                if let Some(a) = f.get("arguments").and_then(|a| a.as_str()) {
+                    calls[i].1.push_str(a);
+                }
+                heard = Instant::now();
+            }
+        }
     }
+    out.calls = calls.into_iter().filter(|(n, _)| !n.trim().is_empty()).collect();
     if !finished {
-        // the connection ended mid-reply: never pass half a reply off as whole
+        // the connection ended mid-reply: never pass half a reply off as whole (a call cut off
+        // in its arguments is no call)
+        out.calls.clear();
         if out.text.is_empty() {
             return Err(Box::new((ModelError::Network("the stream ended before the reply".into()), None)));
         }

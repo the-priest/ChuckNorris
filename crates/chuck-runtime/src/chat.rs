@@ -3,7 +3,7 @@
 //! wants something done on their machine it hands the request to the fleet
 //! (```agent```), and the user decides whether to send it.
 
-use crate::agent::{think, Convo, Ctx, Halt};
+use crate::agent::{think_with, Convo, Ctx, Halt};
 use crate::events::{Event, Outcome};
 use crate::exec::research;
 use crate::{first_message, Job, JobReport, Runtime};
@@ -170,7 +170,7 @@ impl Runtime {
                     }
                 }
                 convo.fit(self.cfg.context_chars);
-                let reply = match think(&ctx, id, &model, &convo) {
+                let reply = match think_with(&ctx, id, &model, &convo, CHAT_TAGS) {
                     Ok(r) => r,
                     Err(Halt::Stopped) => break 'turn Outcome::Paused { gaps: vec!["stopped by you".into()] },
                     Err(h) => break 'turn Outcome::Failed { error: h.describe() },

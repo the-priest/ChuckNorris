@@ -79,6 +79,11 @@ exists for whoever sets `fleet_glm_pool`; by default GLM is only the eyes.
   stops a task's workers and fails the task.
 - A worker thread that ends without a word, or a model call that panics, is
   reported to the Lead as a stopped task. It is never waited on.
+- Tools are also offered as API functions (`chuck-runtime::schemas`). A call comes back parsed and
+  is turned into the fenced block it means (`chuck_tools::native::call_block`). Text calls in any
+  format are normalized the same way, so the gate, the jail and the evidence see one thing.
+- A worker's copy borrows the project's `node_modules`, `.venv`, `venv` and `.git` as links. The
+  jail shows them read-only, and diffs and merges skip them (`Workspace::lend`).
 - The worker system prompt is identical for every worker; name, task and roster
   come in the first message. One cached prefix serves the whole team.
 - Budgets: every agent is a process with a quota; spend is charged to it and

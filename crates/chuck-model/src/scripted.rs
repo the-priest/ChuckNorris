@@ -85,6 +85,20 @@ impl ChatModel for Scripted {
         let queued = self.queues.lock().unwrap_or_else(|e| e.into_inner()).get_mut(&req.model).and_then(|q| q.pop_front());
         let queued = queued.or_else(|| self.shared.lock().unwrap_or_else(|e| e.into_inner()).pop_front());
         let text = queued.or_else(|| self.responder.as_ref().map(|f| f(req))).unwrap_or_else(|| "Done.".to_string());
+        // `@call name {json}` lines are function calls, as the API returns them when tools were offered
+        let mut calls = Vec::new();
+        let text = if req.tools.is_some() && text.contains("@call ") {
+            let mut kept = Vec::new();
+            for line in text.lines() {
+                match line.trim_start().strip_prefix("@call ").and_then(|r| r.split_once(' ')) {
+                    Some((name, args)) => calls.push((name.to_string(), args.trim().to_string())),
+                    None => kept.push(line),
+                }
+            }
+            kept.join("\n")
+        } else {
+            text
+        };
         let chars: Vec<char> = text.chars().collect();
         for chunk in chars.chunks(40) {
             sink.delta(&chunk.iter().collect::<String>());
@@ -92,7 +106,8 @@ impl ChatModel for Scripted {
         Ok(Outcome {
             usage: Some(Usage { prompt: (req.sent_chars() / 4) as u64 + 50, completion: (text.len() / 4) as u64 + 5,
                                 cached: 0, reasoning: 0 }),
-            text, reasoning: String::new(), finish: Some("stop".into()), model: req.model.clone(),
+            text, reasoning: String::new(), finish: Some(if calls.is_empty() { "stop" } else { "tool_calls" }.into()),
+            model: req.model.clone(), calls,
         })
     }
 }

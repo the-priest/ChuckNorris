@@ -192,6 +192,9 @@ fn block(tag: &str, p: &Params) -> Option<String> {
             let body = p.get(&["content", "body", "text", "lines", "criteria", "plan", "items", "steps", "message",
                                "details", "brief", "summary", "question"]).unwrap_or_default();
             if arg.trim().is_empty() && body.trim().is_empty() {
+                if tag == "map" {
+                    return Some("```map```".into()); // the one tool that takes nothing
+                }
                 return p.only().map(|v| with_body("", &v));
             }
             Some(if body.trim().is_empty() { one(&arg) } else { with_body(&arg, &body) })
@@ -212,6 +215,18 @@ fn params_of_json(v: &Value) -> Params {
         Value::Null => Vec::new(),
         other => vec![("input".into(), text_of(&other))],
     })
+}
+
+/// A function call the API returned (its name, its arguments as JSON
+/// text) as the block it means, when `tags` has the tool and the arguments
+/// are enough to run it.
+pub fn call_block(name: &str, args: &str, tags: &[&str]) -> Option<String> {
+    let v = serde_json::from_str::<Value>(args.trim()).unwrap_or_else(|_| {
+        // not JSON (a truncated call, or a bare string): the one value it gives
+        if args.trim().is_empty() { Value::Null } else { Value::String(args.to_string()) }
+    });
+    let params = params_of_json(&serde_json::json!({ "arguments": v }));
+    tag_for(name, tags).and_then(|t| block(&t, &params))
 }
 
 /// Rewrite every native call `tags` has a tool for as its fenced block;

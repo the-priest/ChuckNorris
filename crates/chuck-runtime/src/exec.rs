@@ -711,8 +711,14 @@ impl<'a> Exec<'a> {
                 let t_start = now_secs();
                 let started = chuck_store::ledger::local_stamp("%Y-%m-%dT%H:%M:%S%z");
                 self.events.emit(Event::Running { id: self.id, tool: tag.into(), cmd: cmd.clone() });
-                // a verification's exit status must be the whole pipeline's: `make test | tail` can't pass a failure
-                let r = self.run_cmd(&if tag == "test" { format!("set -o pipefail\n{cmd}") } else { cmd.clone() }, wrap);
+                // a verification's exit status must be the whole pipeline's: `make test | tail` can't pass a
+                // failure (a criterion's own verify command is a verification whichever tool runs it)
+                let verifies = tag == "test" || {
+                    let checked = as_checked(&cmd, self.root);
+                    self.gate.lock().unwrap().criteria.iter()
+                        .any(|c| c.verify.as_deref().is_some_and(|v| as_checked(v, self.root) == checked))
+                };
+                let r = self.run_cmd(&if verifies { format!("set -o pipefail\n{cmd}") } else { cmd.clone() }, wrap);
                 let changed = fingerprint(self.root) != before;
                 if let Some((ledger, who)) = &self.audit {
                     // every command that ran, whatever the agent later says about it (recorded after
@@ -782,6 +788,19 @@ impl<'a> Exec<'a> {
                 if hollow {
                     res.feedback.push(format!("[`{}` can't fail, so it proves nothing and doesn't count as a test — \
                         run the real tests, build, linter or the program itself]", clip(&cmd, 80)));
+                }
+                // a check wrapped in a pipe or a chain (`… | grep`, `…; echo $?`) can't count: its exit status is
+                // the wrapper's. Say so, and how it does count, rather than leave the agent guessing
+                if !is_check {
+                    let g = self.gate.lock().unwrap();
+                    let inside: Vec<String> = g.criteria.iter().filter_map(|c| c.verify.as_ref().map(|v| (c.id, v)))
+                        .filter(|(_, v)| v.trim().len() >= 4 && cmd.contains(v.trim()))
+                        .map(|(id, v)| format!("{id} `{}`", clip(v, 80))).collect();
+                    if !inside.is_empty() {
+                        res.feedback.push(format!("[that ran a criterion's check inside a longer command, so it doesn't \
+                            count as verification (a pipeline's or chain's exit status isn't the check's). Run each one \
+                            on its own — ```test <its command>``` — for: {}]", inside.join(", ")));
+                    }
                 }
             }
             "search" | "fetch" => self.web(tag, arg, t.body.trim(), res),

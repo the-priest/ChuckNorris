@@ -337,3 +337,57 @@ fn a_workers_copy_has_the_projects_dependencies_and_history_read_only() {
     assert!(refused.is_empty() && applied == 1, "{refused:?} {applied}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_whole_job_done_through_function_calls_alone() {
+    // as V4-Flash answers when it is offered tools: no fenced block anywhere, only calls the API parsed
+    let dir = tmp("native");
+    let call = |name: &str, args: serde_json::Value| format!("@call {name} {args}");
+    let model = Arc::new(Scripted::new().respond(move |req| {
+        if text(&req.messages[0]) == chuck_runtime::prompts::CRITIC {
+            assert!(req.tools.is_none(), "the critic has no tools");
+            return "ACCEPT".into();
+        }
+        let names: Vec<String> = req.tools.as_ref().expect("an acting agent is offered its tools").as_array().unwrap()
+            .iter().map(|t| t["function"]["name"].as_str().unwrap().to_string()).collect();
+        let me = worker(req);
+        if !me.is_empty() {
+            assert!(names.contains(&"submit".into()) && !names.contains(&"assign".into()), "{names:?}");
+            return if req.messages.len() == 2 {
+                [call("team", serde_json::json!({"message": "game.js exports start()"})),
+                 call("write", serde_json::json!({"path": "game.js", "content": "export function start() {}\n"})),
+                 call("test", serde_json::json!({"command": "grep -q start game.js"})),
+                 call("submit", serde_json::json!({"report": "game.js exports start(); grep passes"}))].join("\n")
+            } else { "ok".into() };
+        }
+        assert!(names.contains(&"assign".into()) && names.contains(&"review".into()), "{names:?}");
+        let last = last_user(req);
+        if req.messages.len() == 2 {
+            return ["Splitting it.".to_string(),
+                call("criteria", serde_json::json!({"body": "- game.js exports start :: verify: grep -q start game.js"})),
+                call("plan", serde_json::json!({"body": "- t1: the game module\n- verify"})),
+                call("assign", serde_json::json!({"arg": "worker", "body": "title: game module\ncriteria:\n- exports start \
+                    :: verify: grep -q start game.js\nbrief: write game.js"}))].join("\n");
+        }
+        if last.contains("SUBMISSION t1") {
+            return call("review", serde_json::json!({"arg": "t1 accept", "body": "verified"}));
+        }
+        if heard(req, "t1 accepted") {
+            return [call("test", serde_json::json!({"command": "grep -q start game.js"})),
+                    call("justify", serde_json::json!({"arg": "proportion", "body": "one small module was asked for"})),
+                    call("done", serde_json::json!({"summary": "game.js exports start(); grep -q start game.js passes."}))]
+                .join("\n");
+        }
+        "Waiting.".into()
+    }));
+    let (tx, rx) = channel();
+    let rt = Runtime::new(model, RuntimeConfig { store: dir.join("store"), ..RuntimeConfig::default() }, Events(Some(tx)));
+    let (report, _) = run_within(30, rt, Job::new("make the game module", &dir));
+    assert!(matches!(report.outcome, Outcome::Done { .. }), "{:?}", report.outcome);
+    assert_eq!(std::fs::read_to_string(dir.join("game.js")).unwrap(), "export function start() {}\n");
+    let events: Vec<Event> = rx.try_iter().collect();
+    assert!(events.iter().any(|e| matches!(e, Event::Team { from, text, .. } if from == "ds-1" && text.contains("start()"))));
+    let plan = events.iter().rev().find_map(|e| match e { Event::Plan { steps } => Some(steps.clone()), _ => None }).unwrap();
+    assert!(plan.iter().all(|(_, d)| *d));
+    let _ = std::fs::remove_dir_all(&dir);
+}

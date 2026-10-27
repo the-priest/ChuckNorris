@@ -62,6 +62,25 @@ fn handle(mut c: TcpStream, seen: Seen) {
         "nousage" if v.get("stream_options").is_some() => {
             return plain(&mut c, "400 Bad Request", r#"{"message":"unknown field stream_options"}"#)
         }
+        "notools" if v.get("tools").is_some() => {
+            return plain(&mut c, "400 Bad Request", r#"{"message":"tools is not supported for this model"}"#)
+        }
+        "calls" => {
+            assert!(v.get("tools").is_some() && v["tool_choice"] == "auto");
+            let _ = write!(c, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n");
+            let pieces = [
+                json!({"content": "Checking."}),
+                json!({"tool_calls": [{"index": 0, "id": "a", "type": "function", "function": {"name": "bash", "arguments": ""}}]}),
+                json!({"tool_calls": [{"index": 0, "function": {"arguments": "{\"command\": \"ls"}}]}),
+                json!({"tool_calls": [{"index": 0, "function": {"arguments": " -la\"}"}}]}),
+                json!({"tool_calls": [{"index": 1, "id": "b", "type": "function", "function": {"name": "read", "arguments": "{\"path\": \"a.rs\"}"}}]}),
+            ];
+            for d in pieces {
+                let _ = write!(c, "data: {}\n\n", json!({"choices": [{"delta": d}]}));
+            }
+            let _ = write!(c, "data: {}\n\ndata: [DONE]\n\n", json!({"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}));
+            return;
+        }
         "queued" if n % 2 == 1 => {
             // the connection stays busy, but with nothing to read: keep-alives and empty deltas
             let _ = write!(c, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n");
@@ -169,6 +188,36 @@ fn options_a_server_refuses_are_dropped_and_the_question_answered() {
     assert_eq!(r2.unwrap().text, "the answer");
     let s = seen.lock().unwrap();
     assert!(s.last().unwrap().get("stream_options").is_none());
+}
+
+#[test]
+fn function_calls_come_back_whole_from_their_pieces() {
+    let (base, _) = serve();
+    let m = client(&base, 5);
+    let mut req = ChatRequest::new("deepseek-ai/DeepSeek-V4-Flash", vec![json!({"role": "user", "content": "calls"})]);
+    req.tools = Some(json!([{"type": "function", "function": {"name": "bash", "parameters": {"type": "object"}}}]));
+    let out = m.chat(&req, &mut Collect::default()).unwrap();
+    assert_eq!(out.text, "Checking.");
+    assert_eq!(out.calls, vec![("bash".to_string(), "{\"command\": \"ls -la\"}".to_string()),
+                               ("read".to_string(), "{\"path\": \"a.rs\"}".to_string())]);
+}
+
+#[test]
+fn a_server_that_refuses_tools_is_asked_without_them() {
+    let (base, seen) = serve();
+    let m = client(&base, 5);
+    let mut req = ChatRequest::new("deepseek-ai/DeepSeek-V4-Flash", vec![json!({"role": "user", "content": "notools"})]);
+    req.tools = Some(json!([{"type": "function", "function": {"name": "bash", "parameters": {"type": "object"}}}]));
+    let mut sink = Collect::default();
+    let out = m.chat(&req, &mut sink).unwrap();
+    assert_eq!(out.text, "the answer");
+    assert!(sink.notices.contains(&Notice::OptionDropped("tools")));
+    // remembered: the next call goes without them straight away
+    let before = seen.lock().unwrap().len();
+    m.chat(&req, &mut Collect::default()).unwrap();
+    let s = seen.lock().unwrap();
+    assert_eq!(s.len(), before + 1);
+    assert!(s.last().unwrap().get("tools").is_none());
 }
 
 #[test]

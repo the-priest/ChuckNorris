@@ -4,7 +4,7 @@
 //! and changes nothing. Its report goes to the inbox; what it proposes, the
 //! user decides.
 
-use crate::agent::{think, Convo, Ctx, Halt};
+use crate::agent::{think_with, Convo, Ctx, Halt};
 use crate::events::Event;
 use crate::exec::{refuse_command, research};
 use crate::Runtime;
@@ -101,7 +101,7 @@ impl Runtime {
                     convo.user("[this is your LAST turn: write the REPORT now, with no tool blocks]");
                 }
                 convo.fit(self.cfg.context_chars / 2);
-                let reply = match think(&ctx, id, &model, &convo) {
+                let reply = match think_with(&ctx, id, &model, &convo, TAGS) {
                     Ok(r) => r,
                     Err(Halt::Stopped) => break 'run (1, "(stopped)".to_string()),
                     Err(h) => break 'run (1, format!("(stopped: {})", h.describe())),

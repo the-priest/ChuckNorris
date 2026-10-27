@@ -13,6 +13,7 @@ pub mod exec;
 pub mod lead;
 pub mod prompts;
 pub mod resume;
+pub mod schemas;
 pub mod team;
 pub mod setup;
 
@@ -31,6 +32,9 @@ use std::time::Duration;
 pub struct RuntimeConfig {
     pub fleet: FleetConfig,
     pub reasoning: Reasoning,
+    /// Offer agents their tools as functions the API parses (see `schemas`);
+    /// off, they write every call as a fenced block.
+    pub native_tools: bool,
     pub max_tokens: u32,
     pub lead_steps: usize,
     pub worker_steps: usize,
@@ -96,6 +100,7 @@ impl Default for RuntimeConfig {
         RuntimeConfig {
             fleet: FleetConfig::default(),
             reasoning: Reasoning::default(),
+            native_tools: true,
             max_tokens: 8192,
             // no real cap: work ends when it's done, out of budget or stuck — never on a step count
             lead_steps: 1_000_000,

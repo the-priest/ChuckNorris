@@ -290,6 +290,14 @@ impl Sink for AgentSink<'_> {
 /// at its length limit is continued (twice at most) so a half-written block
 /// is never executed.
 pub fn think(ctx: &Ctx, id: AgentId, model: &str, convo: &Convo) -> Result<String, Halt> {
+    think_with(ctx, id, model, convo, &[])
+}
+
+/// [`think`], offering the agent's `tags` as functions it can call: a call
+/// comes back as the fenced block it means, appended to the reply, so the
+/// rest of the loop reads it as if it had been written that way.
+pub fn think_with(ctx: &Ctx, id: AgentId, model: &str, convo: &Convo, tags: &[&str]) -> Result<String, Halt> {
+    let tools = (ctx.cfg.native_tools && !tags.is_empty()).then(|| crate::schemas::tools(tags));
     let mut msgs = convo.msgs.clone();
     let mut text = String::new();
     // how long the API has been unreachable (reset by any answer)
@@ -321,6 +329,7 @@ pub fn think(ctx: &Ctx, id: AgentId, model: &str, convo: &Convo) -> Result<Strin
         let mut req = ChatRequest::new(model, msgs.clone());
         req.reasoning = ctx.cfg.reasoning;
         req.max_tokens = ctx.cfg.max_tokens;
+        req.tools = tools.clone();
         let mut sink = AgentSink { id, ctx, t0: std::time::Instant::now(), thought: 0, wrote: 0, shown: None };
         let r = chuck_model::chat_interruptible(&ctx.model, &req, &mut sink);
         ctx.kernel.release(id);
@@ -365,6 +374,16 @@ pub fn think(ctx: &Ctx, id: AgentId, model: &str, convo: &Convo) -> Result<Strin
         ctx.events.emit(Event::Usage { id, tokens: usage.prompt + usage.completion, usd, prompt: usage.prompt,
                                        cached: usage.cached });
         text.push_str(&out.text);
+        // what it called, as the blocks they mean (one a text block already carries isn't run twice)
+        for (name, args) in &out.calls {
+            let b = chuck_tools::native::call_block(name, args, tags).unwrap_or_else(|| {
+                // a call that can't be made into a block: kept as a call, so the agent hears it didn't run
+                format!("<tool_call>{}</tool_call>", json!({"name": name, "arguments": args}))
+            });
+            if !text.contains(&b) {
+                text.push_str(&format!("\n{b}\n"));
+            }
+        }
         if !out.was_cut() || round == 2 {
             break;
         }
@@ -443,7 +462,7 @@ pub fn run_worker(ctx: Ctx, w: WorkerSpec) {
             }
             // a worker's context is one task's: kept smaller than the Lead's, so each call costs less
             convo.fit(ctx.cfg.context_chars.min(WORKER_CONTEXT));
-            let reply = match think(&ctx, w.id, &model, &convo) {
+            let reply = match think_with(&ctx, w.id, &model, &convo, WORKER_TAGS) {
                 Ok(r) => r,
                 Err(_) if w.stop.load(Ordering::Relaxed) => break 'life ("stopped", None),
                 Err(h) => break 'life ("paused", Some(h.describe())),

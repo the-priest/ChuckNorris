@@ -42,6 +42,25 @@ Chuck is now a Rust app (`crates/`), and the installer puts it over any earlier 
   - Every worker gets the same system prompt, so the API caches it once for all of them.
   - A worker's context is capped lower than the Lead's.
   - V4-Flash is priced with its cache discount.
+- **Agents call their tools through the API.** Every tool is offered as a function. What a model
+  calls comes back parsed and runs as the block it means. Calls written as text still work,
+  including DSML, `<read x>` and `<bash>…</bash>`. A server that refuses `tools` gets the request
+  without them.
+- **Worker copies have what the project needs.** `node_modules`, `.venv`, `venv` and `.git` are
+  lent read-only, so a worker's checks run as the Lead's do. Before, tests that needed
+  dependencies always failed in a worker's copy.
+- **Checks count however they're run.**
+  - A criterion's verify command run with `bash` counts as verification. It runs with pipefail.
+  - A check wrapped in a pipe or chain is explained, not silently ignored.
+  - A large task with a small, complete change can be handed in. The Lead weighs proportion at
+    review.
+- **Stalls and spend are visible.**
+  - A reply stream kept alive with no words is retried, not waited on forever.
+  - Each agent's line shows its call in flight.
+  - The Lead's row shows its own spend and the team's.
+  - A worker that stops says why.
+- **Camoufox is set up once.** It is launched with the browser it has, and never downloads at
+  launch. The installer leaves a working setup alone.
 - `read .` lists the folder.
 - A sed/awk pattern like `'/## 3. Setup/'`, or text a heredoc only writes out, is no longer taken for
   a path outside the folder. Numbered criteria (`1. …`) parse.
