@@ -25,6 +25,8 @@ chuck — one Lead and eight workers on SiliconFlow; work ends only through the 
 USAGE
   chuck             the fleet window (in the folder you start it from)
   chuck run [-C DIR] [--max-usd N] [--verbose] \"what to do\"
+  chuck continue [-C DIR] [--max-usd N] [\"what to add\"]   carry on a paused (INCOMPLETE)
+                    job exactly where it stopped: criteria, evidence and the Lead's work kept
   chuck ask [--max-usd N] \"a question\"   Chat mode: an answer, researched on the web
                     when it should be; it changes nothing (work goes to `chuck run`)
   chuck models      show the fleet's models, checked against your account
@@ -273,7 +275,7 @@ struct RunArgs {
     task: String,
 }
 
-fn parse_run(args: &[String]) -> Result<RunArgs, String> {
+fn parse_run(args: &[String], allow_empty: bool) -> Result<RunArgs, String> {
     let mut a = RunArgs { dir: PathBuf::from("."), max_usd: None, verbose: false, task: String::new() };
     let mut words = Vec::new();
     let mut i = 0;
@@ -300,16 +302,22 @@ fn parse_run(args: &[String]) -> Result<RunArgs, String> {
         i += 1;
     }
     a.task = words.join(" ").trim().to_string();
-    if a.task.is_empty() {
+    if a.task.is_empty() && !allow_empty {
         return Err("say what to do: chuck run \"fix the failing test in parser.py\"".into());
     }
     Ok(a)
 }
 
-fn cmd_run(args: &[String], chat: bool) -> i32 {
-    let a = parse_run(args).unwrap_or_else(|e| fail(&e));
+fn cmd_run(args: &[String], chat: bool, cont: bool) -> i32 {
+    let a = parse_run(args, cont).unwrap_or_else(|e| fail(&e));
     let s = Settings::load();
     let folder = a.dir.canonicalize().unwrap_or_else(|_| a.dir.clone());
+    let resume = if cont {
+        Some(chuck_runtime::resume::load(&folder).unwrap_or_else(|| fail(&format!(
+            "no paused job in {} — a finished job, or one never started here, has nothing to carry on", folder.display()))))
+    } else {
+        None
+    };
     let setup::Setup { model, mut cfg, usd, notes } = setup::from_settings(&s, &folder, a.max_usd)
         .unwrap_or_else(|e| fail(&e));
     for n in notes {
@@ -336,6 +344,11 @@ fn cmd_run(args: &[String], chat: bool) -> i32 {
     let (tx, rx) = channel();
     let rt = Runtime::new(model, cfg, Events(Some(tx)));
     let mut job = Job::new(a.task, &a.dir);
+    if let Some(r) = resume {
+        eprintln!("chuck: carrying on \"{}\" ({} so far, paused: {})", chuck_core::evidence::clip(&r.ask, 80),
+                  chuck_model::fmt_usd(r.spent_usd), r.why);
+        job.resume = Some(r);
+    }
     // the Lead's questions are answered from the keyboard; stdin is read on
     // its own thread so Ctrl-C still stops the job while a question is open
     if std::io::stdin().is_terminal() {
@@ -409,6 +422,9 @@ fn cmd_run(args: &[String], chat: bool) -> i32 {
     if let (Some(cp), false) = (&report.checkpoint, matches!(report.outcome, Outcome::Answered { .. })) {
         println!("{}", view.st.dim(&format!("undo all of it:  chuck rewind -C {} {}", folder.display(), &cp[..10])));
     }
+    if report.resume.is_some() {
+        println!("{}", view.st.dim(&format!("carry on where it stopped:  chuck continue -C {}", folder.display())));
+    }
     match report.outcome {
         Outcome::Done { .. } | Outcome::Answered { .. } => 0,
         Outcome::Paused { .. } => 2,
@@ -420,8 +436,9 @@ fn main() {
     chuck_store::crashlog::install();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let code = match args.first().map(String::as_str) {
-        Some("run") => cmd_run(&args[1..], false),
-        Some("ask") => cmd_run(&args[1..], true),
+        Some("run") => cmd_run(&args[1..], false, false),
+        Some("continue") => cmd_run(&args[1..], false, true),
+        Some("ask") => cmd_run(&args[1..], true, false),
         Some("models") => {
             cmd_models();
             0
@@ -492,13 +509,13 @@ mod tests {
 
     #[test]
     fn run_arguments() {
-        let a = parse_run(&v(&["-C", "/tmp/p", "--max-usd", "0.5", "fix", "the", "test"])).unwrap();
+        let a = parse_run(&v(&["-C", "/tmp/p", "--max-usd", "0.5", "fix", "the", "test"]), false).unwrap();
         assert_eq!(a.dir, PathBuf::from("/tmp/p"));
         assert_eq!(a.max_usd, Some(0.5));
         assert_eq!(a.task, "fix the test");
-        assert!(parse_run(&v(&["--max-usd", "-1", "x"])).is_err());
-        assert!(parse_run(&v(&["--bogus", "x"])).is_err());
-        assert!(parse_run(&v(&[])).is_err());
-        assert_eq!(parse_run(&v(&["--", "-v", "means", "verbose"])).unwrap().task, "-v means verbose");
+        assert!(parse_run(&v(&["--max-usd", "-1", "x"]), false).is_err());
+        assert!(parse_run(&v(&["--bogus", "x"]), false).is_err());
+        assert!(parse_run(&v(&[]), false).is_err());
+        assert_eq!(parse_run(&v(&["--", "-v", "means", "verbose"]), false).unwrap().task, "-v means verbose");
     }
 }

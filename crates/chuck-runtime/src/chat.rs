@@ -258,6 +258,6 @@ impl Runtime {
         self.events.emit(Event::AgentEnded { id, status: label.into() });
         let (tokens, usd) = self.kernel.info(id).map(|p| (p.tokens, p.usd)).unwrap_or_default();
         self.events.emit(Event::Finished(outcome.clone()));
-        JobReport { outcome, gate: DoneGate::new(job.ask, Scale::Small), lead: id, tokens, usd, checkpoint: None }
+        JobReport { outcome, gate: DoneGate::new(job.ask, Scale::Small), lead: id, tokens, usd, checkpoint: None, resume: None }
     }
 }

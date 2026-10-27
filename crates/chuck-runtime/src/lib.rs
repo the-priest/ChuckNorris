@@ -12,6 +12,7 @@ pub mod events;
 pub mod exec;
 pub mod lead;
 pub mod prompts;
+pub mod resume;
 pub mod setup;
 
 pub use agent::{Ctx, Halt};
@@ -33,6 +34,9 @@ pub struct RuntimeConfig {
     pub lead_steps: usize,
     pub worker_steps: usize,
     pub cmd_timeout: Duration,
+    /// How long an agent waits out an API or network outage (retrying with
+    /// backoff) before the job pauses.
+    pub outage_wait: Duration,
     /// A conversation is trimmed past this many characters.
     pub context_chars: usize,
     /// The whole job: the Lead and everything under it.
@@ -72,6 +76,8 @@ pub struct RuntimeConfig {
     /// The lead's ```browse``` drives this browser ("auto", "brave",
     /// "chromium", "chrome" or a path; None: no browse this run).
     pub browser: Option<String>,
+    /// Where a paused job is kept so it can carry on later (None: not kept).
+    pub resume_dir: Option<PathBuf>,
 }
 
 pub fn default_store() -> PathBuf {
@@ -87,13 +93,16 @@ impl Default for RuntimeConfig {
             fleet: FleetConfig::default(),
             reasoning: Reasoning::default(),
             max_tokens: 8192,
-            // generous: work ends when it's done (or out of budget), not on a step count
-            lead_steps: 200,
-            worker_steps: 120,
-            cmd_timeout: Duration::from_secs(300),
+            // no real cap: work ends when it's done, out of budget or stuck — never on a step count
+            lead_steps: 1_000_000,
+            worker_steps: 100_000,
+            // long builds and test suites take time; Stop ends any command at once
+            cmd_timeout: Duration::from_secs(1800),
+            outage_wait: Duration::from_secs(6 * 3600),
             context_chars: 360_000,
-            job_quota: Quota { tokens: Some(4_000_000), usd: Some(2.0), seconds: None },
-            worker_quota: Quota::tokens(900_000),
+            // money is the job's limit (the user sets it); tokens only cap a single runaway worker
+            job_quota: Quota { tokens: None, usd: Some(2.0), seconds: None },
+            worker_quota: Quota::tokens(8_000_000),
             access: chuck_sandbox::Access::Full,
             bwrap: chuck_sandbox::bwrap().is_some(),
             store: default_store(),
@@ -109,6 +118,7 @@ impl Default for RuntimeConfig {
             lsp: None,
             memory: None,
             browser: None,
+            resume_dir: None,
         }
     }
 }
@@ -125,12 +135,14 @@ pub struct Job {
     /// its next step (and stops waiting on workers to read it).
     pub steer: Option<Receiver<String>>,
     pub stop: Arc<AtomicBool>,
+    /// Carry on a paused job (`ask` is then what the user adds, if anything).
+    pub resume: Option<resume::Resume>,
 }
 
 impl Job {
     pub fn new(ask: impl Into<String>, folder: impl AsRef<Path>) -> Job {
         Job { ask: ask.into(), folder: folder.as_ref().to_path_buf(), history: Vec::new(), answers: None, steer: None,
-              stop: Arc::new(AtomicBool::new(false)) }
+              stop: Arc::new(AtomicBool::new(false)), resume: None }
     }
 }
 
@@ -145,6 +157,8 @@ pub struct JobReport {
     /// The checkpoint taken before the job touched anything: `rewind` to it
     /// undoes the whole job.
     pub checkpoint: Option<String>,
+    /// A paused job's state: run it again with `Job::resume` to carry on.
+    pub resume: Option<resume::Resume>,
 }
 
 pub struct Runtime {
@@ -199,7 +213,7 @@ impl Runtime {
                 let outcome = Outcome::Failed { error: format!("no such folder: {}", job.folder.display()) };
                 self.events.emit(Event::Finished(outcome.clone()));
                 return JobReport { outcome, gate: DoneGate::new(job.ask, chuck_core::Scale::Small), lead: AgentId(0),
-                                   tokens: 0, usd: 0.0, checkpoint: None };
+                                   tokens: 0, usd: 0.0, checkpoint: None, resume: None };
             }
         };
         sweep_stale(&self.cfg.store);
@@ -221,9 +235,13 @@ impl Runtime {
             .brief(chuck_core::evidence::clip(&job.ask, 160)));
         self.events.emit(Event::AgentStarted { id: lead, role: Role::Lead, name: "lead".into(),
                                                model: self.cfg.fleet.deepseek_model.clone(), task: None });
-        let first = first_message(&job);
-        let mut run = lead::LeadRun::new(&ctx, lead, &folder, &job.ask, job.answers);
+        let resumed = job.resume.clone();
+        // carrying on: the user's words are only what they add now
+        let first = if resumed.is_some() { job.ask.clone() } else { first_message(&job) };
+        let ask = resumed.as_ref().map_or(job.ask.clone(), |r| r.ask.clone());
+        let mut run = lead::LeadRun::new(&ctx, lead, &folder, &ask, job.answers);
         run.steer = job.steer;
+        run.resume = job.resume;
         let outcome = run.run(&first);
         let status = match &outcome {
             Outcome::Done { .. } | Outcome::Answered { .. } => 0,
@@ -240,7 +258,34 @@ impl Runtime {
         let (tokens, usd) = self.kernel.info(lead).map(|p| (p.tokens, p.usd)).unwrap_or_default();
         let gate = run.gate.lock().unwrap().clone();
         let checkpoint = run.first_checkpoint.clone();
+        // a paused job can carry on later, even after Chuck was closed; a finished one is done with
+        let resume = match &outcome {
+            Outcome::Paused { gaps } if run.mutated() || !gate.criteria.is_empty() || run.tasks_assigned() > 0 => {
+                let convo = if run.last_msgs.len() >= 2 { run.last_msgs.clone() } else {
+                    vec![serde_json::json!({"role": "system", "content": ""}), serde_json::json!({"role": "user", "content": first})]
+                };
+                let r = resume::Resume {
+                    ask: ask.clone(), folder: folder.display().to_string(), convo, gate: gate.clone(),
+                    mutated: run.mutated(), checkpoint: checkpoint.clone(), tasks: run.tasks_assigned(),
+                    why: run.paused_why.clone().unwrap_or_else(|| gaps.first().cloned().unwrap_or_default()),
+                    gaps: gaps.clone(), spent_usd: resumed.as_ref().map_or(0.0, |r| r.spent_usd) + usd,
+                    runs: resumed.as_ref().map_or(0, |r| r.runs + 1), saved_at: chuck_sandbox::now_secs() as f64,
+                };
+                if let Some(d) = &self.cfg.resume_dir {
+                    resume::save_in(d, &r);
+                }
+                Some(r)
+            }
+            Outcome::Done { .. } => {
+                if let Some(d) = &self.cfg.resume_dir {
+                    resume::clear_in(d, &folder);
+                }
+                None
+            }
+            // an answer (or a failure to start) leaves an earlier paused job as it was
+            _ => None,
+        };
         self.events.emit(Event::Finished(outcome.clone()));
-        JobReport { outcome, gate, lead, tokens, usd, checkpoint }
+        JobReport { outcome, gate, lead, tokens, usd, checkpoint, resume }
     }
 }

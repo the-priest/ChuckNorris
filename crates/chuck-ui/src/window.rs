@@ -103,6 +103,10 @@ struct State {
     chat: bool,
     /// What the "hand it to the fleet" button does.
     on_handoff: Option<Rc<dyn Fn(String)>>,
+    /// The Keep going button: carry on the paused job.
+    on_continue: Option<Rc<dyn Fn()>>,
+    /// Stop pressed: an automatic "keep going" that was about to start doesn't.
+    auto_cancel: Rc<Cell<bool>>,
     /// MCP servers: started with the window, shared by every job, ended with it.
     mcp: Arc<chuck_mcp::Manager>,
     /// Language servers: started on first use, ended with the window.
@@ -369,6 +373,27 @@ impl State {
             Entry::Card { kind, class, text } => {
                 let (c, body, _foot) = card(kind, class);
                 body.append(&render(text));
+                self.append(&c);
+                self.lane = None;
+            }
+            Entry::Paused { head, text } => {
+                let (c, body, foot) = card(head, "gap-card");
+                body.append(&render(text));
+                let btn = gtk::Button::with_label("Keep going");
+                btn.add_css_class("suggested-action");
+                btn.add_css_class("pill-sm");
+                btn.set_tooltip_text(Some("Carry on exactly where it stopped, with another job budget (`/continue`)"));
+                let can = self.folder.as_ref().and_then(|f| chuck_runtime::resume::load(f)).is_some();
+                btn.set_sensitive(can);
+                if let Some(go) = self.on_continue.clone() {
+                    btn.connect_clicked(move |b| {
+                        b.set_sensitive(false);
+                        go();
+                    });
+                }
+                foot.append(&btn);
+                foot.append(&label(if can { "Criteria, evidence and the conversation are kept." } else {
+                    "Nothing left to carry on here." }, &["panel-dim"]));
                 self.append(&c);
                 self.lane = None;
             }
@@ -793,7 +818,28 @@ fn finished(st: &mut State, report: JobReport, shared: &Shared) {
             text.push_str(&format!("\n\nUndo the whole job: `/undo` (or **Rewind** checkpoint `{}` in the right panel); \
                 see every change: `/diff`.", &cp[..10.min(cp.len())]));
         }
-        st.add(Entry::Card { kind: head, class: class.into(), text });
+        if report.resume.is_some() {
+            st.add(Entry::Paused { head, text });
+        } else {
+            st.add(Entry::Card { kind: head, class: class.into(), text });
+        }
+    }
+    // keep going on its own when only the job's budget ran out, if the user turned that on (never past the daily limit)
+    if let Some(r) = report.resume.as_ref().filter(|r| r.out_of_budget()) {
+        let s = Settings::load();
+        let day = s.num("budget_day_usd", 0.0, 0.0, 1e5);
+        if s.map.get("fleet_auto_continue").and_then(|v| v.as_bool()) == Some(true) && day > 0.0 && r.runs < 200 {
+            st.act(format!("<span foreground=\"#A78BFA\">↻ the job's budget ran out: carrying on in 5 s with another \
+                (Settings › Fleet; the daily limit {} still holds) — Stop to stay paused</span>", fmt_usd(day)));
+            let sh = shared.clone();
+            let cancelled = st.auto_cancel.clone();
+            cancelled.set(false);
+            glib::timeout_add_local_once(Duration::from_secs(5), move || {
+                if !cancelled.get() && sh.borrow().running.is_none() {
+                    start(&sh, "/continue".into());
+                }
+            });
+        }
     }
     let gate = &report.gate;
     if !gate.criteria.is_empty() || gate.is_done() {
@@ -837,7 +883,20 @@ fn start(shared: &Shared, text: String) {
     }
     st.add(Entry::User { text: text.clone() });
     st.voice.stop();
-    if text.starts_with('/') && slash(&mut st, shared, &text) {
+    // carry on the paused job in this folder
+    let resume = match text.strip_prefix("/continue").filter(|r| r.is_empty() || r.starts_with(char::is_whitespace)) {
+        Some(rest) => match st.folder.as_ref().and_then(|f| chuck_runtime::resume::load(f)) {
+            Some(r) => Some((r, rest.trim().to_string())),
+            None => {
+                st.add(Entry::Card { kind: "NOTHING TO CONTINUE".into(), class: "gap-card".into(), text: "No paused \
+                    job in this folder: a job that finished, or one never started here, has nothing to carry on.".into() });
+                st.save();
+                return;
+            }
+        },
+        None => None,
+    };
+    if resume.is_none() && text.starts_with('/') && slash(&mut st, shared, &text) {
         st.save();
         return;
     }
@@ -870,7 +929,8 @@ fn start(shared: &Shared, text: String) {
         refresh_daemons(&st, shared);
         return;
     }
-    let chat_mode = st.chat;
+    // a paused job is the fleet's, whatever mode the window is in
+    let chat_mode = st.chat && resume.is_none();
     let folder = match st.folder.clone() {
         Some(f) => f,
         // Chat mode works on no folder; nothing it does touches one
@@ -887,6 +947,7 @@ fn start(shared: &Shared, text: String) {
                                                                   web: st.opts.web.clone(), mcp: Some(st.mcp.clone()),
                                                                   lsp: Some(st.lsp.clone()), memory: Some(st.memory.clone()),
                                                                   browser: Some(setup::browser_pref(&settings)),
+                                                                  resume_dir: Some(chuck_runtime::resume::default_dir()),
                                                                   ..Default::default() }),
         (None, Ok(s)) => {
             for n in &s.notes {
@@ -909,6 +970,10 @@ fn start(shared: &Shared, text: String) {
     let kernel = rt.kernel.clone();
     let mut job = Job::new(text.clone(), &folder);
     job.history = st.saved.history.clone();
+    if let Some((r, extra)) = resume {
+        job.ask = extra;
+        job.resume = Some(r);
+    }
     let (atx, arx) = channel();
     job.answers = Some(arx);
     let (stx, srx) = channel();
@@ -1143,6 +1208,7 @@ const HELP: &str = "\
 - `/remind <when>: <what>` — a reminder (in 20m, at 17:30, tomorrow at 9am, every day at 8:30)
 - `/daemon <when>: <what>` — something to look at when it happens (every 2h, when a service fails, \
 when disk / is above 90%, when ~/src changes…); it only looks and reports to the Inbox
+- `/continue [what to add]` — carry on a paused job exactly where it stopped
 - `/undo` — put the folder back to before the last job · `/diff` — every change the last job made
 - `/doctor` — check everything Chuck depends on · `/update` — install the newest Chuck · `/restart`
 - `/export` — save this conversation as Markdown · `/cost` — what was spent · `/clear` — a new conversation
@@ -1503,9 +1569,14 @@ fn settings_dialog(shared: &Shared) {
     cap.set_title("Spending cap per job ($)");
     cap.set_digits(2);
     cap.set_value(s.num("fleet_job_usd", 2.0, 0.01, 1000.0));
+    let auto = adw::SwitchRow::builder().title("Keep going when a job's budget runs out")
+        .subtitle("Carries on with another job budget, as often as needed, until it's done — never past the daily \
+            limit, which this needs set (Spending limits below)")
+        .active(s.map.get("fleet_auto_continue").and_then(|v| v.as_bool()) == Some(true)).build();
     fleet.add(&ds);
     fleet.add(&glm);
     fleet.add(&cap);
+    fleet.add(&auto);
     page.add(&fleet);
 
     let reason = adw::PreferencesGroup::builder().title("Reasoning").build();
@@ -1741,6 +1812,7 @@ fn settings_dialog(shared: &Shared) {
         s.set("fleet_deepseek_workers", (ds.value() as i64).into());
         s.set("fleet_glm_workers", (glm.value() as i64).into());
         s.set("fleet_job_usd", cap.value().into());
+        s.set("fleet_auto_continue", auto.is_active().into());
         s.set("reasoning_budget", (levels[rz.selected() as usize].1 as i64).into());
         s.set("max_think_seconds", (think.value() as i64).into());
         s.set("stall_seconds", (stall.value() as i64).into());
@@ -2079,7 +2151,7 @@ pub fn build(app: &adw::Application, opts: Options) {
     chat_btn.set_active(chat_mode);
     let shared: Shared = Rc::new(RefCell::new(State {
         ui, panel, opts: opts.clone(), folder: None, saved: Saved::default(), running: None, names: HashMap::new(),
-        models: HashMap::new(), lane: None, last_ps: Vec::new(), chat: chat_mode, on_handoff: None, mcp: mcp.clone(),
+        models: HashMap::new(), lane: None, last_ps: Vec::new(), chat: chat_mode, on_handoff: None, on_continue: None, auto_cancel: Rc::new(Cell::new(false)), mcp: mcp.clone(),
         lsp: Arc::new(setup::lsp(&Settings::load())),
         daemons: chuck_daemon::Registry::load(&chuck_daemon::Registry::default_path()),
         inbox: chuck_daemon::Inbox::load(&chuck_daemon::Inbox::default_path(), 200), daemon_live: HashMap::new(),
@@ -2099,6 +2171,16 @@ pub fn build(app: &adw::Application, opts: Options) {
         sh.borrow_mut().set_mode(false, &sh);
         let sh2 = sh.clone();
         glib::idle_add_local_once(move || start(&sh2, request));
+    }));
+    let weak = Rc::downgrade(&shared);
+    shared.borrow_mut().on_continue = Some(Rc::new(move || {
+        let Some(sh) = weak.upgrade() else { return };
+        if sh.borrow().running.is_some() {
+            return;
+        }
+        sh.borrow_mut().set_mode(false, &sh);
+        let sh2 = sh.clone();
+        glib::idle_add_local_once(move || start(&sh2, "/continue".into()));
     }));
     shared.borrow_mut().open_folder(folder, &shared);
     shared.borrow_mut().set_running(false);
@@ -2130,6 +2212,7 @@ pub fn build(app: &adw::Application, opts: Options) {
     let sh = shared.clone();
     let stop_job = move || {
         let st = sh.borrow();
+        st.auto_cancel.set(true);
         st.voice.stop();
         if let Some(r) = &st.running {
             r.stop.store(true, Ordering::SeqCst);
@@ -2200,6 +2283,7 @@ pub fn build(app: &adw::Application, opts: Options) {
                 it("/remind — a reminder", "Commands", "alarm timer later", "", type_in("/remind in 20m: ")),
                 it("/daemon — watch something and report", "Commands", "monitor trigger watch", "", type_in("/daemon every 2h: ")),
                 it("Choose a folder", "Folder", "project open directory", "", click(&folder_btn)),
+                it("/continue — carry on the paused job", "Folder", "resume keep going incomplete", "", run("/continue")),
                 it("/undo — put the folder back to before the last job", "Folder", "rewind revert checkpoint", "", run("/undo")),
                 it("/diff — every change the last job made", "Folder", "changes review", "", run("/diff")),
                 it("Talk", "Voice", "microphone listen speak dictate", "Ctrl+M", Box::new(move || mic_clicked(&sh2))),

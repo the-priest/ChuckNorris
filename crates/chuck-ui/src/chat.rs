@@ -29,6 +29,8 @@ pub enum Entry {
     Card { kind: String, class: String, text: String },
     /// What the Lead saw in the browser.
     Browser(Box<Browsed>),
+    /// A job that paused: what's missing, and a button that carries it on.
+    Paused { head: String, text: String },
     /// Pictures Chat found.
     Gallery { query: String, items: Vec<Picture> },
     /// Videos Chat found.
@@ -142,6 +144,9 @@ pub fn markdown(s: &Saved) -> String {
                 out.push_str(&format!("> **{kind}**\n>\n{}\n\n", text.trim().lines().map(|l| format!("> {l}")).collect::<Vec<_>>().join("\n")));
             }
             Entry::Handoff { request } => out.push_str(&format!("> **FOR THE FLEET**\n>\n> {}\n\n", request.trim())),
+            Entry::Paused { head, text } => {
+                out.push_str(&format!("> **{head}**\n>\n{}\n\n", text.trim().lines().map(|l| format!("> {l}")).collect::<Vec<_>>().join("\n")));
+            }
             Entry::Gallery { query, items } => {
                 out.push_str(&format!("> **PICTURES** — {query}\n"));
                 for p in items {

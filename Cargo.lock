@@ -213,6 +213,7 @@ dependencies = [
  "chuck-tools",
  "chuck-web",
  "regex",
+ "serde",
  "serde_json",
 ]
 

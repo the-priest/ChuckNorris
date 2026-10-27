@@ -88,6 +88,12 @@ impl Convo {
                 elided: 0, first: first.to_string(), trimmed: 0 }
     }
 
+    /// A conversation as it was saved (a paused job carrying on).
+    pub fn restore(msgs: Vec<Value>) -> Convo {
+        let first = msgs.get(1).and_then(|m| m["content"].as_str()).unwrap_or("").to_string();
+        Convo { msgs, elided: 0, first, trimmed: 0 }
+    }
+
     pub fn user(&mut self, text: &str) {
         self.msgs.push(json!({"role": "user", "content": text}));
     }
@@ -199,7 +205,10 @@ impl Sink for AgentSink<'_> {
 pub fn think(ctx: &Ctx, id: AgentId, model: &str, convo: &Convo) -> Result<String, Halt> {
     let mut msgs = convo.msgs.clone();
     let mut text = String::new();
-    for round in 0..3 {
+    // how long the API has been unreachable (reset by any answer)
+    let mut outage = Duration::ZERO;
+    let mut round = 0;
+    while round < 3 {
         if let Some(over) = ctx.cfg.spend.as_ref().and_then(|s| s.over(ctx.cfg.day_limit, ctx.cfg.month_limit)) {
             return Err(Halt::Killed(format!("the {} spending limit ({}) is reached — only you can raise it, in \
                 Settings", if over.scope == "day" { "daily" } else { "monthly" }, chuck_model::fmt_usd(over.limit))));
@@ -222,11 +231,34 @@ pub fn think(ctx: &Ctx, id: AgentId, model: &str, convo: &Convo) -> Result<Strin
         let r = chuck_model::chat_interruptible(&ctx.model, &req, &mut sink);
         ctx.kernel.release(id);
         let out = match r {
-            Ok(o) => o,
+            Ok(o) => {
+                outage = Duration::ZERO;
+                o
+            }
             Err(ModelError::Stopped) => {
                 return Err(if ctx.stop.load(Ordering::Relaxed) { Halt::Stopped } else {
                     Halt::Killed("killed".into())
                 });
+            }
+            // the network or the API is down: a long job waits it out rather than giving up
+            Err(e) if e.transient() && outage < ctx.cfg.outage_wait => {
+                let pause = Duration::from_secs(match outage.as_secs() { 0..=59 => 15, 60..=599 => 60, _ => 300 })
+                    .min((ctx.cfg.outage_wait / 10).max(Duration::from_millis(100)));
+                ctx.events.emit(Event::Notice { id, text: format!("the API isn't answering ({}) — trying again in {:.0}s; \
+                    the job waits (Stop ends it)", chuck_core::evidence::clip(&e.to_string(), 120), pause.as_secs_f64()) });
+                ctx.kernel.note(id, "waiting for the API");
+                let until = std::time::Instant::now() + pause;
+                while std::time::Instant::now() < until {
+                    if ctx.stop.load(Ordering::Relaxed) {
+                        return Err(Halt::Stopped);
+                    }
+                    if ctx.kernel.should_stop(id) {
+                        return Err(Halt::Killed("killed".into()));
+                    }
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+                outage += pause;
+                continue;
             }
             Err(e) => return Err(Halt::Model(e.to_string())),
         };
@@ -245,6 +277,7 @@ pub fn think(ctx: &Ctx, id: AgentId, model: &str, convo: &Convo) -> Result<Strin
         msgs.push(json!({"role": "assistant", "content": text.clone()}));
         msgs.push(json!({"role": "user", "content":
             "[your reply was cut off by the length limit — continue EXACTLY where it stopped, no repetition]"}));
+        round += 1;
     }
     ctx.kernel.note(id, "acting");
     Ok(text)
@@ -369,6 +402,10 @@ pub fn run_worker(ctx: Ctx, w: WorkerSpec) {
                     criterion has evidence]".into());
             }
             if let Stall::Replan(why) = progress.turn(r.mutated, r.verified, &r.actions) {
+                if progress.stalls() > crate::lead::MAX_STALLS {
+                    break 'life ("paused", Some(format!("stuck: {} replans in a row without progress ({why})",
+                                                        progress.stalls())));
+                }
                 fb.push(format!("[you are going in circles ({why}). Stop and re-think: what exactly is still \
                     missing for each criterion, and what is the next concrete change or check?]"));
             }

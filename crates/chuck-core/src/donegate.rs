@@ -475,12 +475,19 @@ fn norm(cmd: &str) -> String {
     cmd.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Shallow-loop detection: turns that talk but neither change nor verify
-/// anything, while criteria are still unmet, mean the agent is spinning.
+/// Shallow-loop detection. A turn makes progress when it changes or verifies
+/// something, or looks at something it hadn't looked at before (a new file,
+/// search or command): exploring a big project is work. Turns that only
+/// repeat what was already done, or do nothing, are idle; a few idle turns
+/// in a row mean the agent is spinning. Progress resets the count, so a
+/// job that runs for days is judged on its last few turns, not its whole life.
 #[derive(Clone, Debug, Default)]
 pub struct Progress {
     idle_turns: u32,
     last_actions: Vec<String>,
+    seen: std::collections::HashSet<String>,
+    /// Replans asked for since the last turn that made progress.
+    stalls: u32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -496,18 +503,32 @@ impl Progress {
     pub fn turn(&mut self, mutated: bool, verified: bool, actions: &[String]) -> Stall {
         let repeat = !actions.is_empty() && actions == self.last_actions.as_slice();
         self.last_actions = actions.to_vec();
-        if (mutated || verified) && !repeat {
+        let mut fresh = false;
+        for a in actions {
+            fresh |= self.seen.insert(norm(a));
+        }
+        if ((mutated || verified) && !repeat) || (fresh && !repeat) {
             self.idle_turns = 0;
+            self.stalls = 0;
             return Stall::None;
         }
         self.idle_turns += 1;
-        if repeat && self.idle_turns >= 2 {
-            return Stall::Replan(format!("the same actions twice in a row ({})", actions.join(", ")));
-        }
-        if self.idle_turns >= 3 {
-            return Stall::Replan(format!("{} turns without changing or verifying anything", self.idle_turns));
-        }
-        Stall::None
+        let why = if repeat && self.idle_turns >= 2 {
+            format!("the same actions twice in a row ({})", actions.join(", "))
+        } else if self.idle_turns >= 3 {
+            format!("{} turns without changing, verifying or looking at anything new", self.idle_turns)
+        } else {
+            return Stall::None;
+        };
+        self.idle_turns = 0;
+        self.stalls += 1;
+        Stall::Replan(why)
+    }
+
+    /// Replans in a row with no progress between them: past a few, the
+    /// agent is stuck and more turns only spend money.
+    pub fn stalls(&self) -> u32 {
+        self.stalls
     }
 }
 
@@ -673,12 +694,35 @@ mod tests {
     #[test]
     fn spinning_is_detected() {
         let mut p = Progress::default();
-        assert_eq!(p.turn(false, false, &["read a.py".into()]), Stall::None);
-        assert_eq!(p.turn(false, false, &["grep x".into()]), Stall::None);
-        assert!(matches!(p.turn(false, false, &["read b".into()]), Stall::Replan(_)));
+        // exploring something new is progress, however long it takes
+        for i in 0..50 {
+            assert_eq!(p.turn(false, false, &[format!("read f{i}.py")]), Stall::None);
+        }
+        // looking at the same things again is not
+        assert_eq!(p.turn(false, false, &["read f1.py".into()]), Stall::None);
+        assert_eq!(p.turn(false, false, &["grep x".into(), "read f2.py".into()]), Stall::None, "grep x is new");
+        assert_eq!(p.turn(false, false, &["read f3.py".into()]), Stall::None);
+        assert_eq!(p.turn(false, false, &[]), Stall::None);
+        assert!(matches!(p.turn(false, false, &["read f4.py".into()]), Stall::Replan(_)));
+        assert_eq!(p.stalls(), 1);
         let mut q = Progress::default();
         q.turn(true, false, &["bash make".into()]);
         assert!(matches!(q.turn(true, false, &["bash make".into()]), Stall::None));
         assert!(matches!(q.turn(true, false, &["bash make".into()]), Stall::Replan(_)));
+    }
+
+    #[test]
+    fn progress_forgives_earlier_stalls() {
+        let mut p = Progress::default();
+        for _ in 0..3 {
+            p.turn(false, false, &[]);
+        }
+        assert_eq!(p.stalls(), 1);
+        for _ in 0..3 {
+            p.turn(false, false, &[]);
+        }
+        assert_eq!(p.stalls(), 2);
+        p.turn(true, false, &["edit a.py".into()]);
+        assert_eq!(p.stalls(), 0, "real work since: the count starts again");
     }
 }

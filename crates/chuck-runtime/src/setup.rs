@@ -139,8 +139,10 @@ pub fn from_settings(s: &Settings, folder: &Path, max_usd: Option<f64>) -> Resul
         cfg.checkpoints = Some(chuck_store::checkpoint::default_store());
     }
     cfg.job_quota = Quota { usd: Some(usd), ..cfg.job_quota };
+    cfg.cmd_timeout = std::time::Duration::from_secs_f64(s.num("command_timeout", 1800.0, 30.0, 86_400.0));
     cfg.web = Some(Arc::new(web(s)));
     cfg.browser = Some(browser_pref(s));
+    cfg.resume_dir = Some(crate::resume::default_dir());
     cfg.memory = Some(Arc::new(chuck_store::memory::Memory::at(&chuck_store::memory::Memory::default_path())));
     cfg.sources = s.num("research_sources", 6.0, 1.0, 10.0) as usize;
     cfg.access = access_of(s, folder);
