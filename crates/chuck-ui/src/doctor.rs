@@ -74,7 +74,7 @@ pub fn run(folder: Option<&Path>, mcp: Option<&chuck_mcp::Manager>) -> Vec<Check
     // the sandbox, for real
     match chuck_sandbox::bwrap() {
         None => out.push(c("Sandbox", State::Warn, "bubblewrap isn't installed: workers' copies aren't jailed and \
-            sandboxed folders can't run commands (pacman -S bubblewrap / apt install bubblewrap)")),
+            sandboxed folders can't run commands (pacman -Syu bubblewrap / apt install bubblewrap)")),
         Some(b) => {
             let ok = std::process::Command::new(&b).args(["--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "true"])
                 .stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok_and(|st| st.success());

@@ -1,6 +1,6 @@
 # Chuck in Rust — architecture
 
-This branch (`rust-rewrite`) replaces the Python harness with a Rust one. The
+Chuck 18 replaces the Python harness with a Rust one. The
 product stays the same — a Linux desktop operating system for AI agents —
 with two things made central and enforced in code:
 

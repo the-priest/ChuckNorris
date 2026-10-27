@@ -149,10 +149,10 @@ pub fn from_settings(s: &Settings, folder: &Path, max_usd: Option<f64>) -> Resul
     cfg.access = access_of(s, folder);
     if cfg.access == Access::Guarded && !cfg.bwrap {
         notes.push("bubblewrap isn't installed, so commands can't be kept inside this folder: they still ask before \
-            naming anything outside it, but a command could reach further without saying so — install it (pacman -S \
+            naming anything outside it, but a command could reach further without saying so — install it (pacman -Syu \
             bubblewrap / apt install bubblewrap)".into());
     } else if cfg.access != Access::Full && !cfg.bwrap {
-        notes.push(format!("this folder is {}, which needs bubblewrap to run commands — install it (pacman -S \
+        notes.push(format!("this folder is {}, which needs bubblewrap to run commands — install it (pacman -Syu \
             bubblewrap / apt install bubblewrap); until then commands are refused", cfg.access.label()));
     }
     Ok(Setup { model: Arc::new(model), cfg, usd, notes })

@@ -10,7 +10,7 @@ A Linux desktop app where AI agents work on your machine the way programs run on
 as processes with budgets and permissions, in parallel, on safe copies of your code,
 asleep until something needs them, and never out of your sight.
 
-![version](https://img.shields.io/badge/version-17_·_Chuck_OS-8b5cf6?style=flat-square&labelColor=0c0c10)
+![version](https://img.shields.io/badge/version-18_·_Rust-8b5cf6?style=flat-square&labelColor=0c0c10)
 ![gtk](https://img.shields.io/badge/GTK4-libadwaita-8b5cf6?style=flat-square&labelColor=0c0c10)
 ![python](https://img.shields.io/badge/Python-3.11_·_3.12_·_3.13-8b5cf6?style=flat-square&labelColor=0c0c10)
 ![suites](https://img.shields.io/badge/test_suites-24-2ea043?style=flat-square&labelColor=0c0c10)
@@ -22,15 +22,15 @@ asleep until something needs them, and never out of your sight.
 </div>
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/the-priest/ChuckNorris/rust-rewrite/install.sh | bash && chucknorris
+curl -fsSL https://raw.githubusercontent.com/the-priest/ChuckNorris/main/install.sh | bash && chucknorris
 ```
 
 Paste a SiliconFlow API key in Settings, pick a folder, and say what you want.
 
-> **You are on the `rust-rewrite` branch.** The one-liner above installs from this branch, and here
-> Chuck *is* the Rust app: the menu entry and `chucknorris` open it, replacing the earlier Python
-> window (which stays installed only as the fallback if the Rust build fails). See
-> [Chuck in Rust](#chuck-in-rust-this-branch) for what it does and what isn't ported yet.
+> **Chuck 18 is a Rust app.** The one-liner above builds it and installs it over any Chuck you had
+> before: the menu entry and `chucknorris` open it. The earlier Python window stays installed only
+> as the fallback if the Rust build fails. See [Chuck in Rust](#chuck-in-rust) for what it does and
+> what isn't ported yet. An older Chuck offers the switch itself the next time it starts.
 
 ---
 
@@ -269,22 +269,22 @@ List prices as of October 2026. **Settings → Fetch** pulls the live list your 
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/the-priest/ChuckNorris/rust-rewrite/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/the-priest/ChuckNorris/main/install.sh | bash
 ```
 
 Or read the installer first:
 
 ```bash
-git clone -b rust-rewrite https://github.com/the-priest/ChuckNorris.git && cd ChuckNorris && ./install.sh
+git clone https://github.com/the-priest/ChuckNorris.git && cd ChuckNorris && ./install.sh
 ```
 
-Installed from this branch, the app's own updater stays on this branch. The installer also builds
-`chuck` with Rust 1.82 or newer. It uses your Rust if you have it, then your distro's package, and
+The app's own updater follows `main`. The installer builds
+`chuck` with Rust 1.88 or newer. It uses your Rust if you have it, then your distro's package, and
 as a last resort installs rustup into `~/.cargo`. `CHUCK_RUST=0` skips this step.
 
-## Chuck in Rust (this branch)
+## Chuck in Rust
 
-On this branch Chuck is a Rust app built around a fixed team on SiliconFlow:
+Chuck is a Rust app built around a fixed team on SiliconFlow:
 one **Lead** (DeepSeek-V4.1-Flash) that talks to you, writes the acceptance criteria, plans, reviews
 and owns "done", and up to **four DeepSeek and four GLM-5.3-Flash workers**. Each worker is its own
 process and thread, working in its own copy of your project.
@@ -434,7 +434,7 @@ remembered carries over.
 
 **Commands in the box:** `/help`, `/undo` (put the folder back to before the last job), `/diff` (every change
 it made), `/doctor` (checks the API key, the sandbox, search, voice, MCP and language servers, disk and
-the evidence chain), `/update` (installs the newest Chuck from this branch, then `/restart`), `/export`
+the evidence chain), `/update` (installs the newest Chuck, then `/restart`), `/export`
 (the conversation as Markdown), `/cost`, `/clear`, `/remind`, `/daemon`. Once a day Chuck asks GitHub
 whether a newer version is out (Settings can turn that off). From a terminal: `chuck doctor`,
 `chuck update`.

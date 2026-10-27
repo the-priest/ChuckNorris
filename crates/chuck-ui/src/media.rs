@@ -73,7 +73,7 @@ pub fn ytdlp() -> Option<PathBuf> {
 /// the end come back through `tx` (Ok(path) or Err(why)).
 pub fn download(url: &str, proxy: Option<String>, tx: std::sync::mpsc::Sender<Result<String, String>>, progress: std::sync::mpsc::Sender<String>) {
     let Some(bin) = ytdlp() else {
-        let _ = tx.send(Err("yt-dlp isn't installed (pacman -S yt-dlp / apt install yt-dlp)".into()));
+        let _ = tx.send(Err("yt-dlp isn't installed (pacman -Syu yt-dlp / apt install yt-dlp)".into()));
         return;
     };
     let dir = downloads();
@@ -160,7 +160,7 @@ pub fn videos(body: &gtk::Box, items: &[Video], proxy: Option<String>) {
         status.set_ellipsize(pango::EllipsizeMode::Middle);
         if ytdlp().is_none() {
             dl.set_sensitive(false);
-            dl.set_tooltip_text(Some("Needs yt-dlp (pacman -S yt-dlp / apt install yt-dlp)"));
+            dl.set_tooltip_text(Some("Needs yt-dlp (pacman -Syu yt-dlp / apt install yt-dlp)"));
         } else {
             dl.set_tooltip_text(Some(&format!("One video, at most 1080p and 2 GB, into {}", downloads().display())));
         }

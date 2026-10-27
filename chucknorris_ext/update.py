@@ -24,7 +24,9 @@ import urllib.request
 from pathlib import Path
 
 REPO = os.environ.get("CHUCK_REPO", "the-priest/ChuckNorris")
-BRANCH = os.environ.get("CHUCK_BRANCH", "rust-rewrite")  # this branch updates from itself
+BRANCH = os.environ.get("CHUCK_BRANCH", "main")
+if BRANCH == "rust-rewrite":                  # the Rust rewrite is main now
+    BRANCH = "main"
 CONFIG_URL = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}/chucknorris_ext/config.py"
 ARCHIVE_URL = f"https://codeload.github.com/{REPO}/tar.gz/refs/heads/{BRANCH}"
 CHECK_EVERY = 24 * 3600

@@ -1,0 +1,50 @@
+# A tag like v18.0.0 builds Chuck and publishes the GitHub release, with the
+# notes from docs/RELEASE-<version>.md and a prebuilt x86_64 binary.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    # GTK 4.14 and libadwaita 1.5, the oldest Chuck builds against
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libgtk-4-dev libadwaita-1-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - name: The tag matches the version
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          grep -q "^version = \"${v}\"" Cargo.toml || { echo "Cargo.toml isn't version ${v}"; exit 1; }
+          test -f "docs/RELEASE-${v}.md" || { echo "docs/RELEASE-${v}.md is missing"; exit 1; }
+          echo "VERSION=${v}" >> "$GITHUB_ENV"
+      - name: Build
+        run: cargo build --release --locked -p chuck
+      - name: Package
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          d="chuck-${v}-linux-x86_64"
+          mkdir "$d"
+          cp target/release/chuck "$d/"
+          strip "$d/chuck"
+          cp README.md CHANGELOG.md "$d/"
+          "$d/chuck" version
+          tar -czf "$d.tar.gz" "$d"
+          sha256sum "$d.tar.gz" > "$d.tar.gz.sha256"
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Chuck ${{ env.VERSION }}
+          body_path: docs/RELEASE-${{ env.VERSION }}.md
+          files: |
+            chuck-*-linux-x86_64.tar.gz
+            chuck-*-linux-x86_64.tar.gz.sha256
+          make_latest: true

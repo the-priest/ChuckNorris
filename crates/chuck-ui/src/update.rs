@@ -10,7 +10,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 pub const REPO: &str = "the-priest/ChuckNorris";
-pub const BRANCH: &str = "rust-rewrite";
+pub const BRANCH: &str = "main";
 const CHECK_EVERY: f64 = 86_400.0;
 
 fn data_dir() -> PathBuf {

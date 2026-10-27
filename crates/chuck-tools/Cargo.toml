@@ -6,7 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-chuck-core = { version = "18.0.0-alpha.1", path = "../chuck-core" }
+chuck-core = { version = "18.0.0", path = "../chuck-core" }
 globset = "0.4.19"
 libc = "0.2.191"
 regex = "1.13.1"

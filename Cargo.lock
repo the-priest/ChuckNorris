@@ -126,7 +126,7 @@ checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
 name = "chuck"
-version = "18.0.0-alpha.1"
+version = "18.0.0"
 dependencies = [
  "chuck-code",
  "chuck-core",
@@ -144,7 +144,7 @@ dependencies = [
 
 [[package]]
 name = "chuck-code"
-version = "18.0.0-alpha.1"
+version = "18.0.0"
 dependencies = [
  "chuck-tools",
  "fancy-regex",
@@ -156,7 +156,7 @@ dependencies = [
 
 [[package]]
 name = "chuck-core"
-version = "18.0.0-alpha.1"
+version = "18.0.0"
 dependencies = [
  "regex",
  "serde",
@@ -166,7 +166,7 @@ dependencies = [
 
 [[package]]
 name = "chuck-daemon"
-version = "18.0.0-alpha.1"
+version = "18.0.0"
 dependencies = [
  "chuck-sandbox",
  "chuck-store",
@@ -179,7 +179,7 @@ dependencies = [
 
 [[package]]
 name = "chuck-mcp"
-version = "18.0.0-alpha.1"
+version = "18.0.0"
 dependencies = [
  "chuck-store",
  "chuck-tools",
@@ -190,7 +190,7 @@ dependencies = [
 
 [[package]]
 name = "chuck-model"
-version = "18.0.0-alpha.1"
+version = "18.0.0"
 dependencies = [
  "chuck-core",
  "serde",
@@ -201,7 +201,7 @@ dependencies = [
 
 [[package]]
 name = "chuck-runtime"
-version = "18.0.0-alpha.1"
+version = "18.0.0"
 dependencies = [
  "chuck-code",
  "chuck-core",
@@ -219,7 +219,7 @@ dependencies = [
 
 [[package]]
 name = "chuck-sandbox"
-version = "18.0.0-alpha.1"
+version = "18.0.0"
 dependencies = [
  "chuck-tools",
  "fancy-regex",
@@ -230,7 +230,7 @@ dependencies = [
 
 [[package]]
 name = "chuck-store"
-version = "18.0.0-alpha.1"
+version = "18.0.0"
 dependencies = [
  "fancy-regex",
  "hex",
@@ -245,7 +245,7 @@ dependencies = [
 
 [[package]]
 name = "chuck-tools"
-version = "18.0.0-alpha.1"
+version = "18.0.0"
 dependencies = [
  "chuck-core",
  "globset",
@@ -260,7 +260,7 @@ dependencies = [
 
 [[package]]
 name = "chuck-ui"
-version = "18.0.0-alpha.1"
+version = "18.0.0"
 dependencies = [
  "chuck-code",
  "chuck-core",
@@ -284,7 +284,7 @@ dependencies = [
 
 [[package]]
 name = "chuck-voice"
-version = "18.0.0-alpha.1"
+version = "18.0.0"
 dependencies = [
  "chuck-store",
  "chuck-tools",
@@ -295,7 +295,7 @@ dependencies = [
 
 [[package]]
 name = "chuck-web"
-version = "18.0.0-alpha.1"
+version = "18.0.0"
 dependencies = [
  "base64",
  "chuck-tools",

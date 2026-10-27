@@ -2,10 +2,10 @@
 # ============================================================================
 #  Chuck installer  —  desktop coding & system agent (Arch / CachyOS first)
 #
-#  One line (this is the rust-rewrite branch; it installs from itself):
-#    curl -fsSL https://raw.githubusercontent.com/the-priest/ChuckNorris/rust-rewrite/install.sh | bash
+#  One line:
+#    curl -fsSL https://raw.githubusercontent.com/the-priest/ChuckNorris/main/install.sh | bash
 #
-#  On this branch Chuck IS the Rust app: it is built from this branch into
+#  Chuck IS the Rust app: it is built from the branch into
 #  ~/.local/bin/chuck, and the menu entry and the `chucknorris` command open
 #  it, replacing whatever Chuck was installed before. The Python app is still
 #  installed alongside (the voice setup uses it); it is what opens only if the
@@ -20,7 +20,10 @@
 set -euo pipefail
 
 REPO="${CHUCK_REPO:-the-priest/ChuckNorris}"
-BRANCH="${CHUCK_BRANCH:-rust-rewrite}"
+BRANCH="${CHUCK_BRANCH:-main}"
+# the Rust rewrite lived on its own branch until it became main: installs
+# made from it (their launcher says so) now follow main
+[ "$BRANCH" = "rust-rewrite" ] && BRANCH="main"
 DATA_DIR="${HOME}/.local/share/chucknorris"
 APP_DIR="${DATA_DIR}/app"
 ASSET_DIR="${DATA_DIR}/assets"
@@ -100,7 +103,7 @@ done
 if [ -n "$BROWSER_FOUND" ]; then
   info "browser: $BROWSER_FOUND — the Lead's page checks and script-only pages will use it"
 else
-  info "no Brave/Chromium/Chrome found — page checks and pages that need JavaScript stay off until one is installed (e.g. pacman -S chromium)"
+  info "no Brave/Chromium/Chrome found — page checks and pages that need JavaScript stay off until one is installed (e.g. pacman -Syu chromium)"
 fi
 
 step "installing Chuck"
@@ -215,7 +218,7 @@ else
 fi
 
 
-# Chuck, the Rust app (this branch's Chuck).
+# Chuck, the Rust app.
 RUST_MIN="1.88.0"     # what its dependencies need (Cargo.toml's rust-version)
 RUST_WHY=""
 if [ "${CHUCK_RUST:-1}" = "1" ]; then
@@ -234,7 +237,7 @@ if [ "${CHUCK_RUST:-1}" = "1" ]; then
     rustup default stable >/dev/null 2>&1 || true
   fi
   if ! cargo_ok && ! command -v rustup >/dev/null; then
-    if command -v pacman >/dev/null; then sudo pacman -S --needed --noconfirm rust >/dev/null 2>&1 || true
+    if command -v pacman >/dev/null; then sudo pacman -Syu --needed --noconfirm rust >/dev/null 2>&1 || true
     elif command -v dnf >/dev/null; then sudo dnf install -y rust cargo >/dev/null 2>&1 || true
     fi
   fi
@@ -277,7 +280,7 @@ else
   RUST_WHY="skipped (CHUCK_RUST=0)"
 fi
 
-# What "Chuck" opens: the Rust app when it built (this branch's Chuck), the
+# What "Chuck" opens: the Rust app when it built, the
 # Python window only when it couldn't be built. The menu entry and the
 # `chucknorris` command are rewritten on every install, so nothing is left
 # pointing at an old build.

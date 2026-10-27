@@ -90,7 +90,7 @@ pub fn find(pref: &str) -> Result<PathBuf, String> {
             Automatic in Settings › Research", pref[..1].to_uppercase() + &pref[1..]));
     }
     [BRAVE, CHROMIUM, CHROME].iter().find_map(|g| first(g))
-        .ok_or_else(|| "no browser found: install Brave or Chromium (pacman -S chromium / apt install chromium)".into())
+        .ok_or_else(|| "no browser found: install Brave or Chromium (pacman -Syu chromium / apt install chromium)".into())
 }
 
 /// "Brave", "Chromium", "Chrome"… from the executable.

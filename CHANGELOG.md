@@ -1,5 +1,17 @@
 # Changelog
 
+## 18.0.0 — Chuck in Rust
+
+Chuck is now a Rust app (`crates/`), and the installer puts it over any earlier Chuck. See
+`docs/RELEASE-18.0.0.md` for the full notes and `ARCHITECTURE.md` for the design.
+
+- One Lead and up to eight jailed workers on SiliconFlow. Done is enforced in code: criteria,
+  evidence, verification after the last change, and a critic review.
+- Long jobs have no step or time limit. A paused job says why, and **Keep going** resumes it.
+- Default access: the project folder freely, anything outside it only with your yes.
+- Closing the window ends every process Chuck started.
+- The Python app stays installed as the fallback. It now offers the switch to the Rust app.
+
 ## Unreleased (v17, in progress)
 
 The third roadmap (`docs/ROADMAP.md`, phases 10–15), with tests in

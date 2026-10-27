@@ -3820,6 +3820,7 @@ class ChuckWindow(Adw.ApplicationWindow):
             _listen.warm_up()
         self._show_empty_hint()
         GLib.timeout_add_seconds(20, self._update_check)   # once a day, after startup settles
+        GLib.timeout_add_seconds(8, self._rust_offer)      # Chuck 18 is the Rust app
         if getattr(_config, "LOAD_PROBLEM", [None])[0]:
             self._sys_note("\u26a0 " + _config.LOAD_PROBLEM[0], "danger")
             _config.LOAD_PROBLEM[0] = None
@@ -12875,6 +12876,9 @@ class ChuckWindow(Adw.ApplicationWindow):
             return
         if getattr(self, "_updating", False):
             return
+        if self._rust_missing():                    # the next Chuck is the Rust app
+            self.install_rust()
+            return
         self._updating = True
         card, head, body, foot = self._card_shell("UPDATE")
         pill = self._pill("checking…", "run")
@@ -12944,6 +12948,132 @@ class ChuckWindow(Adw.ApplicationWindow):
             os.execv(sys.executable, argv)
         except OSError as ex:
             self._sys_note(f"Couldn't restart ({ex}) — close and reopen Chuck.", "danger")
+
+    # ── the switch to the Rust app ──
+    RUST_BIN = Path.home() / ".local" / "bin" / "chuck"
+    RUST_OFFERED = DATA_DIR / "rust-offer"
+    INSTALL_ONE_LINER = ("curl -fsSL https://raw.githubusercontent.com/the-priest/ChuckNorris/main/install.sh "
+                         "| bash")
+
+    def _rust_missing(self):
+        """This is the installer's copy of the Python window and there is no
+        Rust Chuck beside it (a clone or a test run is left alone)."""
+        try:
+            installed = HERE.resolve() == (DATA_DIR / "app").resolve()
+        except OSError:
+            installed = False
+        return installed and not self.RUST_BIN.exists()
+
+    def _rust_offer(self):
+        """Chuck 18 is a Rust app. An install that only has this window (an
+        update that swapped in the new Python files) is offered the switch,
+        at most once a day; an install where the Rust build failed is too."""
+        if os.environ.get("CHUCK_NO_UPDATE_CHECK") or not self._rust_missing():
+            return False
+        try:
+            if time.time() - self.RUST_OFFERED.stat().st_mtime < 24 * 3600:
+                return False
+        except OSError:
+            pass
+        try:
+            self.RUST_OFFERED.parent.mkdir(parents=True, exist_ok=True)
+            self.RUST_OFFERED.touch()
+        except OSError:
+            pass
+        try:
+            t = Adw.Toast.new("Chuck 18 is here, rebuilt in Rust: a lead and eight workers, done only when verified")
+            t.set_button_label("Install it")
+            t.set_timeout(0)
+            t.connect("button-clicked", lambda *_a: self.install_rust())
+            self.toasts.add_toast(t)
+        except Exception:
+            self._sys_note("Chuck 18 is here, rebuilt in Rust — /update installs it, or run: "
+                           + self.INSTALL_ONE_LINER, "dim")
+        return False
+
+    def install_rust(self):
+        """Build and install the Rust Chuck with the installer from main (no
+        system packages: there is no terminal here to ask for a password)."""
+        if getattr(self, "_installing_rust", False):
+            return
+        self._installing_rust = True
+        card, head, body, foot = self._card_shell("CHUCK 18")
+        pill = self._pill("installing…", "run")
+        head.insert_child_after(pill, head.get_first_child())
+        status = Gtk.Label(label="Downloading the installer…", xalign=0, wrap=True)
+        status.add_css_class("dim"); _wrap_anywhere(status)
+        body.append(status)
+        self._log_pin(card)
+
+        def progress(line):
+            GLib.idle_add(lambda: (status.set_text(line[:300]), False)[1])
+
+        def work():
+            fd, script = tempfile.mkstemp(prefix="chuck-install-", suffix=".sh")
+            try:
+                with os.fdopen(fd, "wb") as f, urllib.request.urlopen(
+                        "https://raw.githubusercontent.com/the-priest/ChuckNorris/main/install.sh", timeout=30) as r:
+                    f.write(r.read())
+                env = dict(os.environ, CHUCK_DEPS="0", CHUCK_VOICE="0", CHUCK_BRANCH="main", NO_COLOR="1")
+                p = subprocess.Popen(["bash", script], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                     stderr=subprocess.STDOUT, text=True, errors="replace", env=env)
+                tail = []
+                for line in p.stdout:
+                    line = re.sub(r"\x1b\[[0-9;]*m", "", line).rstrip()
+                    if line:
+                        tail = (tail + [line])[-12:]
+                        progress(line)
+                p.wait()
+                if p.returncode == 0 and self.RUST_BIN.exists():
+                    return True, "The Rust Chuck is installed: the menu entry and `chucknorris` open it now."
+                return False, "\n".join(tail[-8:])
+            except Exception as ex:
+                return False, f"{ex.__class__.__name__}: {ex}"
+            finally:
+                try:
+                    os.unlink(script)
+                except OSError:
+                    pass
+
+        def done(res):
+            self._installing_rust = False
+            ok, msg = res
+            for k in ("run", "ok", "fail"):
+                pill.remove_css_class(f"pill-{k}")
+            pill.add_css_class("pill-ok" if ok else "pill-fail")
+            pill.set_text("installed" if ok else "didn't finish")
+            if ok:
+                status.set_text(msg + " This chat is saved.")
+                rb = Gtk.Button(label="Open the new Chuck"); rb.add_css_class("quick")
+                rb.add_css_class("accent-btn"); rb.set_halign(Gtk.Align.START)
+                rb.connect("clicked", lambda *_a: self._open_rust())
+                foot.append(rb)
+            else:
+                status.set_text("The Rust build couldn't finish from here (it may need system packages, which ask for "
+                                "your password). Run this in a terminal:\n\n" + self.INSTALL_ONE_LINER
+                                + "\n\nWhat it said:\n" + msg)
+                cb = Gtk.Button(label="Copy the command"); cb.add_css_class("quick")
+                cb.set_halign(Gtk.Align.START)
+                cb.connect("clicked", lambda *_a: Gdk.Display.get_default().get_clipboard().set(self.INSTALL_ONE_LINER))
+                foot.append(cb)
+            foot.set_visible(True)
+            return False
+
+        def guarded():
+            try:
+                res = work()
+            except Exception as ex:
+                res = (False, f"{ex.__class__.__name__}: {ex}")
+            GLib.idle_add(done, res)
+        threading.Thread(target=guarded, daemon=True, name="install-rust").start()
+
+    def _open_rust(self):
+        """Close this window and open the Rust Chuck in its place."""
+        self._on_close()
+        try:
+            os.execv(str(self.RUST_BIN), [str(self.RUST_BIN)])
+        except OSError as ex:
+            self._sys_note(f"Couldn't open it ({ex}) — open Chuck from your app menu.", "danger")
 
     # ── git ──
     def _git(self, *args, timeout=15):

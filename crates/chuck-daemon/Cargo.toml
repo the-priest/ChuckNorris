@@ -6,9 +6,9 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-chuck-sandbox = { version = "18.0.0-alpha.1", path = "../chuck-sandbox" }
-chuck-store = { version = "18.0.0-alpha.1", path = "../chuck-store" }
-chuck-tools = { version = "18.0.0-alpha.1", path = "../chuck-tools" }
+chuck-sandbox = { version = "18.0.0", path = "../chuck-sandbox" }
+chuck-store = { version = "18.0.0", path = "../chuck-store" }
+chuck-tools = { version = "18.0.0", path = "../chuck-tools" }
 libc = "0.2.191"
 regex = "1.13.1"
 serde_json = "1.0.154"

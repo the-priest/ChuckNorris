@@ -14,7 +14,7 @@ from pathlib import Path
 from . import net as _net
 
 APP_ID = "org.thepriest.chucknorris"
-VERSION = "16.0.0"
+VERSION = "18.0.0"
 
 # Backend model. GLM-5.3-Flash (Z.ai) replaced DeepSeek-V4-Flash in v13: it
 # tops SiliconFlow's intelligence board, is the strongest coder / long-horizon
