@@ -886,6 +886,17 @@ fn save_shot(window: &adw::ApplicationWindow, path: &std::path::Path) -> Result<
     tex.save_to_png(path).map_err(|e| e.to_string())
 }
 
+/// The folder of your most recent chat in the earlier (Python) Chuck
+/// window, so switching over opens where you were.
+fn last_python_folder() -> Option<PathBuf> {
+    let dir = chuck_store::ledger::data_dir().join("chats");
+    let newest = std::fs::read_dir(dir).ok()?.flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+        .max_by_key(|e| e.metadata().and_then(|m| m.modified()).ok())?;
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(newest.path()).ok()?).ok()?;
+    v.get("workspace").and_then(|w| w.as_str()).filter(|w| !w.is_empty()).map(PathBuf::from)
+}
+
 fn panel_open_from_settings() -> Vec<String> {
     Settings::load().map.get("fleet_panel_open").and_then(|v| v.as_array())
         .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
@@ -1072,6 +1083,7 @@ pub fn build(app: &adw::Application, opts: Options) {
             Some(d) != home.as_ref() && d != Path::new("/")
         })
     }).or_else(|| Settings::load().str("fleet_last_folder").map(PathBuf::from))
+        .or_else(last_python_folder)
         .and_then(|f| f.canonicalize().ok()).filter(|f| f.is_dir());
     let ui = Ui { window: window.clone(), stack, transcript, input: input.clone(), hint, send: send.clone(),
                   stop: stop.clone(), status, subtitle, meter, folder_btn: folder_btn.clone(), new_btn: new_btn.clone() };

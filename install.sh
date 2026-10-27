@@ -102,6 +102,7 @@ trap 'rm -rf "$SRC_TMP"' EXIT
 # over the latest release.
 SELF_DIR=""
 RUST_SRC=""
+RUST_OK=0
 if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
   SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 fi
@@ -227,20 +228,11 @@ if [ "${CHUCK_RUST:-1}" = "1" ]; then
   else
     TARGET="${HOME}/.cache/chuck/cargo-target"
     if ( cd "$RUST_SRC" && CARGO_TARGET_DIR="$TARGET" cargo build --release --locked -p chuck ); then
-      install -m 755 "${TARGET}/release/chuck" "${HOME}/.local/bin/chuck"
-      cat > "${HOME}/.local/share/applications/org.thepriest.chuck.fleet.desktop" <<EOF
-[Desktop Entry]
-Type=Application
-Name=Chuck Fleet
-GenericName=AI engineering team
-Comment=One lead and eight workers on SiliconFlow; work ends only through the Done gate
-Exec=${HOME}/.local/bin/chuck
-Icon=org.thepriest.chucknorris
-Terminal=false
-Categories=Development;Utility;
-StartupNotify=true
-EOF
-      ok "$("${HOME}/.local/bin/chuck" version) installed — try: chuck run \"what to do\" (in a project folder)"
+      # replace, never swap under a running copy: a new file, then a rename
+      install -m 755 "${TARGET}/release/chuck" "${HOME}/.local/bin/.chuck.new"
+      mv -f "${HOME}/.local/bin/.chuck.new" "${HOME}/.local/bin/chuck"
+      RUST_OK=1
+      ok "$("${HOME}/.local/bin/chuck" version) installed"
     else
       info "the Rust build failed (output above) — the Chuck window is installed and works without it"
       info "(the fleet window needs GTK 4.14+ and libadwaita 1.5+)"
@@ -250,26 +242,45 @@ else
   info "Rust runtime skipped (CHUCK_RUST=0)"
 fi
 
-cat > "$LAUNCH" <<EOF
+# What "Chuck" opens: the Rust app when it built (this branch's Chuck), the
+# Python window only when it couldn't be built. The menu entry and the
+# `chucknorris` command are rewritten on every install, so nothing is left
+# pointing at an old build.
+if [ "$RUST_OK" = "1" ]; then
+  cat > "$LAUNCH" <<EOF
+#!/usr/bin/env bash
+# Chuck (Rust), installed from the ${BRANCH} branch. Re-run the installer to update.
+exec "${HOME}/.local/bin/chuck" "\$@"
+EOF
+  WM_CLASS="org.thepriest.chuck"
+  COMMENT="One lead and eight workers on SiliconFlow; work is done only when it is verified"
+else
+  cat > "$LAUNCH" <<EOF
 #!/usr/bin/env bash
 # installed from the ${BRANCH} branch: the in-app updater stays on it
 export CHUCK_BRANCH="\${CHUCK_BRANCH:-${BRANCH}}"
 exec python3 "${APP_DIR}/chucknorris.py" "\$@"
 EOF
+  WM_CLASS="org.thepriest.chucknorris"
+  COMMENT="A coding and system agent for your desktop: runs commands, edits code, researches, sees screenshots"
+fi
 chmod +x "$LAUNCH"
 cat > "$DESKTOP" <<EOF
 [Desktop Entry]
 Type=Application
 Name=Chuck
 GenericName=AI Agent
-Comment=A coding and system agent for your desktop: runs commands, edits code, researches, sees screenshots
+Comment=${COMMENT}
 Exec=${LAUNCH}
 Icon=org.thepriest.chucknorris
+StartupWMClass=${WM_CLASS}
 Terminal=false
-Categories=Utility;System;
-Keywords=arch;cachyos;assistant;fixer;research;news;images;video;code;pacman;searxng;
+Categories=Utility;System;Development;
+Keywords=arch;cachyos;assistant;agent;code;fleet;
 StartupNotify=true
 EOF
+# the separate entry an earlier build of this branch added
+rm -f "${HOME}/.local/share/applications/org.thepriest.chuck.fleet.desktop"
 update-desktop-database "${HOME}/.local/share/applications" 2>/dev/null || true
 if [ -f "${ASSET_DIR}/chucknorris-icon.png" ]; then
   # install every generated size so the taskbar/dock picks a crisp one
@@ -289,5 +300,12 @@ fi
 case ":$PATH:" in *":${HOME}/.local/bin:"*) : ;; *)
   info "add to PATH:  export PATH=\"\$HOME/.local/bin:\$PATH\"" ;; esac
 
-printf '\n%sChuck installed (%s branch).%s  Launch:  %schucknorris%s\n' "$c1" "$BRANCH" "$c0" "$c2" "$c0"
-info "add a SiliconFlow key in Settings (or it reuses Basilisk's). Tab switches Agent / Chat."
+if [ "$RUST_OK" = "1" ]; then
+  printf '\n%sChuck installed (%s branch, the Rust app).%s  Open Chuck from your app menu, or run:  %schuck%s\n' \
+    "$c1" "$BRANCH" "$c0" "$c2" "$c0"
+  info "an old Chuck window that is still open is the previous version: close it and open Chuck again"
+  info "add a SiliconFlow key in Settings (gear icon), or: chuck key"
+else
+  printf '\n%sChuck installed (%s branch).%s  Launch:  %schucknorris%s\n' "$c1" "$BRANCH" "$c0" "$c2" "$c0"
+  info "add a SiliconFlow key in Settings (or it reuses Basilisk's). Tab switches Agent / Chat."
+fi

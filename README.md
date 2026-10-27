@@ -27,9 +27,10 @@ curl -fsSL https://raw.githubusercontent.com/the-priest/ChuckNorris/rust-rewrite
 
 Paste a SiliconFlow API key in Settings, pick a folder, and say what you want.
 
-> **You are on the `rust-rewrite` branch.** The one-liner above installs from this branch: the
-> Chuck window, plus `chuck`, the new Rust fleet runtime. The rewrite is in progress; see
-> [The Rust fleet (preview)](#the-rust-fleet-preview) for what works today.
+> **You are on the `rust-rewrite` branch.** The one-liner above installs from this branch, and here
+> Chuck *is* the Rust app: the menu entry and `chucknorris` open it, replacing the earlier Python
+> window (which stays installed only as the fallback if the Rust build fails). See
+> [Chuck in Rust](#chuck-in-rust-this-branch) for what it does and what isn't ported yet.
 
 ---
 
@@ -281,22 +282,34 @@ Installed from this branch, the app's own updater stays on this branch. The inst
 `chuck` with Rust 1.82 or newer. It uses your Rust if you have it, then your distro's package, and
 as a last resort installs rustup into `~/.cargo`. `CHUCK_RUST=0` skips this step.
 
-## The Rust fleet (preview)
+## Chuck in Rust (this branch)
 
-`chuck` is the rewrite of Chuck's agent runtime in Rust, built around a fixed team on SiliconFlow:
+On this branch Chuck is a Rust app built around a fixed team on SiliconFlow:
 one **Lead** (DeepSeek-V4.1-Flash) that talks to you, writes the acceptance criteria, plans, reviews
 and owns "done", and up to **four DeepSeek and four GLM-5.3-Flash workers**. Each worker is its own
 process and thread, working in its own copy of your project.
 
-<img src="assets/screenshots/fleet-run.png" alt="The Chuck Fleet window: the Lead plans and assigns two tasks, a DeepSeek and a GLM worker do them in parallel, each is reviewed, merged and verified, the independent review accepts it, and the Done gate on the right shows every criterion with its evidence" width="100%">
+<img src="assets/screenshots/fleet-run.png" alt="Chuck: the Lead plans and assigns two tasks, a DeepSeek and a GLM worker do them in parallel, each is reviewed, merged and verified, the independent review accepts it, and the Done gate on the right shows every criterion with its evidence" width="100%">
 
-Run `chuck` (or open **Chuck Fleet**) for the fleet's window:
-- the conversation with the Lead, with every agent's work underneath;
-- the fleet itself, live, with each agent's state, task and spend;
-- the Done gate, with each criterion and its evidence.
+On the left is your conversation with the Lead, with every agent's work in a lane under each reply.
+The right side shows everything the fleet is doing, in sections that start closed. Each shows a
+one-line summary until you click it open, so nothing is hidden and nothing piles up:
 
-Critical commands stop and ask for your yes right in the conversation. A finished job can be rewound
-with one click.
+- **Plan:** the steps, with a progress bar and the current step always in view.
+- **Tasks:** who is on each task, its criteria, and whether it's queued, running, in review, merged
+  or failed.
+- **Agents:** each agent's state, model and spend, with its own history.
+- **Commands:** what's running right now, with live output, then recent commands with their exit
+  codes and output.
+- **Done gate:** each criterion and its evidence.
+- **Spend:** this job, today and this month, against your limits.
+- **Checkpoints:** every point you can rewind to.
+
+<img src="assets/screenshots/fleet-midrun.png" alt="Mid-job: the plan at step 2 of 4, two tasks running in parallel on a DeepSeek and a GLM worker, and each agent's state in the right panel" width="100%">
+
+Type while the fleet works to steer the Lead; it reads your words at its next step. Critical
+commands stop and ask for your yes right in the conversation. Conversations are saved per folder.
+Closing the window stops every agent and ends every command it started; nothing keeps running.
 
 <img src="assets/screenshots/fleet-critical.png" alt="A critical command (curl piped into bash) waiting in the conversation for the user to press Run it or Refuse" width="100%">
 
@@ -344,9 +357,9 @@ Before every step that changes your folder, `chuck` takes a checkpoint in the wi
 history. `chuck rewind` puts the whole folder back to before the last job, including whatever shell
 commands changed, and a rewind can itself be undone.
 
-What isn't ported yet: daemons and voice. The Chuck window (`chucknorris`), with research, voice and
-saved chats, is still the Python app; Chuck Fleet is the new window built around the fleet. [ARCHITECTURE.md](ARCHITECTURE.md) has the
-design and the plan.
+What isn't ported to Rust yet, so isn't in this branch's app: voice (Kokoro, Piper, talking to it),
+web research and browsing, Chat mode, images and video, daemons, MCP servers and language servers.
+[ARCHITECTURE.md](ARCHITECTURE.md) has the design and the plan.
 
 Arch and CachyOS are first-class; apt and dnf are supported. The installer sets up GTK4 and libadwaita, bubblewrap, a screenshot tool, the local voice models (about 600 MB, skip with `CHUCK_VOICE=0`) and the linters Chuck uses to check code. At runtime Chuck needs only Python's standard library and GTK; everything optional degrades gracefully when it's missing.
 
