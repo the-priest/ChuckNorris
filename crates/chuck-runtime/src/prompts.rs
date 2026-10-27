@@ -47,6 +47,60 @@ critical commands (disk wipes, rm -rf ~, curl | sh) are refused — tell the lea
         id = task.id)
 }
 
+const INSTRUCTION_FILES: &[&str] = &["CHUCK.md", "AGENTS.md", "CLAUDE.md", ".chuck/instructions.md"];
+const INSTRUCTION_CAP: usize = 12_000;
+
+fn read_capped(p: &std::path::Path) -> String {
+    let Ok(t) = std::fs::read_to_string(p) else { return String::new() };
+    let t = t.trim();
+    if t.chars().count() <= INSTRUCTION_CAP {
+        return t.to_string();
+    }
+    format!("{}\n… (cut at {INSTRUCTION_CAP} characters — read {} for the rest)",
+            t.chars().take(INSTRUCTION_CAP).collect::<String>(), p.display())
+}
+
+/// The user's standing rules: ~/.config/chucknorris/CHUCK.md for everything,
+/// plus the first of CHUCK.md / AGENTS.md / CLAUDE.md in the folder ("" when
+/// there are none) — as the Python app reads them.
+pub fn instructions(root: Option<&std::path::Path>) -> String {
+    let mut out = Vec::new();
+    let g = read_capped(&chuck_store::settings::config_dir().join("CHUCK.md"));
+    if !g.is_empty() {
+        out.push(format!("USER INSTRUCTIONS (~/.config/chucknorris/CHUCK.md) — always follow:\n{g}"));
+    }
+    if let Some(root) = root {
+        for name in INSTRUCTION_FILES {
+            let f = root.join(name);
+            if f.is_file() {
+                let t = read_capped(&f);
+                if !t.is_empty() {
+                    out.push(format!("PROJECT INSTRUCTIONS ({name} in the working folder) — follow them for work here:\n{t}"));
+                }
+                break;
+            }
+        }
+    }
+    out.join("\n\n")
+}
+
+/// The prompt, with the standing rules and what's remembered appended.
+pub fn with_context(system: String, instructions: &str, memory: &str) -> String {
+    let mut s = system;
+    for part in [instructions, memory] {
+        if !part.trim().is_empty() {
+            s.push_str("\n\n");
+            s.push_str(part.trim());
+        }
+    }
+    s
+}
+
+pub const MEMORY_TOOLS: &str = "\
+```remember <a durable fact>```   keep it for later chats (start it with `project:` for this folder only); \
+only what the user would want kept: their setup, preferences, names, standing instructions
+```forget <what>```               drop facts that match";
+
 pub fn task_brief(task: &Task) -> String {
     let mut s = format!("TASK {}: {}\n\nACCEPTANCE CRITERIA:\n", task.id, task.title);
     for c in &task.criteria {
@@ -99,7 +153,8 @@ And the lead's own:
 ```assign deepseek|glm|race [after t1,t2]``` + `title: ...` / `criteria:` lines / `brief:` + the work + ```
 ```review t1 accept``` or ```review t1 reject``` + lines `- <defect>` + ```
 ```justify proportion``` + why a small change fully solves a large ask + ```
-```done``` + summary for the user (what changed, how it was verified) + ```",
+```done``` + summary for the user (what changed, how it was verified) + ```
+{MEMORY_TOOLS}",
         model = f.deepseek_model, ds = f.deepseek_model, glm = f.glm_model,
         nd = f.deepseek_workers, ng = f.glm_workers)
 }

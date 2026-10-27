@@ -154,6 +154,7 @@ pub struct Panel {
     pub checkpoints: Section,
     inbox: Section,
     daemons: Section,
+    memory: Section,
     // what's shown
     steps: Vec<(String, bool)>,
     finished: bool,
@@ -208,14 +209,15 @@ impl Panel {
         let checkpoints = mk("checkpoints", "CHECKPOINTS");
         let inbox = mk("inbox", "INBOX");
         let daemons = mk("daemons", "DAEMONS & REMINDERS");
+        let memory = mk("memory", "MEMORY");
 
-        for s in [&plan, &tasks, &agents, &commands, &research, &gate, &spend, &checkpoints, &inbox, &daemons] {
+        for s in [&plan, &tasks, &agents, &commands, &research, &gate, &spend, &checkpoints, &inbox, &daemons, &memory] {
             side.append(&s.root);
         }
         let root = gtk::ScrolledWindow::builder().child(&side).hscrollbar_policy(gtk::PolicyType::Never).build();
         let p = Panel { root, plan, plan_bar, plan_now, tasks, agents, commands, running_box, recent_box,
                         research, searches: 0, pages: 0, gate,
-                        gate_phase, gate_unmet, gate_criteria, spend, checkpoints, inbox, daemons, steps: Vec::new(), finished: false,
+                        gate_phase, gate_unmet, gate_criteria, spend, checkpoints, inbox, daemons, memory, steps: Vec::new(), finished: false,
                         logs: HashMap::new(), running: HashMap::new(), recent: VecDeque::new(), recent_dirty: false,
                         agents_sig: String::new() };
         p.plan.summary.set_label("no plan yet");
@@ -761,6 +763,44 @@ impl Panel {
             x.connect_clicked(move |_| cb(id));
             row.append(&x);
             self.daemons.body.append(&row);
+        }
+    }
+
+    /// What Chuck remembers, newest first, each with a button to forget it.
+    /// `folder`: the open project (its own facts are marked).
+    pub fn set_memory(&self, facts: &[chuck_store::memory::Fact], folder: &str, on_forget: Rc<dyn Fn(serde_json::Value)>) {
+        clear(&self.memory.body);
+        let here = facts.iter().filter(|f| f.scope().is_empty() || f.scope() == folder).count();
+        self.memory.summary.set_label(&match facts.len() {
+            0 => "nothing yet".into(),
+            n if here == n => format!("{n} fact{}", if n == 1 { "" } else { "s" }),
+            n => format!("{here} here · {n} in all"),
+        });
+        if facts.is_empty() {
+            self.memory.body.append(&label("Facts Chuck keeps for later chats appear here (it says when it \
+                remembers something). Remove any you don't want kept.", &["panel-dim"]));
+            return;
+        }
+        for f in facts.iter().take(200) {
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            row.add_css_class("panel-row");
+            let col = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            col.set_hexpand(true);
+            col.append(&label(f.text(), &["panel-text"]));
+            let scope = if f.scope().is_empty() { "about you".to_string() } else {
+                format!("project · {}", std::path::Path::new(f.scope()).file_name().map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| f.scope().to_string()))
+            };
+            col.append(&label(&format!("{}{scope}", if f.kind() == "core" { "always · " } else { "" }), &["panel-meta"]));
+            row.append(&col);
+            let x = gtk::Button::from_icon_name("user-trash-symbolic");
+            x.add_css_class("flat");
+            x.set_valign(gtk::Align::Center);
+            x.set_tooltip_text(Some("Forget this"));
+            let (id, cb) = (f.id(), on_forget.clone());
+            x.connect_clicked(move |_| cb(id.clone()));
+            row.append(&x);
+            self.memory.body.append(&row);
         }
     }
 

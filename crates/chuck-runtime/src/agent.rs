@@ -287,7 +287,10 @@ fn describe(gaps: &[Unmet]) -> Vec<String> {
 pub fn run_worker(ctx: Ctx, w: WorkerSpec) {
     let model = ctx.cfg.fleet.model_for(w.role).to_string();
     let root = w.ws.work.display().to_string();
-    let mut convo = Convo::new(&prompts::worker(w.role, &w.name, &model, &w.task, &root),
+    // the project's own rules (its CHUCK.md / AGENTS.md is in the copy too)
+    let system = prompts::with_context(prompts::worker(w.role, &w.name, &model, &w.task, &root),
+                                       &prompts::instructions(Some(&w.ws.work)), "");
+    let mut convo = Convo::new(&system,
                                &format!("{}\n\nYour copy of the project: {root}", prompts::task_brief(&w.task)));
     let mut progress = Progress::default();
     let mut warned_term = false;
@@ -314,7 +317,8 @@ pub fn run_worker(ctx: Ctx, w: WorkerSpec) {
                               stop: w.stop.clone(), events: &ctx.events,
                               cmd_timeout: ctx.cfg.cmd_timeout,
                               web: ctx.cfg.web.as_deref(), sources: ctx.cfg.sources,
-                              mcp: ctx.cfg.mcp.as_deref(), lsp: ctx.cfg.lsp.as_deref() };
+                              mcp: ctx.cfg.mcp.as_deref(), lsp: ctx.cfg.lsp.as_deref(),
+                              memory: ctx.cfg.memory.as_deref() };
             let r = exec.run(&reply);
             let mut fb = r.feedback.clone();
             if let Some(report) = &r.submit {

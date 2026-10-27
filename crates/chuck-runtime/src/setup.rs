@@ -132,6 +132,7 @@ pub fn from_settings(s: &Settings, folder: &Path, max_usd: Option<f64>) -> Resul
     }
     cfg.job_quota = Quota { usd: Some(usd), ..cfg.job_quota };
     cfg.web = Some(Arc::new(web(s)));
+    cfg.memory = Some(Arc::new(chuck_store::memory::Memory::at(&chuck_store::memory::Memory::default_path())));
     cfg.sources = s.num("research_sources", 6.0, 1.0, 10.0) as usize;
     cfg.access = access_of(s, folder);
     if cfg.access != Access::Full && !cfg.bwrap {

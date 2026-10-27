@@ -409,6 +409,13 @@ The mic button (Ctrl+M) listens with Moonshine and puts what you said in the box
 that on in Settings › Voice. Settings shows which engine is speaking and why, and lets you pick the
 voice, the speed and test it.
 
+**Memory and standing rules.** Every agent follows `~/.config/chucknorris/CHUCK.md` and the folder's
+`CHUCK.md`, `AGENTS.md` or `CLAUDE.md`. The Lead and Chat keep durable facts with ```` ```remember``` ````
+(start with `project:` to keep a fact to that folder) and drop them with ```` ```forget``` ````. Only the few
+facts relevant to what you asked go into a prompt, never the whole store. The panel's **Memory** section
+lists every fact, with a button to forget each one. It is the Python app's memory file, so what it
+remembered carries over.
+
 What isn't ported to Rust yet, so isn't in this branch's app: a real browser for pages that need
 JavaScript, and images and video.
 [ARCHITECTURE.md](ARCHITECTURE.md) has the design and the plan.

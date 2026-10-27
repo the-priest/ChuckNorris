@@ -4,6 +4,7 @@
 pub mod budget;
 pub mod checkpoint;
 pub mod ledger;
+pub mod memory;
 pub mod settings;
 
 pub use budget::{Over, Spend};

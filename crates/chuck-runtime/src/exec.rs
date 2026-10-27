@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 pub const WORKER_TAGS: &[&str] = &["read", "grep", "glob", "map", "def", "refs", "rename", "bash", "sh", "test", "search", "fetch",
     "mcp", "submit"];
 pub const LEAD_TAGS: &[&str] = &["read", "grep", "glob", "map", "def", "refs", "rename", "bash", "sh", "test", "search",
-    "fetch", "mcp", "criteria", "plan", "assign",
+    "fetch", "mcp", "remember", "forget", "criteria", "plan", "assign",
     "review", "justify", "done", "ask"];
 const CLIP: usize = 20_000;
 /// A fetched page is handed over this many characters at a time.
@@ -80,6 +80,8 @@ pub struct Exec<'a> {
     /// Language servers (the lead's only, for the same reason: workers get
     /// the syntax answers).
     pub lsp: Option<&'a chuck_code::Manager>,
+    /// Long-term memory (the lead's: workers don't keep facts).
+    pub memory: Option<&'a chuck_store::memory::Memory>,
 }
 
 fn clip(s: &str, n: usize) -> String {
@@ -453,6 +455,14 @@ impl<'a> Exec<'a> {
             "mcp" => self.mcp(t, res),
             "map" | "def" | "refs" => self.code(tag, arg, t.body.trim(), res),
             "rename" => self.rename(arg, t.body.trim(), res),
+            "remember" | "forget" => {
+                let what = if arg.is_empty() { t.body.trim() } else { arg };
+                res.actions.push(format!("{tag} {what}"));
+                let (ok, summary, text) = memory_tool(if self.sandbox.worker { None } else { self.memory }, tag, what,
+                                                      &self.root.display().to_string());
+                self.act(tag, what, ok, &summary);
+                res.feedback.push(text);
+            }
             "submit" => {
                 res.submit = Some(format!("{}\n{}", arg, t.body).trim().to_string());
             }
@@ -724,6 +734,26 @@ impl<'a> Exec<'a> {
         format!("GATE: {} — still missing: {}", g.phase.label(),
                 gaps.iter().take(6).map(Unmet::describe).collect::<Vec<_>>().join("; "))
     }
+}
+
+/// ```remember <fact>``` (`project:` for this folder only) or ```forget
+/// <what>```: (ok, summary, what the agent reads).
+pub fn memory_tool(memory: Option<&chuck_store::memory::Memory>, tag: &str, what: &str, folder: &str)
+    -> (bool, String, String) {
+    let Some(m) = memory else {
+        return (false, "no memory".into(), format!("[{tag}: there's no long-term memory in this run]"));
+    };
+    let what = what.trim();
+    if tag == "forget" {
+        let (ok, msg) = m.forget(what);
+        return (ok, msg.clone(), format!("[forget: {msg}]"));
+    }
+    let (fact, scope) = match what.get(..8).filter(|p| p.eq_ignore_ascii_case("project:")) {
+        Some(_) => (what[8..].trim(), folder),
+        None => (what, ""),
+    };
+    let (ok, msg) = m.remember(fact, "fact", 1.0, scope);
+    (ok, msg.clone(), format!("[remember: {msg}{}]", if scope.is_empty() { "" } else { " (for this folder)" }))
 }
 
 /// ```search <query>``` or ```fetch <url> [part]```: (ok, one-line summary,

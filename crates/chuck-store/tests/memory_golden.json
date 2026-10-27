@@ -1,0 +1,239 @@
+{
+ "steps": [
+  {
+   "op": "remember",
+   "text": "User runs CachyOS on a ThinkPad X395",
+   "kind": "fact",
+   "scope": "",
+   "out": [
+    true,
+    "noted"
+   ]
+  },
+  {
+   "op": "remember",
+   "text": "User's GPU is an RTX 3080",
+   "kind": "fact",
+   "scope": "",
+   "out": [
+    true,
+    "noted"
+   ]
+  },
+  {
+   "op": "remember",
+   "text": "User prefers vim for editing config files",
+   "kind": "fact",
+   "scope": "",
+   "out": [
+    true,
+    "noted"
+   ]
+  },
+  {
+   "op": "remember",
+   "text": "User prefers dark themes everywhere",
+   "kind": "fact",
+   "scope": "",
+   "out": [
+    true,
+    "noted"
+   ]
+  },
+  {
+   "op": "remember",
+   "text": "Always answer in British English",
+   "kind": "core",
+   "scope": "",
+   "out": [
+    true,
+    "noted"
+   ]
+  },
+  {
+   "op": "remember",
+   "text": "User's GPU is an RTX 4090 with 24GB",
+   "kind": "fact",
+   "scope": "",
+   "out": [
+    true,
+    "updated"
+   ]
+  },
+  {
+   "op": "remember",
+   "text": "User runs CachyOS on a ThinkPad X395",
+   "kind": "fact",
+   "scope": "",
+   "out": [
+    true,
+    "already knew that (refreshed)"
+   ]
+  },
+  {
+   "op": "remember",
+   "text": "User's handle on GitHub is the-priest",
+   "kind": "fact",
+   "scope": "",
+   "out": [
+    true,
+    "noted"
+   ]
+  },
+  {
+   "op": "remember",
+   "text": "The project uses pytest with -q and a conftest in tests/",
+   "kind": "fact",
+   "scope": "/home/u/proj",
+   "out": [
+    true,
+    "noted"
+   ]
+  },
+  {
+   "op": "remember",
+   "text": "Deploys go through GitHub Actions on main",
+   "kind": "fact",
+   "scope": "/home/u/proj",
+   "out": [
+    true,
+    "noted"
+   ]
+  },
+  {
+   "op": "remember",
+   "text": "ok",
+   "kind": "fact",
+   "scope": "",
+   "out": [
+    false,
+    "nothing to remember"
+   ]
+  },
+  {
+   "op": "recall",
+   "text": "what distro am I on",
+   "scope": "",
+   "out": [
+    "Always answer in British English",
+    "User runs CachyOS on a ThinkPad X395"
+   ]
+  },
+  {
+   "op": "recall",
+   "text": "which gpu do I have",
+   "scope": "",
+   "out": [
+    "Always answer in British English",
+    "User's GPU is an RTX 4090 with 24GB"
+   ]
+  },
+  {
+   "op": "recall",
+   "text": "what's the weather like today",
+   "scope": "",
+   "out": [
+    "Always answer in British English"
+   ]
+  },
+  {
+   "op": "recall",
+   "text": "how do I run the tests",
+   "scope": "/home/u/proj",
+   "out": [
+    "Always answer in British English",
+    "User runs CachyOS on a ThinkPad X395",
+    "The project uses pytest with -q and a conftest in tests/"
+   ]
+  },
+  {
+   "op": "recall",
+   "text": "how do I run the tests",
+   "scope": "/home/u/other",
+   "out": [
+    "Always answer in British English",
+    "User runs CachyOS on a ThinkPad X395"
+   ]
+  },
+  {
+   "op": "recall",
+   "text": "what editor should I use for configs",
+   "scope": "",
+   "out": [
+    "Always answer in British English",
+    "User prefers vim for editing config files"
+   ]
+  },
+  {
+   "op": "recall",
+   "text": "what is my github username",
+   "scope": "",
+   "out": [
+    "Always answer in British English",
+    "User's handle on GitHub is the-priest"
+   ]
+  },
+  {
+   "op": "forget",
+   "text": "dark themes",
+   "out": [
+    true,
+    "forgot 1 fact(s)"
+   ]
+  },
+  {
+   "op": "forget",
+   "text": "nothing like this exists",
+   "out": [
+    false,
+    "no match to forget"
+   ]
+  },
+  {
+   "op": "recall",
+   "text": "prefers",
+   "scope": "",
+   "out": [
+    "Always answer in British English",
+    "User prefers vim for editing config files"
+   ]
+  }
+ ],
+ "final": [
+  {
+   "text": "User runs CachyOS on a ThinkPad X395",
+   "kind": "fact",
+   "scope": ""
+  },
+  {
+   "text": "User prefers vim for editing config files",
+   "kind": "fact",
+   "scope": ""
+  },
+  {
+   "text": "Always answer in British English",
+   "kind": "core",
+   "scope": ""
+  },
+  {
+   "text": "User's GPU is an RTX 4090 with 24GB",
+   "kind": "fact",
+   "scope": ""
+  },
+  {
+   "text": "User's handle on GitHub is the-priest",
+   "kind": "fact",
+   "scope": ""
+  },
+  {
+   "text": "The project uses pytest with -q and a conftest in tests/",
+   "kind": "fact",
+   "scope": "/home/u/proj"
+  },
+  {
+   "text": "Deploys go through GitHub Actions on main",
+   "kind": "fact",
+   "scope": "/home/u/proj"
+  }
+ ]
+}

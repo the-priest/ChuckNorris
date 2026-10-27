@@ -65,6 +65,9 @@ pub struct RuntimeConfig {
     pub mcp: Option<Arc<chuck_mcp::Manager>>,
     /// Language servers for def/refs/rename (the lead's folder only).
     pub lsp: Option<Arc<chuck_code::Manager>>,
+    /// Long-term memory: recalled into the lead's and Chat's prompts, kept
+    /// with ```remember``` / ```forget```.
+    pub memory: Option<Arc<chuck_store::memory::Memory>>,
 }
 
 pub fn default_store() -> PathBuf {
@@ -100,6 +103,7 @@ impl Default for RuntimeConfig {
             sources: 6,
             mcp: None,
             lsp: None,
+            memory: None,
         }
     }
 }

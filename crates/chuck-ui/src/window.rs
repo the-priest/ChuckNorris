@@ -117,6 +117,8 @@ struct State {
     ears: chuck_voice::Ears,
     /// What the microphone hears, while it listens.
     heard: Option<Receiver<chuck_voice::Heard>>,
+    /// Long-term memory (shared with every job).
+    memory: Arc<chuck_store::memory::Memory>,
     tokens: u64,
     spent: f64,
     /// Prompt tokens sent, and how many of them the API's cache served.
@@ -445,6 +447,7 @@ impl State {
         self.panel.reset();
         self.panel.restore(&self.saved.progress);
         refresh_checkpoints(self, shared);
+        refresh_daemons(self, shared);
     }
 }
 
@@ -707,6 +710,7 @@ fn finished(st: &mut State, report: JobReport, shared: &Shared) {
     }
     let done = matches!(report.outcome, Outcome::Done { .. });
     st.panel.job_finished(done);
+    refresh_daemons(st, shared);
     st.saved.progress.finished = done;
     st.saved.history.push(("lead".into(), reply));
     st.lane = None;
@@ -774,13 +778,14 @@ fn start(shared: &Shared, text: String) {
     let (model, cfg) = match (&st.opts.model, setup::from_settings(&settings, &folder, None)) {
         (Some(m), _) => (m.clone(), chuck_runtime::RuntimeConfig { access: setup::access_of(&settings, &folder),
                                                                   web: st.opts.web.clone(), mcp: Some(st.mcp.clone()),
-                                                                  lsp: Some(st.lsp.clone()),
+                                                                  lsp: Some(st.lsp.clone()), memory: Some(st.memory.clone()),
                                                                   ..Default::default() }),
         (None, Ok(s)) => {
             for n in &s.notes {
                 st.act(format!("<span foreground=\"#F5B454\">! {}</span>", md::escape(n)));
             }
-            (s.model, chuck_runtime::RuntimeConfig { mcp: Some(st.mcp.clone()), lsp: Some(st.lsp.clone()), ..s.cfg })
+            (s.model, chuck_runtime::RuntimeConfig { mcp: Some(st.mcp.clone()), lsp: Some(st.lsp.clone()),
+                                                     memory: Some(st.memory.clone()), ..s.cfg })
         }
         (None, Err(e)) => {
             st.add(Entry::Card { kind: "CAN'T START".into(), class: "gap-card".into(), text: e });
@@ -891,6 +896,7 @@ fn shut_down(shared: &Shared) {
     st.lsp.stop_all();
     st.voice.shutdown();
     st.ears.shutdown();
+    st.memory.flush();
 }
 
 fn speaker_look(b: &gtk::ToggleButton, on: bool) {
@@ -1047,6 +1053,18 @@ fn refresh_daemons(st: &State, shared: &Shared) {
             refresh_daemons(&st, &sh2);
         });
     });
+    let w4 = Rc::downgrade(shared);
+    let on_forget: Rc<dyn Fn(serde_json::Value)> = Rc::new(move |id| {
+        let Some(sh) = w4.upgrade() else { return };
+        let sh2 = sh.clone();
+        glib::idle_add_local_once(move || {
+            let st = sh2.borrow();
+            st.memory.forget_id(&id);
+            refresh_daemons(&st, &sh2);
+        });
+    });
+    let folder = st.folder.as_ref().map(|f| f.display().to_string()).unwrap_or_default();
+    st.panel.set_memory(&st.memory.all(), &folder, on_forget);
     let live: Vec<i64> = st.daemon_live.keys().copied().collect();
     st.panel.set_daemons(&st.daemons.items, &live, on_toggle, on_remove);
     st.panel.set_inbox(&st.inbox.items, on_read);
@@ -1774,7 +1792,8 @@ pub fn build(app: &adw::Application, opts: Options) {
         lsp: Arc::new(setup::lsp(&Settings::load())),
         daemons: chuck_daemon::Registry::load(&chuck_daemon::Registry::default_path()),
         inbox: chuck_daemon::Inbox::load(&chuck_daemon::Inbox::default_path(), 200), daemon_live: HashMap::new(),
-        daemon_check: None, voice: chuck_voice::Voice::new(), ears: chuck_voice::Ears::new(), heard: None, tokens: 0,
+        daemon_check: None, voice: chuck_voice::Voice::new(), ears: chuck_voice::Ears::new(), heard: None,
+        memory: Arc::new(chuck_store::memory::Memory::at(&chuck_store::memory::Memory::default_path())), tokens: 0,
         spent: 0.0, prompt: 0, cached: 0, unsaved: false,
     }));
     *slot.borrow_mut() = Some(shared.clone());
