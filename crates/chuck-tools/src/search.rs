@@ -17,31 +17,49 @@ fn walk(root: &Path) -> impl Iterator<Item = walkdir::DirEntry> {
 const BINARY_EXT: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "ico", "pdf", "zip", "gz", "xz", "zst", "so",
     "o", "a", "bin", "pyc", "lock", "woff", "woff2", "ttf", "mp3", "mp4", "onnx", "wasm"];
 
-/// `path:line:text` for each match of `pattern`, at most `max_hits`.
+/// One file's matching lines (all of them: the caller keeps the first few).
+fn grep_file(rx: &regex::Regex, whole: &regex::Regex, root: &Path, p: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(p) else { return Vec::new() };
+    // most files don't match at all: one pass over the whole text says so, far faster than line by line
+    // (`whole` is the pattern with ^ and $ at every line, as the line-by-line match reads them)
+    if !whole.is_match(&text) {
+        return Vec::new();
+    }
+    let rel = p.strip_prefix(root).unwrap_or(p).display().to_string();
+    text.lines().enumerate().filter(|(_, l)| rx.is_match(l))
+        .map(|(i, line)| format!("{rel}:{}:{}", i + 1, line.chars().take(220).collect::<String>())).collect()
+}
+
+/// `path:line:text` for each match of `pattern`, at most `max_hits`. Files
+/// are searched on every core; the results come in the walk's order.
 pub fn grep(root: &Path, pattern: &str, sub: &str, max_hits: usize) -> Result<String, String> {
     let rx = regex::Regex::new(pattern).map_err(|e| format!("bad regex: {e}"))?;
+    let whole = regex::RegexBuilder::new(pattern).multi_line(true).build().map_err(|e| format!("bad regex: {e}"))?;
     let base = if sub.trim().is_empty() { root.to_path_buf() } else { crate::fs::safe(root, sub).map_err(|e| e.to_string())? };
-    let mut rows = Vec::new();
-    let mut hits = 0;
-    for e in walk(&base) {
-        let p = e.path();
-        if p.extension().and_then(|x| x.to_str()).is_some_and(|x| BINARY_EXT.contains(&x.to_lowercase().as_str())) {
-            continue;
-        }
-        if e.metadata().map(|m| m.len() > crate::fs::MAX_FILE_BYTES as u64).unwrap_or(true) {
-            continue;
-        }
-        let Ok(text) = std::fs::read_to_string(p) else { continue };
-        let rel = p.strip_prefix(root).unwrap_or(p).display().to_string();
-        for (i, line) in text.lines().enumerate() {
-            if rx.is_match(line) {
-                hits += 1;
-                if rows.len() < max_hits {
-                    rows.push(format!("{rel}:{}:{}", i + 1, line.chars().take(220).collect::<String>()));
+    let files: Vec<std::path::PathBuf> = walk(&base).filter(|e| {
+        !e.path().extension().and_then(|x| x.to_str()).is_some_and(|x| BINARY_EXT.contains(&x.to_lowercase().as_str()))
+            && e.metadata().is_ok_and(|m| m.len() <= crate::fs::MAX_FILE_BYTES as u64)
+    }).map(|e| e.into_path()).collect();
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 16).min(files.len().max(1));
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let mut found: Vec<(usize, Vec<String>)> = std::thread::scope(|s| {
+        let workers: Vec<_> = (0..threads).map(|_| s.spawn(|| {
+            let mut mine = Vec::new();
+            loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(p) = files.get(i) else { break };
+                let rows = grep_file(&rx, &whole, root, p);
+                if !rows.is_empty() {
+                    mine.push((i, rows));
                 }
             }
-        }
-    }
+            mine
+        })).collect();
+        workers.into_iter().flat_map(|w| w.join().unwrap_or_default()).collect()
+    });
+    found.sort_by_key(|(i, _)| *i);
+    let hits: usize = found.iter().map(|(_, r)| r.len()).sum();
+    let mut rows: Vec<String> = found.into_iter().flat_map(|(_, r)| r).take(max_hits).collect();
     if rows.is_empty() {
         return Ok(format!("no matches for /{pattern}/"));
     }
@@ -98,7 +116,11 @@ mod tests {
         std::fs::write(d.join("node_modules/x.js"), "retry").unwrap();
         let g = grep(&d, "retry", "", 10).unwrap();
         assert_eq!(g, "src/a.py:1:def retry():");
-        assert_eq!(glob(&d, "*.py", 10).unwrap(), "src/a.py");
+        // anchors are per line, as ever (the whole-file pre-check reads them so too)
+        std::fs::write(d.join("src/c.py"), "x = 1\n    pass_through()\n").unwrap();
+        assert_eq!(grep(&d, r"^\s+pass_", "", 10).unwrap(), "src/c.py:2:    pass_through()");
+        assert_eq!(grep(&d, r"retry\(\):$", "", 10).unwrap(), "src/a.py:1:def retry():");
+        assert_eq!(glob(&d, "*.py", 10).unwrap(), "src/a.py\nsrc/c.py");
         let f1 = fingerprint(&d);
         assert_eq!(f1, fingerprint(&d));
         std::thread::sleep(std::time::Duration::from_millis(10));
