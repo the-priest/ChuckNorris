@@ -117,7 +117,8 @@ pub struct Flag {
 /// Unfinished-code markers in ADDED lines of a unified diff.
 pub fn scan_diff(patch: &str) -> Vec<Flag> {
     let rules: &[(&str, &'static str)] = &[
-        (r"\b(TODO|FIXME|XXX|HACK)\b", "a TODO/FIXME left in"),
+        // in a comment only: a Tetris piece drawn as "XXX" or a to-do app's <h1>TODO</h1> is the work itself
+        (r"(?://|#|/\*|<!--|^\s*\*|^\s*--)[^\n]*?\b(TODO|FIXME|XXX|HACK)\b", "a TODO/FIXME left in"),
         (r"\b(unimplemented|todo)!\s*\(", "unimplemented!/todo!() in shipped code"),
         (r"raise\s+NotImplementedError", "raise NotImplementedError"),
         (r"(?i)not\s+implemented(\s+yet)?['\x22]", "a 'not implemented' placeholder"),
@@ -593,6 +594,19 @@ mod tests {
 
     fn test(exit: i32) -> EvidenceKind {
         EvidenceKind::Test { cmd: "pytest -q".into(), exit, passed: Some(3), failed: Some(0), output: String::new() }
+    }
+
+    #[test]
+    fn todo_words_count_only_in_comments() {
+        let flagged = |line: &str| !scan_diff(&format!("+++ b/x\n+{line}\n")).is_empty();
+        for l in ["// TODO: handle errors", "# FIXME later", "/* XXX */", "<!-- TODO: footer -->", "  * HACK around it",
+                  "x = 1  # TODO", "let y = 2; // HACK", "-- TODO in sql", "todo!()", "raise NotImplementedError"] {
+            assert!(flagged(l), "{l}");
+        }
+        for l in [r#"const T = ["XXX", " X "];"#, "<h1>TODO</h1>", r#"title: "My TODO list""#, "let mode = HACK_MODE;",
+                  "XXX.push(row)", r#"label.textContent = "TODO";"#] {
+            assert!(!flagged(l), "{l}");
+        }
     }
 
     #[test]

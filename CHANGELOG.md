@@ -84,6 +84,8 @@ Chuck is now a Rust app (`crates/`), and the installer puts it over any earlier 
   command still waits for you, however long.)
 - The independent review can't send a job round forever: after 3 rejections, a `done` the gate
   accepts finishes, with the review's open points in the summary.
+- The gate's unfinished-code check reads TODO/FIXME/XXX/HACK in comments only: a Tetris piece drawn
+  as `"XXX"` or a to-do app's `<h1>TODO</h1>` no longer blocks a hand-in.
 - Finished work said in prose isn't lost: a worker that checks everything and then just says it's
   done is handed in; a Lead that finishes in prose with every criterion verified ends through `done`
   (gate and independent review included) instead of being paused as unfinished.
