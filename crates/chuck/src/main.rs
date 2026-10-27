@@ -25,6 +25,8 @@ chuck — one Lead and eight workers on SiliconFlow; work ends only through the 
 USAGE
   chuck             the fleet window (in the folder you start it from)
   chuck run [-C DIR] [--max-usd N] [--verbose] \"what to do\"
+  chuck ask [--max-usd N] \"a question\"   Chat mode: an answer, researched on the web
+                    when it should be; it changes nothing (work goes to `chuck run`)
   chuck models      show the fleet's models, checked against your account
   chuck key         save your SiliconFlow API key (shared with the Chuck window)
   chuck ledger [N]  verify the evidence chain and show the last N commands run
@@ -242,7 +244,7 @@ fn parse_run(args: &[String]) -> Result<RunArgs, String> {
     Ok(a)
 }
 
-fn cmd_run(args: &[String]) -> i32 {
+fn cmd_run(args: &[String], chat: bool) -> i32 {
     let a = parse_run(args).unwrap_or_else(|e| fail(&e));
     let s = Settings::load();
     let folder = a.dir.canonicalize().unwrap_or_else(|_| a.dir.clone());
@@ -251,8 +253,12 @@ fn cmd_run(args: &[String]) -> i32 {
     for n in notes {
         eprintln!("chuck: {n}");
     }
-    let header = format!("lead + {} DeepSeek + {} GLM · {} ({}) · up to {}", cfg.fleet.deepseek_workers,
-                         cfg.fleet.glm_workers, folder.display(), cfg.access.label(), chuck_model::fmt_usd(usd));
+    let header = if chat {
+        format!("chat · {} · up to {}", term::short_model(&cfg.fleet.deepseek_model), chuck_model::fmt_usd(usd))
+    } else {
+        format!("lead + {} DeepSeek + {} GLM · {} ({}) · up to {}", cfg.fleet.deepseek_workers, cfg.fleet.glm_workers,
+                folder.display(), cfg.access.label(), chuck_model::fmt_usd(usd))
+    };
     let (tx, rx) = channel();
     let rt = Runtime::new(model, cfg, Events(Some(tx)));
     let mut job = Job::new(a.task, &a.dir);
@@ -294,7 +300,7 @@ fn cmd_run(args: &[String]) -> i32 {
             std::thread::sleep(Duration::from_millis(100));
         }
     });
-    let worker = std::thread::spawn(move || rt.run(job));
+    let worker = std::thread::spawn(move || if chat { rt.chat(job) } else { rt.run(job) });
 
     let color = std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none();
     let mut view = term::View::new(color, a.verbose, Box::new(std::io::stdout()));
@@ -330,7 +336,8 @@ fn cmd_run(args: &[String]) -> i32 {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let code = match args.first().map(String::as_str) {
-        Some("run") => cmd_run(&args[1..]),
+        Some("run") => cmd_run(&args[1..], false),
+        Some("ask") => cmd_run(&args[1..], true),
         Some("models") => {
             cmd_models();
             0

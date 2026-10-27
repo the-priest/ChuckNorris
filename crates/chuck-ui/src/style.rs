@@ -71,6 +71,9 @@ headerbar { background-color: @bg; border-bottom: 1px solid @line; box-shadow: n
                padding: 10px 14px; }
 .user-bubble label { color: @ink; }
 .prose  { color: @body; }
+.prose link { color: @accent_hi; }
+.modes button { padding: 4px 14px; font-weight: 600; }
+.modes button:checked { background-color: @accent_bg; color: @accent_hi; }
 .byline { color: @ink; font-size: 12.5px; font-weight: 700; }
 .byline-meta { color: @faint; font-size: 11px; }
 .avatar { background-color: #17151F; border: 1px solid alpha(@accent, 0.5); border-radius: 7px; color: @accent_hi;

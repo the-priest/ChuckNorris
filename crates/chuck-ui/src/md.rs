@@ -1,5 +1,5 @@
 //! Just enough Markdown for an engineer's replies: paragraphs, headings,
-//! lists, **bold**, *italic*, `code` and fenced code blocks.
+//! lists, **bold**, *italic*, `code`, links and fenced code blocks.
 
 /// A reply split into prose (as Pango markup) and code blocks.
 #[derive(Debug, PartialEq)]
@@ -36,7 +36,21 @@ fn emphasis(s: &str) -> String {
         regex::Regex::new(r"(^|[^*\w])\*([^*\s](?:[^*]*?[^*\s])?)\*($|[^*\w])").unwrap(),
     ));
     let b = bold.replace_all(s, "<b>$1</b>");
-    italic.replace_all(&b, "$1<i>$2</i>$3").into_owned()
+    links(&italic.replace_all(&b, "$1<i>$2</i>$3"))
+}
+
+/// `[text](https://…)` and bare https:// addresses, as links you can click.
+/// (The line is already escaped, so an address's `&` is `&amp;` — as Pango wants it.)
+fn links(s: &str) -> String {
+    use std::sync::OnceLock;
+    static RX: OnceLock<regex::Regex> = OnceLock::new();
+    let rx = RX.get_or_init(|| regex::Regex::new(
+        r#"\[([^\]]+)\]\((https?://[^\s)"]+)\)|(https?://[^\s<>()"]*[^\s<>()".,;:!?'])"#).unwrap());
+    rx.replace_all(s, |c: &regex::Captures| match (c.get(1), c.get(2), c.get(3)) {
+        (Some(t), Some(u), _) => format!("<a href=\"{}\">{}</a>", u.as_str(), t.as_str()),
+        (_, _, Some(u)) => format!("<a href=\"{0}\">{0}</a>", u.as_str()),
+        _ => c[0].to_string(),
+    }).into_owned()
 }
 
 /// Parse a reply.
@@ -102,5 +116,16 @@ mod tests {
         assert_eq!(parse("x <y> & z"), vec![Part::Prose("x &lt;y&gt; &amp; z".into())]);
         assert_eq!(parse("a *b* c **d** e"), vec![Part::Prose("a <i>b</i> c <b>d</b> e".into())]);
         assert_eq!(parse("glob *.rs and 3*4*5"), vec![Part::Prose("glob *.rs and 3*4*5".into())]);
+    }
+
+    #[test]
+    fn links_are_clickable() {
+        assert_eq!(parse("see [the docs](https://docs.python.org/3/library/functions.html#int)."),
+                   vec![Part::Prose("see <a href=\"https://docs.python.org/3/library/functions.html#int\">the docs</a>.".into())]);
+        assert_eq!(parse("from https://a.org/x?q=1&r=2, and http://b.org."),
+                   vec![Part::Prose("from <a href=\"https://a.org/x?q=1&amp;r=2\">https://a.org/x?q=1&amp;r=2</a>, and \
+                                     <a href=\"http://b.org\">http://b.org</a>.".into())]);
+        assert_eq!(parse("`https://in.code`"), vec![Part::Prose("<tt>https://in.code</tt>".into())]);
+        assert_eq!(parse("[not a link](javascript:alert(1))"), vec![Part::Prose("[not a link](javascript:alert(1))".into())]);
     }
 }

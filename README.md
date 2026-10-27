@@ -363,9 +363,16 @@ reads a page as text, a part at a time, never from a local or private address, a
 site blocks it or needs JavaScript. Every search and page read is listed, with links, in the panel's
 **Research** section. A folder set to *sandboxed, offline* keeps the whole job offline, research included.
 
+**Chat mode** (the *Fleet | Chat* switch at the top, or `chuck ask "…"`) is Chuck answering directly:
+it looks up what it should check, cites the pages it read, and can't change anything. When you want
+something done on your machine it writes the request for the fleet and shows a **Hand it to the fleet**
+button; nothing runs until you press it.
+
+![Chat mode: an answer with its source, and work proposed for the fleet](assets/screenshots/fleet-chat.png)
+
 What isn't ported to Rust yet, so isn't in this branch's app: voice (Kokoro, Piper, talking to it),
-a real browser for pages that need JavaScript, Chat mode, images and video, daemons, MCP servers and
-language servers.
+a real browser for pages that need JavaScript, images and video, daemons, MCP servers and language
+servers.
 [ARCHITECTURE.md](ARCHITECTURE.md) has the design and the plan.
 
 Arch and CachyOS are first-class; apt and dnf are supported. The installer sets up GTK4 and libadwaita, bubblewrap, a screenshot tool, the local voice models (about 600 MB, skip with `CHUCK_VOICE=0`) and the linters Chuck uses to check code. At runtime Chuck needs only Python's standard library and GTK; everything optional degrades gracefully when it's missing.

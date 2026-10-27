@@ -44,6 +44,9 @@ pub enum Event {
     Tasks(Vec<TaskView>),
     /// A command started (it ends with an Action for the same agent).
     Running { id: AgentId, tool: String, cmd: String },
+    /// Chat mode: something to be done on the machine, for the fleet — sent
+    /// only if the user says so.
+    Handoff { request: String },
     Finished(Outcome),
 }
 

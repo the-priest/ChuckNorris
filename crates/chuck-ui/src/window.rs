@@ -42,6 +42,8 @@ pub struct Options {
     pub open: Option<Vec<String>>,
     /// The web for a scripted session (a real one gets it from the settings).
     pub web: Option<Arc<chuck_web::Web>>,
+    /// Start in Chat mode (true) or with the fleet (false); else as last time.
+    pub chat: Option<bool>,
 }
 
 struct Running {
@@ -67,6 +69,10 @@ struct Ui {
     meter: gtk::Label,
     folder_btn: gtk::Button,
     new_btn: gtk::Button,
+    fleet_btn: gtk::ToggleButton,
+    chat_btn: gtk::ToggleButton,
+    hero: gtk::Label,
+    lede: gtk::Label,
 }
 
 struct Lane {
@@ -87,6 +93,10 @@ struct State {
     models: HashMap<AgentId, String>,
     lane: Option<Lane>,
     last_ps: Vec<ProcInfo>,
+    /// Chat mode: one model answers, researches, and hands work to the fleet.
+    chat: bool,
+    /// What the "hand it to the fleet" button does.
+    on_handoff: Option<Rc<dyn Fn(String)>>,
     tokens: u64,
     spent: f64,
     /// Prompt tokens sent, and how many of them the API's cache served.
@@ -217,14 +227,14 @@ impl State {
                 self.append(&row);
                 self.lane = None;
             }
-            Entry::Lead { text, model } => {
+            Entry::Lead { text, model, chat } => {
                 let col = gtk::Box::new(gtk::Orientation::Vertical, 6);
                 col.add_css_class("bot-row");
                 let by = gtk::Box::new(gtk::Orientation::Horizontal, 8);
                 let av = label("C", &["avatar"]);
                 av.set_xalign(0.5);
                 by.append(&av);
-                by.append(&label("Lead", &["byline"]));
+                by.append(&label(if *chat { "Chuck" } else { "Lead" }, &["byline"]));
                 by.append(&label(model, &["byline-meta"]));
                 col.append(&by);
                 let body = render(text);
@@ -275,6 +285,25 @@ impl State {
                 self.append(&c);
                 self.lane = None;
             }
+            Entry::Handoff { request } => {
+                let (c, body, foot) = card("FOR THE FLEET", "ask-card");
+                body.append(&render(request));
+                let btn = gtk::Button::with_label("Hand it to the fleet");
+                btn.add_css_class("suggested-action");
+                btn.add_css_class("pill-sm");
+                btn.set_tooltip_text(Some("Switch to the fleet and send this — it can act on your machine"));
+                if let Some(go) = self.on_handoff.clone() {
+                    let r = request.clone();
+                    btn.connect_clicked(move |b| {
+                        b.set_sensitive(false);
+                        go(r.clone());
+                    });
+                }
+                foot.append(&btn);
+                foot.append(&label("Nothing runs until you press it.", &["panel-dim"]));
+                self.append(&c);
+                self.lane = None;
+            }
         }
     }
 
@@ -292,14 +321,47 @@ impl State {
         self.ui.stack.set_visible_child_name(if self.saved.entries.is_empty() { "welcome" } else { "chat" });
     }
 
+    /// Where this conversation is kept: the project folder's, or (in Chat
+    /// mode with no folder) the loose one.
+    fn key(&self) -> Option<PathBuf> {
+        self.folder.clone().or_else(|| self.chat.then(chat::loose))
+    }
+
     fn save(&mut self) {
-        if let Some(f) = &self.folder {
+        if let Some(k) = self.key() {
             if self.unsaved {
-                self.saved.folder = f.display().to_string();
-                chat::save(f, &self.saved);
+                self.saved.folder = self.folder.as_ref().map(|f| f.display().to_string()).unwrap_or_default();
+                chat::save(&k, &self.saved);
                 self.unsaved = false;
             }
         }
+    }
+
+    /// Chat mode on or off: remembered, shown, and (with no folder) its own conversation.
+    fn set_mode(&mut self, chat: bool, shared: &Shared) {
+        if self.chat == chat {
+            return;
+        }
+        if self.running.is_some() {
+            // a job in flight keeps its mode; the switch shows what's true
+            self.ui.chat_btn.set_active(self.chat);
+            self.ui.fleet_btn.set_active(!self.chat);
+            return;
+        }
+        if self.folder.is_none() {
+            self.save();
+        }
+        self.chat = chat;
+        let mut s = Settings::load();
+        s.set("agent_mode", (!chat).into());
+        let _ = s.save();
+        self.ui.chat_btn.set_active(chat);
+        self.ui.fleet_btn.set_active(!chat);
+        if self.folder.is_none() {
+            let f = self.folder.clone();
+            self.open_folder(f, shared);
+        }
+        self.set_running(false);
     }
 
     fn act(&mut self, m: String) {
@@ -311,15 +373,25 @@ impl State {
     }
 
     fn is_lead(&self, id: AgentId) -> bool {
-        self.names.get(&id).is_some_and(|(n, r)| *r == Role::Lead && n == "lead")
+        self.names.get(&id).is_some_and(|(n, r)| *r == Role::Lead && (n == "lead" || n == "chuck"))
     }
 
     fn set_running(&mut self, on: bool) {
         self.ui.stop.set_visible(on);
         self.ui.send.set_tooltip_text(Some(if on { "Tell the Lead (it reads it at its next step)" } else {
             "Send (Enter) · new line: Shift+Enter" }));
-        self.ui.hint.set_label(if on { "Type to steer — the Lead reads it at its next step · Esc stops" } else {
-            "Tell the fleet what you want" });
+        self.ui.hint.set_label(match (on, self.chat) {
+            (true, false) => "Type to steer — the Lead reads it at its next step · Esc stops",
+            (true, true) => "Add to the question — Chuck reads it before its next step · Esc stops",
+            (false, false) => "Tell the fleet what you want",
+            (false, true) => "Ask Chuck anything — it can look things up",
+        });
+        self.ui.hero.set_label(if self.chat { "Ask Chuck anything." } else { "Tell the fleet what you want." });
+        self.ui.lede.set_label(if self.chat {
+            "Answers straight away, looks up what it should check on the web, and cites its sources. When you want \
+             something done on your machine, it hands it to the fleet — on your say-so." } else {
+            "A Lead and up to eight workers on SiliconFlow. Criteria first, evidence for every claim, and nothing \
+             is done until the gate says so." });
         self.ui.folder_btn.set_sensitive(!on);
         self.ui.new_btn.set_sensitive(!on);
         if !on {
@@ -344,7 +416,7 @@ impl State {
     fn open_folder(&mut self, folder: Option<PathBuf>, shared: &Shared) {
         self.save();
         self.folder = folder;
-        self.saved = self.folder.as_deref().and_then(chat::load).unwrap_or_default();
+        self.saved = self.key().as_deref().and_then(chat::load).unwrap_or_default();
         self.redraw();
         self.refresh_header();
         self.panel.reset();
@@ -402,7 +474,8 @@ fn on_event(st: &mut State, e: Event, shared: &Shared) {
             let who = st.who(id);
             if st.is_lead(id) {
                 let model = st.models.get(&id).cloned().unwrap_or_default();
-                st.add(Entry::Lead { text: text.clone(), model });
+                let chat = st.names.get(&id).is_some_and(|(n, _)| n == "chuck");
+                st.add(Entry::Lead { text: text.clone(), model, chat });
                 st.save(); // a reply is never lost, even if the app is killed
             } else {
                 st.act(format!("<span foreground=\"#5F5F6E\">{:<6} │ {}</span>", esc(&who), esc(&one_line(&text, 160))));
@@ -551,6 +624,10 @@ fn on_event(st: &mut State, e: Event, shared: &Shared) {
             st.append(&c);
             st.lane = None;
         }
+        Event::Handoff { request } => {
+            st.add(Entry::Handoff { request });
+            st.save();
+        }
         Event::Finished(_) | Event::AgentEnded { .. } | Event::Thinking { .. } | Event::Delta { .. } | Event::Gate { .. } => {}
     }
 }
@@ -619,10 +696,16 @@ fn start(shared: &Shared, text: String) {
         return;
     }
     st.add(Entry::User { text: text.clone() });
-    let Some(folder) = st.folder.clone() else {
-        st.add(Entry::Lead { text: "Pick a project folder first (the button at the top): the fleet works on a folder."
-                                 .into(), model: String::new() });
-        return;
+    let chat_mode = st.chat;
+    let folder = match st.folder.clone() {
+        Some(f) => f,
+        // Chat mode works on no folder; nothing it does touches one
+        None if chat_mode => std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(std::env::temp_dir),
+        None => {
+            st.add(Entry::Lead { text: "Pick a project folder first (the button at the top): the fleet works on a \
+                folder. Or switch to **Chat** to just ask.".into(), model: String::new(), chat: false });
+            return;
+        }
     };
     let settings = Settings::load();
     let (model, cfg) = match (&st.opts.model, setup::from_settings(&settings, &folder, None)) {
@@ -655,7 +738,7 @@ fn start(shared: &Shared, text: String) {
     let stop = job.stop.clone();
     let (dtx, drx) = channel();
     std::thread::Builder::new().name("chuck-job".into()).spawn(move || {
-        let _ = dtx.send(rt.run(job));
+        let _ = dtx.send(if chat_mode { rt.chat(job) } else { rt.run(job) });
     }).expect("start the job thread");
     st.saved.history.push(("user".into(), text));
     st.running = Some(Running { stop, answers: atx, steer: stx, events: rx, kernel, done: drx, started: Instant::now() });
@@ -852,7 +935,7 @@ fn settings_dialog(shared: &Shared) {
     dialog.present(Some(&win));
 }
 
-fn welcome(shared_slot: Rc<RefCell<Option<Shared>>>) -> gtk::Box {
+fn welcome(shared_slot: Rc<RefCell<Option<Shared>>>) -> (gtk::Box, gtk::Label, gtk::Label) {
     let b = gtk::Box::new(gtk::Orientation::Vertical, 14);
     b.set_valign(gtk::Align::Center);
     b.set_halign(gtk::Align::Center);
@@ -886,7 +969,7 @@ fn welcome(shared_slot: Rc<RefCell<Option<Shared>>>) -> gtk::Box {
         flow.append(&btn);
     }
     b.append(&flow);
-    b
+    (b, hero, lede)
 }
 
 fn save_shot(window: &adw::ApplicationWindow, path: &std::path::Path) -> Result<(), String> {
@@ -957,6 +1040,18 @@ pub fn build(app: &adw::Application, opts: Options) {
     new_btn.add_css_class("headerbtn");
     new_btn.set_tooltip_text(Some("New conversation (the current one is kept on disk)"));
     header.pack_start(&new_btn);
+    // Fleet: the Lead and workers act on the folder. Chat: Chuck answers, researches, hands work over.
+    let modes = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    modes.add_css_class("linked");
+    modes.add_css_class("modes");
+    let fleet_btn = gtk::ToggleButton::with_label("Fleet");
+    fleet_btn.set_tooltip_text(Some("The Lead and its workers act on the project folder"));
+    let chat_btn = gtk::ToggleButton::with_label("Chat");
+    chat_btn.set_tooltip_text(Some("Chuck answers and looks things up — it can't change anything"));
+    chat_btn.set_group(Some(&fleet_btn));
+    modes.append(&fleet_btn);
+    modes.append(&chat_btn);
+    header.pack_start(&modes);
     let gear = gtk::Button::from_icon_name("emblem-system-symbolic");
     gear.add_css_class("headerbtn");
     gear.set_tooltip_text(Some("Settings"));
@@ -1015,7 +1110,8 @@ pub fn build(app: &adw::Application, opts: Options) {
     overlay.set_child(Some(&scroller));
     overlay.add_overlay(&jump);
     let stack = gtk::Stack::new();
-    stack.add_named(&welcome(slot.clone()), Some("welcome"));
+    let (welcome_page, hero, lede) = welcome(slot.clone());
+    stack.add_named(&welcome_page, Some("welcome"));
     stack.add_named(&overlay, Some("chat"));
     stack.set_vexpand(true);
 
@@ -1100,14 +1196,40 @@ pub fn build(app: &adw::Application, opts: Options) {
         .or_else(last_python_folder)
         .and_then(|f| f.canonicalize().ok()).filter(|f| f.is_dir());
     let ui = Ui { window: window.clone(), stack, transcript, input: input.clone(), hint, send: send.clone(),
-                  stop: stop.clone(), status, subtitle, meter, folder_btn: folder_btn.clone(), new_btn: new_btn.clone() };
+                  stop: stop.clone(), status, subtitle, meter, folder_btn: folder_btn.clone(), new_btn: new_btn.clone(),
+                  fleet_btn: fleet_btn.clone(), chat_btn: chat_btn.clone(), hero, lede };
+    let chat_mode = opts.chat.unwrap_or_else(|| Settings::load().map.get("agent_mode").and_then(|v| v.as_bool()) == Some(false));
+    fleet_btn.set_active(!chat_mode);
+    chat_btn.set_active(chat_mode);
     let shared: Shared = Rc::new(RefCell::new(State {
         ui, panel, opts: opts.clone(), folder: None, saved: Saved::default(), running: None, names: HashMap::new(),
-        models: HashMap::new(), lane: None, last_ps: Vec::new(), tokens: 0, spent: 0.0, prompt: 0, cached: 0,
-        unsaved: false,
+        models: HashMap::new(), lane: None, last_ps: Vec::new(), chat: chat_mode, on_handoff: None, tokens: 0,
+        spent: 0.0, prompt: 0, cached: 0, unsaved: false,
     }));
     *slot.borrow_mut() = Some(shared.clone());
+    // the handoff button: to the fleet, and send
+    let weak = Rc::downgrade(&shared);
+    shared.borrow_mut().on_handoff = Some(Rc::new(move |request: String| {
+        let Some(sh) = weak.upgrade() else { return };
+        if sh.borrow().running.is_some() {
+            return;
+        }
+        sh.borrow_mut().set_mode(false, &sh);
+        let sh2 = sh.clone();
+        glib::idle_add_local_once(move || start(&sh2, request));
+    }));
     shared.borrow_mut().open_folder(folder, &shared);
+    shared.borrow_mut().set_running(false);
+    for (btn, chat) in [(fleet_btn.clone(), false), (chat_btn.clone(), true)] {
+        let sh = shared.clone();
+        btn.connect_toggled(move |b| {
+            if b.is_active() {
+                // after the toggle settles: set_mode may set the buttons back
+                let sh = sh.clone();
+                glib::idle_add_local_once(move || sh.borrow_mut().set_mode(chat, &sh));
+            }
+        });
+    }
 
     let submit = {
         let sh = shared.clone();

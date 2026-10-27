@@ -5,6 +5,7 @@
 //! through the Done gate and an independent critic pass.
 
 pub mod agent;
+pub mod chat;
 pub mod events;
 pub mod exec;
 pub mod lead;
@@ -137,7 +138,7 @@ pub struct Runtime {
     pub events: Events,
 }
 
-fn first_message(job: &Job) -> String {
+pub(crate) fn first_message(job: &Job) -> String {
     if job.history.is_empty() {
         return job.ask.clone();
     }

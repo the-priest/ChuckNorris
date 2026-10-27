@@ -118,8 +118,17 @@ fn main() {
     std::fs::write(proj.join("src/parse.py"), "def parse(s):\n    return [int(x) for x in s.split(',')]\n").unwrap();
     // a stand-in pytest so the render doesn't depend on one being installed
     std::fs::write(proj.join("pytest.sh"), "#!/bin/sh\necho '3 passed in 0.02s'\n").unwrap();
-    let (web, base) = if mode == "research" { research_web() } else { (None, String::new()) };
+    let (web, base) = if mode == "research" || mode == "chat" { research_web() } else { (None, String::new()) };
     let model: Arc<dyn chuck_model::ChatModel> = match mode.as_str() {
+        "chat" => Arc::new(Scripted::new().replies([
+            "```search python int empty string ValueError```".to_string(),
+            format!("```fetch {base}/docs/functions```"),
+            format!("`int('')` raises **ValueError** — `int()` only accepts a string holding an integer literal (optional sign, \
+             surrounding whitespace allowed), and an empty string isn't one ([Built-in Functions]({base}/docs/functions)).\n\n\
+             Guard before converting:\n\n```python\nvalues = [int(x) for x in s.split(',') if x.strip()]\n```\n\n\
+             Want it fixed in your parser, with tests? The fleet can do that:\n\
+             ```agent\nIn src/parse.py, make parse() skip empty and blank fields instead of crashing, and add tests for \
+             empty input, blank fields and normal numbers.\n```")])),
         "research" => Arc::new(Scripted::new().replies([
             "Let me check what the docs say first.\n```search python int parse empty string ValueError```".to_string(),
             format!("```fetch {base}/docs/functions```\n```fetch {base}/howto/robust-parsing```\n```fetch {base}/blocked```"),
@@ -144,7 +153,7 @@ fn main() {
     let send = match mode.as_str() {
         "welcome" => None,
         "confirm" => Some("Clean the build output".to_string()),
-        "research" => Some("Why does int() fail on an empty string? Check the docs.".to_string()),
+        "research" | "chat" => Some("Why does int() fail on an empty string? Check the docs.".to_string()),
         _ => Some("The parser crashes on empty input. Fix it and add tests.".to_string()),
     };
     let ms = match mode.as_str() {
@@ -156,7 +165,7 @@ fn main() {
     let open: Vec<String> = match mode.as_str() {
         "run" | "live" => vec!["plan", "tasks", "gate"],
         "midrun" => vec!["plan", "tasks", "agents", "commands"],
-        "research" => vec!["research"],
+        "research" | "chat" => vec!["research"],
         _ => vec!["plan"],
     }.into_iter().map(String::from).collect();
     let send = if mode == "settings" { None } else { send };
@@ -165,7 +174,8 @@ fn main() {
     let send = if mode == "live" { Some("make hello.py greet Chuck".to_string()) } else { send };
     let code = chuck_ui::run(chuck_ui::Options { model, folder: Some(proj), send,
                                                  shot: Some((out, ms)), width: 1280, height: 860,
-                                                 settings: mode == "settings", open: Some(open), web });
+                                                 settings: mode == "settings", open: Some(open), web,
+                                                 chat: Some(mode == "chat") });
     if std::env::var_os("CHUCK_SHOT_FOLDER").is_none() {
         let _ = std::fs::remove_dir_all(&dir);
     }

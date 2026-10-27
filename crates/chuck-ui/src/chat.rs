@@ -14,7 +14,15 @@ pub enum Entry {
     User { text: String },
     /// A message typed to the Lead while it worked.
     Steer { text: String },
-    Lead { text: String, model: String },
+    Lead {
+        text: String,
+        model: String,
+        /// Said in Chat mode (by Chuck, not the fleet's Lead).
+        #[serde(default)]
+        chat: bool,
+    },
+    /// Chat mode proposed work for the fleet: a button sends it.
+    Handoff { request: String },
     /// One line of the work lane (Pango markup).
     Act { markup: String },
     /// A card: DONE, INCOMPLETE, a question and its answer, a rewind.
@@ -52,6 +60,11 @@ pub struct Saved {
     pub entries: Vec<Entry>,
     #[serde(default)]
     pub progress: Progress,
+}
+
+/// The key Chat-mode conversations without a project folder are kept under.
+pub fn loose() -> PathBuf {
+    PathBuf::from("chuck:chat")
 }
 
 fn dir() -> PathBuf {
@@ -106,7 +119,8 @@ mod tests {
         let folder = home.join("proj");
         let s = Saved { folder: folder.display().to_string(), history: vec![("user".into(), "hi".into())],
                         entries: vec![Entry::User { text: "hi".into() },
-                                      Entry::Lead { text: "**hello**".into(), model: "m".into() },
+                                      Entry::Lead { text: "**hello**".into(), model: "m".into(), chat: true },
+                                      Entry::Handoff { request: "install rg".into() },
                                       Entry::Act { markup: "<b>x</b>".into() },
                                       Entry::Card { kind: "DONE".into(), class: "done-card".into(), text: "ok".into() }],
                         progress: Progress { plan: vec![("a".into(), true)], finished: true, ..Default::default() } };
@@ -114,6 +128,9 @@ mod tests {
         assert_eq!(load(&folder), Some(s));
         archive(&folder);
         assert_eq!(load(&folder), None);
+        // an old file, from before Chat mode, still opens
+        std::fs::write(path_for(&folder), r#"{"folder":"x","history":[],"entries":[{"k":"lead","text":"t","model":"m"}]}"#).unwrap();
+        assert_eq!(load(&folder).unwrap().entries, vec![Entry::Lead { text: "t".into(), model: "m".into(), chat: false }]);
         let _ = std::fs::remove_dir_all(&home);
     }
 }

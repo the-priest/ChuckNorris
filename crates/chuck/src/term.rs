@@ -67,7 +67,7 @@ impl View {
     }
 
     fn is_lead(&self, id: AgentId) -> bool {
-        self.names.get(&id).is_some_and(|(n, r)| *r == Role::Lead && n == "lead")
+        self.names.get(&id).is_some_and(|(n, r)| *r == Role::Lead && (n == "lead" || n == "chuck"))
     }
 
     fn line(&mut self, s: String) {
@@ -80,7 +80,7 @@ impl View {
         let text = match e {
             Event::AgentStarted { id, role, name, model, task } => {
                 self.names.insert(*id, (name.clone(), *role));
-                if name == "lead" {
+                if name == "lead" || name == "chuck" {
                     return;
                 }
                 let doing = match task {
@@ -195,6 +195,9 @@ impl View {
                 let who = self.who(*id);
                 st.dim(&format!("  − {who} {status}"))
             }
+            Event::Handoff { request } => format!("\n{}\n  {}\n{}", st.bold("→ for the fleet (nothing has run):"),
+                request.trim().replace('\n', "\n  "),
+                st.dim(&format!("  to send it:  chuck run \"{}\"", one_line(request, 200).replace('"', "\\\"")))),
             Event::Finished(o) => self.ending(o),
         };
         self.line(text);
@@ -266,5 +269,23 @@ mod tests {
         assert!(s.contains("INCOMPLETE"));
         assert!(s.contains("- c1 has no evidence"));
         assert!(!s.contains('\x1b'));
+    }
+
+    #[test]
+    fn chat_mode_reads_as_an_answer_and_a_proposal() {
+        let buf = Buf::default();
+        let mut v = View::new(false, false, Box::new(buf.clone()));
+        let c = AgentId(1);
+        v.show(&Event::AgentStarted { id: c, role: Role::Lead, name: "chuck".into(), model: "m".into(), task: None });
+        v.show(&Event::Action { id: c, tool: "search".into(), arg: "rg smart case".into(), ok: true, summary: "5 results".into() });
+        v.show(&Event::Said { id: c, text: "Use `rg -S`.".into() });
+        v.show(&Event::Handoff { request: "Add alias rg=\"rg -S\" to ~/.bashrc".into() });
+        v.show(&Event::Finished(Outcome::Answered { text: "Use `rg -S`.".into() }));
+        let s = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        assert!(!s.contains("+ chuck"), "{s}");
+        assert!(s.contains("✓ chuck  search “rg smart case” → 5 results"), "{s}");
+        assert!(s.contains("\nUse `rg -S`."));
+        assert!(s.contains("→ for the fleet (nothing has run):\n  Add alias"));
+        assert!(s.contains(r#"chuck run "Add alias rg=\"rg -S\" to ~/.bashrc""#), "{s}");
     }
 }
