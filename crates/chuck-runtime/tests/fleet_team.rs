@@ -675,3 +675,38 @@ fn good_work_is_merged_at_once_without_waiting_for_the_leads_review() {
     assert!(lead.iter().any(|r| last_user(r).contains("merged without waiting for you")));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn finished_work_said_in_prose_is_handed_in_and_done_not_lost() {
+    // the worker builds and checks, then just says it's done (no ```submit```); the Lead finishes in prose too
+    let dir = tmp("prose-done");
+    let model = Arc::new(Scripted::new().respond(|req| {
+        if text(&req.messages[0]) == chuck_runtime::prompts::CRITIC {
+            return "ACCEPT".into();
+        }
+        if !worker(req).is_empty() {
+            return if req.messages.len() == 2 {
+                "```write a.txt\nA\n```\n```test grep -qx A a.txt```".into()
+            } else {
+                "All done — a.txt holds A and its check passes.".into()
+            };
+        }
+        let last = last_user(req);
+        if req.messages.len() == 2 {
+            return "```criteria\n- a holds A :: verify: grep -qx A a.txt\n```\n```plan\n- t1: a\n```\n\
+                ```assign worker\ntitle: a\ncriteria:\n- a holds A :: verify: grep -qx A a.txt\nbrief: write a.txt\n```".into();
+        }
+        if last.contains("merged without waiting") {
+            return "```test grep -qx A a.txt```\n```justify proportion\none letter\n```".into();
+        }
+        "Everything is in place: a.txt holds A, and grep -qx A a.txt passes in the folder.".into()
+    }));
+    let rt = Runtime::new(model.clone(), RuntimeConfig { store: dir.join("store"), ..RuntimeConfig::default() }, Events(None));
+    let (report, _) = run_within(30, rt, Job::new("write a", &dir));
+    assert!(matches!(&report.outcome, Outcome::Done { summary } if summary.contains("a.txt holds A")), "{:?}", report.outcome);
+    assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "A\n");
+    let seen = model.seen.lock().unwrap();
+    // the worker spent no turn being told to submit: its "done" was its hand-in
+    assert!(!seen.iter().any(|r| !worker(r).is_empty() && last_user(r).contains("no tool calls")));
+    let _ = std::fs::remove_dir_all(&dir);
+}

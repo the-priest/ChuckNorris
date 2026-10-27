@@ -586,7 +586,7 @@ pub fn run_worker(ctx: Ctx, w: WorkerSpec) {
             convo.assistant(&reply);
             let said = chuck_tools::prose(&reply, WORKER_TAGS);
             if !said.trim().is_empty() {
-                ctx.events.emit(Event::Said { id: w.id, text: said });
+                ctx.events.emit(Event::Said { id: w.id, text: said.clone() });
             }
             let exec = Exec { id: w.id, role: w.role, kernel: &ctx.kernel, root: &w.ws.work, gate: &w.gate,
                               sandbox: Sandbox { access: ctx.cfg.access, bwrap: ctx.cfg.bwrap, worker: true },
@@ -623,7 +623,12 @@ pub fn run_worker(ctx: Ctx, w: WorkerSpec) {
                     check it now, or ask the Lead (```team @lead```) what you're missing — at {} you are replaced]",
                     crate::lead::STALL_TURNS));
             }
-            if let Some(report) = &r.submit {
+            // "All done, every check passes." with no ```submit```: when its gate agrees (every criterion
+            // verified since the last change), that is its hand-in — not a turn lost, nor an idle worker
+            let finished = r.submit.is_none() && !r.acted() && !r.malformed && !said.trim().is_empty()
+                && w.gate.lock().unwrap().check_work().is_empty();
+            let submit = r.submit.clone().or_else(|| finished.then(|| said.trim().to_string()));
+            if let Some(report) = &submit {
                 // judged on the copy as it really is, not on the history of edits
                 let (diff, lines) = w.ws.diff(400_000).unwrap_or_else(|e| (format!("(diff failed: {e})"), 0));
                 let sub = {
@@ -679,7 +684,7 @@ pub fn run_worker(ctx: Ctx, w: WorkerSpec) {
                 fb.push(format!("[you are going in circles ({why}). Stop and re-think: what exactly is still \
                     missing for each criterion, and what is the next concrete change or check?]"));
             }
-            if ctx.kernel.terminating(w.id) && warned_term && r.submit.is_none() {
+            if ctx.kernel.terminating(w.id) && warned_term && submit.is_none() {
                 break 'life ("paused", Some("budget spent".into()));
             }
             fb.push(exec.gate_line());

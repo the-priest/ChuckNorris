@@ -1559,6 +1559,17 @@ impl<'a> LeadRun<'a> {
                     fb.push("[you said what you'd do next but used no tool, so nothing happened. Do it now with the \
                         tools — without repeating what you already said (the user has read it). If that reply was \
                         your whole answer, say so in one line.]".into());
+                } else if self.tasks.iter().all(|t| !t.open()) && {
+                    let g = self.gate.lock().unwrap();
+                    !g.criteria.is_empty() && g.check_work().is_empty()
+                } {
+                    // finished and said so in prose, every criterion verified since the last change: that is its
+                    // ```done``` (the gate and the independent review still judge it) — never a finished job paused
+                    match self.done(&LeadCall { tag: "done".into(), arg: String::new(), body: said.trim().to_string() }) {
+                        Ok(Ok(o)) => return o,
+                        Ok(Err(refused)) => fb.push(refused),
+                        Err(h) => return self.pause(&h.describe()),
+                    }
                 } else if !self.mutated && self.tasks.is_empty() && self.gate.lock().unwrap().criteria.is_empty() {
                     return Outcome::Answered { text: said.trim().to_string() };
                 } else if !self.mutated && self.tasks.is_empty() {
