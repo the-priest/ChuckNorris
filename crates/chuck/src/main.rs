@@ -248,10 +248,20 @@ fn cmd_run(args: &[String], chat: bool) -> i32 {
     let a = parse_run(args).unwrap_or_else(|e| fail(&e));
     let s = Settings::load();
     let folder = a.dir.canonicalize().unwrap_or_else(|_| a.dir.clone());
-    let setup::Setup { model, cfg, usd, notes } = setup::from_settings(&s, &folder, a.max_usd)
+    let setup::Setup { model, mut cfg, usd, notes } = setup::from_settings(&s, &folder, a.max_usd)
         .unwrap_or_else(|e| fail(&e));
     for n in notes {
         eprintln!("chuck: {n}");
+    }
+    // MCP servers, if any are set up: started for this job, ended with it
+    let mcp = Arc::new(chuck_mcp::Manager::new(chuck_mcp::config_path()));
+    if mcp.configured() {
+        mcp.set_roots(vec![folder.clone()]);
+        mcp.start_all();
+        for st in mcp.status().iter().filter(|st| st.state != "running") {
+            eprintln!("chuck: MCP server {} {}: {}", st.name, st.state, st.detail);
+        }
+        cfg.mcp = Some(mcp.clone());
     }
     let header = if chat {
         format!("chat · {} · up to {}", term::short_model(&cfg.fleet.deepseek_model), chuck_model::fmt_usd(usd))
@@ -321,6 +331,7 @@ fn cmd_run(args: &[String], chat: bool) -> i32 {
         }
     }
     let report = worker.join().unwrap_or_else(|_| fail("the job crashed"));
+    mcp.stop_all();
     chuck_tools::kill_all();
     done.store(true, Ordering::Relaxed);
     if let (Some(cp), false) = (&report.checkpoint, matches!(report.outcome, Outcome::Answered { .. })) {

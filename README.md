@@ -370,9 +370,19 @@ button; nothing runs until you press it.
 
 ![Chat mode: an answer with its source, and work proposed for the fleet](assets/screenshots/fleet-chat.png)
 
+**MCP servers** come from the same `~/.config/chucknorris/mcp.json` the Python app reads (the format
+Claude Desktop uses), start with the window and end with it. Settings lists each one with its state
+and tool count, and can reload them. Because a server runs outside every sandbox, the rules are
+stricter than a command's:
+- workers never get MCP tools;
+- before the acceptance criteria exist, or in a read-only folder, only tools that declare themselves
+  read-only run, and an offline folder gets none;
+- a tool that may change or delete things (the protocol's default when a tool doesn't say) asks you
+  first, unless you mark its server `"trust": true`;
+- Chat mode sees only the read-only tools.
+
 What isn't ported to Rust yet, so isn't in this branch's app: voice (Kokoro, Piper, talking to it),
-a real browser for pages that need JavaScript, images and video, daemons, MCP servers and language
-servers.
+a real browser for pages that need JavaScript, images and video, daemons and language servers.
 [ARCHITECTURE.md](ARCHITECTURE.md) has the design and the plan.
 
 Arch and CachyOS are first-class; apt and dnf are supported. The installer sets up GTK4 and libadwaita, bubblewrap, a screenshot tool, the local voice models (about 600 MB, skip with `CHUCK_VOICE=0`) and the linters Chuck uses to check code. At runtime Chuck needs only Python's standard library and GTK; everything optional degrades gracefully when it's missing.

@@ -97,6 +97,8 @@ struct State {
     chat: bool,
     /// What the "hand it to the fleet" button does.
     on_handoff: Option<Rc<dyn Fn(String)>>,
+    /// MCP servers: started with the window, shared by every job, ended with it.
+    mcp: Arc<chuck_mcp::Manager>,
     tokens: u64,
     spent: f64,
     /// Prompt tokens sent, and how many of them the API's cache served.
@@ -416,6 +418,7 @@ impl State {
     fn open_folder(&mut self, folder: Option<PathBuf>, shared: &Shared) {
         self.save();
         self.folder = folder;
+        self.mcp.set_roots(self.folder.iter().cloned().collect());
         self.saved = self.key().as_deref().and_then(chat::load).unwrap_or_default();
         self.redraw();
         self.refresh_header();
@@ -498,7 +501,7 @@ fn on_event(st: &mut State, e: Event, shared: &Shared) {
                 _ if summary.is_empty() => one_line(&arg, 100),
                 _ => one_line(&summary, 120),
             };
-            if tool == "bash" || tool == "test" {
+            if tool == "bash" || tool == "test" || tool == "mcp" {
                 st.panel.command_finished(id, ok, &summary);
             }
             if tool == "search" || tool == "fetch" {
@@ -710,12 +713,13 @@ fn start(shared: &Shared, text: String) {
     let settings = Settings::load();
     let (model, cfg) = match (&st.opts.model, setup::from_settings(&settings, &folder, None)) {
         (Some(m), _) => (m.clone(), chuck_runtime::RuntimeConfig { access: setup::access_of(&settings, &folder),
-                                                                  web: st.opts.web.clone(), ..Default::default() }),
+                                                                  web: st.opts.web.clone(), mcp: Some(st.mcp.clone()),
+                                                                  ..Default::default() }),
         (None, Ok(s)) => {
             for n in &s.notes {
                 st.act(format!("<span foreground=\"#F5B454\">! {}</span>", md::escape(n)));
             }
-            (s.model, s.cfg)
+            (s.model, chuck_runtime::RuntimeConfig { mcp: Some(st.mcp.clone()), ..s.cfg })
         }
         (None, Err(e)) => {
             st.add(Entry::Card { kind: "CAN'T START".into(), class: "gap-card".into(), text: e });
@@ -818,6 +822,7 @@ fn shut_down(shared: &Shared) {
         }
     }
     st.save();
+    st.mcp.stop_all();
 }
 
 fn settings_dialog(shared: &Shared) {
@@ -898,6 +903,98 @@ fn settings_dialog(shared: &Shared) {
     access_group.add(&acc);
     page.add(&access_group);
 
+    let research = adw::PreferencesGroup::builder().title("Research")
+        .description("How agents search the web and read pages.").build();
+    let searx = adw::EntryRow::builder().title("Your own SearXNG (asked first; optional)")
+        .text(s.str("searx_url").unwrap_or("")).build();
+    let proxy = adw::EntryRow::builder().title("Proxy for web reads (optional, e.g. socks5://127.0.0.1:9050)")
+        .text(s.str("proxy").unwrap_or("")).build();
+    let sources = adw::SpinRow::with_range(1.0, 10.0, 1.0);
+    sources.set_title("Results per search");
+    sources.set_value(s.num("research_sources", 6.0, 1.0, 10.0));
+    research.add(&searx);
+    research.add(&proxy);
+    research.add(&sources);
+    page.add(&research);
+
+    let mcp = shared.borrow().mcp.clone();
+    let mcp_group = adw::PreferencesGroup::builder().title("MCP servers")
+        .description(format!("Tools from Model Context Protocol servers, set up in {} (the format Claude Desktop \
+            uses). The Lead can use them; Chat mode only the ones that only read. A tool that may change things \
+            asks you first unless its server has \"trust\": true.", chuck_mcp::config_path().display())).build();
+    let status_box = gtk::ListBox::new();
+    status_box.add_css_class("boxed-list");
+    status_box.set_selection_mode(gtk::SelectionMode::None);
+    let fill = {
+        let (status_box, mcp) = (status_box.clone(), mcp.clone());
+        move || {
+            while let Some(c) = status_box.first_child() {
+                status_box.remove(&c);
+            }
+            let st = mcp.status();
+            if st.is_empty() {
+                status_box.append(&adw::ActionRow::builder().title("No servers set up")
+                    .subtitle("Add one to mcp.json, then Reload").build());
+            }
+            for x in st {
+                let row = adw::ActionRow::builder().title(&x.name)
+                    .subtitle(md::escape(&if x.detail.is_empty() { x.state.clone() } else { format!("{} — {}", x.state, x.detail) }))
+                    .build();
+                row.set_subtitle_lines(2);
+                status_box.append(&row);
+            }
+        }
+    };
+    fill();
+    let reload = gtk::Button::with_label("Reload");
+    reload.add_css_class("pill-sm");
+    let busy = shared.borrow().running.is_some();
+    reload.set_sensitive(!busy);
+    reload.set_tooltip_text(Some(if busy { "Not while a job runs" } else { "Restart every server and re-read mcp.json" }));
+    {
+        let (mcp, fill) = (mcp.clone(), fill.clone());
+        reload.connect_clicked(move |b| {
+            b.set_sensitive(false);
+            let (tx, rx) = std::sync::mpsc::channel();
+            let m = mcp.clone();
+            std::thread::spawn(move || {
+                m.start_all();
+                let _ = tx.send(());
+            });
+            let (b, fill) = (b.clone(), fill.clone());
+            glib::timeout_add_local(Duration::from_millis(200), move || {
+                if rx.try_recv().is_ok() {
+                    fill();
+                    b.set_sensitive(true);
+                    return glib::ControlFlow::Break;
+                }
+                glib::ControlFlow::Continue
+            });
+        });
+    }
+    let open = gtk::Button::with_label("Open mcp.json");
+    open.add_css_class("pill-sm");
+    open.connect_clicked(|_| {
+        let p = chuck_mcp::config_path();
+        if !p.exists() {
+            if let Some(d) = p.parent() {
+                let _ = std::fs::create_dir_all(d);
+            }
+            let _ = chuck_store::settings::write_private(&p, b"{\n  \"mcpServers\": {\n  }\n}\n");
+        }
+        let f = gtk::gio::File::for_path(&p);
+        gtk::FileLauncher::new(Some(&f)).launch(None::<&gtk::Window>, gtk::gio::Cancellable::NONE, |_| {});
+    });
+    let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    buttons.set_margin_top(8);
+    buttons.append(&reload);
+    buttons.append(&open);
+    let mcp_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    mcp_box.append(&status_box);
+    mcp_box.append(&buttons);
+    mcp_group.add(&mcp_box);
+    page.add(&mcp_group);
+
     let dialog = adw::PreferencesDialog::new();
     dialog.set_title("Settings");
     dialog.add(&page);
@@ -916,6 +1013,9 @@ fn settings_dialog(shared: &Shared) {
         s.set("stall_seconds", (stall.value() as i64).into());
         s.set("budget_day_usd", day.value().into());
         s.set("budget_month_usd", month.value().into());
+        s.set("searx_url", searx.text().trim().into());
+        s.set("proxy", proxy.text().trim().into());
+        s.set("research_sources", (sources.value() as i64).into());
         if let Some(f) = &folder {
             let mode = modes[acc.selected() as usize].0;
             let mut map = s.map.get("folder_access").and_then(|v| v.as_object()).cloned().unwrap_or_default();
@@ -970,6 +1070,20 @@ fn welcome(shared_slot: Rc<RefCell<Option<Shared>>>) -> (gtk::Box, gtk::Label, g
     }
     b.append(&flow);
     (b, hero, lede)
+}
+
+/// Quit for good — a signal, a logout: everything is stopped and saved
+/// first, and an open dialog can't hold the app open (libadwaita takes a
+/// window close with Settings open as "close Settings").
+fn quit(w: &adw::ApplicationWindow, shared: &Shared) {
+    shut_down(shared);
+    if let Some(d) = w.visible_dialog() {
+        d.force_close();
+    }
+    w.close();
+    if let Some(app) = w.application() {
+        app.quit();
+    }
 }
 
 fn save_shot(window: &adw::ApplicationWindow, path: &std::path::Path) -> Result<(), String> {
@@ -1198,12 +1312,18 @@ pub fn build(app: &adw::Application, opts: Options) {
     let ui = Ui { window: window.clone(), stack, transcript, input: input.clone(), hint, send: send.clone(),
                   stop: stop.clone(), status, subtitle, meter, folder_btn: folder_btn.clone(), new_btn: new_btn.clone(),
                   fleet_btn: fleet_btn.clone(), chat_btn: chat_btn.clone(), hero, lede };
+    // MCP servers start in the background: the window doesn't wait for them
+    let mcp = Arc::new(chuck_mcp::Manager::new(chuck_mcp::config_path()));
+    if mcp.configured() {
+        let m = mcp.clone();
+        std::thread::Builder::new().name("mcp-start".into()).spawn(move || m.start_all()).ok();
+    }
     let chat_mode = opts.chat.unwrap_or_else(|| Settings::load().map.get("agent_mode").and_then(|v| v.as_bool()) == Some(false));
     fleet_btn.set_active(!chat_mode);
     chat_btn.set_active(chat_mode);
     let shared: Shared = Rc::new(RefCell::new(State {
         ui, panel, opts: opts.clone(), folder: None, saved: Saved::default(), running: None, names: HashMap::new(),
-        models: HashMap::new(), lane: None, last_ps: Vec::new(), chat: chat_mode, on_handoff: None, tokens: 0,
+        models: HashMap::new(), lane: None, last_ps: Vec::new(), chat: chat_mode, on_handoff: None, mcp: mcp.clone(), tokens: 0,
         spent: 0.0, prompt: 0, cached: 0, unsaved: false,
     }));
     *slot.borrow_mut() = Some(shared.clone());
@@ -1316,9 +1436,9 @@ pub fn build(app: &adw::Application, opts: Options) {
         glib::Propagation::Proceed
     });
     for sig in [libc::SIGTERM, libc::SIGHUP, libc::SIGINT] {
-        let w = window.clone();
+        let (w, sh) = (window.clone(), shared.clone());
         glib::unix_signal_add_local(sig, move || {
-            w.close();
+            quit(&w, &sh);
             glib::ControlFlow::Break
         });
     }
@@ -1361,13 +1481,13 @@ pub fn build(app: &adw::Application, opts: Options) {
         let sh = shared.clone();
         glib::timeout_add_local_once(Duration::from_millis(ms), move || {
             tick(&sh);
-            let w2 = w.clone();
+            let (w2, sh2) = (w.clone(), sh.clone());
             glib::timeout_add_local_once(Duration::from_millis(250), move || {
                 match save_shot(&w2, &path) {
                     Ok(()) => eprintln!("saved {}", path.display()),
                     Err(e) => eprintln!("screenshot failed: {e}"),
                 }
-                w2.close();
+                quit(&w2, &sh2);
             });
         });
     }

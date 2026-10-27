@@ -313,7 +313,8 @@ pub fn run_worker(ctx: Ctx, w: WorkerSpec) {
                               approve: None, audit: ctx.cfg.audit.clone().map(|l| (l, w.name.clone())),
                               stop: w.stop.clone(), events: &ctx.events,
                               cmd_timeout: ctx.cfg.cmd_timeout,
-                              web: ctx.cfg.web.as_deref(), sources: ctx.cfg.sources };
+                              web: ctx.cfg.web.as_deref(), sources: ctx.cfg.sources,
+                              mcp: ctx.cfg.mcp.as_deref() };
             let r = exec.run(&reply);
             let mut fb = r.feedback.clone();
             if let Some(report) = &r.submit {

@@ -60,6 +60,8 @@ pub struct RuntimeConfig {
     pub web: Option<Arc<chuck_web::Web>>,
     /// Results per search.
     pub sources: usize,
+    /// MCP servers (the app's, running for as long as it does).
+    pub mcp: Option<Arc<chuck_mcp::Manager>>,
 }
 
 pub fn default_store() -> PathBuf {
@@ -93,6 +95,7 @@ impl Default for RuntimeConfig {
             checkpoints: None,
             web: None,
             sources: 6,
+            mcp: None,
         }
     }
 }

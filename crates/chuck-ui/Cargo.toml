@@ -13,6 +13,7 @@ chuck-model = { version = "18.0.0-alpha.1", path = "../chuck-model" }
 chuck-runtime = { version = "18.0.0-alpha.1", path = "../chuck-runtime" }
 chuck-sandbox = { version = "18.0.0-alpha.1", path = "../chuck-sandbox" }
 chuck-store = { version = "18.0.0-alpha.1", path = "../chuck-store" }
+chuck-mcp = { version = "18.0.0-alpha.1", path = "../chuck-mcp" }
 chuck-web = { version = "18.0.0-alpha.1", path = "../chuck-web" }
 chuck-tools = { version = "18.0.0-alpha.1", path = "../chuck-tools" }
 regex = "1.13.1"

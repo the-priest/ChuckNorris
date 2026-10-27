@@ -129,6 +129,7 @@ name = "chuck"
 version = "18.0.0-alpha.1"
 dependencies = [
  "chuck-core",
+ "chuck-mcp",
  "chuck-model",
  "chuck-runtime",
  "chuck-sandbox",
@@ -150,6 +151,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "chuck-mcp"
+version = "18.0.0-alpha.1"
+dependencies = [
+ "chuck-store",
+ "chuck-tools",
+ "libc",
+ "regex",
+ "serde_json",
+]
+
+[[package]]
 name = "chuck-model"
 version = "18.0.0-alpha.1"
 dependencies = [
@@ -165,6 +177,7 @@ name = "chuck-runtime"
 version = "18.0.0-alpha.1"
 dependencies = [
  "chuck-core",
+ "chuck-mcp",
  "chuck-model",
  "chuck-sandbox",
  "chuck-store",
@@ -219,6 +232,7 @@ name = "chuck-ui"
 version = "18.0.0-alpha.1"
 dependencies = [
  "chuck-core",
+ "chuck-mcp",
  "chuck-model",
  "chuck-runtime",
  "chuck-sandbox",

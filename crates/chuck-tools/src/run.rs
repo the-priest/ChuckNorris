@@ -222,6 +222,29 @@ impl Drop for Live {
     }
 }
 
+/// Long-lived helpers Chuck starts (MCP servers): not commands, so not
+/// counted as running ones, but ended with everything else on quit.
+fn services() -> &'static std::sync::Mutex<std::collections::HashSet<i32>> {
+    static S: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<i32>>> = std::sync::OnceLock::new();
+    S.get_or_init(Default::default)
+}
+
+/// A helper's process group, registered while the guard lives.
+pub struct Service(i32);
+
+impl Service {
+    pub fn register(pgid: i32) -> Service {
+        services().lock().unwrap_or_else(|e| e.into_inner()).insert(pgid);
+        Service(pgid)
+    }
+}
+
+impl Drop for Service {
+    fn drop(&mut self) {
+        services().lock().unwrap_or_else(|e| e.into_inner()).remove(&self.0);
+    }
+}
+
 /// How many commands are running right now (any agent, any thread).
 pub fn running() -> usize {
     live().lock().unwrap_or_else(|e| e.into_inner()).len()
@@ -230,7 +253,8 @@ pub fn running() -> usize {
 /// End every command still running — the whole process group of each,
 /// TERM then KILL. Called when the app quits.
 pub fn kill_all() {
-    let groups: Vec<i32> = live().lock().unwrap_or_else(|e| e.into_inner()).iter().copied().collect();
+    let mut groups: Vec<i32> = live().lock().unwrap_or_else(|e| e.into_inner()).iter().copied().collect();
+    groups.extend(services().lock().unwrap_or_else(|e| e.into_inner()).iter().copied());
     for g in &groups {
         unsafe {
             libc::killpg(*g, libc::SIGTERM);
