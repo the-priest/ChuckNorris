@@ -937,6 +937,29 @@ pub fn build(app: &adw::Application, opts: Options) {
         glib::ControlFlow::Continue
     });
 
+    // tools/bench.sh: report the first painted frame (against the shell's clock) and memory, then quit
+    if let Ok(t0) = std::env::var("CHUCK_BENCH_FRAME") {
+        let app = app.clone();
+        window.connect_map(move |w| {
+            let (app, t0) = (app.clone(), t0.clone());
+            if let Some(clock) = w.frame_clock() {
+                let fired = Rc::new(std::cell::Cell::new(false));
+                clock.connect_after_paint(move |_| {
+                    if fired.replace(true) {
+                        return;
+                    }
+                    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs_f64()).unwrap_or(0.0);
+                    let start: f64 = t0.parse().unwrap_or(now);
+                    let rss = std::fs::read_to_string("/proc/self/status").ok().and_then(|s| s.lines()
+                        .find(|l| l.starts_with("VmRSS:")).map(|l| l.split_whitespace().nth(1).unwrap_or("0").to_string()))
+                        .unwrap_or_default();
+                    println!("first-frame {:.3} rss-kb {rss}", now - start);
+                    app.quit();
+                });
+            }
+        });
+    }
     window.present();
     input.grab_focus();
     if opts.settings {

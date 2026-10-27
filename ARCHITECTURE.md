@@ -171,13 +171,15 @@ between them, no async runtime — a blocking HTTP stream per agent is the
 simplest correct design at this scale and keeps idle cost at zero (daemons are
 a single timer thread that checks triggers in plain code).
 
-## 5. Performance targets
+## 5. Performance
 
-- Cold start of the binary to a ready window: under 150 ms on a laptop
-  (Python: ~1.2 s import + GTK init).
-- Per-agent overhead: one thread + its message history; under 2 MB RSS per idle
-  agent (Python: an interpreter-wide GIL and ~30 MB baseline).
-- Tool dispatch (parse a reply, guard, run read-only tools): microseconds,
-  not milliseconds.
+Measured, not estimated — see `docs/rust-benchmarks.md` for how and on what:
 
-Measured numbers are recorded in `docs/rust-benchmarks.md` as they land.
+- First painted window frame: about 210 ms for the Rust window vs about 430 ms
+  for the Python one, on the same machine (most of both is GTK's own start).
+- The fleet's own overhead (model calls taken out): a whole job with the Lead and
+  eight parallel workers in their own copies — 0.36 s, 16 MB peak.
+- Each extra agent costs well under 1 MB: one thread, its message history, its
+  gate; the model's latency is everything else.
+
+
