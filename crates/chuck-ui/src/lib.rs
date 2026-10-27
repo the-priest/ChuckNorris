@@ -2,6 +2,8 @@
 //! in an organised side panel, see the Done gate fill in.
 
 mod chat;
+mod glyphs;
+mod icons;
 pub mod doctor;
 pub mod update;
 mod md;

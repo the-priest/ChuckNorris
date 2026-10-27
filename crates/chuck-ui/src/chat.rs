@@ -192,6 +192,11 @@ pub fn path_for(folder: &Path) -> PathBuf {
     dir().join(format!("{}.json", &key[..16]))
 }
 
+/// A conversation file, wherever it is.
+pub fn load_path(p: &Path) -> Option<Saved> {
+    serde_json::from_str(&std::fs::read_to_string(p).ok()?).ok()
+}
+
 pub fn load(folder: &Path) -> Option<Saved> {
     let text = std::fs::read_to_string(path_for(folder)).ok()?;
     serde_json::from_str(&text).ok()
@@ -220,6 +225,219 @@ pub fn archive(folder: &Path) {
     if p.exists() {
         let stamp = chuck_store::ledger::local_stamp("%Y%m%d-%H%M%S");
         let _ = std::fs::rename(&p, p.with_extension(format!("{stamp}.json")));
+    }
+}
+
+// ── every conversation, for the Recent list ────────────────────────────
+
+/// What kind of file a listed conversation is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Kind {
+    /// A folder's (or Chat's) conversation as it stands.
+    Current,
+    /// An earlier one, kept when a new conversation was started.
+    Archived,
+    /// One from the Python app (opened as a copy; the original stays).
+    Python,
+}
+
+#[derive(Clone, Debug)]
+pub struct Listed {
+    pub path: PathBuf,
+    pub title: String,
+    /// The project folder ("" for a Chat-mode conversation).
+    pub folder: String,
+    pub modified: std::time::SystemTime,
+    pub kind: Kind,
+    /// Lower-cased text to search in.
+    hay: String,
+}
+
+impl Listed {
+    pub fn matches(&self, q: &str) -> bool {
+        let q = q.trim().to_lowercase();
+        q.is_empty() || q.split_whitespace().all(|w| self.hay.contains(w))
+    }
+}
+
+/// The Python app's saved chats.
+fn python_dir() -> PathBuf {
+    chuck_store::ledger::data_dir().join("chats")
+}
+
+/// Its scaffolding messages (tool results and the like), not what anyone typed.
+const PY_INTERNAL: &[&str] = &["TOOL RESULTS", "RESEARCH BUDGET", "STEP BUDGET", "CONTINUE:", "I ran ", "FILE ",
+    "CONVERSATION SUMMARY", "[MESSAGE FROM THE USER"];
+
+fn py_text(c: &serde_json::Value) -> String {
+    match c {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(parts) => parts.iter().filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+            .collect::<Vec<_>>().join(" "),
+        _ => String::new(),
+    }
+}
+
+/// A Python chat as a conversation here: what you typed and what Chuck said.
+fn from_python(v: &serde_json::Value) -> Saved {
+    let mut s = Saved { folder: v.get("workspace").and_then(|w| w.as_str()).unwrap_or("").to_string(), ..Saved::default() };
+    for m in v.get("history").and_then(|h| h.as_array()).into_iter().flatten() {
+        let role = m.get("role").and_then(|r| r.as_str()).unwrap_or("");
+        let mut text = py_text(m.get("content").unwrap_or(&serde_json::Value::Null));
+        if let Some(rest) = text.strip_prefix("[Since your last reply:") {
+            text = rest.split_once("]\n\n").map_or(String::new(), |(_, t)| t.to_string());
+        }
+        for cut in ["\n\n--- attached file:", "\n\n[attached file:", "\n[image attached:"] {
+            if let Some(i) = text.find(cut) {
+                text.truncate(i);
+            }
+        }
+        match role {
+            "user" if !PY_INTERNAL.iter().any(|p| text.starts_with(p)) && !text.trim().is_empty() => {
+                s.entries.push(Entry::User { text: text.trim().to_string() });
+                s.history.push(("user".into(), text.trim().to_string()));
+            }
+            "assistant" => {
+                let said = chuck_tools::prose(&text, &["bash", "sh", "write", "edit", "patch", "read", "grep", "glob",
+                    "search", "fetch", "images", "videos", "py", "python", "node", "plan", "ask", "task", "browse"]);
+                if !said.trim().is_empty() {
+                    s.entries.push(Entry::Lead { text: said.trim().to_string(), model: String::new(), chat: true });
+                    s.history.push(("lead".into(), said.trim().to_string()));
+                }
+            }
+            _ => {}
+        }
+    }
+    s
+}
+
+fn summary(s: &Saved) -> (String, String) {
+    let title = s.entries.iter().find_map(|e| match e {
+        Entry::User { text } if !text.starts_with('/') => Some(text.clone()),
+        _ => None,
+    }).unwrap_or_else(|| "New conversation".into());
+    let mut hay = String::new();
+    for e in &s.entries {
+        if let Entry::User { text } | Entry::Lead { text, .. } | Entry::Steer { text } = e {
+            hay.push_str(&text.to_lowercase());
+            hay.push('\n');
+            if hay.len() > 40_000 {
+                break;
+            }
+        }
+    }
+    (title.split_whitespace().collect::<Vec<_>>().join(" "), hay)
+}
+
+thread_local! {
+    /// Parsed files by (path, modified): reading every conversation again on each keystroke would be slow.
+    static SEEN: std::cell::RefCell<std::collections::HashMap<PathBuf, (std::time::SystemTime, Option<Listed>)>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+fn read_listed(path: &Path, kind: Kind, modified: std::time::SystemTime) -> Option<Listed> {
+    SEEN.with(|seen| {
+        if let Some((m, l)) = seen.borrow().get(path) {
+            if *m == modified {
+                return l.clone();
+            }
+        }
+        let l = (|| {
+            let text = std::fs::read_to_string(path).ok()?;
+            let (title, folder, hay) = if kind == Kind::Python {
+                let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+                let s = from_python(&v);
+                let (t, hay) = summary(&s);
+                let t = v.get("title").and_then(|t| t.as_str()).map(|t| t.split_whitespace().collect::<Vec<_>>().join(" "))
+                    .filter(|t| !t.is_empty()).unwrap_or(t);
+                (t, s.folder, hay)
+            } else {
+                let s: Saved = serde_json::from_str(&text).ok()?;
+                if s.entries.is_empty() {
+                    return None;
+                }
+                let (t, hay) = summary(&s);
+                (t, s.folder, hay)
+            };
+            let hay = format!("{} {} {hay}", title.to_lowercase(), folder.to_lowercase());
+            Some(Listed { path: path.to_path_buf(), title, folder, modified, kind, hay })
+        })();
+        seen.borrow_mut().insert(path.to_path_buf(), (modified, l.clone()));
+        l
+    })
+}
+
+/// Every conversation, newest first: this app's (current and earlier) and
+/// the Python app's.
+pub fn list(limit: usize) -> Vec<Listed> {
+    let mut files: Vec<(std::time::SystemTime, PathBuf, Kind)> = Vec::new();
+    for (d, python) in [(dir(), false), (python_dir(), true)] {
+        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            let name = e.file_name().to_string_lossy().into_owned();
+            let Ok(m) = e.metadata() else { continue };
+            if !m.is_file() || e.file_type().is_ok_and(|t| t.is_symlink()) || !name.ends_with(".json") {
+                continue;
+            }
+            let kind = if python {
+                Kind::Python
+            } else if name.matches('.').count() > 1 {
+                Kind::Archived
+            } else {
+                Kind::Current
+            };
+            files.push((m.modified().unwrap_or(std::time::UNIX_EPOCH), p, kind));
+        }
+    }
+    files.sort_by_key(|f| std::cmp::Reverse(f.0));
+    files.into_iter().filter_map(|(m, p, k)| read_listed(&p, k, m)).take(limit).collect()
+}
+
+/// The conversation's key: its folder, or Chat's loose key.
+fn key_of(folder: &str) -> PathBuf {
+    if folder.is_empty() { loose() } else { PathBuf::from(folder) }
+}
+
+/// Make `l` the conversation its folder opens with (the one there now is
+/// kept as an earlier one). -> the folder (None: a Chat-mode conversation).
+pub fn reopen(l: &Listed) -> Result<Option<PathBuf>, String> {
+    let key = key_of(&l.folder);
+    match l.kind {
+        Kind::Current => {}
+        Kind::Archived => {
+            archive(&key);
+            std::fs::rename(&l.path, path_for(&key)).map_err(|e| e.to_string())?;
+        }
+        Kind::Python => {
+            let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&l.path).map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())?;
+            let s = from_python(&v);
+            archive(&key);
+            save(&key, &s);
+        }
+    }
+    Ok((!l.folder.is_empty()).then(|| PathBuf::from(&l.folder)))
+}
+
+/// Delete a conversation for good.
+pub fn delete(l: &Listed) -> std::io::Result<()> {
+    std::fs::remove_file(&l.path)
+}
+
+/// "3 min ago", "yesterday", "12 Mar".
+pub fn ago(t: std::time::SystemTime) -> String {
+    let secs = std::time::SystemTime::now().duration_since(t).map(|d| d.as_secs()).unwrap_or(0);
+    match secs {
+        0..=59 => "just now".into(),
+        60..=3599 => format!("{} min ago", secs / 60),
+        3600..=86_399 => format!("{} h ago", secs / 3600),
+        86_400..=172_799 => "yesterday".into(),
+        _ if secs < 7 * 86_400 => format!("{} days ago", secs / 86_400),
+        _ => {
+            let at = t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+            chuck_store::ledger::stamp_at(at, "%-d %b")
+        }
     }
 }
 

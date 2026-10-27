@@ -208,7 +208,7 @@ fn main() {
         _ => Arc::new(Scripted::new().respond(|r| fleet_script(r).replace("python3 -m pytest -q", "sh pytest.sh"))),
     };
     let send = match mode.as_str() {
-        "welcome" | "daemons" | "palette" => None,
+        "welcome" | "daemons" | "palette" | "wave" => None,
         "confirm" => Some("Clean the build output".to_string()),
         "research" | "chat" => Some("Why does int() fail on an empty string? Check the docs.".to_string()),
         "voice" => Some("What does ls -la show?".to_string()),
@@ -219,6 +219,7 @@ fn main() {
     };
     let ms = match mode.as_str() {
         "welcome" | "settings" => 900,
+        "wave" => 1150,
         "midrun" => 1500,
         "daemons" => 6000,
         "browse" => 9000,
@@ -241,7 +242,8 @@ fn main() {
                                                  settings: mode == "settings", open: Some(open), web,
                                                  chat: Some(mode == "chat" || mode == "voice" || mode == "pictures"),
                                                  listen: mode == "voice",
-                                                 palette: (mode == "palette").then(|| "do".to_string()) });
+                                                 palette: (mode == "palette").then(|| "do".to_string()),
+                                                 poke: (mode == "wave").then_some((400.0, 380.0)) });
     if std::env::var_os("CHUCK_SHOT_FOLDER").is_none() {
         let _ = std::fs::remove_dir_all(&dir);
     }

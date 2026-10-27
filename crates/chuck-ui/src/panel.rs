@@ -76,7 +76,7 @@ impl Section {
         head.add_css_class("sec-head");
         head.add_css_class("flat");
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        let chevron = gtk::Image::from_icon_name(if open { "pan-down-symbolic" } else { "pan-end-symbolic" });
+        let chevron = gtk::Image::from_icon_name(if open { "chuck-down-symbolic" } else { "chuck-right-symbolic" });
         chevron.add_css_class("sec-chevron");
         row.append(&chevron);
         let t = label(title, &["sec-title"]);
@@ -103,7 +103,7 @@ impl Section {
         head.connect_clicked(move |_| {
             let open = !r.reveals_child();
             r.set_reveal_child(open);
-            chevron.set_icon_name(Some(if open { "pan-down-symbolic" } else { "pan-end-symbolic" }));
+            chevron.set_icon_name(Some(if open { "chuck-down-symbolic" } else { "chuck-right-symbolic" }));
             on_toggle(name, open);
         });
         Section { root, summary, strip, body, revealer }
@@ -376,10 +376,10 @@ impl Panel {
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         row.add_css_class("panel-row");
         let mark = gtk::Image::from_icon_name(match tool {
-            "search" => "system-search-symbolic",
-            "images" => "image-x-generic-symbolic",
-            "videos" => "video-x-generic-symbolic",
-            _ => "text-x-generic-symbolic",
+            "search" => "chuck-search-symbolic",
+            "images" => "chuck-image-symbolic",
+            "videos" => "chuck-video-symbolic",
+            _ => "chuck-page-symbolic",
         });
         mark.add_css_class(if ok { "research-ok" } else { "research-fail" });
         mark.set_valign(gtk::Align::Start);
@@ -753,14 +753,14 @@ impl Panel {
                 else if d.runs() > 0 { format!(" · ran {}×", d.runs()) } else { String::new() };
             col.append(&label(&format!("{kind} · {}{state}", chuck_daemon::describe(d.when())), &["panel-meta"]));
             row.append(&col);
-            let t = gtk::Button::from_icon_name(if d.enabled() { "media-playback-pause-symbolic" } else { "media-playback-start-symbolic" });
+            let t = gtk::Button::from_icon_name(if d.enabled() { "chuck-pause-symbolic" } else { "chuck-play-symbolic" });
             t.add_css_class("flat");
             t.set_valign(gtk::Align::Center);
             t.set_tooltip_text(Some(if d.enabled() { "Pause it" } else { "Resume it" }));
             let (id, cb) = (d.id(), on_toggle.clone());
             t.connect_clicked(move |_| cb(id));
             row.append(&t);
-            let x = gtk::Button::from_icon_name("user-trash-symbolic");
+            let x = gtk::Button::from_icon_name("chuck-trash-symbolic");
             x.add_css_class("flat");
             x.set_valign(gtk::Align::Center);
             x.set_tooltip_text(Some("Remove it"));
@@ -798,7 +798,7 @@ impl Panel {
             };
             col.append(&label(&format!("{}{scope}", if f.kind() == "core" { "always · " } else { "" }), &["panel-meta"]));
             row.append(&col);
-            let x = gtk::Button::from_icon_name("user-trash-symbolic");
+            let x = gtk::Button::from_icon_name("chuck-trash-symbolic");
             x.add_css_class("flat");
             x.set_valign(gtk::Align::Center);
             x.set_tooltip_text(Some("Forget this"));

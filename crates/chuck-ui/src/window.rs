@@ -48,6 +48,8 @@ pub struct Options {
     pub listen: bool,
     /// Open the command palette once the window is up, with this typed.
     pub palette: Option<String>,
+    /// Strike the welcome screen's code net here (renders of the window).
+    pub poke: Option<(f64, f64)>,
 }
 
 struct Running {
@@ -79,6 +81,9 @@ struct Ui {
     speaker: gtk::ToggleButton,
     hero: gtk::Label,
     lede: gtk::Label,
+    /// The Recent list on the left, and its search.
+    chats: gtk::Box,
+    chats_search: gtk::SearchEntry,
 }
 
 struct Lane {
@@ -556,7 +561,115 @@ impl State {
         self.panel.restore(&self.saved.progress);
         refresh_checkpoints(self, shared);
         refresh_daemons(self, shared);
+        refresh_chats(self, shared);
     }
+}
+
+/// The Recent list: every conversation (search narrows it), this one marked.
+fn refresh_chats(st: &State, shared: &Shared) {
+    let list = &st.ui.chats;
+    while let Some(c) = list.first_child() {
+        list.remove(&c);
+    }
+    let q = st.ui.chats_search.text().to_string();
+    let here = st.key().map(|k| chat::path_for(&k));
+    let all = chat::list(400);
+    let mut shown = 0;
+    for l in all.iter().filter(|l| l.matches(&q)).take(120) {
+        shown += 1;
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        row.add_css_class("chat-row");
+        if Some(&l.path) == here.as_ref() {
+            row.add_css_class("chat-current");
+        }
+        let open = gtk::Button::new();
+        open.add_css_class("flat");
+        open.add_css_class("chat-open");
+        open.set_hexpand(true);
+        let col = gtk::Box::new(gtk::Orientation::Vertical, 1);
+        let t = gtk::Label::builder().label(&l.title).xalign(0.0).ellipsize(pango::EllipsizeMode::End)
+            .max_width_chars(26).build();
+        t.add_css_class("chat-title");
+        col.append(&t);
+        let place = if l.folder.is_empty() { "Chat".to_string() } else {
+            Path::new(&l.folder).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| l.folder.clone())
+        };
+        let meta = format!("{place} · {}{}", chat::ago(l.modified), if l.kind == chat::Kind::Python { " · Python app" } else { "" });
+        let m = gtk::Label::builder().label(&meta).xalign(0.0).ellipsize(pango::EllipsizeMode::End).max_width_chars(30).build();
+        m.add_css_class("chat-meta");
+        col.append(&m);
+        open.set_child(Some(&col));
+        open.set_tooltip_text(Some(&if l.folder.is_empty() { l.title.clone() } else { format!("{}\n{}", l.title, l.folder) }));
+        let (sh, item) = (shared.clone(), l.clone());
+        open.connect_clicked(move |_| open_chat(&sh, &item));
+        row.append(&open);
+        let del = gtk::Button::from_icon_name("chuck-trash-symbolic");
+        del.add_css_class("flat");
+        del.add_css_class("chat-del");
+        del.set_valign(gtk::Align::Center);
+        del.set_tooltip_text(Some(if l.kind == chat::Kind::Python { "Delete this Python-app chat" } else { "Delete this conversation" }));
+        let (sh, item) = (shared.clone(), l.clone());
+        del.connect_clicked(move |_| {
+            let Ok(mut st) = sh.try_borrow_mut() else { return };
+            if st.running.is_some() && st.key().map(|k| chat::path_for(&k)).as_ref() == Some(&item.path) {
+                return; // not the one a job is writing to
+            }
+            if chat::delete(&item).is_ok() && st.key().map(|k| chat::path_for(&k)).as_ref() == Some(&item.path) {
+                st.saved = Saved::default();
+                st.unsaved = false;
+                st.redraw();
+                st.panel.reset();
+            }
+            refresh_chats(&st, &sh);
+        });
+        row.append(&del);
+        list.append(&row);
+    }
+    if shown == 0 {
+        let e = label(if q.trim().is_empty() { "No conversations yet." } else { "Nothing matches." }, &["panel-dim"]);
+        e.set_margin_start(8);
+        e.set_margin_top(6);
+        list.append(&e);
+    }
+}
+
+/// Open a conversation from the Recent list (in its folder, or in Chat).
+fn open_chat(shared: &Shared, l: &chat::Listed) {
+    let Ok(mut st) = shared.try_borrow_mut() else { return };
+    if st.running.is_some() {
+        st.ui.status.set_label("a job is running: stop it before opening another conversation");
+        return;
+    }
+    st.save();
+    match chat::reopen(l) {
+        Ok(Some(folder)) if folder.is_dir() => {
+            if st.chat != l_is_chat(l) {
+                st.chat = l_is_chat(l);
+                st.ui.chat_btn.set_active(st.chat);
+                st.ui.fleet_btn.set_active(!st.chat);
+            }
+            st.open_folder(Some(folder), shared);
+        }
+        Ok(Some(folder)) => {
+            st.ui.status.set_label(&format!("{} no longer exists", folder.display()));
+        }
+        Ok(None) => {
+            st.chat = true;
+            st.ui.chat_btn.set_active(true);
+            st.ui.fleet_btn.set_active(false);
+            st.open_folder(None, shared);
+        }
+        Err(e) => st.ui.status.set_label(&format!("couldn't open that conversation: {e}")),
+    }
+    st.set_running(false);
+    refresh_chats(&st, shared);
+}
+
+/// Was it a Chat-mode conversation (Chuck answering, no fleet)?
+fn l_is_chat(l: &chat::Listed) -> bool {
+    l.folder.is_empty() || (l.kind != chat::Kind::Python && chat::load_path(&l.path).is_some_and(|s| s.entries.iter()
+        .any(|e| matches!(e, Entry::Lead { chat: true, .. }))))
+        || l.kind == chat::Kind::Python
 }
 
 fn refresh_checkpoints(st: &State, shared: &Shared) {
@@ -582,6 +695,7 @@ fn rewind(shared: &Shared, sha: &str) {
     st.add(Entry::Card { kind: "REWOUND".into(), class: "ask-card".into(), text });
     st.save();
     refresh_checkpoints(&st, shared);
+    refresh_chats(&st, shared);
 }
 
 fn mark(ok: bool) -> &'static str {
@@ -867,6 +981,7 @@ fn finished(st: &mut State, report: JobReport, shared: &Shared) {
     st.set_running(false);
     st.save();
     refresh_checkpoints(st, shared);
+    refresh_chats(st, shared);
 }
 
 fn start(shared: &Shared, text: String) {
@@ -988,6 +1103,7 @@ fn start(shared: &Shared, text: String) {
     st.set_running(true);
     st.save();
     refresh_checkpoints(&st, shared);
+    refresh_chats(&st, shared);
 }
 
 /// Drain the fleet's events into the window (every 60 ms).
@@ -1092,7 +1208,7 @@ fn shut_down(shared: &Shared) {
 }
 
 fn speaker_look(b: &gtk::ToggleButton, on: bool) {
-    b.set_icon_name(if on { "audio-volume-high-symbolic" } else { "audio-volume-muted-symbolic" });
+    b.set_icon_name(if on { "chuck-speaker-symbolic" } else { "chuck-speaker-off-symbolic" });
     b.set_tooltip_text(Some(if on { "Replies are read aloud — click to stop (Esc silences one)" } else {
         "Read replies aloud" }));
 }
@@ -1938,6 +2054,7 @@ pub fn build(app: &adw::Application, opts: Options) {
         gtk::style_context_add_provider_for_display(&d, &provider, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
     }
     adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceDark);
+    crate::icons::install();
 
     let window = adw::ApplicationWindow::builder().application(app).title("Chuck")
         .default_width(if opts.width > 0 { opts.width } else { 1280 })
@@ -1962,12 +2079,16 @@ pub fn build(app: &adw::Application, opts: Options) {
     subtitle.set_max_width_chars(56);
     tcol.append(&subtitle);
     titlebox.append(&tcol);
+    let chats_btn = gtk::ToggleButton::builder().icon_name("chuck-chats-symbolic").build();
+    chats_btn.add_css_class("headerbtn");
+    chats_btn.set_tooltip_text(Some("Your conversations"));
+    header.pack_start(&chats_btn);
     header.pack_start(&titlebox);
     let folder_btn = gtk::Button::with_label("Choose a folder");
     folder_btn.add_css_class("pill");
     folder_btn.set_tooltip_text(Some("The project the fleet works on"));
     header.pack_start(&folder_btn);
-    let new_btn = gtk::Button::from_icon_name("document-new-symbolic");
+    let new_btn = gtk::Button::from_icon_name("chuck-new-symbolic");
     new_btn.add_css_class("headerbtn");
     new_btn.set_tooltip_text(Some("New conversation (the current one is kept on disk)"));
     header.pack_start(&new_btn);
@@ -1983,14 +2104,14 @@ pub fn build(app: &adw::Application, opts: Options) {
     modes.append(&fleet_btn);
     modes.append(&chat_btn);
     header.pack_start(&modes);
-    let gear = gtk::Button::from_icon_name("emblem-system-symbolic");
+    let gear = gtk::Button::from_icon_name("chuck-settings-symbolic");
     gear.add_css_class("headerbtn");
     gear.set_tooltip_text(Some("Settings"));
     header.pack_end(&gear);
-    let speaker = gtk::ToggleButton::builder().icon_name("audio-volume-high-symbolic").build();
+    let speaker = gtk::ToggleButton::builder().icon_name("chuck-speaker-symbolic").build();
     speaker.add_css_class("headerbtn");
     header.pack_end(&speaker);
-    let side_btn = gtk::ToggleButton::builder().icon_name("view-dual-symbolic").active(true).build();
+    let side_btn = gtk::ToggleButton::builder().icon_name("chuck-panel-symbolic").active(true).build();
     side_btn.add_css_class("headerbtn");
     side_btn.set_tooltip_text(Some("Show or hide what the fleet is doing"));
     header.pack_end(&side_btn);
@@ -2045,7 +2166,20 @@ pub fn build(app: &adw::Application, opts: Options) {
     overlay.add_overlay(&jump);
     let stack = gtk::Stack::new();
     let (welcome_page, hero, lede) = welcome(slot.clone());
-    stack.add_named(&welcome_page, Some("welcome"));
+    // behind the welcome: the net of code glyphs that ripples where you click
+    let field = crate::glyphs::GlyphField::new();
+    let welcome_holder = gtk::Overlay::new();
+    welcome_holder.set_child(Some(&field.area));
+    welcome_holder.add_overlay(&welcome_page);
+    field.listen(&welcome_holder);
+    if let Some((x, y)) = opts.poke {
+        let f = field.clone();
+        glib::timeout_add_local_once(Duration::from_millis(250), move || {
+            f.hover(Some((x + 260.0, y + 120.0)));
+            f.poke(x, y);
+        });
+    }
+    stack.add_named(&welcome_holder, Some("welcome"));
     stack.add_named(&overlay, Some("chat"));
     stack.set_vexpand(true);
 
@@ -2067,19 +2201,19 @@ pub fn build(app: &adw::Application, opts: Options) {
     let insc = gtk::ScrolledWindow::builder().child(&in_overlay).hscrollbar_policy(gtk::PolicyType::Never)
         .propagate_natural_height(true).max_content_height(200).hexpand(true).build();
     comp.append(&insc);
-    let send = gtk::Button::from_icon_name("go-up-symbolic");
+    let send = gtk::Button::from_icon_name("chuck-send-symbolic");
     send.add_css_class("suggested-action");
     send.add_css_class("sendbtn");
     send.set_valign(gtk::Align::End);
     send.set_tooltip_text(Some("Send (Enter) · new line: Shift+Enter"));
-    let stop = gtk::Button::from_icon_name("media-playback-stop-symbolic");
+    let stop = gtk::Button::from_icon_name("chuck-stop-symbolic");
     stop.add_css_class("destructive-action");
     stop.add_css_class("sendbtn");
     stop.set_valign(gtk::Align::End);
     stop.set_visible(false);
     stop.set_tooltip_text(Some("Stop every agent and command (Esc)"));
     // talk instead of typing: heard on this machine, never uploaded
-    let mic = gtk::Button::from_icon_name("audio-input-microphone-symbolic");
+    let mic = gtk::Button::from_icon_name("chuck-mic-symbolic");
     mic.add_css_class("flat");
     mic.add_css_class("micbtn");
     mic.set_valign(gtk::Align::End);
@@ -2123,9 +2257,37 @@ pub fn build(app: &adw::Application, opts: Options) {
         .sidebar_width_fraction(0.3).build();
     side_btn.bind_property("active", &split, "show-sidebar").bidirectional().build();
 
+    // the left side: every conversation, newest first
+    let chats_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    chats_box.add_css_class("chats");
+    let chats_search = gtk::SearchEntry::builder().placeholder_text("Search chats").build();
+    chats_search.set_margin_top(10);
+    chats_search.set_margin_start(10);
+    chats_search.set_margin_end(10);
+    chats_box.append(&chats_search);
+    chats_box.append(&label("RECENT", &["side-head"]));
+    let chats_list = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    chats_list.set_margin_start(6);
+    chats_list.set_margin_end(6);
+    chats_list.set_margin_bottom(8);
+    let chats_scroll = gtk::ScrolledWindow::builder().hscrollbar_policy(gtk::PolicyType::Never).vexpand(true)
+        .child(&chats_list).build();
+    chats_box.append(&chats_scroll);
+    let show_chats = Settings::load().map.get("chats_sidebar").and_then(|v| v.as_bool()).unwrap_or(true);
+    let outer = adw::OverlaySplitView::builder().sidebar_position(gtk::PackType::Start).sidebar(&chats_box)
+        .content(&split).show_sidebar(show_chats).min_sidebar_width(220.0).max_sidebar_width(280.0)
+        .sidebar_width_fraction(0.2).build();
+    chats_btn.set_active(show_chats);
+    chats_btn.bind_property("active", &outer, "show-sidebar").bidirectional().build();
+    chats_btn.connect_toggled(|b| {
+        let mut s = Settings::load();
+        s.set("chats_sidebar", b.is_active().into());
+        let _ = s.save();
+    });
+
     let view = adw::ToolbarView::new();
     view.add_top_bar(&header);
-    view.set_content(Some(&split));
+    view.set_content(Some(&outer));
     window.set_content(Some(&view));
 
     let folder = opts.folder.clone().or_else(|| {
@@ -2139,7 +2301,7 @@ pub fn build(app: &adw::Application, opts: Options) {
     let ui = Ui { window: window.clone(), stack, transcript, input: input.clone(), hint, send: send.clone(),
                   stop: stop.clone(), status, subtitle, meter, folder_btn: folder_btn.clone(), new_btn: new_btn.clone(),
                   fleet_btn: fleet_btn.clone(), chat_btn: chat_btn.clone(), mic: mic.clone(), speaker: speaker.clone(),
-                  hero, lede };
+                  hero, lede, chats: chats_list.clone(), chats_search: chats_search.clone() };
     // MCP servers start in the background: the window doesn't wait for them
     let mcp = Arc::new(chuck_mcp::Manager::new(chuck_mcp::config_path()));
     if mcp.configured() {
@@ -2347,13 +2509,21 @@ pub fn build(app: &adw::Application, opts: Options) {
             return;
         }
         st.save();
-        if let Some(f) = st.folder.clone() {
-            chat::archive(&f);
+        // the current conversation (a folder's, or Chat's) is kept in the Recent list
+        if let Some(k) = st.key() {
+            chat::archive(&k);
         }
         st.saved = Saved::default();
         st.redraw();
         st.panel.reset();
         st.ui.input.grab_focus();
+        refresh_chats(&st, &sh);
+    });
+    let sh = shared.clone();
+    shared.borrow().ui.chats_search.connect_search_changed(move |_| {
+        if let Ok(st) = sh.try_borrow() {
+            refresh_chats(&st, &sh);
+        }
     });
     let sh = shared.clone();
     folder_btn.connect_clicked(move |_| {

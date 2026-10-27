@@ -104,6 +104,17 @@ headerbar { background-color: @bg; border-bottom: 1px solid @line; box-shadow: n
 .done-card .card-kind { color: @good; }
 .gap-card  { border-color: alpha(@warn, 0.5); }
 .gap-card .card-kind { color: @warn; }
+.chats { background-color: @side; border-right: 1px solid @line; }
+.chats .side-head { margin: 8px 14px 4px 14px; }
+.chat-row { border-radius: 8px; }
+.chat-row:hover { background-color: alpha(@surface2, 0.7); }
+.chat-current { background-color: alpha(@accent, 0.16); }
+.chat-open { padding: 6px 8px; border-radius: 8px; }
+.chat-title { color: @ink; font-size: 12.5px; }
+.chat-meta { color: @faint; font-size: 10.5px; }
+.chat-del { opacity: 0; min-width: 24px; min-height: 24px; padding: 2px; }
+.chat-row:hover .chat-del { opacity: 0.7; }
+.chat-del:hover { opacity: 1; color: @bad; }
 .gal-pic   { border-radius: 8px; }
 .gal-cap   { color: @mute; font-size: 11.5px; }
 .thumb-btn { padding: 0; border-radius: 8px; }
