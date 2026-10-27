@@ -710,3 +710,43 @@ fn finished_work_said_in_prose_is_handed_in_and_done_not_lost() {
     assert!(!seen.iter().any(|r| !worker(r).is_empty() && last_user(r).contains("no tool calls")));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn an_unanswered_question_and_an_endless_review_never_stall_the_job() {
+    // the Lead asks (nobody answers), then the independent review rejects every time: the job still ends
+    let dir = tmp("nostall");
+    let model = Arc::new(Scripted::new().respond(|req| {
+        if text(&req.messages[0]) == chuck_runtime::prompts::CRITIC {
+            return "REJECT\n- the colours could be nicer".into();
+        }
+        let last = last_user(req);
+        if req.messages.len() == 2 {
+            return "```ask\nRed or blue?\n```".into();
+        }
+        if last.contains("no answer in") {
+            return "Going with blue.\n```criteria\n- v holds blue :: verify: grep -qx blue v.txt\n```\n```write v.txt\nblue\n```\n\
+                ```test grep -qx blue v.txt```\n```justify proportion\none word\n```\n```done\nv.txt holds blue (grep).\n```".into();
+        }
+        if last.contains("independent review") {
+            // it answers the review a little differently each time
+            let n = req.messages.len();
+            return format!("```test grep -qx blue v.txt```\n```done\nv.txt holds blue (grep), round {n}.\n```");
+        }
+        "Hmm.".into()
+    }));
+    let (_atx, arx) = channel::<String>(); // a user who never answers
+    let mut job = Job::new("pick a colour for v", &dir);
+    job.answers = Some(arx);
+    let cfg = RuntimeConfig { store: dir.join("store"), ask_wait: Duration::from_millis(300), ..RuntimeConfig::default() };
+    let rt = Runtime::new(model.clone(), cfg, Events(None));
+    let (report, _) = run_within(30, rt, job);
+    match &report.outcome {
+        Outcome::Done { summary } => assert!(summary.contains("Still open after 3 rounds") && summary.contains("colours"),
+                                             "{summary}"),
+        o => panic!("{o:?}"),
+    }
+    let critics = model.seen.lock().unwrap().iter()
+        .filter(|r| text(&r.messages[0]) == chuck_runtime::prompts::CRITIC).count();
+    assert_eq!(critics, 4, "three rejections, and the fourth closes it");
+    let _ = std::fs::remove_dir_all(&dir);
+}

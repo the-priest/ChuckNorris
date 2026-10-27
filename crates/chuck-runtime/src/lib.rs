@@ -41,6 +41,8 @@ pub struct RuntimeConfig {
     pub reasoning: Reasoning,
     /// The workers' (lighter: they build from a brief).
     pub worker_reasoning: Reasoning,
+    /// How long the Lead waits for an answer to its question before going on.
+    pub ask_wait: Duration,
     /// Offer agents their tools as functions the API parses (see `schemas`);
     /// off, they write every call as a fenced block.
     pub native_tools: bool,
@@ -113,6 +115,7 @@ impl Default for RuntimeConfig {
             fleet: FleetConfig::default(),
             reasoning: Reasoning::default(),
             worker_reasoning: Reasoning { budget: 1024, max_think_secs: 45 },
+            ask_wait: crate::lead::ASK_WAIT,
             native_tools: true,
             debug: false,
             // a reply's ceiling, not its size (only what's written is billed): a big file fits in one

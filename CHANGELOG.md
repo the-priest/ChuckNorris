@@ -79,6 +79,11 @@ Chuck is now a Rust app (`crates/`), and the installer puts it over any earlier 
 - Races:
   - The first entry through its gate is reviewed at once; accepting it stops the other entrant.
   - The Lead races only a small, risky piece, never a whole build.
+- A job never stalls on a question: with no answer in 3 minutes the Lead makes the most reasonable
+  choice, says which, and goes on; an answer typed later still reaches it. (Approval of a critical
+  command still waits for you, however long.)
+- The independent review can't send a job round forever: after 3 rejections, a `done` the gate
+  accepts finishes, with the review's open points in the summary.
 - Finished work said in prose isn't lost: a worker that checks everything and then just says it's
   done is handed in; a Lead that finishes in prose with every criterion verified ends through `done`
   (gate and independent review included) instead of being paused as unfinished.

@@ -159,14 +159,22 @@ fn forget_typed(rx: &Mutex<Receiver<String>>) {
     while rx.try_recv().is_ok() {}
 }
 
-/// The user's next typed line, or None when they stopped the job or nobody
-/// can answer.
-fn wait_answer(rx: &Mutex<Receiver<String>>, stop: &AtomicBool, kernel: &chuck_core::Kernel, id: AgentId)
-    -> Option<String>
+/// How long the Lead waits for the answer to its question before it makes
+/// the most reasonable choice itself (the job never stalls on an absent user).
+pub const ASK_WAIT: Duration = Duration::from_secs(180);
+/// Rejections by the independent review after which a `done` the gate accepts
+/// finishes the job, the review's open points written into the summary.
+pub const CRITIC_ROUNDS: u32 = 3;
+
+/// The user's next typed line, or None when they stopped the job, nobody can
+/// answer, or `within` went by.
+fn wait_answer(rx: &Mutex<Receiver<String>>, stop: &AtomicBool, kernel: &chuck_core::Kernel, id: AgentId,
+               within: Option<Duration>) -> Option<String>
 {
     let rx = rx.lock().unwrap();
+    let t0 = std::time::Instant::now();
     loop {
-        if stop.load(Ordering::Relaxed) || kernel.should_stop(id) {
+        if stop.load(Ordering::Relaxed) || kernel.should_stop(id) || within.is_some_and(|w| t0.elapsed() >= w) {
             return None;
         }
         match rx.recv_timeout(Duration::from_millis(200)) {
@@ -362,7 +370,7 @@ impl<'a> LeadRun<'a> {
             forget_typed(&rx);
             events.emit(Event::Confirm { id, command: cmd.to_string(), why: why.to_string(), outside: outside.to_vec() });
             kernel.block(id, "waiting for your approval");
-            let a = wait_answer(&rx, &stop, &kernel, id);
+            let a = wait_answer(&rx, &stop, &kernel, id, None); // a critical command waits for the user, however long
             kernel.unblock(id);
             let g = a.map_or(Grant::No, |a| Grant::parse(&a));
             // "for this job" only means something for places outside the folder
@@ -372,8 +380,14 @@ impl<'a> LeadRun<'a> {
 
     /// What the user typed since the last step, as the lead should read it.
     fn steering(&self) -> Option<String> {
-        let rx = self.steer.as_ref()?;
-        let said: Vec<String> = rx.try_iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+        let mut said: Vec<String> = self.steer.as_ref().map(|rx| rx.try_iter().collect()).unwrap_or_default();
+        // an answer that came after the Lead stopped waiting for it still counts
+        if let Some(rx) = &self.answers {
+            if let Ok(rx) = rx.try_lock() {
+                said.extend(rx.try_iter().map(|a| format!("(answering your earlier question) {a}")));
+            }
+        }
+        let said: Vec<String> = said.into_iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
         (!said.is_empty()).then(|| format!("[the user, while you work — this takes priority over your plan where it \
             conflicts: {}]", said.join(" / ")))
     }
@@ -1040,11 +1054,18 @@ impl<'a> LeadRun<'a> {
             return "[nobody can answer right now: make the most reasonable choice, say which, and go on]".into();
         };
         self.ctx.kernel.block(self.id, "waiting for your answer");
-        let answer = wait_answer(rx, &self.ctx.stop, &self.ctx.kernel, self.id);
+        let wait = self.ctx.cfg.ask_wait;
+        let answer = wait_answer(rx, &self.ctx.stop, &self.ctx.kernel, self.id, Some(wait));
         self.ctx.kernel.unblock(self.id);
+        if answer.is_none() && !self.ctx.stop.load(Ordering::Relaxed) {
+            self.ctx.events.emit(Event::Notice { id: self.id, text: "no answer yet — the Lead goes on with its best \
+                choice; your answer still reaches it".into() });
+        }
         match answer {
             Some(a) => format!("[the user answered: {a}]"),
-            None => "[no answer came: make the most reasonable choice, say which, and go on]".into(),
+            None => format!("[no answer in {}: make the most reasonable choice, say which, and go on — the user can \
+                still steer]", if wait.as_secs() >= 120 { format!("{} minutes", wait.as_secs() / 60) } else {
+                    format!("{} seconds", wait.as_secs()) }),
         }
     }
 
@@ -1131,9 +1152,15 @@ impl<'a> LeadRun<'a> {
             Verdict::Accepted => Vec::new(),
         };
         let mut g = self.gate.lock().unwrap();
+        // past its rounds, the review's points are the summary's, not another lap: the work passed its gate
+        let last_lap = !defects.is_empty() && self.critic_rounds > CRITIC_ROUNDS;
+        let verdict = if last_lap { Verdict::Accepted } else { verdict };
         let _ = g.review(self.id, Role::Lead, verdict, "independent critic pass");
         self.ctx.events.emit(Event::Reviewed { task: "job".into(), accepted: defects.is_empty(), defects: defects.clone() });
-        if !defects.is_empty() {
+        let summary = if last_lap {
+            format!("{summary}\n\nStill open after {CRITIC_ROUNDS} rounds of independent review:\n- {}", defects.join("\n- "))
+        } else { summary };
+        if !defects.is_empty() && !last_lap {
             self.rejected_at = Some((g.evidence.len(), summary.clone()));
             return Ok(Err(format!("[done REFUSED: the independent review (round {}) rejected the result:\n- {}\n\
                 Fix each one, verify again, then ```done```]", self.critic_rounds, defects.join("\n- "))));
