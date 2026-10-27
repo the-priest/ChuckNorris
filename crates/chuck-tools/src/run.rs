@@ -60,6 +60,7 @@ pub fn bash(cmd: &str, mut o: RunOpts<'_>) -> RunResult {
         None => argv,
     };
     let mut c = Command::new(&argv[0]);
+    tag(&mut c);
     c.args(&argv[1..]).current_dir(o.cwd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped())
         .env("CI", "1").env("PAGER", "cat").env("GIT_PAGER", "cat").env("TERM", "dumb")
         .env("DEBIAN_FRONTEND", "noninteractive");
@@ -250,8 +251,64 @@ pub fn running() -> usize {
     live().lock().unwrap_or_else(|e| e.into_inner()).len()
 }
 
+/// Every process Chuck starts carries this in its environment, and so does
+/// everything those start in turn — through `nohup … &`, setsid and
+/// daemons that detach (an emulator, an adb server) — so quitting can end
+/// all of it, wherever it went. What Chuck opens for you (a link in your
+/// browser, a restarted Chuck) is never tagged.
+pub const SESSION_VAR: &str = "CHUCK_SESSION";
+
+/// This run's tag.
+pub fn session() -> &'static str {
+    static S: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    S.get_or_init(|| {
+        let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+        format!("{}-{t:x}", std::process::id())
+    })
+}
+
+/// Tag a command Chuck is about to start.
+pub fn tag(c: &mut Command) {
+    c.env(SESSION_VAR, session());
+}
+
+/// Processes carrying this run's tag (never Chuck itself).
+pub fn session_pids() -> Vec<i32> {
+    let want = format!("{SESSION_VAR}={}", session());
+    let me = std::process::id() as i32;
+    let Ok(rd) = std::fs::read_dir("/proc") else { return Vec::new() };
+    rd.flatten().filter_map(|e| e.file_name().to_str().and_then(|n| n.parse::<i32>().ok()))
+        .filter(|&pid| pid != me)
+        .filter(|pid| std::fs::read(format!("/proc/{pid}/environ"))
+            .is_ok_and(|env| env.split(|b| *b == 0).any(|kv| kv == want.as_bytes())))
+        .collect()
+}
+
+/// End everything this run started that is still alive, TERM then KILL;
+/// twice, for what was being started meanwhile.
+pub fn kill_session() {
+    for _ in 0..2 {
+        let pids = session_pids();
+        if pids.is_empty() {
+            return;
+        }
+        for p in &pids {
+            unsafe {
+                libc::kill(*p, libc::SIGTERM);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        for p in session_pids() {
+            unsafe {
+                libc::kill(p, libc::SIGKILL);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// End every command still running — the whole process group of each,
-/// TERM then KILL. Called when the app quits.
+/// TERM then KILL — and everything they left behind. Called when the app quits.
 pub fn kill_all() {
     let mut groups: Vec<i32> = live().lock().unwrap_or_else(|e| e.into_inner()).iter().copied().collect();
     groups.extend(services().lock().unwrap_or_else(|e| e.into_inner()).iter().copied());
@@ -268,6 +325,7 @@ pub fn kill_all() {
             libc::killpg(*g, libc::SIGKILL);
         }
     }
+    kill_session();
 }
 
 fn kill_group(pgid: i32) {

@@ -441,6 +441,7 @@ fn launch(exe: &Path, proxy: Option<&Proxy>, file_access: bool, startup: Duratio
     }
     args.push("about:blank".into());
     let mut c = Command::new(exe);
+    chuck_tools::tag(&mut c);
     c.args(&args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
     unsafe {
         c.pre_exec(|| {

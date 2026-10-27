@@ -237,6 +237,7 @@ impl Server {
         // to the thread that started a process, not to the whole program.
         std::thread::Builder::new().name(format!("mcp-{name}")).spawn(move || {
             let mut c = Command::new(&exe);
+            chuck_tools::tag(&mut c);
             c.args(&args).envs(&env).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
             if let Some(d) = &cwd {
                 c.current_dir(d);

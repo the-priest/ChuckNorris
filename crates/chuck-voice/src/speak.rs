@@ -82,6 +82,7 @@ pub fn which(cmd: &str) -> Option<PathBuf> {
 /// everything else when Chuck quits.
 fn spawn(argv: &[String], stdin: Stdio, stdout: Stdio) -> std::io::Result<(Child, chuck_tools::Service)> {
     let mut c = Command::new(&argv[0]);
+    chuck_tools::tag(&mut c);
     c.args(&argv[1..]).stdin(stdin).stdout(stdout).stderr(Stdio::null());
     unsafe {
         c.pre_exec(|| {
@@ -115,6 +116,7 @@ impl Lasting {
         let (argv, cwd, ex) = (argv.to_vec(), cwd.to_path_buf(), exited.clone());
         std::thread::Builder::new().name("voice-helper".into()).spawn(move || {
             let mut c = Command::new(&argv[0]);
+            chuck_tools::tag(&mut c);
             c.args(&argv[1..]).current_dir(&cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
             unsafe {
                 c.pre_exec(|| {

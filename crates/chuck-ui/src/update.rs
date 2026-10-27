@@ -100,7 +100,9 @@ pub fn run(line: &mut dyn FnMut(&str)) -> Result<(), String> {
         return Err("the downloaded installer doesn't look right; nothing was run".into());
     }
     std::fs::write(&script, text).map_err(|e| e.to_string())?;
-    let mut child = Command::new("bash").arg(&script)
+    let mut cmd = Command::new("bash");
+    chuck_tools::tag(&mut cmd);
+    let mut child = cmd.arg(&script)
         .env("CHUCK_DEPS", "0").env("CHUCK_VOICE", "0").env("CHUCK_BRANCH", BRANCH).env("NO_COLOR", "1")
         .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| e.to_string())?;
     let err = child.stderr.take();

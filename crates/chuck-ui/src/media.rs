@@ -81,6 +81,7 @@ pub fn download(url: &str, proxy: Option<String>, tx: std::sync::mpsc::Sender<Re
     std::thread::Builder::new().name("yt-dlp".into()).spawn(move || {
         let _ = std::fs::create_dir_all(&dir);
         let mut c = Command::new(bin);
+        chuck_tools::tag(&mut c);
         c.args(["--no-playlist", "--max-filesize", "2G", "-f", "bv*[height<=1080]+ba/b[height<=1080]/b", "--trim-filenames",
                 "150", "--newline", "--print", "after_move:filepath", "-o"])
             .arg(dir.join("%(title)s.%(ext)s"));

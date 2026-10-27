@@ -257,6 +257,7 @@ impl Client {
         // signal follows the thread that started a process)
         std::thread::Builder::new().name(format!("lsp-{name}")).spawn(move || {
             let mut c = Command::new(&argv[0]);
+            chuck_tools::tag(&mut c);
             c.args(&argv[1..]).current_dir(&r2).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
             unsafe {
                 c.pre_exec(|| {

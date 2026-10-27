@@ -1469,6 +1469,8 @@ fn slash(st: &mut State, shared: &Shared, text: &str) -> bool {
             if let Some(exe) = exe {
                 use std::os::unix::process::CommandExt;
                 let mut c = std::process::Command::new(exe);
+                // the new Chuck is not this one's: it must outlive the quit below
+                c.env_remove(chuck_tools::SESSION_VAR);
                 unsafe {
                     c.pre_exec(|| {
                         libc::setsid();
