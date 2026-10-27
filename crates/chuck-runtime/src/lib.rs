@@ -222,6 +222,8 @@ impl Runtime {
             let access = self.cfg.access;
             let wrap: Option<chuck_code::lsp::Wrap> = match access {
                 chuck_sandbox::Access::Full => None,
+                chuck_sandbox::Access::Guarded if !self.cfg.bwrap => None,
+                chuck_sandbox::Access::Guarded => Some(chuck_sandbox::Jail::new(&folder).guarded().wrap()),
                 _ if !self.cfg.bwrap => Some(Arc::new(|_| None)),
                 chuck_sandbox::Access::SandboxNet => Some(chuck_sandbox::Jail::new(&folder).wrap()),
                 chuck_sandbox::Access::Sandbox => Some(chuck_sandbox::Jail::new(&folder).offline().wrap()),

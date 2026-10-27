@@ -867,20 +867,32 @@ fn on_event(st: &mut State, e: Event, shared: &Shared) {
             st.lane = None;
             entry.grab_focus();
         }
-        Event::Confirm { command, why, .. } => {
-            let (c, body, foot) = card("CRITICAL — NEEDS YOUR YES", "crit-card");
+        Event::Confirm { command, why, outside, .. } => {
+            let out = !outside.is_empty();
+            let (c, body, foot) = if out { card("OUTSIDE THE FOLDER — MAY IT?", "ask-card") } else {
+                card("CRITICAL — NEEDS YOUR YES", "crit-card") };
             body.append(&label("The Lead wants to run:", &["prose"]));
             let cmd = label(&command, &["cmd-text"]);
             cmd.set_selectable(true);
             body.append(&cmd);
             body.append(&label(&why, &["sub"]));
-            let run = gtk::Button::with_label("Run it");
-            run.add_css_class("destructive-action");
+            if out {
+                body.append(&label(&format!("It reaches: {}", outside.join(", ")), &["sub"]));
+            }
+            let run = gtk::Button::with_label(if out { "Allow once" } else { "Run it" });
+            run.add_css_class(if out { "suggested-action" } else { "destructive-action" });
             let no = gtk::Button::with_label("Refuse");
             foot.append(&no);
             foot.append(&run);
+            let mut choices = vec![(run, "yes"), (no, "no")];
+            if out {
+                let job = gtk::Button::with_label("Allow for this job");
+                job.set_tooltip_text(Some("Those places stay open to this job's commands until it ends"));
+                foot.append(&job);
+                choices.push((job, "always"));
+            }
             let tx = st.running.as_ref().map(|r| r.answers.clone());
-            for (b, word) in [(run, "yes"), (no, "no")] {
+            for (b, word) in choices {
                 let (tx, f, sh, cmd) = (tx.clone(), foot.clone(), shared.clone(), command.clone());
                 b.connect_clicked(move |_| {
                     if let Some(tx) = &tx {
@@ -888,8 +900,10 @@ fn on_event(st: &mut State, e: Event, shared: &Shared) {
                     }
                     f.set_sensitive(false);
                     if let Ok(mut st) = sh.try_borrow_mut() {
-                        st.record(Entry::Card { kind: "CRITICAL COMMAND".into(), class: "crit-card".into(),
-                            text: format!("`{cmd}`\n\nYou said **{}**.", if word == "yes" { "run it" } else { "no" }) });
+                        let said = match word { "yes" if out => "allow once", "yes" => "run it", "always" => "allow for this job", _ => "no" };
+                        st.record(Entry::Card { kind: if out { "OUTSIDE THE FOLDER".into() } else { "CRITICAL COMMAND".into() },
+                            class: if out { "ask-card".into() } else { "crit-card".into() },
+                            text: format!("`{cmd}`\n\nYou said **{said}**.") });
                     }
                 });
             }
@@ -1769,16 +1783,18 @@ fn settings_dialog(shared: &Shared) {
     let access_group = adw::PreferencesGroup::builder().title("This folder's access")
         .description(folder.as_ref().map(|f| f.display().to_string()).unwrap_or_else(|| "pick a folder first".into()))
         .build();
-    let modes = [("full", "Full access — commands run as you"), ("sandbox-net", "Sandboxed — only this folder is writable"),
+    let modes = [("guarded", "This folder freely — asks before anything outside it"),
+                 ("full", "Full access — commands run as you, anywhere"), ("sandbox-net", "Sandboxed — only this folder is writable"),
                  ("sandbox", "Sandboxed, offline — no network"), ("readonly", "Read-only — nothing is changed")];
     let mnames: Vec<&str> = modes.iter().map(|(_, n)| *n).collect();
     let acc = adw::ComboRow::builder().title("Access").model(&gtk::StringList::new(&mnames)).build();
-    let current = folder.as_ref().map(|f| setup::access_of(&s, f)).unwrap_or(chuck_sandbox::Access::Full);
+    let current = folder.as_ref().map(|f| setup::access_of(&s, f)).unwrap_or(chuck_sandbox::Access::Guarded);
     acc.set_selected(match current {
-        chuck_sandbox::Access::Full => 0,
-        chuck_sandbox::Access::SandboxNet => 1,
-        chuck_sandbox::Access::Sandbox => 2,
-        chuck_sandbox::Access::ReadOnly => 3,
+        chuck_sandbox::Access::Guarded => 0,
+        chuck_sandbox::Access::Full => 1,
+        chuck_sandbox::Access::SandboxNet => 2,
+        chuck_sandbox::Access::Sandbox => 3,
+        chuck_sandbox::Access::ReadOnly => 4,
     });
     acc.set_sensitive(folder.is_some());
     access_group.add(&acc);
@@ -1988,7 +2004,8 @@ fn settings_dialog(shared: &Shared) {
         if let Some(f) = &folder {
             let mode = modes[acc.selected() as usize].0;
             let mut map = s.map.get("folder_access").and_then(|v| v.as_object()).cloned().unwrap_or_default();
-            if mode == "full" {
+            if mode == "guarded" {
+                // the default: nothing to keep
                 map.remove(&f.display().to_string());
             } else if mode.starts_with("sandbox") && chuck_sandbox::bwrap().is_none() {
                 // never claim a jail that isn't there

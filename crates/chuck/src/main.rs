@@ -400,8 +400,9 @@ fn cmd_run(args: &[String], chat: bool, cont: bool) -> i32 {
                 print!("{} ", view.st.bold(">"));
                 let _ = std::io::stdout().flush();
             }
-            Event::Confirm { .. } if asking => {
-                print!("{} ", view.st.bold("type yes to run it, anything else to refuse >"));
+            Event::Confirm { outside, .. } if asking => {
+                print!("{} ", view.st.bold(if outside.is_empty() { "type yes to run it, anything else to refuse >" } else {
+                    "yes: allow once · always: for this job · anything else refuses >" }));
                 let _ = std::io::stdout().flush();
             }
             Event::Schedule { kind, when, what } => {

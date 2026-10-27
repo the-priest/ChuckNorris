@@ -5,7 +5,7 @@
 
 use crate::agent::{run_worker, think, Convo, Ctx, Halt, ToLead, ToWorker, WorkerSpec};
 use crate::events::{Event, Outcome};
-use crate::exec::{parse_criteria, refuse_command, Approve, Exec, LeadCall, Sandbox, LEAD_TAGS};
+use crate::exec::{parse_criteria, refuse_command, Approve, Exec, Grant, LeadCall, Sandbox, LEAD_TAGS};
 use crate::prompts;
 use chuck_core::evidence::{clip, test_counts};
 use chuck_core::fleet::better;
@@ -98,6 +98,8 @@ pub struct LeadRun<'a> {
     /// a later "keep going" picks up.
     pub last_msgs: Vec<serde_json::Value>,
     pub paused_why: Option<String>,
+    /// Places outside the folder the user allowed for this job.
+    outside: Arc<Mutex<Vec<PathBuf>>>,
 }
 
 /// Forget lines typed before a question is shown: they don't answer it.
@@ -279,7 +281,7 @@ impl<'a> LeadRun<'a> {
                   shadow: ctx.cfg.checkpoints.as_ref().filter(|_| ctx.cfg.access != chuck_sandbox::Access::ReadOnly)
                       .and_then(|store| chuck_store::Shadow::new(root, store).ok()),
                   first_checkpoint: None, steer: None, resume: None, task_base: 0, resumed: false, last_msgs: Vec::new(),
-                  paused_why: None }
+                  paused_why: None, outside: Arc::default() }
     }
 
     /// Snapshot the folder before a step that may change it. A failure turns
@@ -302,13 +304,15 @@ impl<'a> LeadRun<'a> {
     fn approver(&self) -> Option<Approve> {
         let rx = self.answers.clone()?;
         let (events, stop, kernel, id) = (self.ctx.events.clone(), self.ctx.stop.clone(), self.ctx.kernel.clone(), self.id);
-        Some(Arc::new(move |cmd: &str, why: &str| {
+        Some(Arc::new(move |cmd: &str, why: &str, outside: &[String]| {
             forget_typed(&rx);
-            events.emit(Event::Confirm { id, command: cmd.to_string(), why: why.to_string() });
+            events.emit(Event::Confirm { id, command: cmd.to_string(), why: why.to_string(), outside: outside.to_vec() });
             kernel.block(id, "waiting for your approval");
             let a = wait_answer(&rx, &stop, &kernel, id);
             kernel.unblock(id);
-            a.is_some_and(|a| matches!(a.trim().to_lowercase().as_str(), "yes" | "y"))
+            let g = a.map_or(Grant::No, |a| Grant::parse(&a));
+            // "for this job" only means something for places outside the folder
+            if g == Grant::Always && outside.is_empty() { Grant::Once } else { g }
         }))
     }
 
@@ -1071,7 +1075,7 @@ impl<'a> LeadRun<'a> {
                     .unwrap_or_default();
                 self.checkpoint(&format!("before {}", clip(&what, 80)));
             }
-            let (root_dir, job_gate) = (self.root.clone(), self.gate.clone());
+            let (root_dir, job_gate, outside) = (self.root.clone(), self.gate.clone(), self.outside.clone());
             let exec = Exec { id: self.id, role: Role::Lead, kernel: &ctx.kernel, root: &root_dir, gate: &job_gate,
                               sandbox: Sandbox { access: ctx.cfg.access, bwrap: ctx.cfg.bwrap, worker: false },
                               approve: self.approver(), audit: ctx.cfg.audit.clone().map(|l| (l, "lead".into())),
@@ -1079,7 +1083,7 @@ impl<'a> LeadRun<'a> {
                               cmd_timeout: ctx.cfg.cmd_timeout,
                               web: ctx.cfg.web.as_deref(), sources: ctx.cfg.sources,
                               mcp: ctx.cfg.mcp.as_deref(), lsp: ctx.cfg.lsp.as_deref(),
-                              memory: ctx.cfg.memory.as_deref() };
+                              memory: ctx.cfg.memory.as_deref(), allowed_outside: Some(&outside) };
             let r = exec.run(&reply);
             self.mutated |= r.mutated;
             let mut fb = r.feedback.clone();

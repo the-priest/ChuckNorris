@@ -208,8 +208,10 @@ impl View {
                 st.warn(&format!("  ! {who}: {text}"))
             }
             Event::Ask { question, .. } => format!("\n{} {}", st.bold("? the lead asks:"), question.trim()),
-            Event::Confirm { command, why, .. } => format!("\n{} {}\n  {}\n  {}", st.bad(&st.bold("! CRITICAL")),
-                st.bold("the lead wants to run:"), command.trim(), st.dim(why)),
+            Event::Confirm { command, why, outside, .. } => format!("\n{} {}\n  {}\n  {}{}",
+                if outside.is_empty() { st.bad(&st.bold("! CRITICAL")) } else { st.warn(&st.bold("! OUTSIDE THE FOLDER")) },
+                st.bold("the lead wants to run:"), command.trim(), st.dim(why),
+                if outside.is_empty() { String::new() } else { format!("\n  {}", st.dim(&format!("it reaches: {}", outside.join(", ")))) }),
             Event::Usage { tokens, usd, prompt, cached, .. } => {
                 self.tokens += tokens;
                 self.usd += usd;

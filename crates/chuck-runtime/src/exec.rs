@@ -45,7 +45,31 @@ impl StepResult {
 }
 
 /// Asks the user whether a critical command may run (true: yes, typed).
-pub type Approve = Arc<dyn Fn(&str, &str) -> bool + Send + Sync>;
+pub type Approve = Arc<dyn Fn(&str, &str, &[String]) -> Grant + Send + Sync>;
+
+/// The user's answer to "may it?".
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Grant {
+    No,
+    Once,
+    /// For the rest of this job (paths outside the folder).
+    Always,
+}
+
+impl Grant {
+    pub fn yes(self) -> bool {
+        self != Grant::No
+    }
+
+    /// The user's typed or clicked answer.
+    pub fn parse(a: &str) -> Grant {
+        match a.trim().to_lowercase().as_str() {
+            "always" | "job" | "allow for this job" => Grant::Always,
+            "yes" | "y" | "once" => Grant::Once,
+            _ => Grant::No,
+        }
+    }
+}
 
 /// How an agent's commands are contained.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -82,6 +106,18 @@ pub struct Exec<'a> {
     pub lsp: Option<&'a chuck_code::Manager>,
     /// Long-term memory (the lead's: workers don't keep facts).
     pub memory: Option<&'a chuck_store::memory::Memory>,
+    /// Places outside the folder the user allowed for this job.
+    pub allowed_outside: Option<&'a Mutex<Vec<std::path::PathBuf>>>,
+}
+
+/// How a command that reaches outside the folder may run.
+enum Reach {
+    /// It doesn't, or the jail is enough.
+    Inside,
+    /// Allowed: these paths writable in the jail.
+    Mount(Vec<std::path::PathBuf>),
+    /// Allowed, but only outside any jail (the paths were all of home or /).
+    Unjailed,
 }
 
 fn clip(s: &str, n: usize) -> String {
@@ -185,18 +221,38 @@ impl<'a> Exec<'a> {
     /// The jail for a command now. Before the acceptance criteria exist a
     /// command may look but not change: the folder is mounted read-only.
     /// Err: it must not run at all.
-    fn jail(&self) -> Result<(Option<Wrap>, bool), String> {
+    fn jail(&self, reach: &Reach) -> Result<(Option<Wrap>, bool), String> {
         let s = self.sandbox;
         let may_write = self.gate.lock().unwrap().allow_mutation().is_ok();
         if s.worker {
             // a worker's copy is jailed whatever the folder's access; an offline folder keeps it offline
-            let j = || if s.access == Access::Sandbox { Jail::new(self.root).offline() } else { Jail::new(self.root) };
+            let j = || match s.access {
+                Access::Sandbox => Jail::new(self.root).offline(),
+                Access::Guarded => Jail::new(self.root).guarded(),
+                _ => Jail::new(self.root),
+            };
             return Ok((s.bwrap.then(|| j().wrap()), false));
         }
         let look = |j: Jail| (Some(j.read_only().wrap()), true);
+        if s.access == Access::Guarded {
+            let allowed: Vec<std::path::PathBuf> = self.allowed_outside.map(|a| a.lock().unwrap().clone()).unwrap_or_default();
+            return Ok(match reach {
+                // the user allowed it, and only somewhere a jail can't cover
+                Reach::Unjailed => (None, false),
+                _ if !s.bwrap => (None, false),
+                Reach::Mount(m) => {
+                    let j = Jail::new(self.root).guarded().allow(&allowed).allow(m);
+                    if may_write { (Some(j.wrap()), false) } else { look(j) }
+                }
+                Reach::Inside => {
+                    let j = Jail::new(self.root).guarded().allow(&allowed);
+                    if may_write { (Some(j.wrap()), false) } else { look(j) }
+                }
+            });
+        }
         match s.access {
             Access::Full if !may_write && s.bwrap => Ok(look(Jail::new(self.root))),
-            Access::Full => Ok((None, false)),
+            Access::Full | Access::Guarded => Ok((None, false)),
             Access::SandboxNet | Access::Sandbox if !s.bwrap => Err("[not run: this folder is sandboxed but \
                 bubblewrap isn't installed — install bubblewrap, or give the folder full access]".into()),
             Access::SandboxNet | Access::Sandbox => {
@@ -209,6 +265,71 @@ impl<'a> Exec<'a> {
             Access::ReadOnly if !s.bwrap => Err("[not run: this folder is read-only, and commands can only be \
                 kept from changing it inside bubblewrap, which isn't installed]".into()),
             Access::ReadOnly => Ok(look(Jail::new(self.root).offline())),
+        }
+    }
+
+    /// May this reach the paths outside the folder it names? Asks the user
+    /// in "ask outside" mode (the lead's; a worker is refused). Err: refused.
+    fn reach(&self, what: &str, outside: Vec<std::path::PathBuf>) -> Result<Reach, String> {
+        if self.sandbox.access != Access::Guarded {
+            return Ok(Reach::Inside);
+        }
+        let allowed: Vec<std::path::PathBuf> = self.allowed_outside.map(|a| a.lock().unwrap().clone()).unwrap_or_default();
+        let outside: Vec<std::path::PathBuf> = outside.into_iter().filter(|p| !allowed.iter().any(|a| p.starts_with(a))).collect();
+        if outside.is_empty() {
+            return Ok(Reach::Inside);
+        }
+        // what would open is what the user is shown: the folders those paths are in
+        let mounts: Option<Vec<std::path::PathBuf>> = outside.iter().map(|p| chuck_sandbox::mount_point(p)).collect();
+        let mut list: Vec<String> = match &mounts {
+            Some(m) => m.iter().map(|p| p.display().to_string()).collect(),
+            None => outside.iter().map(|p| p.display().to_string()).collect(),
+        };
+        list.dedup();
+        if self.sandbox.worker {
+            return Err(format!("[refused: `{}` reaches outside your copy of the project ({}). Work inside it; if the \
+                task truly needs something outside, say so in your submission for the lead]", clip(what, 120), list.join(", ")));
+        }
+        if let Some(p) = outside.iter().find(|p| secret_path(p)) {
+            return Err(format!("[refused: {} holds credentials, which no agent may touch]", p.display()));
+        }
+        let why = "it reaches outside the project folder";
+        let grant = self.approve.as_ref().map_or(Grant::No, |ok| ok(what, why, &list));
+        if !grant.yes() {
+            return Err(format!("[refused: you asked to reach outside the project folder ({}) and the user said no — \
+                work inside the folder, or explain why it's needed]", list.join(", ")));
+        }
+        match mounts {
+            Some(m) => {
+                if grant == Grant::Always {
+                    if let Some(a) = self.allowed_outside {
+                        a.lock().unwrap().extend(m.iter().cloned());
+                    }
+                }
+                Ok(Reach::Mount(m))
+            }
+            None => Ok(Reach::Unjailed),
+        }
+    }
+
+    /// Chuck's own tools on a path outside the folder. Ok(None): it's inside
+    /// (the tool's own checks apply); Ok(Some(path)): allowed outside;
+    /// Err: refused (said why).
+    fn tool_outside(&self, raw: &str, what: &str) -> Result<Option<std::path::PathBuf>, String> {
+        let Some(abs) = chuck_sandbox::resolve(raw, self.root) else { return Ok(None) };
+        let root = self.root.canonicalize().unwrap_or_else(|_| self.root.to_path_buf());
+        if abs.starts_with(&root) {
+            return Ok(None);
+        }
+        if secret_path(&abs) {
+            return Err(format!("[refused: {} holds credentials, which no agent may touch]", abs.display()));
+        }
+        match self.sandbox.access {
+            Access::Full if !self.sandbox.worker => Ok(Some(abs)),
+            Access::Guarded if chuck_sandbox::free_to_reach(&abs, self.root) => Ok(Some(abs)),
+            Access::Guarded => self.reach(what, vec![abs.clone()]).map(|_| Some(abs)),
+            _ => Err(format!("[refused: {} is outside the project, and this {} stays inside it]", abs.display(),
+                             if self.sandbox.worker { "copy's work" } else { "folder's access" })),
         }
     }
 
@@ -272,10 +393,26 @@ impl<'a> Exec<'a> {
             res.feedback.push(e);
             return;
         }
+        // a file outside the folder: asked first (in "ask outside" mode), then written where it is
+        let outside = if b.tag == "patch" { None } else {
+            match self.tool_outside(&b.path, &format!("{} {}", b.tag, b.path)) {
+                Ok(o) => o,
+                Err(e) => {
+                    self.act(&b.tag, &b.path, false, "outside the folder: not allowed");
+                    res.feedback.push(e);
+                    return;
+                }
+            }
+        };
+        let (dir, rel) = match &outside {
+            Some(abs) => (abs.parent().unwrap_or(abs).to_path_buf(),
+                          abs.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
+            None => (self.root.to_path_buf(), b.path.clone()),
+        };
         let t0 = Instant::now();
         let r = match b.tag.as_str() {
-            "write" => chuck_tools::write_file(self.root, &b.path, &b.body),
-            "edit" => chuck_tools::edit_file(self.root, &b.path, &b.body),
+            "write" => chuck_tools::write_file(&dir, &rel, &b.body),
+            "edit" => chuck_tools::edit_file(&dir, &rel, &b.body),
             _ => return self.patch(&b.body, all, res),
         };
         match r {
@@ -384,11 +521,45 @@ impl<'a> Exec<'a> {
                     res.feedback.push("[refused: that's a credential, hidden in a restricted folder]".into());
                     return;
                 }
+                // outside the folder: asked first (in "ask outside" mode), then read from where it is
+                let spot = if tag == "glob" { arg.split_whitespace().last().unwrap_or("") } else if tag == "grep" {
+                    arg.rsplit_once(char::is_whitespace).map_or("", |(_, s)| s) } else { target };
+                let outside = match self.tool_outside(spot, &format!("{tag} {arg}")) {
+                    Ok(o) => o,
+                    Err(e) => {
+                        self.act(tag, arg, false, "outside the folder: not allowed");
+                        res.feedback.push(e);
+                        return;
+                    }
+                };
                 let t0 = Instant::now();
-                let out = match tag {
-                    "read" => chuck_tools::read_page(self.root, if arg.is_empty() { t.body.trim() } else { arg }, CLIP)
+                let out = match (tag, &outside) {
+                    ("read", Some(abs)) => {
+                        let spec = if arg.is_empty() { t.body.trim() } else { arg };
+                        let lines = spec.rsplit_once(':').filter(|(_, r)| r.chars().next().is_some_and(|c| c.is_ascii_digit()))
+                            .map(|(_, r)| format!(":{r}")).unwrap_or_default();
+                        if abs.is_dir() {
+                            chuck_tools::glob(abs, "*", 200)
+                        } else {
+                            let dir = abs.parent().unwrap_or(abs);
+                            chuck_tools::read_page(dir, &format!("{}{lines}", abs.file_name().map(|n| n.to_string_lossy())
+                                .unwrap_or_default()), CLIP).map_err(|e| e.to_string())
+                        }
+                    }
+                    ("grep", Some(abs)) => {
+                        let pat = arg.rsplit_once(char::is_whitespace).map_or(arg, |(p, _)| p);
+                        if abs.is_dir() { chuck_tools::grep(abs, pat.trim(), "", 80) } else {
+                            chuck_tools::grep(abs.parent().unwrap_or(abs), pat.trim(),
+                                &abs.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), 80)
+                        }
+                    }
+                    ("glob", Some(abs)) => {
+                        let pat = arg.split_whitespace().next().filter(|p| *p != spot).unwrap_or("**/*");
+                        chuck_tools::glob(abs, pat, 200)
+                    }
+                    ("read", None) => chuck_tools::read_page(self.root, if arg.is_empty() { t.body.trim() } else { arg }, CLIP)
                         .map_err(|e| e.to_string()),
-                    "grep" => {
+                    ("grep", _) => {
                         let (pat, sub) = match arg.rsplit_once(char::is_whitespace) {
                             Some((p, s)) if !s.contains(['*', '(', '[', '\\', '|']) && self.root.join(s).exists() => (p, s),
                             _ => (arg, ""),
@@ -433,7 +604,7 @@ impl<'a> Exec<'a> {
                 };
                 if classify_command(&cmd) == Level::Critical {
                     let why = "it can destroy data or the system beyond what a checkpoint brings back";
-                    let yes = !self.sandbox.worker && self.approve.as_ref().is_some_and(|ok| ok(&cmd, why));
+                    let yes = !self.sandbox.worker && self.approve.as_ref().is_some_and(|ok| ok(&cmd, why, &[]).yes());
                     if !yes {
                         let msg = if self.sandbox.worker {
                             format!("[refused: `{}` is critical ({why}); background workers never run commands \
@@ -449,7 +620,15 @@ impl<'a> Exec<'a> {
                 } else if classify_command(&cmd) == Level::Danger {
                     self.events.emit(Event::Notice { id: self.id, text: format!("destructive: {}", clip(&cmd, 160)) });
                 }
-                let (wrap, looking) = match self.jail() {
+                let reach = match self.reach(&cmd, chuck_sandbox::outside_paths(&cmd, self.root)) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        self.act(tag, &cmd, false, "outside the folder: not allowed");
+                        res.feedback.push(e);
+                        return;
+                    }
+                };
+                let (wrap, looking) = match self.jail(&reach) {
                     Ok(w) => w,
                     Err(e) => {
                         self.act(tag, &cmd, false, &e);
@@ -754,7 +933,7 @@ impl<'a> Exec<'a> {
                 let shown = format!("mcp {target} {}", clip(&args.to_string(), 400));
                 let why = "an MCP tool that may change or delete things outside this folder (its server doesn't say \
                     otherwise)";
-                if !self.approve.as_ref().is_some_and(|ok| ok(&shown, why)) {
+                if !self.approve.as_ref().is_some_and(|ok| ok(&shown, why, &[]).yes()) {
                     return refuse(res, "it may change or delete things, and the user didn't approve it".into());
                 }
             }

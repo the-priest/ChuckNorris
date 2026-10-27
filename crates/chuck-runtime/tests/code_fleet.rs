@@ -82,7 +82,8 @@ fn a_worker_gets_syntax_answers_and_no_rename() {
     let exec = Exec { id, role: Role::GlmWorker, kernel: &kernel, root: &dir, gate: &gate,
                       sandbox: Sandbox { access: chuck_sandbox::Access::Full, bwrap: false, worker: true }, approve: None,
                       audit: None, stop: Arc::new(AtomicBool::new(false)), events: &ev,
-                      cmd_timeout: Duration::from_secs(10), web: None, sources: 6, mcp: None, lsp: Some(&m), memory: None };
+                      cmd_timeout: Duration::from_secs(10), web: None, sources: 6, mcp: None, lsp: Some(&m), memory: None,
+                      allowed_outside: None };
     let r = exec.run("```def make_store```\n```rename make_store build_store```");
     assert!(r.feedback[0].contains("via syntax (no language server)"), "{:?}", r.feedback);
     assert!(r.feedback[1].contains("workers don't get"), "{:?}", r.feedback);

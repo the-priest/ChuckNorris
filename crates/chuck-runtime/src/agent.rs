@@ -351,7 +351,7 @@ pub fn run_worker(ctx: Ctx, w: WorkerSpec) {
                               cmd_timeout: ctx.cfg.cmd_timeout,
                               web: ctx.cfg.web.as_deref(), sources: ctx.cfg.sources,
                               mcp: ctx.cfg.mcp.as_deref(), lsp: ctx.cfg.lsp.as_deref(),
-                              memory: ctx.cfg.memory.as_deref() };
+                              memory: ctx.cfg.memory.as_deref(), allowed_outside: None };
             let r = exec.run(&reply);
             let mut fb = r.feedback.clone();
             if let Some(report) = &r.submit {

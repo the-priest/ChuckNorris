@@ -15,6 +15,11 @@ use std::sync::{Arc, OnceLock};
 pub enum Access {
     /// Commands run as you, anywhere you can.
     Full,
+    /// The folder freely, nothing outside it without asking: commands run
+    /// jailed with the folder writable, the rest of your home hidden (but
+    /// your toolchains and build caches), the system read-only; a command
+    /// that names a path outside the folder asks you first. The default.
+    Guarded,
     /// Only this folder is writable; network allowed.
     SandboxNet,
     /// Only this folder is writable; no network.
@@ -29,13 +34,16 @@ impl Access {
             "sandbox-net" => Access::SandboxNet,
             "sandbox" => Access::Sandbox,
             "readonly" => Access::ReadOnly,
-            _ => Access::Full,
+            "full" => Access::Full,
+            // anything else, or nothing set: the folder freely, ask outside it
+            _ => Access::Guarded,
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
             Access::Full => "full access",
+            Access::Guarded => "this folder, ask outside",
             Access::SandboxNet => "sandboxed",
             Access::Sandbox => "sandboxed, offline",
             Access::ReadOnly => "read-only",
@@ -52,6 +60,17 @@ pub const HIDE_DIRS: &[&str] = &[".ssh", ".gnupg", ".aws", ".kube", ".docker", "
 /// Single files that hold tokens: shown as empty.
 pub const HIDE_FILES: &[&str] = &[".netrc", ".git-credentials", ".pypirc", ".npmrc", ".pgpass", ".my.cnf",
     ".config/hub"];
+
+/// Toolchains under your home a jailed build needs to read (compilers,
+/// SDKs, version managers).
+pub const TOOLCHAIN_DIRS: &[&str] = &[".cargo", ".rustup", ".local/bin", ".local/lib", ".local/share/pnpm", ".nvm",
+    ".pyenv", ".rbenv", ".sdkman", ".deno", ".bun", ".volta", ".nimble", ".ghcup", ".elan", ".juliaup", "go/bin",
+    "go/pkg", ".jdks", ".java", "Android/Sdk", "android-sdk", ".dotnet", "flutter", ".pub-cache", ".zig"];
+/// Build caches a jailed build writes (downloads, compiled dependencies,
+/// emulators' disks): reused, never your documents.
+pub const CACHE_DIRS: &[&str] = &[".cache", ".gradle", ".m2", ".ivy2", ".sbt", ".npm", ".yarn", ".android", ".konan",
+    ".cargo/registry", ".cargo/git", ".local/share/pnpm/store", ".nuget", ".cache/go-build", "go/pkg/mod", ".expo",
+    ".config/configstore"];
 
 pub fn home() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
@@ -103,12 +122,27 @@ pub struct Jail {
     /// A process meant to outlive one step (a language server) must not die
     /// with the thread that started it.
     pub persistent: bool,
+    /// Hide your home folder but for the working folder, your toolchains and
+    /// build caches (the "ask outside the folder" mode).
+    pub hide_home: bool,
 }
 
 impl Jail {
     pub fn new(root: &Path) -> Jail {
         Jail { root: root.to_path_buf(), write: true, net: true, writable: Vec::new(), cache: Some(default_cache()),
-               extra_ro: Vec::new(), persistent: false }
+               extra_ro: Vec::new(), persistent: false, hide_home: false }
+    }
+
+    /// Only the folder (and what was allowed): the rest of home hidden.
+    pub fn guarded(mut self) -> Jail {
+        self.hide_home = true;
+        self
+    }
+
+    /// Also writable: paths the user allowed outside the folder.
+    pub fn allow(mut self, paths: &[PathBuf]) -> Jail {
+        self.writable.extend(paths.iter().cloned());
+        self
     }
 
     pub fn read_only(mut self) -> Jail {
@@ -130,6 +164,12 @@ impl Jail {
         if !self.persistent {
             a.push("--die-with-parent".into());
         }
+        // emulators and VMs need KVM, GPU-using builds the render nodes: devices, not files
+        for d in ["/dev/kvm", "/dev/dri"] {
+            if Path::new(d).exists() {
+                a.extend(["--dev-bind".into(), d.into(), d.into()]);
+            }
+        }
         // DNS: resolv.conf usually points into /run
         if let Ok(rc) = Path::new("/etc/resolv.conf").canonicalize() {
             if rc.starts_with("/run/") && rc.exists() {
@@ -141,6 +181,23 @@ impl Jail {
             a.extend(["--unsetenv".into(), var.into()]);
         }
         let cache = self.cache.as_ref().filter(|c| std::fs::create_dir_all(c).is_ok());
+        let h = home();
+        if self.hide_home && h.is_dir() && h != Path::new("/") {
+            // home goes first, so the folder and what's allowed are mounted back over it
+            a.extend(["--tmpfs".into(), s(&h)]);
+            for rel in TOOLCHAIN_DIRS {
+                let p = h.join(rel);
+                if p.exists() {
+                    a.extend(["--ro-bind".into(), s(&p), s(&p)]);
+                }
+            }
+            for rel in CACHE_DIRS {
+                let p = h.join(rel);
+                if p.exists() {
+                    a.extend(["--bind".into(), s(&p), s(&p)]);
+                }
+            }
+        }
         let mut binds: Vec<(PathBuf, bool)> = vec![(self.root.clone(), self.write)];
         binds.extend(self.writable.iter().map(|w| (w.clone(), true)));
         if let Some(c) = cache {
@@ -153,7 +210,6 @@ impl Jail {
         }
         // credentials are hidden AFTER the binds: bwrap mounts in order, so a
         // working folder of ~ bound earlier can't bring ~/.ssh back
-        let h = home();
         let mut hidden = Vec::new();
         for rel in HIDE_DIRS {
             let p = h.join(rel);

@@ -33,7 +33,9 @@ pub enum Event {
     Notice { id: AgentId, text: String },
     Ask { id: AgentId, question: String },
     /// A critical command waits for the user's explicit yes.
-    Confirm { id: AgentId, command: String, why: String },
+    /// `outside`: the paths outside the folder it reaches (then the user may
+    /// also allow them for the rest of the job).
+    Confirm { id: AgentId, command: String, why: String, outside: Vec<String> },
     /// One model call's bill: all tokens, the prompt part of them, and how
     /// much of the prompt the API's cache served (billed at a fraction).
     Usage { id: AgentId, tokens: u64, usd: f64, prompt: u64, cached: u64 },

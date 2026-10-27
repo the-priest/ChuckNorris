@@ -33,11 +33,11 @@ pub fn client(s: &Settings) -> Result<SiliconFlow, String> {
 
 /// The folder's access as the window stores it (`folder_access`: path → mode).
 pub fn access_of(s: &Settings, folder: &Path) -> Access {
-    let Some(map) = s.map.get("folder_access").and_then(|v| v.as_object()) else { return Access::Full };
+    let Some(map) = s.map.get("folder_access").and_then(|v| v.as_object()) else { return Access::Guarded };
     map.iter().find(|(k, _)| {
         let p = Path::new(k.as_str());
         p == folder || p.canonicalize().is_ok_and(|c| c == folder)
-    }).and_then(|(_, v)| v.as_str()).map_or(Access::Full, Access::parse)
+    }).and_then(|(_, v)| v.as_str()).map_or(Access::Guarded, Access::parse)
 }
 
 pub fn fleet(s: &Settings) -> FleetConfig {
@@ -146,7 +146,11 @@ pub fn from_settings(s: &Settings, folder: &Path, max_usd: Option<f64>) -> Resul
     cfg.memory = Some(Arc::new(chuck_store::memory::Memory::at(&chuck_store::memory::Memory::default_path())));
     cfg.sources = s.num("research_sources", 6.0, 1.0, 10.0) as usize;
     cfg.access = access_of(s, folder);
-    if cfg.access != Access::Full && !cfg.bwrap {
+    if cfg.access == Access::Guarded && !cfg.bwrap {
+        notes.push("bubblewrap isn't installed, so commands can't be kept inside this folder: they still ask before \
+            naming anything outside it, but a command could reach further without saying so — install it (pacman -S \
+            bubblewrap / apt install bubblewrap)".into());
+    } else if cfg.access != Access::Full && !cfg.bwrap {
         notes.push(format!("this folder is {}, which needs bubblewrap to run commands — install it (pacman -S \
             bubblewrap / apt install bubblewrap); until then commands are refused", cfg.access.label()));
     }
