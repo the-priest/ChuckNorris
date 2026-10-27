@@ -137,7 +137,9 @@ fn lead_and_two_families_deliver_through_every_gate() {
         }
     }));
     let (tx, rx) = channel();
-    let cfg = RuntimeConfig { store: dir.join("store"), ..RuntimeConfig::default() };
+    // the Lead's own review (it sends the first version back): hand-ins wait for it
+    let fleet = chuck_core::FleetConfig { auto_merge: false, ..chuck_core::FleetConfig::default() };
+    let cfg = RuntimeConfig { store: dir.join("store"), fleet, ..RuntimeConfig::default() };
     let rt = Runtime::new(model.clone(), cfg, Events(Some(tx)));
     let report = rt.run(Job::new("greet is broken: fix it and document it", &proj));
     let events: Vec<Event> = rx.try_iter().collect();

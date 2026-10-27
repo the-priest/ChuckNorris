@@ -79,6 +79,11 @@ Chuck is now a Rust app (`crates/`), and the installer puts it over any earlier 
 - Races:
   - The first entry through its gate is reviewed at once; accepting it stops the other entrant.
   - The Lead races only a small, risky piece, never a whole build.
+- Every worker gets a part, and good work is merged at once: a hand-in that passes its gate and its
+  re-run checks goes straight into the project, without waiting for the Lead's turn (Settings ›
+  Merge good work at once). The Lead sees each one with its diff and fixes or reassigns what's wrong;
+  the independent review still judges the whole job. The Lead lays a build out as separate files,
+  hands every part out in one reply, and writes the glue itself meanwhile.
 - Faster:
   - workers think lightly (Settings › Reasoning › Workers' reasoning, 1k by default) and never for
     more than 45 s; the Lead's default is 2k;

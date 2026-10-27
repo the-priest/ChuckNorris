@@ -696,7 +696,20 @@ impl<'a> LeadRun<'a> {
                 entries.push(sub);
                 let win = entries.iter().skip(1).fold(&entries[0], |a, b| better(a, b)).clone();
                 slot.held = entries.into_iter().filter(|e| e.worker != win.worker).collect();
-                out.push(self.present(win));
+                let tid = win.task.clone();
+                let shown = self.present(win);
+                if self.ctx.cfg.fleet.auto_merge {
+                    // no waiting on the Lead's turn: its gate passed; its checks are re-run on its copy, then merged
+                    let said = self.review(&LeadCall { tag: "review".into(), arg: format!("{tid} accept"),
+                        body: "merged at once: its gate passed and its checks re-ran green on its copy".into() });
+                    let report = shown.split("\n\nReview it against the criteria").next().unwrap_or(&shown).to_string();
+                    let merged = self.tasks.iter().any(|t| t.task.id == tid && t.state == TaskState::Merged);
+                    out.push(format!("{report}\n\n{said}{}", if merged {
+                        "\n[merged without waiting for you: look it over — fix what's wrong yourself, or assign the fix]"
+                    } else { "" }));
+                } else {
+                    out.push(shown);
+                }
             }
             ToLead::Ended { task, worker, gaps, why } => {
                 let name = self.workers.get(&worker).map(|w| w.name.clone()).unwrap_or_default();
@@ -743,6 +756,9 @@ impl<'a> LeadRun<'a> {
         let Some(slot) = self.tasks.iter_mut().find(|t| t.task.id == tid) else {
             return format!("[review: there is no task {tid}]");
         };
+        if slot.state == TaskState::Merged {
+            return format!("[{tid} is already merged — nothing to review]");
+        }
         let Some(sub) = slot.pending.take() else {
             return format!("[review: {tid} has no submission waiting (it is {:?})]", slot.state);
         };

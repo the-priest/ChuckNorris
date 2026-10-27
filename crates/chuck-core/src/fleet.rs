@@ -32,6 +32,14 @@ pub struct FleetConfig {
     pub glm_model: String,
     pub deepseek_workers: u8,
     pub glm_workers: u8,
+    /// A hand-in whose gate passed and whose checks re-run green on its copy
+    /// is merged at once, without waiting for the Lead's turn (it is told).
+    #[serde(default = "yes")]
+    pub auto_merge: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl Default for FleetConfig {
@@ -42,6 +50,7 @@ impl Default for FleetConfig {
             glm_model: GLM_MODEL.into(),
             deepseek_workers: 6,
             glm_workers: 0,
+            auto_merge: true,
         }
     }
 }

@@ -1885,6 +1885,11 @@ fn settings_dialog(shared: &Shared) {
             limit, which this needs set (Spending limits below)")
         .active(s.map.get("fleet_auto_continue").and_then(|v| v.as_bool()) == Some(true)).build();
     fleet.add(&ds);
+    let merge_row = adw::SwitchRow::builder().title("Merge good work at once")
+        .subtitle("A worker's hand-in that passes its gate and its re-run checks goes straight into the project; the \
+                   Lead looks it over after. Off: each waits for the Lead's review")
+        .active(s.map.get("fleet_auto_merge").and_then(|v| v.as_bool()) != Some(false)).build();
+    fleet.add(&merge_row);
     let debug_row = adw::SwitchRow::builder().title("Debug mode")
         .subtitle("The agents note whatever slows them down, limits them or goes wrong (right panel › Debug, /snags) \
                    — for it to be fixed")
@@ -2182,6 +2187,7 @@ fn settings_dialog(shared: &Shared) {
         s.set("fleet_deepseek_workers", (ds.value() as i64).into());
         s.set("fleet_job_usd", cap.value().into());
         s.set("fleet_auto_continue", auto.is_active().into());
+        s.set("fleet_auto_merge", merge_row.is_active().into());
         s.set("command_timeout", ((cmd_min.value() * 60.0) as i64).into());
         s.set("reasoning_budget", (levels[rz.selected() as usize].1 as i64).into());
         s.set("worker_reasoning_budget", (levels[wz.selected() as usize].1 as i64).into());

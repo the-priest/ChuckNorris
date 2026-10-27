@@ -628,3 +628,50 @@ fn what_the_lead_reads_while_workers_build_comes_back_at_once() {
     assert!(saw_early.load(std::sync::atomic::Ordering::SeqCst), "the Lead's read waited for the worker's hand-in");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn good_work_is_merged_at_once_without_waiting_for_the_leads_review() {
+    // three parts, three workers: each hand-in that passes its gate goes straight into the project
+    let dir = tmp("automerge");
+    let model = Arc::new(Scripted::new().respond(|req| {
+        if text(&req.messages[0]) == chuck_runtime::prompts::CRITIC {
+            return "ACCEPT".into();
+        }
+        let me = worker(req);
+        for (t, f) in [("TASK t1", "a"), ("TASK t2", "b"), ("TASK t3", "c")] {
+            if me.contains(t) {
+                return if req.messages.len() == 2 {
+                    format!("```write {f}.js\nexport const {f} = 1;\n```\n```test grep -q {f} {f}.js```\n```submit\n{f}.js done\n```")
+                } else { "ok".into() };
+            }
+        }
+        if req.messages.len() == 2 {
+            let mut s = String::from("```criteria\n- a :: verify: grep -q a a.js\n- b :: verify: grep -q b b.js\n\
+                - c :: verify: grep -q c c.js\n```\n```plan\n- t1: a\n- t2: b\n- t3: c\n```\n");
+            for f in ["a", "b", "c"] {
+                s.push_str(&format!("```assign worker\ntitle: part {f}\ncriteria:\n- {f} :: verify: grep -q {f} {f}.js\n\
+                    brief: write {f}.js\n```\n"));
+            }
+            return s;
+        }
+        let merged = req.messages.iter().filter(|m| m["role"] == "user")
+            .map(|m| text(m).matches("merged without waiting for you").count()).sum::<usize>();
+        if merged == 3 {
+            return "```test grep -q a a.js```\n```test grep -q b b.js```\n```test grep -q c c.js```\n\
+                ```justify proportion\nthree tiny files are the ask\n```\n```done\na, b and c are in (greps pass).\n```".into();
+        }
+        "Waiting.".into()
+    }));
+    let rt = Runtime::new(model.clone(), RuntimeConfig { store: dir.join("store"), ..RuntimeConfig::default() }, Events(None));
+    let (report, _) = run_within(30, rt, Job::new("write a, b and c", &dir));
+    assert!(matches!(report.outcome, Outcome::Done { .. }), "{:?}", report.outcome);
+    for f in ["a", "b", "c"] {
+        assert!(dir.join(format!("{f}.js")).exists(), "{f}.js merged");
+    }
+    let seen = model.seen.lock().unwrap();
+    // the Lead never wrote a review: the runtime merged each one, and told it
+    let lead: Vec<&ChatRequest> = seen.iter().filter(|r| is_lead(r)).collect();
+    assert!(!lead.iter().any(|r| r.messages.iter().any(|m| m["role"] == "assistant" && text(m).contains("```review"))));
+    assert!(lead.iter().any(|r| last_user(r).contains("merged without waiting for you")));
+    let _ = std::fs::remove_dir_all(&dir);
+}
