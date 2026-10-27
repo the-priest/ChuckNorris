@@ -63,6 +63,47 @@ fn fleet_script(req: &ChatRequest) -> String {
     "Waiting for the workers.".into()
 }
 
+/// A stand-in web on loopback, so the render doesn't depend on the internet.
+fn research_web() -> (Option<Arc<chuck_web::Web>>, String) {
+    use std::io::{BufRead, BufReader, Write};
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", l.local_addr().unwrap());
+    let b = base.clone();
+    let (b2, b3) = (base.replace("127.0.0.1", "localhost"), base.clone());
+    std::thread::spawn(move || {
+        for s in l.incoming().flatten() {
+            let mut s = s;
+            let mut r = BufReader::new(s.try_clone().unwrap());
+            let mut line = String::new();
+            let _ = r.read_line(&mut line);
+            loop {
+                let mut h = String::new();
+                if r.read_line(&mut h).is_err() || h.trim().is_empty() {
+                    break;
+                }
+            }
+            let path = line.split_whitespace().nth(1).unwrap_or("/").to_string();
+            let (status, ctype, body) = if path.starts_with("/search") {
+                ("200 OK", "application/json", format!(r#"{{"results":[
+                  {{"url":"{b}/docs/functions","title":"Built-in Functions — Python 3 documentation","content":"int(x) … If x is not a number or if base is given, then x must be a string representing an integer literal"}},
+                  {{"url":"{b2}/howto/robust-parsing","title":"Parsing numbers robustly in Python","content":"Empty fields and whitespace are the usual culprits"}},
+                  {{"url":"{b3}/blocked","title":"Stack Overflow: ValueError invalid literal for int()","content":"int('') raises ValueError"}}]}}"#))
+            } else if path.starts_with("/blocked") {
+                ("403 Forbidden", "text/html", "no".to_string())
+            } else {
+                ("200 OK", "text/html", format!("<html><head><title>{}</title></head><body><article><p>{}</p></article></body></html>",
+                    if path.contains("docs") { "Built-in Functions" } else { "Parsing numbers robustly" },
+                    "int(x) returns an integer object constructed from a number or a string. ".repeat(20)))
+            };
+            let _ = s.write_all(format!("HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                        body.len()).as_bytes());
+        }
+    });
+    let web = chuck_web::Web::new(chuck_web::Config { searx: vec![base.clone()], ddg: vec![], proxy: chuck_web::Proxy::None,
+                                                      allow_private: true, ..chuck_web::Config::default() });
+    (Some(Arc::new(web)), base)
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mode = args.get(1).cloned().unwrap_or_else(|| "run".into());
@@ -77,7 +118,14 @@ fn main() {
     std::fs::write(proj.join("src/parse.py"), "def parse(s):\n    return [int(x) for x in s.split(',')]\n").unwrap();
     // a stand-in pytest so the render doesn't depend on one being installed
     std::fs::write(proj.join("pytest.sh"), "#!/bin/sh\necho '3 passed in 0.02s'\n").unwrap();
+    let (web, base) = if mode == "research" { research_web() } else { (None, String::new()) };
     let model: Arc<dyn chuck_model::ChatModel> = match mode.as_str() {
+        "research" => Arc::new(Scripted::new().replies([
+            "Let me check what the docs say first.\n```search python int parse empty string ValueError```".to_string(),
+            format!("```fetch {base}/docs/functions```\n```fetch {base}/howto/robust-parsing```\n```fetch {base}/blocked```"),
+            "`int('')` raises `ValueError: invalid literal for int() with base 10: ''` — the docs say `int()` \
+             accepts only a string of digits, optionally signed and surrounded by whitespace, so an empty input has to be \
+             handled before converting: guard for blank input and skip empty fields.".to_string()])),
         // a long command, to prove closing the window ends it (tools: kill the app mid-run)
         "longcmd" => Arc::new(Scripted::new().replies([
             "Running the long build.\n```criteria\n- built :: verify: test -f after.txt\n```\n```bash\nsleep 120; touch after.txt\n```"])),
@@ -96,6 +144,7 @@ fn main() {
     let send = match mode.as_str() {
         "welcome" => None,
         "confirm" => Some("Clean the build output".to_string()),
+        "research" => Some("Why does int() fail on an empty string? Check the docs.".to_string()),
         _ => Some("The parser crashes on empty input. Fix it and add tests.".to_string()),
     };
     let ms = match mode.as_str() {
@@ -107,6 +156,7 @@ fn main() {
     let open: Vec<String> = match mode.as_str() {
         "run" | "live" => vec!["plan", "tasks", "gate"],
         "midrun" => vec!["plan", "tasks", "agents", "commands"],
+        "research" => vec!["research"],
         _ => vec!["plan"],
     }.into_iter().map(String::from).collect();
     let send = if mode == "settings" { None } else { send };
@@ -115,7 +165,7 @@ fn main() {
     let send = if mode == "live" { Some("make hello.py greet Chuck".to_string()) } else { send };
     let code = chuck_ui::run(chuck_ui::Options { model, folder: Some(proj), send,
                                                  shot: Some((out, ms)), width: 1280, height: 860,
-                                                 settings: mode == "settings", open: Some(open) });
+                                                 settings: mode == "settings", open: Some(open), web });
     if std::env::var_os("CHUCK_SHOT_FOLDER").is_none() {
         let _ = std::fs::remove_dir_all(&dir);
     }

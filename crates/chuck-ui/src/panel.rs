@@ -143,6 +143,9 @@ pub struct Panel {
     commands: Section,
     running_box: gtk::Box,
     recent_box: gtk::Box,
+    research: Section,
+    searches: usize,
+    pages: usize,
     gate: Section,
     gate_phase: gtk::Label,
     gate_unmet: gtk::Box,
@@ -188,6 +191,9 @@ impl Panel {
         commands.body.append(&recent_box);
         running_box.append(&label("nothing running", &["panel-dim"]));
 
+        let research = mk("research", "RESEARCH");
+        research.body.append(&label("Searches and the pages agents read appear here, with links.", &["panel-dim"]));
+
         let gate = mk("gate", "DONE GATE");
         let gate_phase = label("No job yet", &["gate-phase"]);
         let gate_unmet = gtk::Box::new(gtk::Orientation::Vertical, 1);
@@ -199,11 +205,12 @@ impl Panel {
         let spend = mk("spend", "SPEND");
         let checkpoints = mk("checkpoints", "CHECKPOINTS");
 
-        for s in [&plan, &tasks, &agents, &commands, &gate, &spend, &checkpoints] {
+        for s in [&plan, &tasks, &agents, &commands, &research, &gate, &spend, &checkpoints] {
             side.append(&s.root);
         }
         let root = gtk::ScrolledWindow::builder().child(&side).hscrollbar_policy(gtk::PolicyType::Never).build();
-        let p = Panel { root, plan, plan_bar, plan_now, tasks, agents, commands, running_box, recent_box, gate,
+        let p = Panel { root, plan, plan_bar, plan_now, tasks, agents, commands, running_box, recent_box,
+                        research, searches: 0, pages: 0, gate,
                         gate_phase, gate_unmet, gate_criteria, spend, checkpoints, steps: Vec::new(), finished: false,
                         logs: HashMap::new(), running: HashMap::new(), recent: VecDeque::new(), recent_dirty: false,
                         agents_sig: String::new() };
@@ -211,6 +218,7 @@ impl Panel {
         p.tasks.summary.set_label("none");
         p.agents.summary.set_label("idle");
         p.commands.summary.set_label("none yet");
+        p.research.summary.set_label("none");
         p.gate.summary.set_label("no job");
         p
     }
@@ -226,6 +234,9 @@ impl Panel {
         self.agents_sig.clear();
         self.set_plan(Vec::new());
         self.set_tasks(&[]);
+        clear(&self.research.body);
+        (self.searches, self.pages) = (0, 0);
+        self.research.summary.set_label("none");
         clear(&self.gate_unmet);
         clear(&self.gate_criteria);
         self.gate_phase.set_label("Phase: intake");
@@ -347,6 +358,59 @@ impl Panel {
             }
             self.tasks.body.append(&expander(head.upcast_ref(), body.upcast_ref()));
         }
+    }
+
+    // ── research ──
+
+    /// A search or a page read: who, what, how it went. Pages link out.
+    pub fn research(&mut self, who: &str, tool: &str, what: &str, ok: bool, summary: &str) {
+        if self.searches + self.pages == 0 {
+            clear(&self.research.body);
+        }
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        row.add_css_class("panel-row");
+        let mark = gtk::Image::from_icon_name(if tool == "search" { "system-search-symbolic" } else { "text-x-generic-symbolic" });
+        mark.add_css_class(if ok { "research-ok" } else { "research-fail" });
+        mark.set_valign(gtk::Align::Start);
+        mark.set_margin_top(2);
+        row.append(&mark);
+        let text = gtk::Box::new(gtk::Orientation::Vertical, 1);
+        text.set_hexpand(true);
+        let url = what.split_whitespace().next().unwrap_or("");
+        let head = if tool == "search" {
+            self.searches += 1;
+            format!("<b>{}</b>", escape(what))
+        } else {
+            self.pages += 1;
+            let shown = if summary.is_empty() || !ok { url.to_string() } else { summary.to_string() };
+            if ok && (url.starts_with("http://") || url.starts_with("https://")) {
+                format!("<a href=\"{}\">{}</a>", escape(url), escape(&shown))
+            } else {
+                escape(&shown)
+            }
+        };
+        let h = label("", &["research-head"]);
+        h.set_markup(&head);
+        h.set_ellipsize(pango::EllipsizeMode::End);
+        h.set_wrap(false);
+        h.set_tooltip_text(Some(url));
+        text.append(&h);
+        let sub = if tool == "search" { format!("{who} · {summary}") } else if ok { format!("{who} · {url}") }
+            else { format!("{who} · {summary}") };
+        let d = label(&sub, &["panel-dim"]);
+        d.set_ellipsize(pango::EllipsizeMode::End);
+        d.set_wrap(false);
+        text.append(&d);
+        row.append(&text);
+        self.research.body.append(&row);
+        while self.research.body.observe_children().n_items() > 80 {
+            if let Some(first) = self.research.body.first_child() {
+                self.research.body.remove(&first);
+            }
+        }
+        let (s, p) = (self.searches, self.pages);
+        self.research.summary.set_label(&format!("{s} search{} · {p} page{}", if s == 1 { "" } else { "es" },
+                                                 if p == 1 { "" } else { "s" }));
     }
 
     // ── agents ──

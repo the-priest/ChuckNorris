@@ -55,6 +55,10 @@ pub struct RuntimeConfig {
     /// Where the folder's checkpoints go (the window's store): the lead
     /// snapshots before every step that acts. None: no checkpoints.
     pub checkpoints: Option<PathBuf>,
+    /// Web search and page reads for every agent (None: no web this run).
+    pub web: Option<Arc<chuck_web::Web>>,
+    /// Results per search.
+    pub sources: usize,
 }
 
 pub fn default_store() -> PathBuf {
@@ -86,6 +90,8 @@ impl Default for RuntimeConfig {
             day_limit: 0.0,
             month_limit: 0.0,
             checkpoints: None,
+            web: None,
+            sources: 6,
         }
     }
 }

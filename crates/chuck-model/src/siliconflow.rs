@@ -47,7 +47,9 @@ impl SiliconFlow {
         let mut cfg = ureq::Agent::config_builder()
             .http_status_as_error(false)
             .timeout_connect(Some(Duration::from_secs(20)))
-            .timeout_per_read(Some(stall.max(Duration::from_secs(1))));
+            .timeout_per_read(Some(stall.max(Duration::from_secs(1))))
+            // the system's trust store (a company's inspecting proxy lives there), not a bundled one
+            .tls_config(ureq::tls::TlsConfig::builder().root_certs(ureq::tls::RootCerts::PlatformVerifier).build());
         if is_local(base) {
             cfg = cfg.proxy(None);
         }

@@ -357,8 +357,15 @@ Before every step that changes your folder, `chuck` takes a checkpoint in the wi
 history. `chuck rewind` puts the whole folder back to before the last job, including whatever shell
 commands changed, and a rewind can itself be undone.
 
+Every agent can research the web: ```` ```search``` ```` asks SearXNG (your own instance first, then
+four public ones at once) with DuckDuckGo as the fallback, at most two results per site; ```` ```fetch``` ````
+reads a page as text, a part at a time, never from a local or private address, and says plainly when a
+site blocks it or needs JavaScript. Every search and page read is listed, with links, in the panel's
+**Research** section. A folder set to *sandboxed, offline* keeps the whole job offline, research included.
+
 What isn't ported to Rust yet, so isn't in this branch's app: voice (Kokoro, Piper, talking to it),
-web research and browsing, Chat mode, images and video, daemons, MCP servers and language servers.
+a real browser for pages that need JavaScript, Chat mode, images and video, daemons, MCP servers and
+language servers.
 [ARCHITECTURE.md](ARCHITECTURE.md) has the design and the plan.
 
 Arch and CachyOS are first-class; apt and dnf are supported. The installer sets up GTK4 and libadwaita, bubblewrap, a screenshot tool, the local voice models (about 600 MB, skip with `CHUCK_VOICE=0`) and the linters Chuck uses to check code. At runtime Chuck needs only Python's standard library and GTK; everything optional degrades gracefully when it's missing.

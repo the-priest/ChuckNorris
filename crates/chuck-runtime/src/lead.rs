@@ -991,7 +991,8 @@ impl<'a> LeadRun<'a> {
                               sandbox: Sandbox { access: ctx.cfg.access, bwrap: ctx.cfg.bwrap, worker: false },
                               approve: self.approver(), audit: ctx.cfg.audit.clone().map(|l| (l, "lead".into())),
                               stop: ctx.stop.clone(), events: &ctx.events,
-                              cmd_timeout: ctx.cfg.cmd_timeout };
+                              cmd_timeout: ctx.cfg.cmd_timeout,
+                              web: ctx.cfg.web.as_deref(), sources: ctx.cfg.sources };
             let r = exec.run(&reply);
             self.mutated |= r.mutated;
             let mut fb = r.feedback.clone();

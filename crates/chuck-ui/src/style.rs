@@ -146,6 +146,10 @@ headerbar { background-color: @bg; border-bottom: 1px solid @line; box-shadow: n
 .step-mark { font-size: 12px; min-width: 14px; }
 .step-text { font-size: 12.5px; }
 .step-done { color: @faint; }
+.research-ok { color: @accent_hi; -gtk-icon-size: 13px; }
+.research-fail { color: @warn; -gtk-icon-size: 13px; }
+.research-head { font-size: 12.5px; }
+.research-head link { color: @accent_hi; }
 .step-done.step-mark { color: @good; }
 .step-now { color: @ink; font-weight: 700; }
 .step-now.step-mark { color: @accent_hi; }

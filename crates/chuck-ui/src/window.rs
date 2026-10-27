@@ -40,6 +40,8 @@ pub struct Options {
     pub settings: bool,
     /// Sections of the right panel to open (else: what the user had open).
     pub open: Option<Vec<String>>,
+    /// The web for a scripted session (a real one gets it from the settings).
+    pub web: Option<Arc<chuck_web::Web>>,
 }
 
 struct Running {
@@ -417,11 +419,17 @@ fn on_event(st: &mut State, e: Event, shared: &Shared) {
             let who = st.who(id);
             let what = match tool.as_str() {
                 "bash" | "test" => format!("{} → {}", one_line(&arg, 80), one_line(&summary, 40)),
+                "search" => format!("“{}” → {}", one_line(&arg, 70), one_line(&summary, 40)),
+                "fetch" if ok => format!("{} ({})", one_line(&summary, 70), chuck_web::domain(&arg)),
+                "fetch" => format!("{} → {}", one_line(&arg, 70), one_line(&summary, 70)),
                 _ if summary.is_empty() => one_line(&arg, 100),
                 _ => one_line(&summary, 120),
             };
             if tool == "bash" || tool == "test" {
                 st.panel.command_finished(id, ok, &summary);
+            }
+            if tool == "search" || tool == "fetch" {
+                st.panel.research(&who, &tool, &arg, ok, &summary);
             }
             st.panel.log(&who, format!("{} {tool} {what}", if ok { "✓" } else { "✗" }));
             st.act(format!("{} <span foreground=\"#5F5F6E\">{:<6}</span> {} <span foreground=\"#8E8E9E\">{}</span>",
@@ -619,7 +627,7 @@ fn start(shared: &Shared, text: String) {
     let settings = Settings::load();
     let (model, cfg) = match (&st.opts.model, setup::from_settings(&settings, &folder, None)) {
         (Some(m), _) => (m.clone(), chuck_runtime::RuntimeConfig { access: setup::access_of(&settings, &folder),
-                                                                  ..Default::default() }),
+                                                                  web: st.opts.web.clone(), ..Default::default() }),
         (None, Ok(s)) => {
             for n in &s.notes {
                 st.act(format!("<span foreground=\"#F5B454\">! {}</span>", md::escape(n)));

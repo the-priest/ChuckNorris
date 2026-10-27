@@ -63,6 +63,19 @@ pub struct Setup {
     pub notes: Vec<String>,
 }
 
+/// The web as the settings have it: the user's own SearXNG first, their
+/// proxy (else the environment's), their fetch timeout.
+pub fn web(s: &Settings) -> chuck_web::Web {
+    let proxy = s.str("proxy").map(str::trim).filter(|p| !p.is_empty())
+        .map_or(chuck_web::Proxy::Env, |p| chuck_web::Proxy::Url(p.to_string()));
+    chuck_web::Web::new(chuck_web::Config {
+        searx_own: s.str("searx_url").map(|u| u.trim().trim_end_matches('/').to_string()).filter(|u| !u.is_empty()),
+        proxy,
+        timeout: std::time::Duration::from_secs_f64(s.num("fetch_timeout", 8.0, 3.0, 30.0)),
+        ..chuck_web::Config::default()
+    })
+}
+
 /// Build a job's setup for `folder`. `max_usd`: a cap for this job (else
 /// the setting). Err: it can't start (no key, over a limit…).
 pub fn from_settings(s: &Settings, folder: &Path, max_usd: Option<f64>) -> Result<Setup, String> {
@@ -99,6 +112,8 @@ pub fn from_settings(s: &Settings, folder: &Path, max_usd: Option<f64>) -> Resul
         cfg.checkpoints = Some(chuck_store::checkpoint::default_store());
     }
     cfg.job_quota = Quota { usd: Some(usd), ..cfg.job_quota };
+    cfg.web = Some(Arc::new(web(s)));
+    cfg.sources = s.num("research_sources", 6.0, 1.0, 10.0) as usize;
     cfg.access = access_of(s, folder);
     if cfg.access != Access::Full && !cfg.bwrap {
         notes.push(format!("this folder is {}, which needs bubblewrap to run commands — install it (pacman -S \

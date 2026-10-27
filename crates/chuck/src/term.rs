@@ -105,6 +105,8 @@ impl View {
                 let mark = if *ok { st.good("✓") } else { st.bad("✗") };
                 let what = match tool.as_str() {
                     "bash" | "test" => format!("{} → {}", one_line(arg, 70), one_line(summary, 40)),
+                    "search" => format!("“{}” → {}", one_line(arg, 60), one_line(summary, 40)),
+                    "fetch" => format!("{} → {}", one_line(arg, 70), one_line(summary, 60)),
                     _ if summary.is_empty() => one_line(arg, 90),
                     _ => one_line(summary, 110),
                 };
