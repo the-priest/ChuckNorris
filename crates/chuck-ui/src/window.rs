@@ -101,6 +101,13 @@ struct State {
     mcp: Arc<chuck_mcp::Manager>,
     /// Language servers: started on first use, ended with the window.
     lsp: Arc<chuck_code::Manager>,
+    /// Daemons and reminders, and the reports they filed.
+    daemons: chuck_daemon::Registry,
+    inbox: chuck_daemon::Inbox,
+    /// Daemons looking right now: their Stop, where their report arrives, why they woke.
+    daemon_live: HashMap<i64, (Arc<AtomicBool>, Receiver<chuck_runtime::daemon::DaemonReport>, String)>,
+    /// A trigger check in flight (it runs off the main thread).
+    daemon_check: Option<Receiver<Vec<Checked>>>,
     tokens: u64,
     spent: f64,
     /// Prompt tokens sent, and how many of them the API's cache served.
@@ -110,6 +117,8 @@ struct State {
 }
 
 type Shared = Rc<RefCell<State>>;
+/// A daemon's trigger, looked at: (id, due, why, its new state).
+type Checked = (i64, bool, String, serde_json::Value);
 
 fn label(text: &str, classes: &[&str]) -> gtk::Label {
     let l = gtk::Label::builder().label(text).xalign(0.0).wrap(true).wrap_mode(pango::WrapMode::WordChar).build();
@@ -629,6 +638,13 @@ fn on_event(st: &mut State, e: Event, shared: &Shared) {
             st.append(&c);
             st.lane = None;
         }
+        Event::Schedule { kind, when, what } => {
+            let folder = if kind == "remind" { String::new() } else {
+                st.folder.as_ref().map(|f| f.display().to_string()).unwrap_or_default()
+            };
+            st.daemons.add("", when, &what, &folder, &kind, 150_000);
+            refresh_daemons(st, shared);
+        }
         Event::Handoff { request } => {
             st.add(Entry::Handoff { request });
             st.save();
@@ -701,6 +717,35 @@ fn start(shared: &Shared, text: String) {
         return;
     }
     st.add(Entry::User { text: text.clone() });
+    if let Some((cmd, arg)) = ["/remind", "/daemon"].iter().find_map(|c| {
+        text.strip_prefix(c).filter(|r| r.is_empty() || r.starts_with(char::is_whitespace)).map(|r| (*c, r.trim()))
+    }) {
+        let kind = if cmd == "/remind" { "remind" } else { "report" };
+        let card = match chuck_daemon::split_spec(arg, chuck_daemon::now()) {
+            Ok((when, what)) => {
+                let folder = if kind == "remind" { String::new() } else {
+                    st.folder.as_ref().map(|f| f.display().to_string()).unwrap_or_default()
+                };
+                let d = st.daemons.add("", when, &what, &folder, kind, 150_000);
+                let say = if kind == "remind" {
+                    format!("I'll remind you {}: {what}", chuck_daemon::describe(d.when()))
+                } else {
+                    format!("A daemon will look {}: {what}\n\nIt costs nothing while it waits; when it wakes it only \
+                        looks, and files a report in the Inbox (right panel). It runs while Chuck is open.",
+                            chuck_daemon::describe(d.when()))
+                };
+                Entry::Card { kind: if kind == "remind" { "REMINDER SET".into() } else { "DAEMON SET".into() },
+                              class: "ask-card".into(), text: say }
+            }
+            Err(e) => Entry::Card { kind: "NOT SET".into(), class: "gap-card".into(), text: format!("{e}\n\nFor example: \
+                `{cmd} in 20m: check the oven`, `{cmd} every day at 9: check the disk`, \
+                `{cmd} when a service fails: find out why`.") },
+        };
+        st.add(card);
+        st.save();
+        refresh_daemons(&st, shared);
+        return;
+    }
     let chat_mode = st.chat;
     let folder = match st.folder.clone() {
         Some(f) => f,
@@ -775,6 +820,7 @@ fn pump(shared: &Shared) {
 /// Twice a second: the fleet as the kernel sees it, spend, the status line.
 fn tick(shared: &Shared) {
     let mut st = shared.borrow_mut();
+    daemon_poll(&mut st, shared);
     if let Some(run) = &st.running {
         let ps = run.kernel.ps(true);
         let elapsed = run.started.elapsed().as_secs();
@@ -825,8 +871,210 @@ fn shut_down(shared: &Shared) {
         }
     }
     st.save();
+    for (stop, _, _) in st.daemon_live.values() {
+        stop.store(true, Ordering::SeqCst);
+    }
     st.mcp.stop_all();
     st.lsp.stop_all();
+}
+
+/// The daemons and the inbox, in the panel.
+fn refresh_daemons(st: &State, shared: &Shared) {
+    let (w1, w2, w3) = (Rc::downgrade(shared), Rc::downgrade(shared), Rc::downgrade(shared));
+    let on_toggle: Rc<dyn Fn(i64)> = Rc::new(move |id| {
+        let Some(sh) = w1.upgrade() else { return };
+        let sh2 = sh.clone();
+        glib::idle_add_local_once(move || {
+            let mut st = sh2.borrow_mut();
+            if let Some(d) = st.daemons.get_mut(id) {
+                let on = !d.enabled();
+                d.set("enabled", on.into());
+                if on {
+                    // resuming doesn't fire it at once for the time it was paused
+                    d.set("last_run", chuck_daemon::now().into());
+                }
+            }
+            st.daemons.save();
+            refresh_daemons(&st, &sh2);
+        });
+    });
+    let on_remove: Rc<dyn Fn(i64)> = Rc::new(move |id| {
+        let Some(sh) = w2.upgrade() else { return };
+        let sh2 = sh.clone();
+        glib::idle_add_local_once(move || {
+            let mut st = sh2.borrow_mut();
+            if let Some((stop, _, _)) = st.daemon_live.get(&id) {
+                stop.store(true, Ordering::SeqCst);
+            }
+            st.daemons.remove(id);
+            refresh_daemons(&st, &sh2);
+        });
+    });
+    let on_read: Rc<dyn Fn()> = Rc::new(move || {
+        let Some(sh) = w3.upgrade() else { return };
+        let sh2 = sh.clone();
+        glib::idle_add_local_once(move || {
+            let mut st = sh2.borrow_mut();
+            st.inbox.mark_read();
+            refresh_daemons(&st, &sh2);
+        });
+    });
+    let live: Vec<i64> = st.daemon_live.keys().copied().collect();
+    st.panel.set_daemons(&st.daemons.items, &live, on_toggle, on_remove);
+    st.panel.set_inbox(&st.inbox.items, on_read);
+}
+
+fn notify(st: &State, id: &str, title: &str, body: &str) {
+    let Some(app) = st.ui.window.application() else { return };
+    let n = gtk::gio::Notification::new(title);
+    n.set_body(Some(body));
+    app.send_notification(Some(id), &n);
+}
+
+/// Every 30 s: is any daemon due? Checked off the main thread by plain code
+/// (the clock, a folder, the disk, a command); nothing is spent unless one fires.
+fn daemon_tick(shared: &Shared) {
+    let mut st = shared.borrow_mut();
+    if st.daemon_check.is_some() || Settings::load().map.get("daemons_paused").and_then(|v| v.as_bool()) == Some(true) {
+        return;
+    }
+    let s = Settings::load();
+    let spend = chuck_store::Spend::at(&chuck_store::Spend::default_path());
+    // over a spending limit: only reminders (they cost nothing)
+    let broke = spend.over(s.num("budget_day_usd", 0.0, 0.0, 1e5), s.num("budget_month_usd", 0.0, 0.0, 1e6)).is_some();
+    let specs: Vec<(i64, serde_json::Value, serde_json::Value, f64)> = st.daemons.items.iter()
+        .filter(|d| d.enabled() && !st.daemon_live.contains_key(&d.id()) && (!broke || d.kind() == "remind"))
+        .map(|d| (d.id(), d.when().clone(), d.state().clone(), d.last_run())).collect();
+    if specs.is_empty() {
+        return;
+    }
+    let (tx, rx) = channel();
+    st.daemon_check = Some(rx);
+    std::thread::Builder::new().name("daemon-check".into()).spawn(move || {
+        let now = chuck_daemon::now();
+        let probe = chuck_daemon::probe::SystemProbe;
+        let out = specs.into_iter().map(|(id, when, state, last)| {
+            let (due, why, st) = chuck_daemon::check(&when, &state, last, now, &probe);
+            (id, due, why, st)
+        }).collect();
+        let _ = tx.send(out);
+    }).ok();
+}
+
+/// Twice a second: trigger results in, reports in.
+fn daemon_poll(st: &mut State, shared: &Shared) {
+    let mut changed = false;
+    if let Some(results) = st.daemon_check.as_ref().and_then(|rx| rx.try_recv().ok()) {
+        st.daemon_check = None;
+        let now = chuck_daemon::now();
+        let mut due = Vec::new();
+        for (id, fire, why, state) in results {
+            let Some(d) = st.daemons.get_mut(id) else { continue };
+            if !d.enabled() {
+                continue;
+            }
+            if d.state() != &state {
+                d.set("state", state);
+                changed = true;
+            }
+            if fire {
+                due.push((id, why));
+            }
+        }
+        for (id, why) in due {
+            wake(st, id, &why, now);
+            changed = true;
+        }
+        if changed {
+            st.daemons.save();
+        }
+    }
+    let arrived: Vec<(i64, chuck_runtime::daemon::DaemonReport)> = st.daemon_live.iter()
+        .filter_map(|(id, (_, rx, _))| rx.try_recv().ok().map(|r| (*id, r))).collect();
+    let done: Vec<i64> = arrived.into_iter()
+        .map(|(id, r)| {
+            let why = st.daemon_live.get(&id).map(|x| x.2.clone()).unwrap_or_default();
+            let name = st.daemons.get(id).map(|d| d.name().to_string()).unwrap_or_else(|| format!("daemon {id}"));
+            let mut extra = serde_json::Map::new();
+            extra.insert("daemon_id".into(), id.into());
+            extra.insert("status".into(), r.status.into());
+            extra.insert("tokens".into(), r.tokens.into());
+            extra.insert("usd".into(), r.usd.into());
+            let quiet = r.status == 0 && chuck_daemon::quiet(&r.report);
+            st.inbox.add(&name, &why, &r.report, extra);
+            if quiet {
+                // nothing wrong: filed, not announced
+                if let Some(last) = st.inbox.items.last_mut() {
+                    last.insert("unread".into(), false.into());
+                }
+                st.inbox.save();
+            } else {
+                let head = r.report.trim().lines().next().unwrap_or("(no report)").chars().take(160).collect::<String>();
+                notify(st, &format!("chuck-daemon-{id}"), &format!("Chuck daemon: {name}"), &head);
+            }
+            id
+        }).collect();
+    for id in &done {
+        st.daemon_live.remove(id);
+    }
+    if changed || !done.is_empty() {
+        refresh_daemons(st, shared);
+    }
+}
+
+/// A daemon fired: a reminder tells you; a daemon wakes an agent that looks
+/// and reports (as its own kernel process, with its own quota).
+fn wake(st: &mut State, id: i64, why: &str, now: f64) {
+    let Some(d) = st.daemons.get_mut(id) else { return };
+    d.set("last_run", now.into());
+    let runs = d.runs() + 1;
+    d.set("runs", runs.into());
+    let d = d.clone();
+    if d.kind() == "remind" {
+        let text = d.brief().trim().to_string();
+        let mut extra = serde_json::Map::new();
+        extra.insert("daemon_id".into(), id.into());
+        extra.insert("status".into(), 0.into());
+        st.inbox.add("reminder", &chuck_daemon::describe(d.when()), &text, extra);
+        st.add(Entry::Card { kind: "⏰ REMINDER".into(), class: "ask-card".into(), text: text.clone() });
+        st.save();
+        notify(st, &format!("chuck-remind-{id}"), "Reminder", &text);
+        if d.when().get("at").is_some() {
+            st.daemons.remove(id); // a one-time reminder is done
+        }
+        return;
+    }
+    let folder = PathBuf::from(d.folder());
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"));
+    let root = if folder.is_dir() { folder } else { home };
+    let settings = Settings::load();
+    let made = match &st.opts.model {
+        Some(m) => Ok((m.clone(), chuck_runtime::RuntimeConfig { web: st.opts.web.clone(), ..Default::default() })),
+        None => setup::from_settings(&settings, &root, None).map(|s| (s.model, s.cfg)),
+    };
+    let (model, cfg) = match made {
+        Ok(x) => x,
+        Err(e) => {
+            let mut extra = serde_json::Map::new();
+            extra.insert("daemon_id".into(), id.into());
+            extra.insert("status".into(), 1.into());
+            st.inbox.add(d.name(), why, &format!("(couldn't start: {e})"), extra);
+            return;
+        }
+    };
+    let stop = Arc::new(AtomicBool::new(false));
+    let (tx, rx) = channel();
+    let run = chuck_runtime::daemon::DaemonRun {
+        name: d.name().to_string(), brief: d.brief().to_string(), why: why.to_string(),
+        detail: chuck_daemon::detail(d.when(), d.state()), folder: root, tokens: d.quota(),
+        minutes: settings.num("daemon_minutes", 15.0, 1.0, 240.0) as u64,
+        steps: settings.num("daemon_steps", 20.0, 3.0, 100.0) as usize, stop: stop.clone(),
+    };
+    std::thread::Builder::new().name(format!("daemon-{id}")).spawn(move || {
+        let rt = Runtime::new(model, cfg, Events::none());
+        let _ = tx.send(rt.daemon(run));
+    }).ok();
+    st.daemon_live.insert(id, (stop, rx, why.to_string()));
 }
 
 fn settings_dialog(shared: &Shared) {
@@ -1328,7 +1576,10 @@ pub fn build(app: &adw::Application, opts: Options) {
     let shared: Shared = Rc::new(RefCell::new(State {
         ui, panel, opts: opts.clone(), folder: None, saved: Saved::default(), running: None, names: HashMap::new(),
         models: HashMap::new(), lane: None, last_ps: Vec::new(), chat: chat_mode, on_handoff: None, mcp: mcp.clone(),
-        lsp: Arc::new(setup::lsp(&Settings::load())), tokens: 0,
+        lsp: Arc::new(setup::lsp(&Settings::load())),
+        daemons: chuck_daemon::Registry::load(&chuck_daemon::Registry::default_path()),
+        inbox: chuck_daemon::Inbox::load(&chuck_daemon::Inbox::default_path(), 200), daemon_live: HashMap::new(),
+        daemon_check: None, tokens: 0,
         spent: 0.0, prompt: 0, cached: 0, unsaved: false,
     }));
     *slot.borrow_mut() = Some(shared.clone());
@@ -1433,6 +1684,15 @@ pub fn build(app: &adw::Application, opts: Options) {
         tick(&sh);
         glib::ControlFlow::Continue
     });
+    // daemons: checked every 30 s while the window is open (and never after it closes)
+    refresh_daemons(&shared.borrow(), &shared);
+    let sh = shared.clone();
+    glib::timeout_add_seconds_local(30, move || {
+        daemon_tick(&sh);
+        glib::ControlFlow::Continue
+    });
+    let sh = shared.clone();
+    glib::timeout_add_local_once(Duration::from_secs(3), move || daemon_tick(&sh));
 
     // closing — the window, Ctrl-C, a logout's SIGTERM/SIGHUP — stops every agent and command first
     let sh = shared.clone();

@@ -152,6 +152,8 @@ pub struct Panel {
     gate_criteria: gtk::Box,
     spend: Section,
     pub checkpoints: Section,
+    inbox: Section,
+    daemons: Section,
     // what's shown
     steps: Vec<(String, bool)>,
     finished: bool,
@@ -204,14 +206,16 @@ impl Panel {
 
         let spend = mk("spend", "SPEND");
         let checkpoints = mk("checkpoints", "CHECKPOINTS");
+        let inbox = mk("inbox", "INBOX");
+        let daemons = mk("daemons", "DAEMONS & REMINDERS");
 
-        for s in [&plan, &tasks, &agents, &commands, &research, &gate, &spend, &checkpoints] {
+        for s in [&plan, &tasks, &agents, &commands, &research, &gate, &spend, &checkpoints, &inbox, &daemons] {
             side.append(&s.root);
         }
         let root = gtk::ScrolledWindow::builder().child(&side).hscrollbar_policy(gtk::PolicyType::Never).build();
         let p = Panel { root, plan, plan_bar, plan_now, tasks, agents, commands, running_box, recent_box,
                         research, searches: 0, pages: 0, gate,
-                        gate_phase, gate_unmet, gate_criteria, spend, checkpoints, steps: Vec::new(), finished: false,
+                        gate_phase, gate_unmet, gate_criteria, spend, checkpoints, inbox, daemons, steps: Vec::new(), finished: false,
                         logs: HashMap::new(), running: HashMap::new(), recent: VecDeque::new(), recent_dirty: false,
                         agents_sig: String::new() };
         p.plan.summary.set_label("no plan yet");
@@ -661,6 +665,104 @@ impl Panel {
     }
 
     // ── checkpoints ──
+
+    /// Daemon reports, newest first; unread ones marked. `on_read` marks
+    /// them all read.
+    pub fn set_inbox(&self, items: &[serde_json::Map<String, serde_json::Value>], on_read: Rc<dyn Fn()>) {
+        clear(&self.inbox.body);
+        let unread = items.iter().filter(|i| i.get("unread").and_then(|v| v.as_bool()) == Some(true)).count();
+        self.inbox.summary.set_label(&match (items.len(), unread) {
+            (0, _) => "empty".into(),
+            (n, 0) => format!("{n} report{}", if n == 1 { "" } else { "s" }),
+            (_, u) => format!("{u} new"),
+        });
+        if unread > 0 {
+            self.inbox.summary.add_css_class("badge-new");
+        } else {
+            self.inbox.summary.remove_css_class("badge-new");
+        }
+        if items.is_empty() {
+            self.inbox.body.append(&label("Daemons' reports and your reminders land here.", &["panel-dim"]));
+            return;
+        }
+        let now = chuck_daemon::now();
+        for it in items.iter().rev().take(40) {
+            let s = |k: &str| it.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let report = s("report");
+            let head_line = report.trim().lines().next().unwrap_or("(no report)").to_string();
+            let new = it.get("unread").and_then(|v| v.as_bool()) == Some(true);
+            let ago = (now - it.get("time").and_then(|v| v.as_f64()).unwrap_or(now)).max(0.0) as u64;
+            let when = if ago < 60 { "just now".into() } else if ago < 3600 { format!("{} min ago", ago / 60) }
+                else if ago < 86400 { format!("{} h ago", ago / 3600) } else { format!("{} d ago", ago / 86400) };
+            let head = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            let h = label(&head_line, &[if new { "inbox-new" } else { "panel-text" }]);
+            h.set_ellipsize(pango::EllipsizeMode::End);
+            h.set_wrap(false);
+            head.append(&h);
+            head.append(&label(&format!("{} · {} · {when}", s("daemon"), s("why")), &["panel-meta"]));
+            let body = label(&report, &["panel-text"]);
+            body.set_selectable(true);
+            body.set_margin_start(6);
+            self.inbox.body.append(&expander(head.upcast_ref(), body.upcast_ref()));
+        }
+        if unread > 0 {
+            let b = gtk::Button::with_label("Mark all read");
+            b.add_css_class("pill-sm");
+            b.set_halign(gtk::Align::Start);
+            b.set_margin_top(6);
+            b.connect_clicked(move |_| on_read());
+            self.inbox.body.append(&b);
+        }
+    }
+
+    /// The daemons and reminders: what wakes each, how often it has, and
+    /// buttons to pause or remove it.
+    pub fn set_daemons(&self, items: &[chuck_daemon::Daemon], live: &[i64], on_toggle: Rc<dyn Fn(i64)>,
+                       on_remove: Rc<dyn Fn(i64)>) {
+        clear(&self.daemons.body);
+        let on = items.iter().filter(|d| d.enabled()).count();
+        self.daemons.summary.set_label(&match (items.len(), live.len()) {
+            (0, _) => "none".into(),
+            (n, 0) => format!("{on} of {n} on"),
+            (_, l) => format!("{l} looking now"),
+        });
+        if items.is_empty() {
+            self.daemons.body.append(&label("Type /remind in 20m: check the oven, or /daemon every day at 9: \
+                check the disk and the failed services. Or ask in Chat. They run while Chuck is open.", &["panel-dim"]));
+            return;
+        }
+        for d in items {
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            row.add_css_class("panel-row");
+            let col = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            col.set_hexpand(true);
+            let name = label(d.name(), &[if d.enabled() { "panel-text" } else { "panel-dim" }]);
+            name.set_ellipsize(pango::EllipsizeMode::End);
+            name.set_wrap(false);
+            name.set_tooltip_text(Some(d.brief()));
+            col.append(&name);
+            let kind = if d.kind() == "remind" { "reminder" } else { "daemon" };
+            let state = if live.contains(&d.id()) { " · looking now".to_string() } else if !d.enabled() { " · paused".into() }
+                else if d.runs() > 0 { format!(" · ran {}×", d.runs()) } else { String::new() };
+            col.append(&label(&format!("{kind} · {}{state}", chuck_daemon::describe(d.when())), &["panel-meta"]));
+            row.append(&col);
+            let t = gtk::Button::from_icon_name(if d.enabled() { "media-playback-pause-symbolic" } else { "media-playback-start-symbolic" });
+            t.add_css_class("flat");
+            t.set_valign(gtk::Align::Center);
+            t.set_tooltip_text(Some(if d.enabled() { "Pause it" } else { "Resume it" }));
+            let (id, cb) = (d.id(), on_toggle.clone());
+            t.connect_clicked(move |_| cb(id));
+            row.append(&t);
+            let x = gtk::Button::from_icon_name("user-trash-symbolic");
+            x.add_css_class("flat");
+            x.set_valign(gtk::Align::Center);
+            x.set_tooltip_text(Some("Remove it"));
+            let (id, cb) = (d.id(), on_remove.clone());
+            x.connect_clicked(move |_| cb(id));
+            row.append(&x);
+            self.daemons.body.append(&row);
+        }
+    }
 
     pub fn set_checkpoints(&self, points: &[chuck_store::Point], busy: bool, on_rewind: Rc<dyn Fn(String)>) {
         clear(&self.checkpoints.body);

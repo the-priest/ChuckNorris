@@ -130,6 +130,7 @@ version = "18.0.0-alpha.1"
 dependencies = [
  "chuck-code",
  "chuck-core",
+ "chuck-daemon",
  "chuck-mcp",
  "chuck-model",
  "chuck-runtime",
@@ -163,6 +164,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "chuck-daemon"
+version = "18.0.0-alpha.1"
+dependencies = [
+ "chuck-sandbox",
+ "chuck-store",
+ "chuck-tools",
+ "libc",
+ "regex",
+ "serde_json",
+ "walkdir",
+]
+
+[[package]]
 name = "chuck-mcp"
 version = "18.0.0-alpha.1"
 dependencies = [
@@ -190,6 +204,7 @@ version = "18.0.0-alpha.1"
 dependencies = [
  "chuck-code",
  "chuck-core",
+ "chuck-daemon",
  "chuck-mcp",
  "chuck-model",
  "chuck-sandbox",
@@ -246,6 +261,7 @@ version = "18.0.0-alpha.1"
 dependencies = [
  "chuck-code",
  "chuck-core",
+ "chuck-daemon",
  "chuck-mcp",
  "chuck-model",
  "chuck-runtime",

@@ -6,6 +6,7 @@
 
 pub mod agent;
 pub mod chat;
+pub mod daemon;
 pub mod events;
 pub mod exec;
 pub mod lead;

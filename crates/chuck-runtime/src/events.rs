@@ -47,6 +47,9 @@ pub enum Event {
     /// Chat mode: something to be done on the machine, for the fleet — sent
     /// only if the user says so.
     Handoff { request: String },
+    /// Chat mode: a reminder ("remind") or a daemon ("report") to keep —
+    /// already checked, for whoever holds the daemons to add.
+    Schedule { kind: String, when: serde_json::Value, what: String },
     Finished(Outcome),
 }
 

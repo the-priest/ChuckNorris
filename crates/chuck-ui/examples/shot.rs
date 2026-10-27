@@ -119,7 +119,26 @@ fn main() {
     // a stand-in pytest so the render doesn't depend on one being installed
     std::fs::write(proj.join("pytest.sh"), "#!/bin/sh\necho '3 passed in 0.02s'\n").unwrap();
     let (web, base) = if mode == "research" || mode == "chat" { research_web() } else { (None, String::new()) };
+    if mode == "daemons" {
+        // a reminder and a daemon, both due: the window's first check fires them
+        let cfg = chuck_store::settings::config_dir();
+        std::fs::create_dir_all(&cfg).unwrap();
+        let now = chuck_daemon::now();
+        std::fs::write(cfg.join("daemons.json"), serde_json::json!({"next_id": 3, "items": [
+            {"id": 1, "name": "stand-up", "when": {"at": now - 1.0}, "brief": "Stand-up in 5 minutes", "kind": "remind",
+             "enabled": true, "last_run": 0, "runs": 0, "state": {}},
+            {"id": 2, "name": "disk and failed services", "when": {"every": 3600},
+             "brief": "Check the disk and any failed services; propose fixes.", "kind": "report", "folder": "",
+             "enabled": true, "last_run": 0, "runs": 0, "state": {}, "quota": 50000},
+        ]}).to_string()).unwrap();
+        let _ = std::fs::remove_file(cfg.join("inbox.json"));
+    }
     let model: Arc<dyn chuck_model::ChatModel> = match mode.as_str() {
+        "daemons" => Arc::new(Scripted::new().replies([
+            "```bash\ndf -h / | tail -1\n```\n```bash\nsystemctl --failed --no-legend --plain\n```",
+            "Disk / is 41% full; one failed unit: bluetooth.service\n\nbluetooth.service failed at boot: the adapter \
+             wasn't ready (journal: \"Failed to set mode: Not Ready\").\n\nPropose:\n- `sudo systemctl restart bluetooth`\n\
+             - if it recurs: `sudo systemctl edit bluetooth` and add `ExecStartPre=/bin/sleep 2`"])),
         "chat" => Arc::new(Scripted::new().replies([
             "```search python int empty string ValueError```".to_string(),
             format!("```fetch {base}/docs/functions```"),
@@ -151,7 +170,7 @@ fn main() {
         _ => Arc::new(Scripted::new().respond(|r| fleet_script(r).replace("python3 -m pytest -q", "sh pytest.sh"))),
     };
     let send = match mode.as_str() {
-        "welcome" => None,
+        "welcome" | "daemons" => None,
         "confirm" => Some("Clean the build output".to_string()),
         "research" | "chat" => Some("Why does int() fail on an empty string? Check the docs.".to_string()),
         _ => Some("The parser crashes on empty input. Fix it and add tests.".to_string()),
@@ -159,6 +178,7 @@ fn main() {
     let ms = match mode.as_str() {
         "welcome" | "settings" => 900,
         "midrun" => 1500,
+        "daemons" => 6000,
         "longcmd" => 600_000,
         _ => 2500,
     };
@@ -166,6 +186,7 @@ fn main() {
         "run" | "live" => vec!["plan", "tasks", "gate"],
         "midrun" => vec!["plan", "tasks", "agents", "commands"],
         "research" | "chat" => vec!["research"],
+        "daemons" => vec!["inbox", "daemons"],
         _ => vec!["plan"],
     }.into_iter().map(String::from).collect();
     let send = if mode == "settings" { None } else { send };

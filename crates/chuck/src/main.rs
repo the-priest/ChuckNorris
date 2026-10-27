@@ -29,6 +29,8 @@ USAGE
                     when it should be; it changes nothing (work goes to `chuck run`)
   chuck models      show the fleet's models, checked against your account
   chuck key         save your SiliconFlow API key (shared with the Chuck window)
+  chuck daemons [rm N | pause N | resume N]   your daemons and reminders
+  chuck inbox [read]   what daemons reported (they run while the window is open)
   chuck ledger [N]  verify the evidence chain and show the last N commands run
   chuck rewind [-C DIR] [--list | N]   put the folder back to before the last job
                     (or checkpoint N); a rewind can itself be undone
@@ -173,6 +175,64 @@ fn cmd_rewind(args: &[String]) -> i32 {
     }
 }
 
+/// `chuck daemons [rm N | pause N | resume N]`
+fn cmd_daemons(args: &[String]) -> i32 {
+    let mut reg = chuck_daemon::Registry::load(&chuck_daemon::Registry::default_path());
+    if let (Some(verb), Some(id)) = (args.first(), args.get(1).and_then(|n| n.parse::<i64>().ok())) {
+        let ok = match verb.as_str() {
+            "rm" | "remove" => reg.remove(id),
+            "pause" | "resume" => match reg.get_mut(id) {
+                Some(d) => {
+                    d.set("enabled", (verb == "resume").into());
+                    if verb == "resume" {
+                        d.set("last_run", chuck_daemon::now().into());
+                    }
+                    reg.save();
+                    true
+                }
+                None => false,
+            },
+            _ => fail("chuck daemons [rm N | pause N | resume N]"),
+        };
+        if !ok {
+            fail(&format!("no daemon {id}"));
+        }
+    }
+    if reg.items.is_empty() {
+        println!("No daemons or reminders. In the window: /daemon every day at 9: check the disk, or ask in Chat.");
+        return 0;
+    }
+    for d in &reg.items {
+        println!("{:>3}  {:<8} {:<34} {}{}", d.id(), if d.kind() == "remind" { "reminder" } else { "daemon" },
+                 chuck_daemon::describe(d.when()), d.name(), if d.enabled() { String::new() } else { "  (paused)".into() });
+    }
+    println!("\nThey run while the Chuck window is open: reports go to `chuck inbox`.");
+    0
+}
+
+/// `chuck inbox [read]`
+fn cmd_inbox(arg: Option<&str>) -> i32 {
+    let mut ib = chuck_daemon::Inbox::load(&chuck_daemon::Inbox::default_path(), 200);
+    if arg == Some("read") {
+        ib.mark_read();
+        println!("Marked read.");
+        return 0;
+    }
+    if ib.items.is_empty() {
+        println!("The inbox is empty.");
+        return 0;
+    }
+    for it in ib.items.iter().rev().take(20) {
+        let s = |k: &str| it.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let t = it.get("time").and_then(|v| v.as_f64()).unwrap_or(0.0) as i64;
+        let new = if it.get("unread").and_then(|v| v.as_bool()) == Some(true) { "● " } else { "  " };
+        println!("{new}{}  {} — {}\n{}\n", chuck_store::ledger::stamp_at(t, "%a %d %b %H:%M"), s("daemon"), s("why"),
+                 s("report").trim().lines().map(|l| format!("    {l}")).collect::<Vec<_>>().join("\n"));
+    }
+    println!("{} unread · `chuck inbox read` marks them read", ib.unread());
+    0
+}
+
 fn cmd_ledger(n: usize) -> i32 {
     let l = Ledger::at(&Ledger::default_path());
     let v = l.verify();
@@ -313,6 +373,7 @@ fn cmd_run(args: &[String], chat: bool) -> i32 {
         }
     });
     let worker = std::thread::spawn(move || if chat { rt.chat(job) } else { rt.run(job) });
+    let mut daemons: Option<chuck_daemon::Registry> = None;
 
     let color = std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none();
     let mut view = term::View::new(color, a.verbose, Box::new(std::io::stdout()));
@@ -327,6 +388,12 @@ fn cmd_run(args: &[String], chat: bool) -> i32 {
             Event::Confirm { .. } if asking => {
                 print!("{} ", view.st.bold("type yes to run it, anything else to refuse >"));
                 let _ = std::io::stdout().flush();
+            }
+            Event::Schedule { kind, when, what } => {
+                // kept for the window, which runs them while it's open
+                let reg = daemons.get_or_insert_with(|| chuck_daemon::Registry::load(&chuck_daemon::Registry::default_path()));
+                let f = if kind == "remind" { String::new() } else { folder.display().to_string() };
+                reg.add("", when.clone(), what, &f, kind, 150_000);
             }
             Event::Finished(_) => break,
             _ => {}
@@ -361,6 +428,8 @@ fn main() {
             0
         }
         Some("rewind") => cmd_rewind(&args[1..]),
+        Some("daemons") => cmd_daemons(&args[1..]),
+        Some("inbox") => cmd_inbox(args.get(1).map(String::as_str)),
         Some("ledger") => cmd_ledger(args.get(1).and_then(|n| n.parse().ok()).unwrap_or(15)),
         Some("version" | "--version" | "-V") => {
             println!("chuck {VERSION}");

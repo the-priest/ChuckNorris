@@ -390,8 +390,20 @@ across files; it refuses if the server's view of a file differs from the file on
 through the Done gate. Servers run in the folder's sandbox (some run project code) and serve the Lead's
 folder only; workers get the syntax answers, since a server for a worker's copy would run outside its jail.
 
+**Daemons and reminders** cost nothing while they wait. Type `/remind in 20m: take the pizza out` or
+`/daemon when a service fails: find out why and propose a fix` (or ask in Chat). Plain code checks
+each trigger every 30 seconds: a time, an interval, a folder changing, a failed service, a disk filling
+up, or a command's output changing. Only when one fires does an agent wake, with its own token and time
+quota. That agent can only look: each command must pass the read-only rules (no `sh -c`, `xargs`, `rm`,
+`systemctl restart`, writing to files…) and runs with the whole system mounted read-only. Its report
+goes to the panel's **Inbox**, with a desktop notification unless it found nothing to do. Reminders
+need no agent. Everything runs only while Chuck is open; `chuck daemons` and `chuck inbox` show them from
+a terminal. Daemons and reports live in the same files as the Python app's.
+
+![A reminder, and a daemon's report in the Inbox](assets/screenshots/fleet-daemons.png)
+
 What isn't ported to Rust yet, so isn't in this branch's app: voice (Kokoro, Piper, talking to it),
-a real browser for pages that need JavaScript, images and video, and daemons.
+a real browser for pages that need JavaScript, and images and video.
 [ARCHITECTURE.md](ARCHITECTURE.md) has the design and the plan.
 
 Arch and CachyOS are first-class; apt and dnf are supported. The installer sets up GTK4 and libadwaita, bubblewrap, a screenshot tool, the local voice models (about 600 MB, skip with `CHUCK_VOICE=0`) and the linters Chuck uses to check code. At runtime Chuck needs only Python's standard library and GTK; everything optional degrades gracefully when it's missing.

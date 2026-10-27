@@ -149,6 +149,8 @@ headerbar { background-color: @bg; border-bottom: 1px solid @line; box-shadow: n
 .step-mark { font-size: 12px; min-width: 14px; }
 .step-text { font-size: 12.5px; }
 .step-done { color: @faint; }
+.inbox-new { color: @ink; font-weight: 600; font-size: 12.5px; }
+.badge-new { color: @accent_hi; font-weight: 600; }
 .research-ok { color: @accent_hi; -gtk-icon-size: 13px; }
 .research-fail { color: @warn; -gtk-icon-size: 13px; }
 .research-head { font-size: 12.5px; }

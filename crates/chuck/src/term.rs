@@ -195,6 +195,8 @@ impl View {
                 let who = self.who(*id);
                 st.dim(&format!("  − {who} {status}"))
             }
+            Event::Schedule { kind, when, what } => format!("{} {}: {}", st.bold(if kind == "remind" { "⏰ reminder set," }
+                else { "◎ daemon set," }), chuck_daemon::describe(when), what),
             Event::Handoff { request } => format!("\n{}\n  {}\n{}", st.bold("→ for the fleet (nothing has run):"),
                 request.trim().replace('\n', "\n  "),
                 st.dim(&format!("  to send it:  chuck run \"{}\"", one_line(request, 200).replace('"', "\\\"")))),
