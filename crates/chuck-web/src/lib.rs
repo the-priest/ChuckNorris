@@ -13,6 +13,7 @@
 //!   through a long page or re-reading a source costs nothing.
 
 pub mod browser;
+pub mod camoufox;
 pub mod html;
 pub mod media;
 
@@ -289,7 +290,7 @@ impl Web {
     /// The page read in a real browser. None: no browser to read it with
     /// (the plain read's answer stands).
     fn in_browser(&self, url: &str) -> Option<Result<Page, Why>> {
-        let exe = browser::find(self.cfg.browser.as_deref()?).ok()?;
+        let engine = browser::pick(self.cfg.browser.as_deref()?, browser::Purpose::Read).ok()?;
         let (lock, cv) = &*self.slots;
         {
             let mut n = lock.lock().unwrap();
@@ -303,7 +304,7 @@ impl Web {
             }
             *n += 1;
         }
-        let mut o = browser::Options::new(exe);
+        let mut o = browser::Options::new(engine);
         o.net = if self.cfg.allow_private { browser::Net::Any } else { browser::Net::Public(self.cfg.proxy.clone()) };
         o.proxy = Some(self.cfg.proxy.clone()).filter(|p| *p != Proxy::Env);
         o.files = browser::Files { root: Some(PathBuf::from("/nonexistent")), hidden: Vec::new() };
@@ -449,10 +450,12 @@ fn read(url: &str, raw: &str, mime: &str) -> Result<Page, Why> {
         return Ok(Page { url: url.into(), title: None, text: text.trim().to_string(), via: None });
     }
     let text = html::readable(raw, MAX_TEXT);
+    // a plain string: `\` at a line's end continues it (in a raw string it wouldn't, and the
+    // alternatives after it could only match after a line break)
     let wall = WALL.get_or_init(|| regex::Regex::new(
-        r"(?i)<title>\s*(?:just a moment\.\.\.|attention required|access denied|are you a robot|security check|please wait)|\
-          cf-browser-verification|challenge-platform|cf_chl_opt|captcha-delivery\.com|px-captcha|_incapsula_resource|\
-          enable javascript and cookies to continue").unwrap());
+        "(?i)<title>\\s*(?:just a moment\\.\\.\\.|attention required|access denied|are you a robot|security check|please wait)\
+         |cf-browser-verification|challenge-platform|cf_chl_opt|captcha-delivery\\.com|px-captcha|_incapsula_resource\
+         |enable javascript and cookies to continue").unwrap());
     if wall.is_match(html::cut(raw, 200_000)) && text.chars().count() < 1500 {
         return Err(Why::Blocked(0));
     }
@@ -673,6 +676,15 @@ mod tests {
         assert_eq!(dec("https%3A%2F%2Fa.org%2Fx%3Fy%3D1+2"), "https://a.org/x?y=1 2");
         assert_eq!(dec("100%"), "100%");
         assert_eq!(enc("a b&c=d/é"), "a%20b%26c%3Dd%2F%C3%A9");
+    }
+
+    #[test]
+    fn bot_walls_are_seen_whatever_the_marker() {
+        for raw in ["<html><title>Just a moment...</title></html>", "<div class=\"cf-browser-verification\"></div>",
+                    "<p>Enable JavaScript and cookies to continue</p>", "<script src=/_Incapsula_Resource></script>"] {
+            assert!(matches!(read("https://x.org/", raw, "text/html"), Err(Why::Blocked(0))), "{raw}");
+        }
+        assert!(read("https://x.org/", "<title>Moments</title><p>just a moment of your time</p>", "text/html").is_ok());
     }
 
     #[test]

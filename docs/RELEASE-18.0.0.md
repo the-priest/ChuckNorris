@@ -57,6 +57,9 @@ is still the recommended way, because it also sets up the menu entry, bubblewrap
   - MCP servers and language servers.
   - Daemons and reminders, local voice in and out, memory, checkpoints and `/undo`, and `/doctor`.
 
-## Not ported yet
+## Camoufox
 
-Camoufox (a Firefox build) as the browser. The Rust app drives Brave, Chromium or Chrome.
+Pages that turn bots away are read with [Camoufox](https://camoufox.com), a Firefox build with a
+consistent, real-looking fingerprint. The installer sets it up in an environment of its own. Every
+request it makes is checked by the same rules as Chromium's: research stays on the public internet,
+and an offline folder stays offline.

@@ -93,11 +93,17 @@ pub fn run(folder: Option<&Path>, mcp: Option<&chuck_mcp::Manager>) -> Vec<Check
         Err(e) => out.push(c("Web search", State::Warn, format!("{e} — set your own SearXNG in Settings › Research"))),
     }
     let pref = setup::browser_pref(&s);
-    match chuck_web::browser::find(&pref) {
-        Ok(p) => out.push(c("Browser", State::Ok, format!("{} ({}) — page checks and pages that need JavaScript",
-                                                          chuck_web::browser::engine_name(&p), p.display()))),
-        Err(e) => out.push(c("Browser", State::Warn, format!("{e}: the Lead can't check web pages, and pages that need \
-            JavaScript can't be read"))),
+    use chuck_web::browser::{pick, Purpose};
+    match pick(&pref, Purpose::Check) {
+        Ok(e) => out.push(c("Browser", State::Ok, format!("{} — the Lead's page checks", e.describe()))),
+        Err(e) => out.push(c("Browser", State::Warn, format!("{e}: the Lead can't check web pages"))),
+    }
+    match pick(&pref, Purpose::Read) {
+        Ok(e) => out.push(c("Blocked pages", if matches!(e, chuck_web::browser::Engine::Camoufox(_)) { State::Ok } else {
+                State::Warn }, format!("read with {}{}", e.describe(), if matches!(e, chuck_web::browser::Engine::Camoufox(_)) {
+                String::new() } else { format!(" — Camoufox gets past more bot checks: {}", chuck_web::camoufox::INSTALL) }))),
+        Err(e) => out.push(c("Blocked pages", State::Warn, format!("{e}: pages that need JavaScript or turn bots away \
+            can't be read"))),
     }
     // voice
     let vp = chuck_voice::Prefs::from(&s);

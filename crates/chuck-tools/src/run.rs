@@ -274,14 +274,36 @@ pub fn tag(c: &mut Command) {
 
 /// Processes carrying this run's tag (never Chuck itself).
 pub fn session_pids() -> Vec<i32> {
-    let want = format!("{SESSION_VAR}={}", session());
+    pids_with_env(&format!("{SESSION_VAR}={}", session()))
+}
+
+/// Processes whose environment holds exactly `kv` ("NAME=value"), never
+/// Chuck itself: what a program started, wherever it went (its own
+/// process group, a new session) still carries what it was given.
+pub fn pids_with_env(kv: &str) -> Vec<i32> {
     let me = std::process::id() as i32;
     let Ok(rd) = std::fs::read_dir("/proc") else { return Vec::new() };
     rd.flatten().filter_map(|e| e.file_name().to_str().and_then(|n| n.parse::<i32>().ok()))
         .filter(|&pid| pid != me)
         .filter(|pid| std::fs::read(format!("/proc/{pid}/environ"))
-            .is_ok_and(|env| env.split(|b| *b == 0).any(|kv| kv == want.as_bytes())))
+            .is_ok_and(|env| env.split(|b| *b == 0).any(|x| x == kv.as_bytes())))
         .collect()
+}
+
+/// KILL every process whose environment holds `kv` (see [`pids_with_env`]).
+pub fn kill_env(kv: &str) {
+    for _ in 0..2 {
+        let pids = pids_with_env(kv);
+        if pids.is_empty() {
+            return;
+        }
+        for p in pids {
+            unsafe {
+                libc::kill(p, libc::SIGKILL);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// End everything this run started that is still alive, TERM then KILL;

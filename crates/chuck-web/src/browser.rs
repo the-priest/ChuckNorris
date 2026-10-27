@@ -13,10 +13,12 @@
 //! The user's own Chromium-family browser is used (Brave, Chromium, Chrome,
 //! Edge, Vivaldi: they all speak the protocol), started with a throwaway
 //! profile and nothing that phones home, in its own process group, and
-//! killed with that group when the call ends (or Chuck does). Every request
-//! the page makes can be judged first: a page read for research reaches
-//! only the public internet, however it redirects or what it loads; a job
-//! in an offline folder reaches no network at all.
+//! killed with that group when the call ends (or Chuck does). Or Camoufox,
+//! a Firefox build sites can't tell from a person (see [`crate::camoufox`]).
+//! Every request the page makes can be judged first, the same way for both:
+//! a page read for research reaches only the public internet, however it
+//! redirects or what it loads; a job in an offline folder reaches no
+//! network at all.
 
 use crate::{html, public_address, Proxy};
 use base64::Engine as _;
@@ -40,7 +42,7 @@ const CHROMIUM: &[&str] = &["chromium", "chromium-browser", "/usr/lib/chromium/c
 const CHROME: &[&str] = &["google-chrome", "google-chrome-stable", "/opt/google/chrome/chrome", "chrome",
     "microsoft-edge", "microsoft-edge-stable", "vivaldi", "vivaldi-stable"];
 /// What Settings offers.
-pub const ENGINES: &[&str] = &["auto", "brave", "chromium", "chrome"];
+pub const ENGINES: &[&str] = &["auto", "camoufox", "brave", "chromium", "chrome"];
 
 fn expand(p: &str) -> PathBuf {
     match p.strip_prefix("~/") {
@@ -91,6 +93,67 @@ pub fn find(pref: &str) -> Result<PathBuf, String> {
     }
     [BRAVE, CHROMIUM, CHROME].iter().find_map(|g| first(g))
         .ok_or_else(|| "no browser found: install Brave or Chromium (pacman -Syu chromium / apt install chromium)".into())
+}
+
+/// What a browser is wanted for.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Purpose {
+    /// Checking a page Chuck built: exact errors with their file and line
+    /// (Chromium's DevTools are best at that).
+    Check,
+    /// Reading a page that a plain fetch couldn't: script-only pages and bot
+    /// walls (Camoufox is best at not being taken for a bot).
+    Read,
+}
+
+/// The browser that runs a page.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Engine {
+    /// Brave, Chromium, Chrome… over the DevTools protocol.
+    Chromium(PathBuf),
+    Camoufox(crate::camoufox::Install),
+}
+
+impl Engine {
+    /// "Brave", "Camoufox"…
+    pub fn name(&self) -> String {
+        match self {
+            Engine::Chromium(p) => engine_name(p),
+            Engine::Camoufox(_) => "Camoufox".into(),
+        }
+    }
+
+    /// The name and where it is, for Settings and the doctor.
+    pub fn describe(&self) -> String {
+        match self {
+            Engine::Chromium(p) => format!("{} · {}", engine_name(p), p.display()),
+            Engine::Camoufox(i) => format!("Camoufox · {}", i.exe.as_ref().map_or_else(|| format!("via {}", i.python.display()),
+                                                                                    |e| e.display().to_string())),
+        }
+    }
+}
+
+/// The browser for `purpose` as the user set it ("auto", "camoufox",
+/// "brave", "chromium", "chrome", or a path). "auto" reads blocked pages
+/// with Camoufox when it is installed and checks pages with Brave, Chromium
+/// or Chrome, each falling back to the other. Err says what to install.
+pub fn pick(pref: &str, purpose: Purpose) -> Result<Engine, String> {
+    let pref = pref.trim();
+    let low = pref.to_ascii_lowercase();
+    let named = Path::new(pref).file_name().is_some_and(|n| n.to_string_lossy().to_ascii_lowercase().contains("camoufox"));
+    if low == "camoufox" || (pref.contains('/') && named) {
+        let exe = pref.contains('/').then(|| expand(pref));
+        return crate::camoufox::find(exe).map(Engine::Camoufox);
+    }
+    if low != "auto" && !low.is_empty() {
+        return find(pref).map(Engine::Chromium);
+    }
+    let fox = || crate::camoufox::find(None).map(Engine::Camoufox);
+    let chrome = || find("auto").map(Engine::Chromium);
+    match purpose {
+        Purpose::Read => fox().or_else(|_| chrome()),
+        Purpose::Check => chrome().or_else(|e| fox().map_err(|_| e)),
+    }
 }
 
 /// "Brave", "Chromium", "Chrome"… from the executable.
@@ -321,11 +384,79 @@ pub struct Files {
 }
 
 impl Files {
-    fn allowed(&self, p: &Path) -> bool {
+    pub(crate) fn allowed(&self, p: &Path) -> bool {
         let Some(root) = &self.root else { return true };
         let real = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
         let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
         real.starts_with(&root) && !self.hidden.iter().any(|h| real.starts_with(h))
+    }
+}
+
+/// Decides, request by request, what a page may reach, and keeps what it
+/// refused. Both engines ask it.
+pub(crate) struct Judge {
+    pub net: Net,
+    pub files: Files,
+    /// An address always allowed: the folder's own file server (Camoufox).
+    pub own: Option<String>,
+    /// Hosts judged already (name:port → allowed).
+    judged: HashMap<String, bool>,
+    pub refused: Vec<String>,
+}
+
+impl Judge {
+    pub fn new(net: Net, files: Files) -> Judge {
+        Judge { net, files, own: None, judged: HashMap::new(), refused: Vec::new() }
+    }
+
+    /// May the page load `url`? A no is remembered for the report.
+    pub fn allow(&mut self, url: &str) -> bool {
+        let ok = self.may_reach(url);
+        if !ok {
+            self.refused.push(html::cut(url, 200).to_string());
+        }
+        ok
+    }
+
+    fn may_reach(&mut self, url: &str) -> bool {
+        let lower = url.to_ascii_lowercase();
+        if self.own.as_deref().is_some_and(|o| lower.starts_with(o)) {
+            return true;
+        }
+        if lower.starts_with("data:") || lower.starts_with("blob:") || lower.starts_with("about:") {
+            return true;
+        }
+        if lower.starts_with("file://") {
+            let path = unpercent(&url[7..]);
+            return self.files.allowed(Path::new(path.split(['?', '#']).next().unwrap_or("")));
+        }
+        let web = ["http://", "https://", "ws://", "wss://"].iter().any(|s| lower.starts_with(s));
+        match &self.net {
+            Net::Any => true,
+            Net::Offline => false,
+            Net::Public(proxy) => {
+                if !web {
+                    return false;
+                }
+                let host = crate::host_port(url).map(|(h, p)| format!("{h}:{p}")).unwrap_or_default();
+                if let Some(v) = self.judged.get(&host) {
+                    return *v;
+                }
+                let http = url.replacen("ws", "http", 1);
+                let v = public_address(if lower.starts_with("ws") { &http } else { url }, proxy).is_ok();
+                self.judged.insert(host, v);
+                v
+            }
+        }
+    }
+
+    /// Why a refused address couldn't be loaded.
+    pub fn why(&self) -> &'static str {
+        match self.net {
+            Net::Offline => "this folder is sandboxed offline",
+            Net::Public(_) => "web reads stay on the public internet",
+            Net::Any => "it is outside this folder",
+        }
     }
 }
 
@@ -376,7 +507,7 @@ pub fn to_url(target: &str, base: Option<&Path>, files: &Files) -> Result<String
 }
 
 /// %XX decoded (a path: `+` stays a plus).
-fn unpercent(s: &str) -> String {
+pub(crate) fn unpercent(s: &str) -> String {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
@@ -484,12 +615,7 @@ struct Page {
     ws: Ws,
     next: u64,
     events: Vec<Value>,
-    net: Net,
-    files: Files,
-    /// Hosts judged already (name → allowed).
-    judged: HashMap<String, bool>,
-    /// Requests refused because of `net`.
-    pub refused: Vec<String>,
+    judge: Judge,
     stop: Option<Arc<AtomicBool>>,
     /// Nothing runs past this.
     deadline: Instant,
@@ -525,10 +651,7 @@ impl Page {
     fn decide(&mut self, p: &Value) -> Result<(), String> {
         let id = p.get("requestId").and_then(Value::as_str).unwrap_or("").to_string();
         let url = p.pointer("/request/url").and_then(Value::as_str).unwrap_or("").to_string();
-        let ok = self.may_reach(&url);
-        if !ok {
-            self.refused.push(html::cut(&url, 200).to_string());
-        }
+        let ok = self.judge.allow(&url);
         let n = self.next_id();
         let msg = if ok {
             json!({"id": n, "method": "Fetch.continueRequest", "params": {"requestId": id}})
@@ -536,35 +659,6 @@ impl Page {
             json!({"id": n, "method": "Fetch.failRequest", "params": {"requestId": id, "errorReason": "AccessDenied"}})
         };
         self.ws.send(&msg.to_string())
-    }
-
-    fn may_reach(&mut self, url: &str) -> bool {
-        let lower = url.to_ascii_lowercase();
-        if lower.starts_with("data:") || lower.starts_with("blob:") || lower.starts_with("about:") {
-            return true;
-        }
-        if lower.starts_with("file://") {
-            let path = unpercent(&url[7..]);
-            return self.files.allowed(Path::new(path.split(['?', '#']).next().unwrap_or("")));
-        }
-        let web = ["http://", "https://", "ws://", "wss://"].iter().any(|s| lower.starts_with(s));
-        match &self.net {
-            Net::Any => true,
-            Net::Offline => false,
-            Net::Public(proxy) => {
-                if !web {
-                    return false;
-                }
-                let host = crate::host_port(url).map(|(h, p)| format!("{h}:{p}")).unwrap_or_default();
-                if let Some(v) = self.judged.get(&host) {
-                    return *v;
-                }
-                let http = url.replacen("ws", "http", 1);
-                let v = public_address(if lower.starts_with("ws") { &http } else { url }, proxy).is_ok();
-                self.judged.insert(host, v);
-                v
-            }
-        }
     }
 
     fn next_id(&mut self) -> u64 {
@@ -649,11 +743,7 @@ impl Page {
         }
         if let Some(e) = r.get("errorText").and_then(Value::as_str) {
             if e == "net::ERR_ACCESS_DENIED" || e == "net::ERR_BLOCKED_BY_CLIENT" {
-                return Err(format!("{url} may not be reached from here ({})", match self.net {
-                    Net::Offline => "this folder is sandboxed offline",
-                    Net::Public(_) => "web reads stay on the public internet",
-                    Net::Any => "refused",
-                }));
+                return Err(format!("{url} may not be reached from here ({})", self.judge.why()));
             }
             return Err(format!("couldn't load {url}: {e}"));
         }
@@ -790,7 +880,7 @@ fn arg_text(a: &Value) -> String {
     }
 }
 
-fn dedup(v: Vec<String>) -> Vec<String> {
+pub(crate) fn dedup(v: Vec<String>) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     v.into_iter().filter(|x| seen.insert(x.clone())).collect()
 }
@@ -854,17 +944,19 @@ fn collect(events: &[Value]) -> (Vec<String>, Vec<String>, Vec<String>, Vec<Stri
 
 // ── bot walls ────────────────────────────────────────────────────────────
 
-/// A bot check's words ("Just a moment…", "Checking your browser").
+/// A bot check's words ("Just a moment…", "Checking your browser"); the same
+/// pattern is handed to the Camoufox bridge (Python reads it alike).
+pub(crate) const CHALLENGE: &str = "(?i)just a moment\\.\\.\\.|checking (?:if the site connection is secure|your browser)\
+    |attention required! \\| cloudflare|cf-browser-verification|challenge-platform\
+    |enable javascript and cookies to continue|please enable js and disable any ad blocker|captcha-delivery|px-captcha\
+    |verify (?:that )?you are (?:a )?human|are you a robot";
+
 pub fn challenged(text: &str) -> bool {
     static RX: OnceLock<regex::Regex> = OnceLock::new();
-    RX.get_or_init(|| regex::Regex::new(
-        r"(?i)just a moment\.\.\.|checking (?:if the site connection is secure|your browser)|attention required! \| cloudflare|\
-          cf-browser-verification|challenge-platform|enable javascript and cookies to continue|\
-          please enable js and disable any ad blocker|captcha-delivery|px-captcha|verify (?:that )?you are (?:a )?human|\
-          are you a robot").unwrap()).is_match(text)
+    RX.get_or_init(|| regex::Regex::new(CHALLENGE).unwrap()).is_match(text)
 }
 
-const CHALLENGE_PROBE: &str = "document.title + '\\n' + (document.body ? document.body.innerText.slice(0, 3000) : '')";
+pub(crate) const CHALLENGE_PROBE: &str = "document.title + '\\n' + (document.body ? document.body.innerText.slice(0, 3000) : '')";
 /// The readable part: an <article> or <main> when the page has one.
 pub const READER_JS: &str = "(document.querySelector('article') || document.querySelector('main') \
     || document.querySelector('[role=main]') || document.body || {innerText: ''}).innerText";
@@ -874,8 +966,8 @@ pub const READER_JS: &str = "(document.querySelector('article') || document.quer
 /// How to run one browse.
 #[derive(Clone, Debug)]
 pub struct Options {
-    /// The browser (from [`find`]).
-    pub exe: PathBuf,
+    /// The browser (from [`pick`]).
+    pub engine: Engine,
     pub size: (u32, u32),
     /// Relative file paths are read from here.
     pub base: Option<PathBuf>,
@@ -894,8 +986,8 @@ pub struct Options {
 }
 
 impl Options {
-    pub fn new(exe: PathBuf) -> Options {
-        Options { exe, size: (1280, 800), base: None, files: Files::default(), net: Net::Any, proxy: None, screenshot: true,
+    pub fn new(engine: Engine) -> Options {
+        Options { engine, size: (1280, 800), base: None, files: Files::default(), net: Net::Any, proxy: None, screenshot: true,
                   settle: Duration::from_millis(600), timeout: Duration::from_secs(60), text_js: None, stop: None }
     }
 }
@@ -926,10 +1018,10 @@ pub struct Report {
 }
 
 /// The largest side a screenshot is taken at (a model reads no more).
-const SHOT_MAX: f64 = 1568.0;
+pub(crate) const SHOT_MAX: f64 = 1568.0;
 
 /// "1024x768" as a window size, within reason.
-fn window_size(arg: &str) -> Option<(u32, u32)> {
+pub(crate) fn window_size(arg: &str) -> Option<(u32, u32)> {
     static WH: OnceLock<regex::Regex> = OnceLock::new();
     let c = WH.get_or_init(|| regex::Regex::new(r"^(\d{2,5})\s*[x×]\s*(\d{2,5})$").unwrap()).captures(arg.trim())?;
     Some((c[1].parse::<u32>().ok()?.clamp(200, 3840), c[2].parse::<u32>().ok()?.clamp(200, 2400)))
@@ -939,13 +1031,17 @@ fn window_size(arg: &str) -> Option<(u32, u32)> {
 /// or the target can't be opened at all; an action failing is part of the
 /// report.
 pub fn browse(target: &str, actions: &[String], o: &Options) -> Result<Report, String> {
+    let exe = match &o.engine {
+        Engine::Chromium(exe) => exe,
+        Engine::Camoufox(install) => return crate::camoufox::browse(target, actions, o, install),
+    };
     let t0 = Instant::now();
     let url = to_url(target, o.base.as_deref(), &o.files)?;
     let deadline = t0 + o.timeout;
-    let (_browser, bws) = launch(&o.exe, o.proxy.as_ref(), o.files.root.is_none(), Duration::from_secs(20))?;
+    let (_browser, bws) = launch(exe, o.proxy.as_ref(), o.files.root.is_none(), Duration::from_secs(20))?;
     let ws = Ws::connect(&open_page(&bws)?, Duration::from_secs(10))?;
-    let mut page = Page { ws, next: 0, events: Vec::new(), net: o.net.clone(), files: o.files.clone(), judged: HashMap::new(),
-                          refused: Vec::new(), stop: o.stop.clone(), deadline: deadline + Duration::from_secs(20), frame: None };
+    let mut page = Page { ws, next: 0, events: Vec::new(), judge: Judge::new(o.net.clone(), o.files.clone()),
+                          stop: o.stop.clone(), deadline: deadline + Duration::from_secs(20), frame: None };
     let short = Duration::from_secs(10);
     for d in ["Runtime", "Log", "Page", "Network"] {
         page.call(&format!("{d}.enable"), json!({}), short)?;
@@ -1038,8 +1134,8 @@ pub fn browse(target: &str, actions: &[String], o: &Options) -> Result<Report, S
         && e.pointer("/params/type").and_then(Value::as_str) == Some("Document")
         && page.frame.as_deref().is_none_or(|f| e.pointer("/params/frameId").and_then(Value::as_str) == Some(f)))
         .and_then(|e| e.pointer("/params/response/status").and_then(Value::as_u64)).map(|s| s as u16);
-    Ok(Report { url, final_url, title, text, errors, warnings, logs, failed, refused: dedup(page.refused.clone()), steps, shot, status,
-                ms: t0.elapsed().as_millis() as u64, size, engine: engine_name(&o.exe) })
+    Ok(Report { url, final_url, title, text, errors, warnings, logs, failed, refused: dedup(page.judge.refused.clone()), steps, shot,
+                status, ms: t0.elapsed().as_millis() as u64, size, engine: engine_name(exe) })
 }
 
 /// A page read in a real browser: its scripts run and a bot check is waited
@@ -1126,7 +1222,14 @@ mod tests {
     #[test]
     fn walls() {
         assert!(challenged("Just a moment...\nChecking your browser"));
+        assert!(challenged("Attention Required! | Cloudflare"));
+        assert!(challenged("please verify you are a human"));
+        // these three sat after a raw string's line break and never matched before
+        assert!(challenged("<div class=\"cf-browser-verification\">"));
+        assert!(challenged("Please enable JS and disable any ad blocker"));
+        assert!(challenged("Are you a robot?"));
         assert!(!challenged("An article about moments"));
+        assert!(!challenged("just a moment, please"), "the three dots are literal");
     }
 
     #[test]

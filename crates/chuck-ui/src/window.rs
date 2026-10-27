@@ -1832,15 +1832,17 @@ fn settings_dialog(shared: &Shared) {
     let sources = adw::SpinRow::with_range(1.0, 10.0, 1.0);
     sources.set_title("Results per search");
     sources.set_value(s.num("research_sources", 6.0, 1.0, 10.0));
-    let browsers = [("auto", "Automatic (Brave, Chromium, then Chrome)"), ("brave", "Brave"), ("chromium", "Chromium"),
-                    ("chrome", "Chrome")];
+    let browsers = [("auto", "Automatic (Camoufox reads, Chromium checks)"), ("camoufox", "Camoufox"), ("brave", "Brave"),
+                    ("chromium", "Chromium"), ("chrome", "Chrome")];
     let pref = chuck_runtime::setup::browser_pref(&s);
+    use chuck_web::browser::{pick, Purpose};
     let browser = adw::ComboRow::builder().title("Browser")
-        .subtitle(match chuck_web::browser::find(&pref) {
-            Ok(p) => format!("{} · {} — for the Lead's page checks and pages that need JavaScript",
-                             chuck_web::browser::engine_name(&p), p.display()),
-            Err(e) => e,
-        })
+        .subtitle(md::escape(&match (pick(&pref, Purpose::Read), pick(&pref, Purpose::Check)) {
+            (Ok(r), Ok(c)) if r == c => format!("{} — reads pages that need JavaScript or turn bots away, and checks \
+                the Lead's pages", r.describe()),
+            (Ok(r), Ok(c)) => format!("Reads blocked pages: {} · checks the Lead's pages: {}", r.describe(), c.describe()),
+            (Err(e), _) | (_, Err(e)) => e,
+        }))
         .model(&gtk::StringList::new(&browsers.iter().map(|b| b.1).collect::<Vec<_>>())).build();
     // a path typed into settings.json stays as it is unless a choice here is made
     let custom = !browsers.iter().any(|b| b.0 == pref);

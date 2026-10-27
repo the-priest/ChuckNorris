@@ -117,14 +117,14 @@ pub fn browse(ctx: &Ctx, id: AgentId, root: &Path, gate: &Mutex<DoneGate>, call:
     let Some(pref) = ctx.cfg.browser.as_deref() else {
         return "[browse: the browser is turned off in Settings › Research]".into();
     };
-    let exe = match browser::find(pref) {
+    let engine = match browser::pick(pref, browser::Purpose::Check) {
         Ok(e) => e,
         Err(e) => {
             ctx.events.emit(Event::Action { id, tool: "browse".into(), arg: target.clone(), ok: false, summary: e.clone() });
             return format!("[browse: {e}]");
         }
     };
-    let mut o = Options::new(exe);
+    let mut o = Options::new(engine);
     o.size = size;
     o.base = Some(root.to_path_buf());
     o.stop = Some(ctx.stop.clone());

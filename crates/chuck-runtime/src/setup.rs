@@ -78,10 +78,10 @@ pub fn web(s: &Settings) -> chuck_web::Web {
 }
 
 /// Which browser drives ```browse``` and reads the pages a plain fetch can't
-/// (Settings › Research; the Python app's `browser` setting).
+/// (Settings › Research; the Python app's `browser` setting): "auto",
+/// "camoufox", "brave", "chromium", "chrome", or a path.
 pub fn browser_pref(s: &Settings) -> String {
-    s.str("browser").map(str::trim).filter(|b| !b.is_empty() && !b.eq_ignore_ascii_case("camoufox"))
-        .unwrap_or("auto").to_string()
+    s.str("browser").map(str::trim).filter(|b| !b.is_empty()).unwrap_or("auto").to_string()
 }
 
 /// Language servers, with the user's choices (settings `lsp_servers`:

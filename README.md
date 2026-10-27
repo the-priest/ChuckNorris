@@ -224,23 +224,39 @@ first if you have one, then four public instances at once, with DuckDuckGo as a 
 at most two results per site, so one site can't crowd out the rest.
 
 **Reading pages.** ```` ```fetch``` ```` reads a page as text, a part at a time. Some pages only
-fill in with JavaScript, or show a bot check that clears in a real browser. Those are read in the
-browser instead, and Chuck says so. Some protections apply to every page:
+fill in with JavaScript, or show a bot check that clears in a real browser. Those are read in a
+browser instead, and Chuck says so. That browser is **[Camoufox](https://camoufox.com)** when it is
+installed (the installer sets it up). Camoufox is a Firefox build that presents a consistent,
+real-looking fingerprint, so sites can't tell it from a person, and it gets past far more bot checks
+than a headless Chrome. Some protections apply to every page, whichever browser reads it:
 
-- Fetches never reach local or private addresses, even through redirects.
+- Fetches never reach local or private addresses. Every request the page makes is checked,
+  including redirects, scripts, images and WebSockets.
+- Nothing is downloaded, service workers don't run, and WebRTC can't reveal your machine's
+  addresses.
 - Text from pages is treated as information, never as instructions.
 
 Every search and page read is listed with its link in the panel's **Research** section.
 
 **A real browser for checking work.** When there's something with a web UI to check, the Lead uses
 ```` ```browse page.html 1024x640``` ````. That loads it in your own Brave, Chromium or Chrome
-(headless, with a throwaway profile) and lets it click, type, press keys and scroll. It reports:
+(headless, with a throwaway profile), or in Camoufox if you pick it in Settings, and lets it click,
+type, press keys and scroll. It reports:
 
 - every uncaught exception, console error and failed request, with its file and line;
 - the text on the page;
 - a screenshot, which GLM-5.3-Flash looks at and describes in a few lines.
 
 A clean page counts as evidence; a page with errors never does.
+
+In a restricted folder the page sees only that folder's files. Chromium is told so directly. For
+Camoufox, the folder is served at a private, random address on your machine that has nothing else.
+
+**Which browser** is set in Settings › Research:
+
+- **Automatic** (the default): Camoufox reads blocked pages, and Brave, Chromium or Chrome checks
+  the Lead's pages. Each falls back to the other.
+- **Camoufox**, **Brave**, **Chromium** or **Chrome**: that one browser for both jobs.
 
 ## Daemons and reminders
 
@@ -388,8 +404,10 @@ history carry over. What it does, in order:
 2. Installs Rust 1.88 or newer if yours is older or missing: your distro's package, or rustup into
    `~/.cargo`, downloaded to a file first and never piped into a shell.
 3. Builds Chuck from the exact commit it downloaded, into `~/.local/bin/chuck`.
-4. Sets up the local voice models (about 600 MB). `CHUCK_VOICE=0` skips this.
-5. Writes the menu entry, the icon and the `chucknorris` launcher.
+4. Sets up Camoufox in an environment of its own, `~/.local/share/chucknorris/camoufox` (about
+   300 MB). No system Python is touched. `CHUCK_CAMOUFOX=0` skips this.
+5. Sets up the local voice models (about 600 MB). `CHUCK_VOICE=0` skips this.
+6. Writes the menu entry, the icon and the `chucknorris` launcher.
 
 Prefer to read it first? Clone and run it:
 
@@ -409,7 +427,7 @@ better way, because it also sets up the menu entry, bubblewrap and voice.
 - [bubblewrap](https://github.com/containers/bubblewrap), for the jails. The installer adds it.
 - A [SiliconFlow](https://siliconflow.com) API key.
 - Optional:
-  - Brave, Chromium or Chrome, for page checks and script-only pages;
+  - Brave, Chromium or Chrome, for checking the Lead's pages (Camoufox can do it too);
   - a language server, for code intelligence.
 
 **Updating.** Chuck checks once a day whether a newer version is out (Settings can turn that off).
@@ -423,7 +441,8 @@ what opens only if the Rust build fails, and the installer says so loudly.
 
 ```bash
 rm -f ~/.local/bin/chuck ~/.local/bin/chucknorris ~/.local/share/applications/org.thepriest.chucknorris.desktop
-rm -rf ~/.local/share/chucknorris ~/.cache/chuck      # app data, chats, checkpoints, build cache
+rm -rf ~/.local/share/chucknorris ~/.cache/chuck      # app data, chats, checkpoints, Camoufox, build cache
+rm -rf ~/.cache/camoufox                              # Camoufox's browser
 rm -rf ~/.config/chucknorris                          # settings, API key, daemons, standing rules
 rm -f ~/.local/share/icons/hicolor/*/apps/org.thepriest.chucknorris.png
 ```
@@ -439,7 +458,7 @@ The gear icon, or Ctrl+P → Settings.
 | Reasoning | How much the models may think (off to 32k tokens). The longest thinking time. When to give up on a silent connection. |
 | Spending limits | Daily and monthly, across everything (0 = no limit). |
 | This folder's access | The five modes in [Safety](#safety), per folder. |
-| Research | Your own SearXNG. A proxy for web reads (e.g. Tor's `socks5://127.0.0.1:9050`). Which browser to use, and whether to read blocked pages in it. |
+| Research | Your own SearXNG. A proxy for web reads (e.g. Tor's `socks5://127.0.0.1:9050`; Camoufox then also takes the proxy's time zone and language). Which browser to use (Automatic, Camoufox, Brave, Chromium, Chrome), and whether to read blocked pages in it. |
 | Voice | Read replies aloud, the engine and voice, and send what you say right away. Each part shows which engine is in use and why. |
 | MCP servers | Each server's state and tool count, and a reload button. |
 | Chuck | The version, and the daily update check. |
@@ -457,6 +476,7 @@ The gear icon, or Ctrl+P → Settings.
 | `~/.local/share/chucknorris/resume/` | Paused jobs, ready for Keep going |
 | `~/.local/share/chucknorris/memory/` | Remembered facts |
 | `~/.local/share/chucknorris/spend.json` | Spending history behind the limits |
+| `~/.local/share/chucknorris/camoufox/` | Camoufox's own Python environment (its browser is in `~/.cache/camoufox`) |
 | `~/.local/state/chucknorris/chuck.log` | Errors, with keys blanked (`/doctor` shows the latest) |
 
 ## When something's wrong
@@ -469,6 +489,7 @@ and language servers, disk space and the evidence chain, and says what to do abo
 | **CAN'T START: the monthly spending limit is reached** | Your own limit. Press **Spending limits…** to raise it, or wait for the new month. |
 | **INCOMPLETE · … budget** | The job's cap ran out. Press **Keep going**; everything is kept. |
 | A command fails with *No such file* for a path outside the project | You pressed Refuse, or the path doesn't exist. Commands only see the folder plus what you allowed. |
+| `/doctor`: *Blocked pages: read with Brave…* | Camoufox isn't set up, so pages that turn bots away are read with Chromium. Re-run the installer; what went wrong is in `~/.local/share/chucknorris/camoufox-setup.log`. |
 | *bubblewrap isn't installed* | Install it (`sudo pacman -Syu bubblewrap` / `sudo apt install bubblewrap`). Until then, sandboxed modes refuse to run commands. |
 | The installer says the Rust build failed | The last lines of the error are shown, and the whole log is in `~/.local/share/chucknorris/rust-build.log`. The older Python window opens meanwhile. |
 | *Needs GTK 4.14+ and libadwaita 1.5+* | Your distribution release is too old for the Rust app. |
@@ -503,7 +524,7 @@ sessions the way people have them. `./run_tests.sh` runs the older Python app's 
 | `chuck-sandbox` | bubblewrap jails, access modes, the critical-command classifier |
 | `chuck-tools` | the block parser, files, commands, copy-on-write workspaces, search |
 | `chuck-store` | settings, ledger, spending, checkpoints, memory, logs |
-| `chuck-web` | search, page reading, the headless browser |
+| `chuck-web` | search, page reading, the headless browsers (Chromium over DevTools, Camoufox through its bridge) |
 | `chuck-code` | language servers, the repo map, ranked code search |
 | `chuck-mcp` | the MCP client |
 | `chuck-daemon` | triggers, reminders, the inbox |

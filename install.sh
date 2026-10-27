@@ -49,7 +49,7 @@ else
 step "installing GTK4 + tools (screenshot, polkit, cleanup, GPU, pkgfile, voice, video)"
 SESS="${XDG_SESSION_TYPE:-}"; DE="${XDG_CURRENT_DESKTOP:-}"
 if command -v pacman >/dev/null; then
-  PKGS="gcc pkgconf python-gobject python-cairo gtk4 libadwaita adwaita-icon-theme polkit pciutils pacman-contrib pkgfile espeak-ng yt-dlp alsa-utils python-pip whois bind traceroute wget openbsd-netcat nodejs shellcheck ruff bubblewrap"
+  PKGS="gcc pkgconf python-gobject python-cairo gtk4 libadwaita adwaita-icon-theme polkit pciutils pacman-contrib pkgfile espeak-ng yt-dlp alsa-utils python-pip whois bind traceroute wget openbsd-netcat nodejs shellcheck ruff bubblewrap gtk3 dbus-glib libxt nss"
   if [ "$SESS" = "wayland" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then PKGS="$PKGS grim"; else PKGS="$PKGS scrot"; fi
   case "$DE" in *KDE*|*kde*|*plasma*|*Plasma*) PKGS="$PKGS spectacle" ;; esac
   # shellcheck disable=SC2086
@@ -64,11 +64,16 @@ elif command -v apt-get >/dev/null; then
   if [ "$SESS" = "wayland" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then PKGS="$PKGS grim"; else PKGS="$PKGS scrot"; fi
   # shellcheck disable=SC2086
   sudo apt-get install -y $PKGS || die "apt install failed"
+  # what Camoufox (Firefox) needs; a name a release doesn't have must not stop the install
+  sudo apt-get install -y libgtk-3-0 libdbus-glib-1-2 libxt6 libasound2 libnss3 >/dev/null 2>&1 \
+    || info "some of Camoufox's libraries didn't install (libgtk-3-0 libdbus-glib-1-2 libxt6 libasound2) — it may not start"
 elif command -v dnf >/dev/null; then
   PKGS="gcc pkgconf-pkg-config gtk4-devel libadwaita-devel python3-gobject python3-cairo gtk4 libadwaita adwaita-icon-theme polkit pciutils espeak-ng yt-dlp whois bind-utils traceroute wget nmap-ncat bubblewrap"
   if [ "$SESS" = "wayland" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then PKGS="$PKGS grim"; else PKGS="$PKGS scrot"; fi
   # shellcheck disable=SC2086
   sudo dnf install -y $PKGS || die "dnf install failed"
+  sudo dnf install -y gtk3 dbus-glib libXt alsa-lib nss >/dev/null 2>&1 \
+    || info "some of Camoufox's libraries didn't install (gtk3 dbus-glib libXt alsa-lib) — it may not start"
 else
   die "unknown package manager — install python3-gi, GTK4, libadwaita, polkit, pciutils, espeak-ng, yt-dlp, grim/scrot"
 fi
@@ -84,16 +89,29 @@ fi
 command -v shellcheck >/dev/null || info "shellcheck not found — shell lint falls back to 'bash -n' (syntax only)"
 mkdir -p "${DATA_DIR}/voices"
 
-# Optional: Camoufox, a Firefox build sites can't fingerprint, for ```browse```.
-# CHUCK_CAMOUFOX=1 ./install.sh   (then pick Camoufox in Settings > Agent > Browser)
-if [ "${CHUCK_CAMOUFOX:-0}" = "1" ]; then
-  step "installing Camoufox (optional browser)"
-  if pip install --user --break-system-packages -U 'camoufox[geoip]' >/dev/null 2>&1 \
-     || pip install --user -U 'camoufox[geoip]' >/dev/null 2>&1; then
-    python3 -m camoufox fetch >/dev/null 2>&1 && ok "Camoufox ready" \
-      || info "Camoufox installed, but its browser download failed — run: python3 -m camoufox fetch"
+# Camoufox: a Firefox build sites can't tell from a person, the browser Chuck
+# reads blocked pages with. In an environment of its own (no system Python is
+# touched); an update from inside Chuck only sets it up if it isn't there.
+# CHUCK_CAMOUFOX=0 skips it.
+CF_VENV="${DATA_DIR}/camoufox"
+if [ "${CHUCK_CAMOUFOX:-1}" = "1" ]; then
+  if [ "${CHUCK_DEPS:-1}" = "0" ] && [ -x "${CF_VENV}/bin/python" ] \
+     && "${CF_VENV}/bin/python" -c "import camoufox.sync_api" >/dev/null 2>&1; then
+    info "Camoufox: already set up"
   else
-    info "Camoufox install skipped (pip failed) — browse will use Brave/Chromium"
+    step "setting up Camoufox (the browser for pages that turn bots away; about 300 MB)"
+    CF_LOG="${DATA_DIR}/camoufox-setup.log"
+    if { [ -x "${CF_VENV}/bin/python" ] || python3 -m venv "$CF_VENV"; } >"$CF_LOG" 2>&1 \
+       && "${CF_VENV}/bin/python" -m pip install -q -U pip >>"$CF_LOG" 2>&1 \
+       && "${CF_VENV}/bin/python" -m pip install -q -U 'camoufox[geoip]' >>"$CF_LOG" 2>&1; then
+      if "${CF_VENV}/bin/python" -m camoufox fetch >>"$CF_LOG" 2>&1; then
+        ok "Camoufox ready"
+      else
+        info "Camoufox is installed, but its browser didn't download — run: ${CF_VENV}/bin/python -m camoufox fetch"
+      fi
+    else
+      info "Camoufox couldn't be set up (see ${CF_LOG}) — Chuck uses Brave/Chromium/Chrome instead"
+    fi
   fi
 fi
 BROWSER_FOUND=""

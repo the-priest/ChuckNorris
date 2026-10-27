@@ -66,7 +66,7 @@ fn a_broken_page_reports_its_errors_and_acts() {
     let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
     let Some(exe) = exe() else { return };
     let port = serve();
-    let mut o = Options::new(exe);
+    let mut o = Options::new(browser::Engine::Chromium(exe));
     o.size = (900, 600);
     let actions: Vec<String> = ["click #b", "click #b", "click #i", "type hi", "press Enter", "eval document.getElementById('n').textContent",
         "click #nothing-here", "dance"].iter().map(|s| s.to_string()).collect();
@@ -94,7 +94,7 @@ fn script_pages_and_bot_walls_are_read() {
     let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
     let Some(exe) = exe() else { return };
     let port = serve();
-    let o = Options::new(exe);
+    let o = Options::new(browser::Engine::Chromium(exe));
     let (r, blocked) = browser::read_page(&format!("http://127.0.0.1:{port}/spa"), &o).unwrap();
     assert!(!blocked && r.text.contains("forty-two"), "{}", r.text);
     let t = std::time::Instant::now();
@@ -109,7 +109,7 @@ fn what_the_page_may_reach() {
     let Some(exe) = exe() else { return };
     let port = serve();
     // research: never a local address, not even the first one
-    let mut o = Options::new(exe.clone());
+    let mut o = Options::new(browser::Engine::Chromium(exe.clone()));
     o.net = Net::Public(chuck_web::Proxy::Env);
     let e = browser::browse(&format!("http://127.0.0.1:{port}/"), &[], &o).unwrap_err();
     assert!(e.contains("may not be reached"), "{e}");
@@ -118,7 +118,7 @@ fn what_the_page_may_reach() {
     std::fs::create_dir_all(&d).unwrap();
     std::fs::write(d.join("index.html"), format!(r#"<title>Offline</title><img src="http://127.0.0.1:{port}/px.png">
         <script>fetch("http://127.0.0.1:{port}/x").catch(e => console.log("fetch refused"))</script>"#)).unwrap();
-    let mut o = Options::new(exe.clone());
+    let mut o = Options::new(browser::Engine::Chromium(exe.clone()));
     o.net = Net::Offline;
     o.base = Some(d.clone());
     o.files = Files { root: Some(d.clone()), hidden: vec![] };
@@ -138,7 +138,7 @@ fn what_the_page_may_reach() {
 fn nothing_is_left_running() {
     let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
     let Some(exe) = exe() else { return };
-    let mut o = Options::new(exe);
+    let mut o = Options::new(browser::Engine::Chromium(exe));
     o.screenshot = false;
     let before = chrome_count();
     for _ in 0..3 {

@@ -16,6 +16,11 @@ Chuck is now a Rust app (`crates/`), and the installer puts it over any earlier 
 - Once criteria exist, the Lead can't end a job with a plain "done" in prose. A real file in `/tmp`
   counts as outside the folder.
 - A new README, and new screenshots of the Rust app.
+- Camoufox reads pages that turn bots away. It is set up by the installer, picked automatically,
+  and checked request by request like Chromium. A page from a restricted folder is served privately,
+  so it sees only that folder's files.
+- Three bot-check markers (Cloudflare's `cf-browser-verification` among them) never matched: they
+  sat after a line break in a raw string. They match now.
 - The Python app stays installed as the fallback. It now offers the switch to the Rust app.
 
 ## Unreleased (v17, in progress)
