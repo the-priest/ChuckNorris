@@ -53,10 +53,16 @@ impl Halt {
 #[derive(Clone, Debug, Default)]
 pub struct Convo {
     pub msgs: Vec<Value>,
+    /// Characters of old output folded away to keep calls cheap.
+    pub elided: usize,
     /// The task as given, kept apart so trimming notes never touch it.
     first: String,
     trimmed: usize,
 }
+
+/// Turns kept whole at the end of a conversation.
+const KEEP_RECENT: usize = 6;
+const ELIDED: &str = "elided to keep the context small";
 
 /// Keep the head and the tail of an over-long message (errors live at the
 /// end, what was asked lives at the start).
@@ -79,7 +85,7 @@ fn squeeze(s: &str, max: usize) -> String {
 impl Convo {
     pub fn new(system: &str, first: &str) -> Convo {
         Convo { msgs: vec![json!({"role": "system", "content": system}), json!({"role": "user", "content": first})],
-                first: first.to_string(), trimmed: 0 }
+                elided: 0, first: first.to_string(), trimmed: 0 }
     }
 
     pub fn user(&mut self, text: &str) {
@@ -94,10 +100,51 @@ impl Convo {
         self.msgs.iter().map(|m| m["content"].as_str().map_or(0, str::len)).sum()
     }
 
-    /// Fit the context: drop the oldest assistant/user pairs (never the
-    /// system prompt, the task, or the latest exchange); if one message is
+    /// Keep the context cheap without losing what matters: past half the
+    /// limit, long tool output and long replies older than the last few
+    /// turns shrink to their head and a note — all in one go, so the API's
+    /// prompt cache (which bills a repeated prefix at a fraction) is broken
+    /// only once per compaction, not on every call. Recent turns, the system
+    /// prompt and the task are never touched; files are on disk to re-read.
+    fn compact(&mut self, soft: usize) -> usize {
+        if self.chars() <= soft || self.msgs.len() <= 2 + KEEP_RECENT {
+            return 0;
+        }
+        let mut saved = 0;
+        let end = self.msgs.len() - KEEP_RECENT;
+        for m in &mut self.msgs[2..end] {
+            let text = m["content"].as_str().unwrap_or("").to_string();
+            let limit = if m["role"] == "assistant" { 3000 } else { 1500 };
+            if text.len() <= limit || text.contains(ELIDED) {
+                continue;
+            }
+            let mut cut = 600;
+            while !text.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            let what = if m["role"] == "assistant" { "your earlier reply (what it wrote is on disk)" } else {
+                "tool output — re-read or re-run if you need it again" };
+            let short = format!("{}\n[{ELIDED}: {} more characters of {what}]", &text[..cut], text.len() - cut);
+            saved += text.len() - short.len();
+            m["content"] = Value::String(short);
+        }
+        self.elided += saved;
+        saved
+    }
+
+    /// Fit the context: compact old output first (see `compact`); then, if
+    /// it's still too big, drop the oldest assistant/user pairs (never the
+    /// system prompt, the task, or the latest exchange) down to three
+    /// quarters of the limit, so this too happens rarely; if one message is
     /// still too big on its own, keep its head and tail.
     pub fn fit(&mut self, max_chars: usize) {
+        self.compact(max_chars / 2);
+        if self.chars() > max_chars {
+            while self.chars() > max_chars * 3 / 4 && self.msgs.len() > 4 {
+                self.msgs.drain(2..4);
+                self.trimmed += 2;
+            }
+        }
         while self.chars() > max_chars && self.msgs.len() > 4 {
             self.msgs.drain(2..4);
             self.trimmed += 2;
@@ -189,7 +236,8 @@ pub fn think(ctx: &Ctx, id: AgentId, model: &str, convo: &Convo) -> Result<Strin
         if let Some(s) = &ctx.cfg.spend {
             s.add(usd);
         }
-        ctx.events.emit(Event::Usage { id, tokens: usage.prompt + usage.completion, usd });
+        ctx.events.emit(Event::Usage { id, tokens: usage.prompt + usage.completion, usd, prompt: usage.prompt,
+                                       cached: usage.cached });
         text.push_str(&out.text);
         if !out.was_cut() || round == 2 {
             break;
@@ -373,6 +421,27 @@ mod tests {
         let first = c.msgs[1]["content"].as_str().unwrap();
         assert!(first.starts_with(task), "{first}");
         assert_eq!(first.matches("trimmed").count(), 1);
+    }
+
+    #[test]
+    fn old_output_is_folded_in_one_batch_and_recent_turns_stay_whole() {
+        let mut c = Convo::new("sys", "the task");
+        for i in 0..10 {
+            c.assistant(&format!("reply {i}"));
+            c.user(&format!("OUTPUT{i} {}", "o".repeat(5000)));
+        }
+        let before = c.chars();
+        c.fit(60_000); // soft limit 30k: compaction, no dropping
+        assert!(c.chars() < before / 2, "{} vs {before}", c.chars()); // the last 3 outputs stay whole
+        assert_eq!(c.msgs.len(), 22, "nothing dropped");
+        assert!(c.msgs[3]["content"].as_str().unwrap().starts_with("OUTPUT0") &&
+                c.msgs[3]["content"].as_str().unwrap().contains("elided"));
+        let last = c.msgs.last().unwrap()["content"].as_str().unwrap();
+        assert!(last.len() > 5000 && !last.contains("elided"), "the latest output is whole");
+        // a second fit with nothing new changes nothing (the cached prefix stays the same)
+        let snapshot = c.msgs.clone();
+        c.fit(60_000);
+        assert_eq!(c.msgs, snapshot);
     }
 
     #[test]

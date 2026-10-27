@@ -87,6 +87,9 @@ struct State {
     last_ps: Vec<ProcInfo>,
     tokens: u64,
     spent: f64,
+    /// Prompt tokens sent, and how many of them the API's cache served.
+    prompt: u64,
+    cached: u64,
     unsaved: bool,
 }
 
@@ -457,9 +460,11 @@ fn on_event(st: &mut State, e: Event, shared: &Shared) {
             st.panel.log(&who, format!("! {text}"));
             st.act(format!("<span foreground=\"#F5B454\">! {}: {}</span>", esc(&who), esc(&text)));
         }
-        Event::Usage { tokens, usd, .. } => {
+        Event::Usage { tokens, usd, prompt, cached, .. } => {
             st.tokens += tokens;
             st.spent += usd;
+            st.prompt += prompt;
+            st.cached += cached;
             st.refresh_header();
         }
         Event::Gate { id, task: None, phase, unmet } if st.is_lead(id) => {
@@ -699,8 +704,9 @@ fn tick(shared: &Shared) {
     let s = Settings::load();
     let now = chuck_sandbox::now_secs();
     let ps = st.last_ps.clone();
+    let cache = (st.prompt > 0).then(|| st.cached as f64 / st.prompt as f64);
     st.panel.set_spend(&ps, spend.today(now), spend.month(now), s.num("budget_day_usd", 0.0, 0.0, 1e5),
-                       s.num("budget_month_usd", 0.0, 0.0, 1e6));
+                       s.num("budget_month_usd", 0.0, 0.0, 1e6), cache);
     st.panel.tick();
 }
 
@@ -1089,7 +1095,8 @@ pub fn build(app: &adw::Application, opts: Options) {
                   stop: stop.clone(), status, subtitle, meter, folder_btn: folder_btn.clone(), new_btn: new_btn.clone() };
     let shared: Shared = Rc::new(RefCell::new(State {
         ui, panel, opts: opts.clone(), folder: None, saved: Saved::default(), running: None, names: HashMap::new(),
-        models: HashMap::new(), lane: None, last_ps: Vec::new(), tokens: 0, spent: 0.0, unsaved: false,
+        models: HashMap::new(), lane: None, last_ps: Vec::new(), tokens: 0, spent: 0.0, prompt: 0, cached: 0,
+        unsaved: false,
     }));
     *slot.borrow_mut() = Some(shared.clone());
     shared.borrow_mut().open_folder(folder, &shared);

@@ -34,7 +34,9 @@ pub enum Event {
     Ask { id: AgentId, question: String },
     /// A critical command waits for the user's explicit yes.
     Confirm { id: AgentId, command: String, why: String },
-    Usage { id: AgentId, tokens: u64, usd: f64 },
+    /// One model call's bill: all tokens, the prompt part of them, and how
+    /// much of the prompt the API's cache served (billed at a fraction).
+    Usage { id: AgentId, tokens: u64, usd: f64, prompt: u64, cached: u64 },
     AgentEnded { id: AgentId, status: String },
     /// The lead's plan as it stands: (step, done).
     Plan { steps: Vec<(String, bool)> },

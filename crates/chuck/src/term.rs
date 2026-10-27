@@ -41,6 +41,8 @@ pub struct View {
     names: HashMap<AgentId, (String, Role)>,
     tokens: u64,
     usd: f64,
+    prompt: u64,
+    cached: u64,
     last_gate: Option<(String, usize)>,
     out: Box<dyn Write>,
 }
@@ -52,7 +54,7 @@ fn one_line(s: &str, n: usize) -> String {
 
 impl View {
     pub fn new(color: bool, verbose: bool, out: Box<dyn Write>) -> View {
-        View { st: Style { color }, verbose, names: HashMap::new(), tokens: 0, usd: 0.0, last_gate: None, out }
+        View { st: Style { color }, verbose, names: HashMap::new(), tokens: 0, usd: 0.0, prompt: 0, cached: 0, last_gate: None, out }
     }
 
     pub fn header(&mut self, text: &str) {
@@ -177,9 +179,11 @@ impl View {
             Event::Ask { question, .. } => format!("\n{} {}", st.bold("? the lead asks:"), question.trim()),
             Event::Confirm { command, why, .. } => format!("\n{} {}\n  {}\n  {}", st.bad(&st.bold("! CRITICAL")),
                 st.bold("the lead wants to run:"), command.trim(), st.dim(why)),
-            Event::Usage { tokens, usd, .. } => {
+            Event::Usage { tokens, usd, prompt, cached, .. } => {
                 self.tokens += tokens;
                 self.usd += usd;
+                self.prompt += prompt;
+                self.cached += cached;
                 return;
             }
             Event::AgentEnded { id, status } => {
@@ -196,7 +200,12 @@ impl View {
 
     fn ending(&self, o: &Outcome) -> String {
         let st = &self.st;
-        let spend = st.dim(&format!("{} tokens · {}", fmt_tokens(self.tokens), fmt_usd(self.usd)));
+        let cache = if self.prompt > 0 && self.cached > 0 {
+            format!(" · {:.0}% of the prompt from cache", 100.0 * self.cached as f64 / self.prompt as f64)
+        } else {
+            String::new()
+        };
+        let spend = st.dim(&format!("{} tokens · {}{cache}", fmt_tokens(self.tokens), fmt_usd(self.usd)));
         match o {
             Outcome::Done { summary } => format!("\n{}  {spend}\n{}", st.good(&st.bold("DONE")), summary.trim()),
             Outcome::Answered { .. } => format!("\n{spend}"),
@@ -245,7 +254,7 @@ mod tests {
         v.show(&Event::Said { id: lead, text: "On it.".into() });
         v.show(&Event::Said { id: w, text: "worker chatter".into() });
         v.show(&Event::Action { id: w, tool: "write".into(), arg: "a.rs".into(), ok: true, summary: "created a.rs (+3 −0)".into() });
-        v.show(&Event::Usage { id: w, tokens: 1500, usd: 0.001 });
+        v.show(&Event::Usage { id: w, tokens: 1500, usd: 0.001, prompt: 1200, cached: 600 });
         v.show(&Event::Finished(Outcome::Paused { gaps: vec!["c1 has no evidence".into()] }));
         let s = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
         assert!(s.contains("+ glm-1 (GLM-5.3-Flash) on t1"));

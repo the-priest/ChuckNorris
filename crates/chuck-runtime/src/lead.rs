@@ -111,6 +111,18 @@ fn wait_answer(rx: &Mutex<Receiver<String>>, stop: &AtomicBool, kernel: &chuck_c
     }
 }
 
+/// A reply that announces work instead of doing it ("Let me check…",
+/// "I'll start with:"), which would otherwise end the job as an answer.
+pub fn promised(said: &str) -> bool {
+    let t = said.trim();
+    if t.ends_with(':') {
+        return true;
+    }
+    let tail: String = t.chars().rev().take(240).collect::<Vec<_>>().into_iter().rev().collect::<String>().to_lowercase();
+    ["let me ", "i'll ", "i will ", "i'm going to", "i am going to", "next, i", "first, i", "now i'll", "let's "]
+        .iter().any(|p| tail.contains(p))
+}
+
 fn defects_of(body: &str) -> Vec<String> {
     body.lines().map(str::trim).filter(|l| l.starts_with(['-', '*', '•']))
         .map(|l| l.trim_start_matches(['-', '*', '•']).trim().to_string()).filter(|l| !l.is_empty()).collect()
@@ -938,6 +950,7 @@ impl<'a> LeadRun<'a> {
         let mut progress = Progress::default();
         let mut replans = 0;
         let mut warned_term = false;
+        let mut nudged = false;
         for _ in 0..ctx.cfg.lead_steps {
             if ctx.kernel.terminating(self.id) && !warned_term {
                 warned_term = true;
@@ -1002,6 +1015,11 @@ impl<'a> LeadRun<'a> {
                 let reviews = self.awaiting_review();
                 if said.trim().is_empty() {
                     fb.push("[your reply was empty — answer the user, or carry on with the tools]".into());
+                } else if promised(&said) && !nudged {
+                    // "Let me look at the project first." with no tool: not an answer — don't stop there
+                    nudged = true;
+                    fb.push("[you said what you'd do next but used no tool, so nothing happened — do it now with \
+                        the tools. If that reply was your whole answer to the user, say so plainly instead.]".into());
                 } else if !self.mutated && self.tasks.is_empty() {
                     return Outcome::Answered { text: said.trim().to_string() };
                 } else if !reviews.is_empty() {
@@ -1076,6 +1094,15 @@ mod tests {
         assert_eq!(a.brief, "Add retry to fetch().\nKeep the API.");
         assert!(parse_assign("glm", "title: x\nbrief: do it").is_err(), "criteria are required");
         assert!(parse_assign("someone", "criteria:\n- a").is_err());
+    }
+
+    #[test]
+    fn announcing_work_is_not_an_answer() {
+        assert!(promised("Let me look at the project structure first."));
+        assert!(promised("Here's the plan:"));
+        assert!(promised("I'll run the tests now."));
+        assert!(!promised("main.rs is an empty program: it defines main and does nothing."));
+        assert!(!promised("The parser fails because int('') raises ValueError."));
     }
 
     #[test]

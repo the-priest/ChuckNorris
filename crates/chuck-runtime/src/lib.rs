@@ -70,8 +70,9 @@ impl Default for RuntimeConfig {
             fleet: FleetConfig::default(),
             reasoning: Reasoning::default(),
             max_tokens: 8192,
-            lead_steps: 80,
-            worker_steps: 50,
+            // generous: work ends when it's done (or out of budget), not on a step count
+            lead_steps: 200,
+            worker_steps: 120,
             cmd_timeout: Duration::from_secs(300),
             context_chars: 360_000,
             job_quota: Quota { tokens: Some(4_000_000), usd: Some(2.0), seconds: None },

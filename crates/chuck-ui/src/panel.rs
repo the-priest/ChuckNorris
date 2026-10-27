@@ -562,7 +562,8 @@ impl Panel {
 
     // ── spend ──
 
-    pub fn set_spend(&self, ps: &[ProcInfo], today: f64, month: f64, day_limit: f64, month_limit: f64) {
+    pub fn set_spend(&self, ps: &[ProcInfo], today: f64, month: f64, day_limit: f64, month_limit: f64,
+                     cache: Option<f64>) {
         let job_usd: f64 = ps.iter().filter(|p| p.ppid.is_none()).map(|p| p.usd).sum::<f64>().max(0.0);
         let job_tok: u64 = ps.iter().filter(|p| p.ppid.is_none()).map(|p| p.tokens).sum();
         let lim = |x: f64, l: f64| if l > 0.0 { format!("{} of {}", fmt_usd(x), fmt_usd(l)) } else { fmt_usd(x) };
@@ -574,6 +575,10 @@ impl Panel {
         self.spend.body.append(&label(&format!("This job: {} · {} tokens", fmt_usd(job_usd), fmt_tokens(job_tok)), &["panel-text"]));
         self.spend.body.append(&label(&format!("Today: {}", lim(today, day_limit)), &["panel-text"]));
         self.spend.body.append(&label(&format!("This month: {}", lim(month, month_limit)), &["panel-text"]));
+        if let Some(c) = cache {
+            self.spend.body.append(&label(&format!("Prompt cache: {:.0}% of what was sent was billed at the cached \
+                price", c * 100.0), &["panel-meta"]));
+        }
         if !ps.is_empty() {
             self.spend.body.append(&label("BY AGENT", &["panel-sub"]));
             let mut rows: Vec<&ProcInfo> = ps.iter().collect();
