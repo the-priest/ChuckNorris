@@ -5,8 +5,11 @@
 #  One line (this is the rust-rewrite branch; it installs from itself):
 #    curl -fsSL https://raw.githubusercontent.com/the-priest/ChuckNorris/rust-rewrite/install.sh | bash
 #
-#  Also builds `chuck`, the Rust fleet runtime (1 Lead + 4 DeepSeek + 4 GLM
-#  workers on SiliconFlow), into ~/.local/bin. CHUCK_RUST=0 skips that.
+#  On this branch Chuck IS the Rust app: it is built from this branch into
+#  ~/.local/bin/chuck, and the menu entry and the `chucknorris` command open
+#  it, replacing whatever Chuck was installed before. The Python app is still
+#  installed alongside (the voice setup uses it); it is what opens only if the
+#  Rust build fails, and the installer says so loudly. CHUCK_RUST=0 skips it.
 #
 #  Installs GTK4 + libadwaita (+ the PyGObject cairo bridge), screenshot tool,
 #  polkit, pacman-contrib, pciutils, pkgfile, espeak-ng (voice) and yt-dlp
@@ -191,20 +194,23 @@ else
 fi
 
 
-# The Rust fleet runtime: `chuck run "task"` (headless, today) — the window
-# above stays the Python app until the Rust window is finished.
+# Chuck, the Rust app (this branch's Chuck).
+RUST_MIN="1.88.0"     # what its dependencies need (Cargo.toml's rust-version)
+RUST_WHY=""
 if [ "${CHUCK_RUST:-1}" = "1" ]; then
-  step "building chuck, the Rust fleet runtime (a few minutes the first time)"
+  step "building Chuck (Rust) from the ${BRANCH} branch (a few minutes the first time)"
   cargo_ok() {
     command -v cargo >/dev/null || return 1
     v="$(cargo --version 2>/dev/null | awk '{print $2}')"
-    [ -n "$v" ] && [ "$(printf '%s\n1.82.0\n' "$v" | sort -V | head -n 1)" = "1.82.0" ]
+    [ -n "$v" ] && [ "$(printf '%s\n%s\n' "$v" "$RUST_MIN" | sort -V | head -n 1)" = "$RUST_MIN" ]
   }
   [ -f "${HOME}/.cargo/env" ] && . "${HOME}/.cargo/env"
-  # rustup without a toolchain yet: give it one (installing the distro's
-  # `rust` next to rustup would conflict)
+  # rustup with no toolchain, or one that's too old: bring stable up to date
+  # (installing the distro's `rust` next to rustup would conflict)
   if ! cargo_ok && command -v rustup >/dev/null; then
-    rustup default stable >/dev/null 2>&1 || rustup toolchain install stable --profile minimal >/dev/null 2>&1 || true
+    info "updating Rust with rustup (Chuck needs ${RUST_MIN} or newer)"
+    rustup toolchain install stable --profile minimal >/dev/null 2>&1 || rustup update stable >/dev/null 2>&1 || true
+    rustup default stable >/dev/null 2>&1 || true
   fi
   if ! cargo_ok && ! command -v rustup >/dev/null; then
     if command -v pacman >/dev/null; then sudo pacman -S --needed --noconfirm rust >/dev/null 2>&1 || true
@@ -212,9 +218,9 @@ if [ "${CHUCK_RUST:-1}" = "1" ]; then
     fi
   fi
   if ! cargo_ok; then
-    # the distro's Rust is missing or older than 1.82: the official rustup,
+    # the distro's Rust is missing or too old: the official rustup,
     # downloaded to a file first (never piped into a shell), user-local only
-    info "Rust 1.82+ not found — installing it with rustup into ~/.cargo"
+    info "Rust ${RUST_MIN}+ not found — installing it with rustup into ~/.cargo"
     RUSTUP="${SRC_TMP}/rustup-init.sh"
     if curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs -o "$RUSTUP" \
        && sh "$RUSTUP" -y --profile minimal --no-modify-path >/dev/null; then
@@ -222,24 +228,30 @@ if [ "${CHUCK_RUST:-1}" = "1" ]; then
     fi
   fi
   if ! cargo_ok; then
-    info "couldn't get Rust 1.82+ — skipped chuck (the window works without it); re-run with Rust installed"
+    RUST_WHY="Rust ${RUST_MIN} or newer couldn't be installed (cargo: $(cargo --version 2>/dev/null || echo none))"
   elif [ -z "$RUST_SRC" ] || [ ! -f "${RUST_SRC}/Cargo.toml" ]; then
-    info "the source archive wasn't available, so chuck can't be built — re-run the installer"
+    RUST_WHY="the source archive of the ${BRANCH} branch couldn't be downloaded"
+  elif ! pkg-config --atleast-version=4.14 gtk4 2>/dev/null || ! pkg-config --atleast-version=1.5 libadwaita-1 2>/dev/null; then
+    RUST_WHY="Chuck needs GTK 4.14+ and libadwaita 1.5+ (found GTK $(pkg-config --modversion gtk4 2>/dev/null || echo none), \
+libadwaita $(pkg-config --modversion libadwaita-1 2>/dev/null || echo none)) — a newer distribution release has them"
   else
     TARGET="${HOME}/.cache/chuck/cargo-target"
-    if ( cd "$RUST_SRC" && CARGO_TARGET_DIR="$TARGET" cargo build --release --locked -p chuck ); then
+    BUILD_LOG="${DATA_DIR}/rust-build.log"
+    if ( cd "$RUST_SRC" && CARGO_NET_RETRY=5 CARGO_TARGET_DIR="$TARGET" cargo build --release --locked -p chuck ) \
+         2>&1 | tee "$BUILD_LOG" | grep -E '^\s*(Compiling chuck|Finished|error)' ; [ "${PIPESTATUS[0]}" = "0" ] \
+       && "${TARGET}/release/chuck" version >/dev/null 2>&1; then
       # replace, never swap under a running copy: a new file, then a rename
       install -m 755 "${TARGET}/release/chuck" "${HOME}/.local/bin/.chuck.new"
       mv -f "${HOME}/.local/bin/.chuck.new" "${HOME}/.local/bin/chuck"
       RUST_OK=1
       ok "$("${HOME}/.local/bin/chuck" version) installed"
     else
-      info "the Rust build failed (output above) — the Chuck window is installed and works without it"
-      info "(the fleet window needs GTK 4.14+ and libadwaita 1.5+)"
+      RUST_WHY="the build failed — the last lines of ${BUILD_LOG}:
+$(grep -E '^error' -A6 "$BUILD_LOG" 2>/dev/null | head -n 20 || tail -n 15 "$BUILD_LOG")"
     fi
   fi
 else
-  info "Rust runtime skipped (CHUCK_RUST=0)"
+  RUST_WHY="skipped (CHUCK_RUST=0)"
 fi
 
 # What "Chuck" opens: the Rust app when it built (this branch's Chuck), the
@@ -252,7 +264,6 @@ if [ "$RUST_OK" = "1" ]; then
 # Chuck (Rust), installed from the ${BRANCH} branch. Re-run the installer to update.
 exec "${HOME}/.local/bin/chuck" "\$@"
 EOF
-  WM_CLASS="org.thepriest.chuck"
   COMMENT="One lead and eight workers on SiliconFlow; work is done only when it is verified"
 else
   cat > "$LAUNCH" <<EOF
@@ -261,7 +272,6 @@ else
 export CHUCK_BRANCH="\${CHUCK_BRANCH:-${BRANCH}}"
 exec python3 "${APP_DIR}/chucknorris.py" "\$@"
 EOF
-  WM_CLASS="org.thepriest.chucknorris"
   COMMENT="A coding and system agent for your desktop: runs commands, edits code, researches, sees screenshots"
 fi
 chmod +x "$LAUNCH"
@@ -273,7 +283,7 @@ GenericName=AI Agent
 Comment=${COMMENT}
 Exec=${LAUNCH}
 Icon=org.thepriest.chucknorris
-StartupWMClass=${WM_CLASS}
+StartupWMClass=org.thepriest.chucknorris
 Terminal=false
 Categories=Utility;System;Development;
 Keywords=arch;cachyos;assistant;agent;code;fleet;
@@ -282,6 +292,9 @@ EOF
 # the separate entry an earlier build of this branch added
 rm -f "${HOME}/.local/share/applications/org.thepriest.chuck.fleet.desktop"
 update-desktop-database "${HOME}/.local/share/applications" 2>/dev/null || true
+# KDE keeps its own menu cache: refresh it so the menu opens the new Chuck now
+command -v kbuildsycoca6 >/dev/null && kbuildsycoca6 >/dev/null 2>&1 || true
+command -v kbuildsycoca5 >/dev/null && kbuildsycoca5 >/dev/null 2>&1 || true
 if [ -f "${ASSET_DIR}/chucknorris-icon.png" ]; then
   # install every generated size so the taskbar/dock picks a crisp one
   for SZ in 512 256 128 64 48 32; do
@@ -300,12 +313,51 @@ fi
 case ":$PATH:" in *":${HOME}/.local/bin:"*) : ;; *)
   info "add to PATH:  export PATH=\"\$HOME/.local/bin:\$PATH\"" ;; esac
 
+# A Chuck window still open from before is the OLD version. A Rust one
+# saves and stops cleanly on SIGTERM, so it is closed; an old Python one is
+# asked about (its unsaved text could be lost), never killed unasked.
+OLD_RUST=""
+for pid in $(pgrep -u "$(id -u)" -x chuck 2>/dev/null); do
+  # a window is `chuck` with no arguments; `chuck run …` in a terminal is someone's job: left alone
+  [ "$(tr '\0' '\n' < "/proc/${pid}/cmdline" 2>/dev/null | wc -l)" -le 1 ] && OLD_RUST="${OLD_RUST} ${pid}"
+done
+OLD_PY=""
+for pid in $(pgrep -u "$(id -u)" -f 'chucknorris\.py' 2>/dev/null); do
+  # only a Python running chucknorris.py, not anything that mentions it
+  argv0="$(tr '\0' '\n' < "/proc/${pid}/cmdline" 2>/dev/null | head -n 1)"
+  argv1="$(tr '\0' '\n' < "/proc/${pid}/cmdline" 2>/dev/null | sed -n 2p)"
+  case "${argv0##*/}" in python*) case "$argv1" in *chucknorris.py) OLD_PY="${OLD_PY} ${pid}" ;; esac ;; esac
+done
+if [ "$RUST_OK" = "1" ] && [ -n "${OLD_RUST// /}" ]; then
+  # shellcheck disable=SC2086
+  kill -TERM $OLD_RUST 2>/dev/null && info "closed the Chuck window that was open (the previous build): open Chuck again"
+fi
+if [ "$RUST_OK" = "1" ] && [ -n "${OLD_PY// /}" ]; then
+  ans="n"
+  # only with a terminal to ask on (opening /dev/tty fails without one)
+  if { exec 3<>/dev/tty; } 2>/dev/null; then
+    printf '%s  The old Chuck window (Python) is still open. Close it now? [Y/n] %s' "$c1" "$c0" >&3
+    read -r ans <&3 || ans="n"
+    exec 3>&-
+    [ -z "$ans" ] && ans="y"
+  fi
+  case "$ans" in
+    y|Y|yes|YES) # shellcheck disable=SC2086
+      kill -TERM $OLD_PY 2>/dev/null && info "closed the old Chuck window" ;;
+    *) info "the old Chuck window (Python) is still open: close it, then open Chuck — it will be the new one" ;;
+  esac
+fi
+
 if [ "$RUST_OK" = "1" ]; then
-  printf '\n%sChuck installed (%s branch, the Rust app).%s  Open Chuck from your app menu, or run:  %schuck%s\n' \
-    "$c1" "$BRANCH" "$c0" "$c2" "$c0"
-  info "an old Chuck window that is still open is the previous version: close it and open Chuck again"
+  # what opens, checked: the menu entry and `chucknorris` both reach the new binary
+  grep -q "${HOME}/.local/bin/chuck\"" "$LAUNCH" && grep -q "^Exec=${LAUNCH}$" "$DESKTOP" \
+    || die "the launcher wasn't written as expected (${LAUNCH}, ${DESKTOP})"
+  printf '\n%s%s installed (%s branch) — this is the Rust Chuck.%s  Open Chuck from your app menu, or run:  %schuck%s\n' \
+    "$c1" "$("${HOME}/.local/bin/chuck" version)" "$BRANCH" "$c0" "$c2" "$c0"
+  info "the app menu's Chuck and the chucknorris command both open it"
   info "add a SiliconFlow key in Settings (gear icon), or: chuck key"
 else
-  printf '\n%sChuck installed (%s branch).%s  Launch:  %schucknorris%s\n' "$c1" "$BRANCH" "$c0" "$c2" "$c0"
-  info "add a SiliconFlow key in Settings (or it reuses Basilisk's). Tab switches Agent / Chat."
+  printf '\n\033[38;5;196m!! The Rust Chuck was NOT installed: %s\033[0m\n' "$RUST_WHY"
+  printf '%s   Chuck opens the older Python window until this is fixed. Re-run the installer afterwards.%s\n' "$c1" "$c0"
+  info "the Python window: chucknorris (or Chuck in the app menu)"
 fi
