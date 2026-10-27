@@ -378,8 +378,17 @@ impl State {
                 }
             }
             Entry::Card { kind, class, text } => {
-                let (c, body, _foot) = card(kind, class);
+                let (c, body, foot) = card(kind, class);
                 body.append(&render(text));
+                // a job that can't start over a limit: the way to the limits, right there
+                if text.contains("spending limit") {
+                    let raise = gtk::Button::with_label("Spending limits…");
+                    raise.add_css_class("pill-sm");
+                    if let Some(open) = self.on_settings.clone() {
+                        raise.connect_clicked(move |_| open());
+                    }
+                    foot.append(&raise);
+                }
                 self.append(&c);
                 self.lane = None;
             }
