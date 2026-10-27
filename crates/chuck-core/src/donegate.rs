@@ -153,6 +153,9 @@ pub struct DoneGate {
     pub criteria: Vec<Criterion>,
     pub criteria_accepted: bool,
     pub plan: Vec<String>,
+    /// Which plan steps are done (as long as `plan`).
+    #[serde(default)]
+    pub plan_done: Vec<bool>,
     pub evidence: Vec<Evidence>,
     seq: u64,
     last_mutation: u64,
@@ -199,7 +202,7 @@ impl DoneGate {
     pub fn new(ask: impl Into<String>, scale: Scale) -> DoneGate {
         DoneGate {
             ask: ask.into(), scale, phase: Phase::Intake, criteria: Vec::new(),
-            criteria_accepted: false, plan: Vec::new(), evidence: Vec::new(), seq: 0,
+            criteria_accepted: false, plan: Vec::new(), plan_done: Vec::new(), evidence: Vec::new(), seq: 0,
             last_mutation: 0, lines_changed: 0, accepted_justifications: Vec::new(), observed: None,
         }
     }
@@ -233,10 +236,40 @@ impl DoneGate {
     }
 
     pub fn set_plan(&mut self, steps: Vec<String>) {
-        self.plan = steps.into_iter().filter(|s| !s.trim().is_empty()).collect();
+        self.set_plan_steps(steps.into_iter().map(|s| (s, false)).collect());
+    }
+
+    /// The plan, with what's done. A step sent again unmarked but done
+    /// before stays done (re-sending the plan never loses progress).
+    pub fn set_plan_steps(&mut self, steps: Vec<(String, bool)>) {
+        let before: Vec<(String, bool)> = self.plan_view();
+        let steps: Vec<(String, bool)> = steps.into_iter().filter(|(s, _)| !s.trim().is_empty()).map(|(s, d)| {
+            let was = before.iter().any(|(b, bd)| *bd && b.trim() == s.trim());
+            (s, d || was)
+        }).collect();
+        self.plan_done = steps.iter().map(|(_, d)| *d).collect();
+        self.plan = steps.into_iter().map(|(s, _)| s).collect();
         if !self.plan.is_empty() && self.phase == Phase::Criteria {
             self.phase = Phase::Planned;
         }
+    }
+
+    /// Mark steps (1-based) done, or not done again. Err names a number
+    /// that isn't a step.
+    pub fn mark_plan(&mut self, steps: &[usize], done: bool) -> Result<(), String> {
+        self.plan_done.resize(self.plan.len(), false);
+        if let Some(bad) = steps.iter().find(|&&n| n == 0 || n > self.plan.len()) {
+            return Err(format!("the plan has {} steps; there's no step {bad}", self.plan.len()));
+        }
+        for &n in steps {
+            self.plan_done[n - 1] = done;
+        }
+        Ok(())
+    }
+
+    /// (step, done) for each step.
+    pub fn plan_view(&self) -> Vec<(String, bool)> {
+        self.plan.iter().enumerate().map(|(i, s)| (s.clone(), self.plan_done.get(i).copied().unwrap_or(false))).collect()
     }
 
     fn needs_plan(&self) -> bool {

@@ -309,6 +309,42 @@ pub fn tool_blocks(text: &str, tags: &[&str]) -> Vec<ToolBlock> {
     out
 }
 
+/// Blocks that open but never close (or otherwise weren't read as calls):
+/// each as its opening line. Nothing in them ran, and the agent must hear so.
+pub fn unclosed(text: &str, tags: &[&str]) -> Vec<String> {
+    let mut spans: Vec<(usize, usize)> = file_blocks(text).iter().map(|b| (b.start, b.end)).collect();
+    spans.extend(tool_blocks(text, tags).iter().map(|b| (b.start, b.end)));
+    // fenced examples in prose (```python … ```) are skipped the way tool_blocks skips them
+    let mut out = Vec::new();
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut pos = 0;
+    let mut in_other = false;
+    for l in &lines {
+        let off = pos;
+        pos += l.len() + 1;
+        if spans.iter().any(|(a, b)| off >= *a && off <= *b) {
+            continue;
+        }
+        let t = l.trim_start();
+        let Some(rest) = t.strip_prefix("```") else { continue };
+        let rest = rest.trim_start_matches('`');
+        let tag_end = rest.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-')).unwrap_or(rest.len());
+        let tag = &rest[..tag_end];
+        if in_other {
+            if t.trim() == "```" {
+                in_other = false;
+            }
+            continue;
+        }
+        if file_fence(l).is_some() || tags.contains(&tag) {
+            out.push(l.trim().chars().take(80).collect());
+        } else if !tag.is_empty() || t.trim() == "```" {
+            in_other = !(t.trim().len() > 3 && t.trim().ends_with("```"));
+        }
+    }
+    out
+}
+
 /// The reply with every tool and file block removed: what the user reads.
 pub fn prose(text: &str, tags: &[&str]) -> String {
     let mut spans: Vec<(usize, usize)> = file_blocks(text).iter().map(|b| (b.start, b.end)).collect();
@@ -385,6 +421,16 @@ mod tests {
         assert_eq!((tb[0].tag.as_str(), tb[0].arg.as_str()), ("test", "pytest -q"));
         assert_eq!(tb[1].body, "ls");
         assert_eq!(prose(t, &["test", "bash"]), "Fixing.");
+    }
+
+    #[test]
+    fn blocks_that_never_close_are_reported() {
+        let t = "Fixing it.\n```edit app.py\n<<<<<<< SEARCH\nx\n=======\ny\n>>>>>>> REPLACE\n";
+        assert!(file_blocks(t).is_empty());
+        assert_eq!(unclosed(t, &["bash"]), vec!["```edit app.py"]);
+        let ok = "```bash\nls\n```\nAn example:\n```python\nprint(1)\n```\n```write a.txt\nhi\n```";
+        assert!(unclosed(ok, &["bash"]).is_empty(), "{:?}", unclosed(ok, &["bash"]));
+        assert_eq!(unclosed("```bash\nmake\n", &["bash"]), vec!["```bash"]);
     }
 
     #[test]

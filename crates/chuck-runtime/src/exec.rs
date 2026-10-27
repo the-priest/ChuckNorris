@@ -231,6 +231,10 @@ impl<'a> Exec<'a> {
             File(chuck_tools::FileBlock),
             Tool(chuck_tools::ToolBlock),
         }
+        for open in chuck_tools::unclosed(reply, tags) {
+            res.feedback.push(format!("[NOT run: `{open}` was never closed with ``` (or ```` for a four-backtick \
+                block), so nothing in it was done — send it again, closed]"));
+        }
         let mut items: Vec<(usize, Item)> = file_blocks(reply).into_iter().map(|b| (b.start, Item::File(b))).collect();
         items.extend(tool_blocks(reply, tags).into_iter().map(|b| (b.start, Item::Tool(b))));
         items.sort_by_key(|(s, _)| *s);
@@ -552,13 +556,36 @@ impl<'a> Exec<'a> {
                 res.feedback.push(format!("[criteria accepted — link evidence with `for cN`:\n{}]", list.join("\n")));
             }
             "plan" => {
-                let steps = parse_plan(&t.body);
+                // ```plan done 2 3``` (or ```plan undo 3```): mark steps without sending the plan again
+                let spec = format!("{arg} {}", t.body).trim().to_string();
+                let mark = spec.split_whitespace().next().map(|w| w.to_lowercase())
+                    .filter(|w| w == "done" || w == "undo");
+                let mut g = self.gate.lock().unwrap();
+                let msg = if let Some(how) = mark {
+                    let nums: Vec<usize> = spec.split(|c: char| !c.is_ascii_digit()).filter_map(|n| n.parse().ok()).collect();
+                    if nums.is_empty() {
+                        "[plan: say which steps — ```plan done 2 3```]".to_string()
+                    } else {
+                        match g.mark_plan(&nums, how == "done") {
+                            Ok(()) => String::new(),
+                            Err(e) => format!("[plan: {e}]"),
+                        }
+                    }
+                } else {
+                    g.set_plan_steps(parse_plan(&t.body));
+                    String::new()
+                };
+                let steps = g.plan_view();
+                drop(g);
                 let (n, done) = (steps.len(), steps.iter().filter(|(_, d)| *d).count());
-                self.gate.lock().unwrap().set_plan(steps.iter().map(|(s, _)| s.clone()).collect());
                 self.events.emit(Event::Plan { steps: steps.clone() });
-                res.actions.push("plan".into());
-                self.act("plan", "", n > 0, &format!("{done}/{n} steps done"));
-                res.feedback.push(format!("[plan recorded: {done} of {n} steps done]"));
+                res.actions.push(format!("plan {done}/{n}"));
+                self.act("plan", "", n > 0 && msg.is_empty(), &format!("{done}/{n} steps done"));
+                res.feedback.push(if msg.is_empty() {
+                    let next = steps.iter().position(|(_, d)| !d);
+                    format!("[plan: {done} of {n} steps done{}]", next.map(|i| format!("; now step {}: {}", i + 1,
+                        clip(&steps[i].0, 120))).unwrap_or_default())
+                } else { msg });
             }
             other => res.lead_calls.push(LeadCall { tag: other.into(), arg: arg.into(), body: t.body.clone() }),
         }

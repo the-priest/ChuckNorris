@@ -888,7 +888,15 @@ impl<'a> LeadRun<'a> {
                 Fix each one, verify again, then ```done```]", self.critic_rounds, defects.join("\n- "))));
         }
         match g.declare_done(Role::Lead) {
-            Ok(()) => Ok(Ok(Outcome::Done { summary })),
+            Ok(()) => {
+                // through every gate: whatever the plan still showed open is done too
+                if !g.plan.is_empty() {
+                    let n = g.plan.len();
+                    let _ = g.mark_plan(&(1..=n).collect::<Vec<_>>(), true);
+                    self.ctx.events.emit(Event::Plan { steps: g.plan_view() });
+                }
+                Ok(Ok(Outcome::Done { summary }))
+            }
             Err(gaps) => Ok(Err(format!("[done REFUSED by the gate:\n- {}]", list(&gaps)))),
         }
     }
@@ -1025,6 +1033,9 @@ impl<'a> LeadRun<'a> {
         let mut progress = Progress::default();
         let mut warned_term = false;
         let mut nudged = false;
+        // turns of work since the plan last changed: past a few, the lead is reminded to mark it
+        let mut plan_stale = 0usize;
+        let mut plan_seen = self.gate.lock().unwrap().plan_view();
         for _ in 0..ctx.cfg.lead_steps {
             if ctx.kernel.terminating(self.id) && !warned_term {
                 warned_term = true;
@@ -1146,6 +1157,21 @@ impl<'a> LeadRun<'a> {
                                               unmet: g.check().iter().map(Unmet::describe).collect() });
                 ctx.events.emit(Event::Board { criteria: g.board().into_iter()
                     .map(|(c, ev)| (c.id.to_string(), c.text, c.verify, ev)).collect() });
+            }
+            {
+                let now = self.gate.lock().unwrap().plan_view();
+                if now != plan_seen {
+                    plan_seen = now;
+                    plan_stale = 0;
+                } else if r.acted() {
+                    plan_stale += 1;
+                }
+                if let Some(i) = plan_seen.iter().position(|(_, d)| !d).filter(|_| plan_stale >= 5) {
+                    plan_stale = 0;
+                    fb.push(format!("[PLAN: {} of {} steps marked done; it shows step {} (\"{}\") as current. The user \
+                        follows it live: mark finished steps with ```plan done N``` (several: ```plan done 2 3```)]",
+                        plan_seen.iter().filter(|(_, d)| *d).count(), plan_seen.len(), i + 1, clip(&plan_seen[i].0, 100)));
+                }
             }
             fb.push(exec.gate_line());
             let open = self.open_tasks();

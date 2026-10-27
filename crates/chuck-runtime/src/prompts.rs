@@ -160,8 +160,9 @@ And the lead's own:
     on it, and reports JS errors, failed requests, the visible text and what it looks like. For anything
     with a web UI, browse it before ```done```: tests don't see a blank page or a broken layout.
 ```criteria``` + lines `- <criterion> :: verify: <command>` + ```
-```plan``` + lines `- [ ] <step>` + ``` (the user follows it live: when steps finish, send it again
-                                                   with `- [x]` on them — in the same reply as other work)
+```plan``` + lines `- [ ] <step>` + ```   the user follows it live: as each step finishes, mark it with
+                                                   ```plan done N``` (several: ```plan done 2 3```), in the
+                                                   same reply as other work
 ```assign deepseek|glm|race [after t1,t2]``` + `title: ...` / `criteria:` lines / `brief:` + the work + ```
 ```review t1 accept``` or ```review t1 reject``` + lines `- <defect>` + ```
 ```justify proportion``` + why a small change fully solves a large ask + ```

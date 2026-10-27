@@ -110,6 +110,8 @@ struct State {
     on_handoff: Option<Rc<dyn Fn(String)>>,
     /// The Keep going button: carry on the paused job.
     on_continue: Option<Rc<dyn Fn()>>,
+    /// Open Settings (a paused job's "Spending limits…").
+    on_settings: Option<Rc<dyn Fn()>>,
     /// Stop pressed: an automatic "keep going" that was about to start doesn't.
     auto_cancel: Rc<Cell<bool>>,
     /// MCP servers: started with the window, shared by every job, ended with it.
@@ -397,6 +399,14 @@ impl State {
                     });
                 }
                 foot.append(&btn);
+                if text.contains("spending limit") {
+                    let raise = gtk::Button::with_label("Spending limits…");
+                    raise.add_css_class("pill-sm");
+                    if let Some(open) = self.on_settings.clone() {
+                        raise.connect_clicked(move |_| open());
+                    }
+                    foot.append(&raise);
+                }
                 foot.append(&label(if can { "Criteria, evidence and the conversation are kept." } else {
                     "Nothing left to carry on here." }, &["panel-dim"]));
                 self.append(&c);
@@ -921,8 +931,7 @@ fn finished(st: &mut State, report: JobReport, shared: &Shared) {
     let reply = match &report.outcome {
         Outcome::Done { summary } => summary.clone(),
         Outcome::Answered { text } => text.clone(),
-        Outcome::Paused { gaps } => format!("Not finished. Still missing:\n{}", gaps.iter().map(|g| format!("- {g}"))
-            .collect::<Vec<_>>().join("\n")),
+        Outcome::Paused { gaps } => paused_text(gaps),
         Outcome::Failed { error } => error.clone(),
     };
     if !kind.is_empty() {
@@ -982,6 +991,33 @@ fn finished(st: &mut State, report: JobReport, shared: &Shared) {
     st.save();
     refresh_checkpoints(st, shared);
     refresh_chats(st, shared);
+}
+
+/// Why a job paused, first and plainly, then what was still open.
+fn paused_text(gaps: &[String]) -> String {
+    let why = gaps.first().map(String::as_str).unwrap_or("it stopped");
+    let why = why.trim_start_matches("stopped by the kernel: ");
+    let cause = if why.contains("spending limit") {
+        format!("**Paused: {why}.** The work itself wasn't finished — your limit stopped it. Raise the limit in \
+            Settings › Spending limits (or set 0 for none), then press **Keep going**: it carries on exactly where it \
+            stopped.")
+    } else if why.contains("budget") {
+        format!("**Paused: {why}.** This job's own budget was used up. **Keep going** gives it another one and carries on \
+            where it stopped (Settings › Fleet can do that on its own).")
+    } else if why.contains("stuck") {
+        format!("**Paused: {why}.** The Lead kept repeating itself after being told to replan. Say what to try differently \
+            and press **Keep going**, or type `/continue <your hint>`.")
+    } else if why.contains("stopped by you") || why == "stopped" {
+        "**Stopped by you.** **Keep going** carries on where it stopped.".to_string()
+    } else {
+        format!("**Paused: {why}.** **Keep going** carries on where it stopped.")
+    };
+    let rest: Vec<&String> = gaps.iter().skip(1).collect();
+    if rest.is_empty() {
+        cause
+    } else {
+        format!("{cause}\n\nStill open when it paused:\n{}", rest.iter().map(|g| format!("- {g}")).collect::<Vec<_>>().join("\n"))
+    }
 }
 
 fn start(shared: &Shared, text: String) {
@@ -2313,7 +2349,7 @@ pub fn build(app: &adw::Application, opts: Options) {
     chat_btn.set_active(chat_mode);
     let shared: Shared = Rc::new(RefCell::new(State {
         ui, panel, opts: opts.clone(), folder: None, saved: Saved::default(), running: None, names: HashMap::new(),
-        models: HashMap::new(), lane: None, last_ps: Vec::new(), chat: chat_mode, on_handoff: None, on_continue: None, auto_cancel: Rc::new(Cell::new(false)), mcp: mcp.clone(),
+        models: HashMap::new(), lane: None, last_ps: Vec::new(), chat: chat_mode, on_handoff: None, on_continue: None, on_settings: None, auto_cancel: Rc::new(Cell::new(false)), mcp: mcp.clone(),
         lsp: Arc::new(setup::lsp(&Settings::load())),
         daemons: chuck_daemon::Registry::load(&chuck_daemon::Registry::default_path()),
         inbox: chuck_daemon::Inbox::load(&chuck_daemon::Inbox::default_path(), 200), daemon_live: HashMap::new(),
@@ -2343,6 +2379,12 @@ pub fn build(app: &adw::Application, opts: Options) {
         sh.borrow_mut().set_mode(false, &sh);
         let sh2 = sh.clone();
         glib::idle_add_local_once(move || start(&sh2, "/continue".into()));
+    }));
+    let weak = Rc::downgrade(&shared);
+    shared.borrow_mut().on_settings = Some(Rc::new(move || {
+        if let Some(sh) = weak.upgrade() {
+            glib::idle_add_local_once(move || settings_dialog(&sh));
+        }
     }));
     shared.borrow_mut().open_folder(folder, &shared);
     shared.borrow_mut().set_running(false);
