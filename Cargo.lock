@@ -268,6 +268,7 @@ dependencies = [
  "chuck-sandbox",
  "chuck-store",
  "chuck-tools",
+ "chuck-voice",
  "chuck-web",
  "gtk4",
  "libadwaita",
@@ -280,6 +281,13 @@ dependencies = [
 [[package]]
 name = "chuck-voice"
 version = "18.0.0-alpha.1"
+dependencies = [
+ "chuck-store",
+ "chuck-tools",
+ "fancy-regex",
+ "libc",
+ "serde_json",
+]
 
 [[package]]
 name = "chuck-web"

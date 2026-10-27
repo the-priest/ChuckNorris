@@ -402,8 +402,15 @@ a terminal. Daemons and reports live in the same files as the Python app's.
 
 ![A reminder, and a daemon's report in the Inbox](assets/screenshots/fleet-daemons.png)
 
-What isn't ported to Rust yet, so isn't in this branch's app: voice (Kokoro, Piper, talking to it),
-a real browser for pages that need JavaScript, and images and video.
+**Voice** is on this machine and nothing is uploaded. With the speaker button in the header on, answers
+are read aloud by Kokoro (the installer sets it up), else Piper, else espeak-ng. Kokoro stays loaded
+between replies, and each reply streams into one player with no gaps. Esc or a new message silences it.
+The mic button (Ctrl+M) listens with Moonshine and puts what you said in the box, or sends it if you turn
+that on in Settings › Voice. Settings shows which engine is speaking and why, and lets you pick the
+voice, the speed and test it.
+
+What isn't ported to Rust yet, so isn't in this branch's app: a real browser for pages that need
+JavaScript, and images and video.
 [ARCHITECTURE.md](ARCHITECTURE.md) has the design and the plan.
 
 Arch and CachyOS are first-class; apt and dnf are supported. The installer sets up GTK4 and libadwaita, bubblewrap, a screenshot tool, the local voice models (about 600 MB, skip with `CHUCK_VOICE=0`) and the linters Chuck uses to check code. At runtime Chuck needs only Python's standard library and GTK; everything optional degrades gracefully when it's missing.

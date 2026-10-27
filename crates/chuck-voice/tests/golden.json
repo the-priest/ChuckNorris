@@ -1,0 +1,328 @@
+[
+ {
+  "in": "## Disk cleanup\nYour disk was ~92% full (e.g. caches in /var/cache/pacman/pkg). Ran `paccache -rk2` -> freed 4 GB 🎉.\n- Removed orphans\n- Trimmed logs\n| a | b |\n|---|---|\n| 1 | 2 |\nUpgrade to v16.0.0 & restart, i.e. now.",
+  "clean": "Disk cleanup.\nYour disk was about 92% full (for example caches in pkg). Ran paccache rk2, then freed 4 GB.\nRemoved orphans.\nTrimmed logs.\nUpgrade to version 16.0.0 and restart, that is now.",
+  "chunks": [
+   "Disk cleanup. Your disk was about 92% full (for example caches in pkg). Ran paccache rk2, then freed 4 GB. Removed orphans. Trimmed logs. Upgrade to version 16.0.0 and restart, that is now."
+  ],
+  "kokoro": [
+   "Disk cleanup.",
+   "Your disk was about 92% full (for example caches in pkg). Ran paccache rk2, then freed 4 GB. Removed orphans. Trimmed logs. Upgrade to version 16.0.0 and restart, that is now."
+  ]
+ },
+ {
+  "in": "Run `ls -la | grep x | wc` now. Dr. Smith said x > 5 and 5 * 3 = 15 in C#. See https://example.com. Then pack shoes, socks, etc. Then go.",
+  "clean": "Run ls la grep x wc now. Dr. Smith said x greater than 5 and 5 times 3 = 15 in C sharp. See link. Then pack shoes, socks, et cetera. Then go.",
+  "chunks": [
+   "Run ls la grep x wc now. Dr. Smith said x greater than 5 and 5 times 3 = 15 in C sharp. See link. Then pack shoes, socks, et cetera. Then go."
+  ],
+  "kokoro": [
+   "Run ls la grep x wc now.",
+   "Dr. Smith said x greater than 5 and 5 times 3 = 15 in C sharp. See link. Then pack shoes, socks, et cetera. Then go."
+  ]
+ },
+ {
+  "in": "````md\n```python\nsecret = 1\n```\n````\nAfter that.\n~~~\nrm -rf x\n~~~\nDone.",
+  "clean": "After that.\nDone.",
+  "chunks": [
+   "After that. Done."
+  ],
+  "kokoro": [
+   "After that. Done."
+  ]
+ },
+ {
+  "in": "Look:\n```python\nimport os\nos.remove(1)",
+  "clean": "Look:",
+  "chunks": [
+   "Look:"
+  ],
+  "kokoro": [
+   "Look:"
+  ]
+ },
+ {
+  "in": "As the error says\n\n> ModuleNotFoundError: x\nSee <https://example.com/a>.",
+  "clean": "As the error says\nModuleNotFoundError: x\nSee link.",
+  "chunks": [
+   "As the error says ModuleNotFoundError: x See link."
+  ],
+  "kokoro": [
+   "As the error says ModuleNotFoundError: x See link."
+  ]
+ },
+ {
+  "in": "2024. That was a good year.",
+  "clean": "2024. That was a good year.",
+  "chunks": [
+   "2024. That was a good year."
+  ],
+  "kokoro": [
+   "2024. That was a good year."
+  ]
+ },
+ {
+  "in": "Run `pip install --upgrade some-long-package-name-here` then restart.",
+  "clean": "Run the command shown then restart.",
+  "chunks": [
+   "Run the command shown then restart."
+  ],
+  "kokoro": [
+   "Run the command shown then restart."
+  ]
+ },
+ {
+  "in": "## Heading\nUse `pacman -Syu`. See [the wiki](https://wiki.archlinux.org/x) or https://example.com/a/b?q=1\n- **one**\n- _two_\n```bash\nrm -rf /tmp/x\n```\nDone.",
+  "clean": "Heading.\nUse pacman Syu. See the wiki or link\none.\ntwo.\nDone.",
+  "chunks": [
+   "Heading. Use pacman Syu. See the wiki or link one. two. Done."
+  ],
+  "kokoro": [
+   "Heading. Use pacman Syu. See the wiki or link one. two.",
+   "Done."
+  ]
+ },
+ {
+  "in": "Grüße — naïve café… 日本語 test.",
+  "clean": "Grüße — naïve café… 日本語 test.",
+  "chunks": [
+   "Grüße — naïve café… 日本語 test."
+  ],
+  "kokoro": [
+   "Grüße — naïve café… 日本語 test."
+  ]
+ },
+ {
+  "in": "",
+  "clean": "",
+  "chunks": [],
+  "kokoro": []
+ },
+ {
+  "in": "   ",
+  "clean": "",
+  "chunks": [],
+  "kokoro": []
+ },
+ {
+  "in": "hi",
+  "clean": "hi",
+  "chunks": [
+   "hi"
+  ],
+  "kokoro": [
+   "hi"
+  ]
+ },
+ {
+  "in": "\n\n\n",
+  "clean": "",
+  "chunks": [],
+  "kokoro": []
+ },
+ {
+  "in": "The file is at ~/projects/chuck/src/main.rs and ./build/out/app.bin. Use a >= b and c <= d, x < y.",
+  "clean": "The file is at main.rs and app.bin. Use a at least b and c at most d, x less than y.",
+  "chunks": [
+   "The file is at main.rs and app.bin. Use a at least b and c at most d, x less than y."
+  ],
+  "kokoro": [
+   "The file is at main.rs and app.bin.",
+   "Use a at least b and c at most d, x less than y."
+  ]
+ },
+ {
+  "in": "1. First step\n2) Second step:\n3. Third!\n* bullet one\n+ bullet two",
+  "clean": "First step.\nSecond step:\nThird!\nbullet one.\nbullet two.",
+  "chunks": [
+   "First step. Second step: Third! bullet one. bullet two."
+  ],
+  "kokoro": [
+   "First step. Second step: Third! bullet one. bullet two."
+  ]
+ },
+ {
+  "in": "**Bold** and __also bold__ and ~~struck~~ and *it* and _it_ here. A * B stays. snake_case_name too.",
+  "clean": "Bold and also bold and struck and it and it here. A B stays. snake_case_name too.",
+  "chunks": [
+   "Bold and also bold and struck and it and it here. A B stays. snake_case_name too."
+  ],
+  "kokoro": [
+   "Bold and also bold and struck and it and it here. A B stays.",
+   "snake_case_name too."
+  ]
+ },
+ {
+  "in": "Things vs. stuff, approx. 5 w/o sugar w/ milk. FYI it's fine, IMO. tl;dr: yes. Go → there => here.",
+  "clean": "Things versus stuff, approximately 5 without sugar with milk. for your information it's fine, in my opinion. in short: yes. Go, then there, then here.",
+  "chunks": [
+   "Things versus stuff, approximately 5 without sugar with milk. for your information it's fine, in my opinion. in short: yes. Go, then there, then here."
+  ],
+  "kokoro": [
+   "Things versus stuff, approximately 5 without sugar with",
+   "milk. for your information it's fine, in my opinion. in short: yes. Go, then there, then here."
+  ]
+ },
+ {
+  "in": "Photo: ![alt text](http://x/y.png) and www.example.org/path, then (  spaced ) words .",
+  "clean": "Photo: and link, then (spaced) words.",
+  "chunks": [
+   "Photo: and link, then (spaced) words."
+  ],
+  "kokoro": [
+   "Photo: and link, then (spaced) words."
+  ]
+ },
+ {
+  "in": "Install `sudo pacman -S --needed base-devel git cmake ninja`.\nThen `make`.",
+  "clean": "Install the command shown.\nThen make.",
+  "chunks": [
+   "Install the command shown. Then make."
+  ],
+  "kokoro": [
+   "Install the command shown. Then make."
+  ]
+ },
+ {
+  "in": "Version v2.3.4 vs v10.0.1-rc: ~3 times faster, 4×5 grid, C# and F# too.",
+  "clean": "Version version 2.3.4 versus version 10.0.1-rc: about 3 times faster, 4 times 5 grid, C sharp and F sharp too.",
+  "chunks": [
+   "Version version 2.3.4 versus version 10.0.1-rc: about 3 times faster, 4 times 5 grid, C sharp and F sharp too."
+  ],
+  "kokoro": [
+   "Version version 2.3.4 versus version 10.0.1-rc:",
+   "about 3 times faster, 4 times 5 grid, C sharp and F sharp too."
+  ]
+ },
+ {
+  "in": "Line one\n\n\n   \nLine two   with   spaces\t\ttabs.",
+  "clean": "Line one\nLine two with spaces tabs.",
+  "chunks": [
+   "Line one Line two with spaces tabs."
+  ],
+  "kokoro": [
+   "Line one Line two with spaces tabs."
+  ]
+ },
+ {
+  "in": "Mr. Jones met Dr. Who at St. Mary's in Jan. 2024. The U.S.A. won. Fig. 3 shows it.",
+  "clean": "Mr. Jones met Dr. Who at St. Mary's in Jan. 2024. The U.S.A. won. Fig. 3 shows it.",
+  "chunks": [
+   "Mr. Jones met Dr. Who at St. Mary's in Jan. 2024. The U.S.A. won. Fig. 3 shows it."
+  ],
+  "kokoro": [
+   "Mr. Jones met Dr. Who at St. Mary's in Jan. 2024.",
+   "The U.S.A. won. Fig. 3 shows it."
+  ]
+ },
+ {
+  "in": "Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with.",
+  "clean": "Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with.",
+  "chunks": [
+   "Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with.",
+   "Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with.",
+   "Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with.",
+   "Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with.",
+   "Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with.",
+   "Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with.",
+   "Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with.",
+   "Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with.",
+   "Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with.",
+   "Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with.",
+   "Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with.",
+   "Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with.",
+   "Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with.",
+   "Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with.",
+   "Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with.",
+   "Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with."
+  ],
+  "kokoro": [
+   "Right, here is the situation you are dealing with.",
+   "Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with.",
+   "Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with.",
+   "Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with.",
+   "Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with.",
+   "Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with.",
+   "Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with.",
+   "Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with.",
+   "Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with.",
+   "Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with.",
+   "Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with. Right, here is the situation you are dealing with."
+  ]
+ },
+ {
+  "in": "word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word ",
+  "clean": "word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word",
+  "chunks": [
+   "word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word",
+   "word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word",
+   "word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word",
+   "word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word",
+   "word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word",
+   "word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word",
+   "word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word",
+   "word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word"
+  ],
+  "kokoro": [
+   "word word word word word word word word word word word word",
+   "word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word",
+   "word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word",
+   "word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word",
+   "word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word",
+   "word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word"
+  ]
+ },
+ {
+  "in": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "clean": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "chunks": [
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  ],
+  "kokoro": [
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  ]
+ },
+ {
+  "in": "Sentence number 0 of this reply. Sentence number 1 of this reply. Sentence number 2 of this reply. Sentence number 3 of this reply. Sentence number 4 of this reply. Sentence number 5 of this reply. Sentence number 6 of this reply. Sentence number 7 of this reply. Sentence number 8 of this reply. Sentence number 9 of this reply. Sentence number 10 of this reply. Sentence number 11 of this reply. Sentence number 12 of this reply. Sentence number 13 of this reply. Sentence number 14 of this reply. Sentence number 15 of this reply. Sentence number 16 of this reply. Sentence number 17 of this reply. Sentence number 18 of this reply. Sentence number 19 of this reply. Sentence number 20 of this reply. Sentence number 21 of this reply. Sentence number 22 of this reply. Sentence number 23 of this reply. Sentence number 24 of this reply. Sentence number 25 of this reply. Sentence number 26 of this reply. Sentence number 27 of this reply. Sentence number 28 of this reply. Sentence number 29 of this reply",
+  "clean": "Sentence number 0 of this reply. Sentence number 1 of this reply. Sentence number 2 of this reply. Sentence number 3 of this reply. Sentence number 4 of this reply. Sentence number 5 of this reply. Sentence number 6 of this reply. Sentence number 7 of this reply. Sentence number 8 of this reply. Sentence number 9 of this reply. Sentence number 10 of this reply. Sentence number 11 of this reply. Sentence number 12 of this reply. Sentence number 13 of this reply. Sentence number 14 of this reply. Sentence number 15 of this reply. Sentence number 16 of this reply. Sentence number 17 of this reply. Sentence number 18 of this reply. Sentence number 19 of this reply. Sentence number 20 of this reply. Sentence number 21 of this reply. Sentence number 22 of this reply. Sentence number 23 of this reply. Sentence number 24 of this reply. Sentence number 25 of this reply. Sentence number 26 of this reply. Sentence number 27 of this reply. Sentence number 28 of this reply. Sentence number 29 of this reply",
+  "chunks": [
+   "Sentence number 0 of this reply. Sentence number 1 of this reply. Sentence number 2 of this reply. Sentence number 3 of this reply. Sentence number 4 of this reply. Sentence number 5 of this reply. Sentence number 6 of this reply.",
+   "Sentence number 7 of this reply. Sentence number 8 of this reply. Sentence number 9 of this reply. Sentence number 10 of this reply. Sentence number 11 of this reply. Sentence number 12 of this reply. Sentence number 13 of this reply.",
+   "Sentence number 14 of this reply. Sentence number 15 of this reply. Sentence number 16 of this reply. Sentence number 17 of this reply. Sentence number 18 of this reply. Sentence number 19 of this reply. Sentence number 20 of this reply.",
+   "Sentence number 21 of this reply. Sentence number 22 of this reply. Sentence number 23 of this reply. Sentence number 24 of this reply. Sentence number 25 of this reply. Sentence number 26 of this reply. Sentence number 27 of this reply.",
+   "Sentence number 28 of this reply. Sentence number 29 of this reply"
+  ],
+  "kokoro": [
+   "Sentence number 0 of this reply.",
+   "Sentence number 1 of this reply. Sentence number 2 of this reply. Sentence number 3 of this reply. Sentence number 4 of this reply. Sentence number 5 of this reply. Sentence number 6 of this reply. Sentence number 7 of this reply. Sentence number 8 of this reply. Sentence number 9 of this reply. Sentence number 10 of this reply. Sentence number 11 of this reply.",
+   "Sentence number 12 of this reply. Sentence number 13 of this reply. Sentence number 14 of this reply. Sentence number 15 of this reply. Sentence number 16 of this reply. Sentence number 17 of this reply. Sentence number 18 of this reply. Sentence number 19 of this reply. Sentence number 20 of this reply. Sentence number 21 of this reply. Sentence number 22 of this reply. Sentence number 23 of this reply.",
+   "Sentence number 24 of this reply. Sentence number 25 of this reply. Sentence number 26 of this reply. Sentence number 27 of this reply. Sentence number 28 of this reply. Sentence number 29 of this reply"
+  ]
+ },
+ {
+  "in": "Dr. Smith agrees. The U.S. team too.",
+  "clean": null,
+  "chunks": [
+   "Dr. Smith",
+   "agrees. The U.S. team too."
+  ],
+  "size": 420,
+  "first": 10
+ },
+ {
+  "in": "Short. Then a much longer sentence that keeps going on and on for a while here.",
+  "clean": null,
+  "chunks": [
+   "Short.",
+   "Then a much longer sentence that keeps going on and on for a while here."
+  ],
+  "size": 420,
+  "first": 20
+ }
+]

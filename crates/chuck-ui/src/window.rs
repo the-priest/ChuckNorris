@@ -44,6 +44,8 @@ pub struct Options {
     pub web: Option<Arc<chuck_web::Web>>,
     /// Start in Chat mode (true) or with the fleet (false); else as last time.
     pub chat: Option<bool>,
+    /// Start listening once the window is up (as if the mic was clicked).
+    pub listen: bool,
 }
 
 struct Running {
@@ -71,6 +73,8 @@ struct Ui {
     new_btn: gtk::Button,
     fleet_btn: gtk::ToggleButton,
     chat_btn: gtk::ToggleButton,
+    mic: gtk::Button,
+    speaker: gtk::ToggleButton,
     hero: gtk::Label,
     lede: gtk::Label,
 }
@@ -108,6 +112,11 @@ struct State {
     daemon_live: HashMap<i64, (Arc<AtomicBool>, Receiver<chuck_runtime::daemon::DaemonReport>, String)>,
     /// A trigger check in flight (it runs off the main thread).
     daemon_check: Option<Receiver<Vec<Checked>>>,
+    /// Replies read aloud, and the microphone.
+    voice: chuck_voice::Voice,
+    ears: chuck_voice::Ears,
+    /// What the microphone hears, while it listens.
+    heard: Option<Receiver<chuck_voice::Heard>>,
     tokens: u64,
     spent: f64,
     /// Prompt tokens sent, and how many of them the API's cache served.
@@ -474,7 +483,7 @@ fn on_event(st: &mut State, e: Event, shared: &Shared) {
         Event::AgentStarted { id, role, name, model, task } => {
             st.names.insert(id, (name.clone(), role));
             st.models.insert(id, short(&model).to_string());
-            if name != "lead" {
+            if name != "lead" && name != "chuck" {
                 let what = match (&task, name.as_str()) {
                     (Some(t), _) => format!(" on {t}"),
                     (None, "critic") => " — reviewing the whole result".into(),
@@ -693,6 +702,9 @@ fn finished(st: &mut State, report: JobReport, shared: &Shared) {
         st.saved.progress.unmet = unmet;
         st.saved.progress.board = board;
     }
+    if matches!(report.outcome, Outcome::Done { .. } | Outcome::Answered { .. }) {
+        speak(st, &reply);
+    }
     let done = matches!(report.outcome, Outcome::Done { .. });
     st.panel.job_finished(done);
     st.saved.progress.finished = done;
@@ -717,6 +729,7 @@ fn start(shared: &Shared, text: String) {
         return;
     }
     st.add(Entry::User { text: text.clone() });
+    st.voice.stop();
     if let Some((cmd, arg)) = ["/remind", "/daemon"].iter().find_map(|c| {
         text.strip_prefix(c).filter(|r| r.is_empty() || r.starts_with(char::is_whitespace)).map(|r| (*c, r.trim()))
     }) {
@@ -876,6 +889,121 @@ fn shut_down(shared: &Shared) {
     }
     st.mcp.stop_all();
     st.lsp.stop_all();
+    st.voice.shutdown();
+    st.ears.shutdown();
+}
+
+fn speaker_look(b: &gtk::ToggleButton, on: bool) {
+    b.set_icon_name(if on { "audio-volume-high-symbolic" } else { "audio-volume-muted-symbolic" });
+    b.set_tooltip_text(Some(if on { "Replies are read aloud — click to stop (Esc silences one)" } else {
+        "Read replies aloud" }));
+}
+
+/// Read a reply aloud, if that's on.
+fn speak(st: &State, text: &str) {
+    let s = Settings::load();
+    if st.ui.speaker.is_active() && s.map.get("tts").and_then(|v| v.as_bool()).unwrap_or(true) {
+        st.voice.speak(text, &chuck_voice::Prefs::from(&s));
+    }
+}
+
+/// The microphone: start listening, or stop.
+fn mic_clicked(shared: &Shared) {
+    let mut st = shared.borrow_mut();
+    if st.heard.is_some() {
+        st.ears.cancel();
+        return;
+    }
+    let s = Settings::load();
+    if !chuck_voice::listen::ready() {
+        st.ui.status.set_label(&format!("Voice input: {}", chuck_voice::listen::status(s.str("mic_command").unwrap_or(""))));
+        return;
+    }
+    st.voice.stop(); // don't transcribe Chuck's own voice
+    let (tx, rx) = channel();
+    st.ears.listen(tx, s.str("mic_command").unwrap_or(""), s.num("mic_wait", 8.0, 2.0, 60.0), s.num("mic_max", 30.0, 5.0, 120.0));
+    st.heard = Some(rx);
+    mic_state(&st, "loading", 0.0);
+}
+
+fn mic_state(st: &State, state: &str, level: f32) {
+    let b = &st.ui.mic;
+    for c in ["mic-on", "mic-speech"] {
+        b.remove_css_class(c);
+    }
+    let tip = match state {
+        "loading" => "Getting ready to listen… (click to cancel)",
+        "listening" => "Listening — say it, then pause (click to cancel)",
+        "speech" => "Hearing you…",
+        _ => "Talk to Chuck (Ctrl+M) — heard on this machine, never uploaded",
+    };
+    if state != "idle" {
+        b.add_css_class("mic-on");
+    }
+    if state == "speech" {
+        b.add_css_class("mic-speech");
+    }
+    b.set_opacity(if state == "speech" { 0.75 + (level * 4.0).min(0.25) as f64 } else { 1.0 });
+    b.set_tooltip_text(Some(tip));
+}
+
+/// What the microphone heard: into the composer (and sent, if you said so).
+fn hear(shared: &Shared) {
+    let mut st = shared.borrow_mut();
+    let Some(rx) = &st.heard else { return };
+    let events: Vec<chuck_voice::Heard> = rx.try_iter().collect();
+    let mut send = None;
+    for ev in events {
+        use chuck_voice::Heard;
+        match ev {
+            Heard::Listening => mic_state(&st, "listening", 0.0),
+            Heard::Speech => mic_state(&st, "speech", 0.0),
+            Heard::Level(l) => {
+                if st.ui.mic.has_css_class("mic-speech") {
+                    mic_state(&st, "speech", l);
+                }
+            }
+            Heard::Final(text) => {
+                st.heard = None;
+                mic_state(&st, "idle", 0.0);
+                if text.is_empty() {
+                    st.ui.status.set_label("Didn't catch that — try again (Ctrl+M)");
+                    break;
+                }
+                let buf = st.ui.input.buffer();
+                let cur = buf.text(&buf.start_iter(), &buf.end_iter(), false).trim_end().to_string();
+                let full = if cur.is_empty() { text } else { format!("{cur} {text}") };
+                buf.set_text(&full);
+                st.ui.input.grab_focus();
+                if Settings::load().map.get("voice_autosend").and_then(|v| v.as_bool()) == Some(true) {
+                    buf.set_text("");
+                    send = Some(full);
+                }
+                break;
+            }
+            Heard::Nothing => {
+                st.heard = None;
+                mic_state(&st, "idle", 0.0);
+                st.ui.status.set_label("Didn't hear anything — is the right microphone selected?");
+                break;
+            }
+            Heard::Cancelled => {
+                st.heard = None;
+                mic_state(&st, "idle", 0.0);
+                break;
+            }
+            Heard::Error(e) => {
+                st.heard = None;
+                mic_state(&st, "idle", 0.0);
+                st.ui.status.set_label(&format!("Voice input: {e}"));
+                break;
+            }
+        }
+    }
+    drop(st);
+    if let Some(text) = send {
+        start(shared, text);
+    }
 }
 
 /// The daemons and the inbox, in the panel.
@@ -1037,6 +1165,7 @@ fn wake(st: &mut State, id: i64, why: &str, now: f64) {
         extra.insert("status".into(), 0.into());
         st.inbox.add("reminder", &chuck_daemon::describe(d.when()), &text, extra);
         st.add(Entry::Card { kind: "⏰ REMINDER".into(), class: "ask-card".into(), text: text.clone() });
+        speak(st, &format!("Reminder: {text}"));
         st.save();
         notify(st, &format!("chuck-remind-{id}"), "Reminder", &text);
         if d.when().get("at").is_some() {
@@ -1169,6 +1298,54 @@ fn settings_dialog(shared: &Shared) {
     research.add(&sources);
     page.add(&research);
 
+    let vp = chuck_voice::Prefs::from(&s);
+    let voice = shared.borrow().voice.clone();
+    let voice_group = adw::PreferencesGroup::builder().title("Voice")
+        .description("Spoken and heard on this machine: nothing is uploaded. The installer sets up the natural voice \
+            (Kokoro) and voice input (Moonshine).").build();
+    let tts = adw::SwitchRow::builder().title("Read replies aloud")
+        .active(s.map.get("tts").and_then(|v| v.as_bool()).unwrap_or(true)).build();
+    let engines = [("auto", "Automatic (the most natural installed)"), ("kokoro", "Kokoro — natural"),
+                   ("piper", "Piper"), ("espeak", "espeak-ng — robotic")];
+    let engine = adw::ComboRow::builder().title("Engine")
+        .model(&gtk::StringList::new(&engines.iter().map(|e| e.1).collect::<Vec<_>>())).build();
+    engine.set_selected(engines.iter().position(|e| e.0 == vp.engine).unwrap_or(0) as u32);
+    let voices = chuck_voice::speak::KOKORO_VOICES;
+    let kvoice = adw::ComboRow::builder().title("Kokoro voice")
+        .model(&gtk::StringList::new(&voices.iter().map(|v| v.1).collect::<Vec<_>>())).build();
+    kvoice.set_selected(voices.iter().position(|v| v.0 == vp.kokoro_voice).unwrap_or(0) as u32);
+    let speed = adw::SpinRow::with_range(0.5, 2.0, 0.05);
+    speed.set_title("Speed");
+    speed.set_digits(2);
+    speed.set_value(vp.speed);
+    let autosend = adw::SwitchRow::builder().title("Send what I say right away")
+        .subtitle("Off: what you say lands in the box to check first")
+        .active(s.map.get("voice_autosend").and_then(|v| v.as_bool()) == Some(true)).build();
+    let vstatus = adw::ActionRow::builder().title("Speaking").subtitle(md::escape(&voice.status(&vp))).build();
+    vstatus.set_subtitle_lines(3);
+    let test = gtk::Button::with_label("Test");
+    test.add_css_class("pill-sm");
+    test.set_valign(gtk::Align::Center);
+    {
+        let (voice, engine, kvoice, speed) = (voice.clone(), engine.clone(), kvoice.clone(), speed.clone());
+        test.connect_clicked(move |_| {
+            let mut p = chuck_voice::Prefs::from(&Settings::load());
+            p.engine = engines[engine.selected() as usize].0.to_string();
+            p.kokoro_voice = voices[kvoice.selected() as usize].0.to_string();
+            p.speed = speed.value();
+            voice.speak("Chuck Norris approves this voice.", &p);
+        });
+    }
+    vstatus.add_suffix(&test);
+    let lstatus = adw::ActionRow::builder().title("Listening")
+        .subtitle(md::escape(&chuck_voice::listen::status(s.str("mic_command").unwrap_or("")))).build();
+    lstatus.set_subtitle_lines(2);
+    for r in [tts.upcast_ref::<gtk::Widget>(), engine.upcast_ref(), kvoice.upcast_ref(), speed.upcast_ref(),
+              vstatus.upcast_ref(), autosend.upcast_ref(), lstatus.upcast_ref()] {
+        voice_group.add(r);
+    }
+    page.add(&voice_group);
+
     let mcp = shared.borrow().mcp.clone();
     let mcp_group = adw::PreferencesGroup::builder().title("MCP servers")
         .description(format!("Tools from Model Context Protocol servers, set up in {} (the format Claude Desktop \
@@ -1268,6 +1445,11 @@ fn settings_dialog(shared: &Shared) {
         s.set("searx_url", searx.text().trim().into());
         s.set("proxy", proxy.text().trim().into());
         s.set("research_sources", (sources.value() as i64).into());
+        s.set("tts", tts.is_active().into());
+        s.set("voice_engine", engines[engine.selected() as usize].0.into());
+        s.set("kokoro_voice", voices[kvoice.selected() as usize].0.into());
+        s.set("voice_speed", speed.value().into());
+        s.set("voice_autosend", autosend.is_active().into());
         if let Some(f) = &folder {
             let mode = modes[acc.selected() as usize].0;
             let mut map = s.map.get("folder_access").and_then(|v| v.as_object()).cloned().unwrap_or_default();
@@ -1281,7 +1463,9 @@ fn settings_dialog(shared: &Shared) {
             s.set("folder_access", serde_json::Value::Object(map));
         }
         let _ = s.save();
-        sh.borrow().refresh_header();
+        let st = sh.borrow();
+        st.refresh_header();
+        st.ui.speaker.set_active(tts.is_active());
     });
     let win = shared.borrow().ui.window.clone();
     dialog.present(Some(&win));
@@ -1422,6 +1606,9 @@ pub fn build(app: &adw::Application, opts: Options) {
     gear.add_css_class("headerbtn");
     gear.set_tooltip_text(Some("Settings"));
     header.pack_end(&gear);
+    let speaker = gtk::ToggleButton::builder().icon_name("audio-volume-high-symbolic").build();
+    speaker.add_css_class("headerbtn");
+    header.pack_end(&speaker);
     let side_btn = gtk::ToggleButton::builder().icon_name("view-dual-symbolic").active(true).build();
     side_btn.add_css_class("headerbtn");
     side_btn.set_tooltip_text(Some("Show or hide what the fleet is doing"));
@@ -1510,6 +1697,13 @@ pub fn build(app: &adw::Application, opts: Options) {
     stop.set_valign(gtk::Align::End);
     stop.set_visible(false);
     stop.set_tooltip_text(Some("Stop every agent and command (Esc)"));
+    // talk instead of typing: heard on this machine, never uploaded
+    let mic = gtk::Button::from_icon_name("audio-input-microphone-symbolic");
+    mic.add_css_class("flat");
+    mic.add_css_class("micbtn");
+    mic.set_valign(gtk::Align::End);
+    mic.set_tooltip_text(Some("Talk to Chuck (Ctrl+M) — heard on this machine, never uploaded"));
+    comp.append(&mic);
     comp.append(&send);
     comp.append(&stop);
     let status = label("", &["statusbar"]);
@@ -1563,7 +1757,8 @@ pub fn build(app: &adw::Application, opts: Options) {
         .and_then(|f| f.canonicalize().ok()).filter(|f| f.is_dir());
     let ui = Ui { window: window.clone(), stack, transcript, input: input.clone(), hint, send: send.clone(),
                   stop: stop.clone(), status, subtitle, meter, folder_btn: folder_btn.clone(), new_btn: new_btn.clone(),
-                  fleet_btn: fleet_btn.clone(), chat_btn: chat_btn.clone(), hero, lede };
+                  fleet_btn: fleet_btn.clone(), chat_btn: chat_btn.clone(), mic: mic.clone(), speaker: speaker.clone(),
+                  hero, lede };
     // MCP servers start in the background: the window doesn't wait for them
     let mcp = Arc::new(chuck_mcp::Manager::new(chuck_mcp::config_path()));
     if mcp.configured() {
@@ -1579,7 +1774,7 @@ pub fn build(app: &adw::Application, opts: Options) {
         lsp: Arc::new(setup::lsp(&Settings::load())),
         daemons: chuck_daemon::Registry::load(&chuck_daemon::Registry::default_path()),
         inbox: chuck_daemon::Inbox::load(&chuck_daemon::Inbox::default_path(), 200), daemon_live: HashMap::new(),
-        daemon_check: None, tokens: 0,
+        daemon_check: None, voice: chuck_voice::Voice::new(), ears: chuck_voice::Ears::new(), heard: None, tokens: 0,
         spent: 0.0, prompt: 0, cached: 0, unsaved: false,
     }));
     *slot.borrow_mut() = Some(shared.clone());
@@ -1623,7 +1818,9 @@ pub fn build(app: &adw::Application, opts: Options) {
     send.connect_clicked(move |_| s1());
     let sh = shared.clone();
     let stop_job = move || {
-        if let Some(r) = &sh.borrow().running {
+        let st = sh.borrow();
+        st.voice.stop();
+        if let Some(r) = &st.running {
             r.stop.store(true, Ordering::SeqCst);
         }
     };
@@ -1643,6 +1840,47 @@ pub fn build(app: &adw::Application, opts: Options) {
         glib::Propagation::Proceed
     });
     input.add_controller(keys);
+    // Ctrl+M anywhere in the window: talk
+    let sh = shared.clone();
+    let mic_key = gtk::EventControllerKey::new();
+    mic_key.connect_key_pressed(move |_, key, _, mods| {
+        if mods.contains(gdk::ModifierType::CONTROL_MASK) && (key == gdk::Key::m || key == gdk::Key::M) {
+            mic_clicked(&sh);
+            return glib::Propagation::Stop;
+        }
+        glib::Propagation::Proceed
+    });
+    window.add_controller(mic_key);
+    let sh = shared.clone();
+    mic.connect_clicked(move |_| mic_clicked(&sh));
+    {
+        let s = Settings::load();
+        let on = s.map.get("tts").and_then(|v| v.as_bool()).unwrap_or(true);
+        speaker.set_active(on);
+        speaker_look(&speaker, on);
+        if on {
+            shared.borrow().voice.warm(&chuck_voice::Prefs::from(&s));
+        }
+    }
+    let sh = shared.clone();
+    speaker.connect_toggled(move |b| {
+        let on = b.is_active();
+        speaker_look(b, on);
+        let mut s = Settings::load();
+        s.set("tts", on.into());
+        let _ = s.save();
+        let st = sh.borrow();
+        if on {
+            st.voice.warm(&chuck_voice::Prefs::from(&s));
+        } else {
+            st.voice.stop();
+        }
+    });
+    let sh = shared.clone();
+    glib::timeout_add_local(Duration::from_millis(60), move || {
+        hear(&sh);
+        glib::ControlFlow::Continue
+    });
     let sh = shared.clone();
     gear.connect_clicked(move |_| settings_dialog(&sh));
     let sh = shared.clone();
@@ -1736,6 +1974,10 @@ pub fn build(app: &adw::Application, opts: Options) {
     if opts.settings {
         let sh = shared.clone();
         glib::timeout_add_local_once(Duration::from_millis(100), move || settings_dialog(&sh));
+    }
+    if opts.listen {
+        let sh = shared.clone();
+        glib::timeout_add_local_once(Duration::from_millis(400), move || mic_clicked(&sh));
     }
     if let Some(text) = opts.send.clone() {
         let sh = shared.clone();

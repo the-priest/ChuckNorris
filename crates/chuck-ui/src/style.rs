@@ -149,6 +149,9 @@ headerbar { background-color: @bg; border-bottom: 1px solid @line; box-shadow: n
 .step-mark { font-size: 12px; min-width: 14px; }
 .step-text { font-size: 12.5px; }
 .step-done { color: @faint; }
+.micbtn { min-width: 40px; min-height: 40px; border-radius: 12px; color: @mute; }
+.micbtn.mic-on { color: @accent_hi; background-color: @accent_bg; }
+.micbtn.mic-speech { color: @ink; background-color: alpha(@accent, 0.45); }
 .inbox-new { color: @ink; font-weight: 600; font-size: 12.5px; }
 .badge-new { color: @accent_hi; font-weight: 600; }
 .research-ok { color: @accent_hi; -gtk-icon-size: 13px; }

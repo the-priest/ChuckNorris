@@ -1,14 +1,10 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! Chuck's voice: replies read aloud (Kokoro, else Piper, else espeak-ng)
+//! and talking to Chuck (Moonshine, on this machine). The engines are the
+//! ones the installer set up for the Python app; nothing leaves the machine.
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub mod clean;
+pub mod listen;
+pub mod speak;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub use listen::{Ears, Heard};
+pub use speak::{Prefs, Voice};
