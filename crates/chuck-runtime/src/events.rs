@@ -36,7 +36,27 @@ pub enum Event {
     Confirm { id: AgentId, command: String, why: String },
     Usage { id: AgentId, tokens: u64, usd: f64 },
     AgentEnded { id: AgentId, status: String },
+    /// The lead's plan as it stands: (step, done).
+    Plan { steps: Vec<(String, bool)> },
+    /// Every task of the job, whenever one changes.
+    Tasks(Vec<TaskView>),
+    /// A command started (it ends with an Action for the same agent).
+    Running { id: AgentId, tool: String, cmd: String },
     Finished(Outcome),
+}
+
+/// A task as the panel shows it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TaskView {
+    pub id: String,
+    pub title: String,
+    /// "queued", "running", "review", "merged" or "failed".
+    pub state: String,
+    pub workers: Vec<String>,
+    pub deps: Vec<String>,
+    pub criteria: Vec<String>,
+    /// Why it failed, or what was sent back last.
+    pub note: String,
 }
 
 #[derive(Clone)]

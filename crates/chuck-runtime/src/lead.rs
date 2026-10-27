@@ -39,6 +39,8 @@ struct TaskSlot {
     held: Vec<Submission>,
     /// The submission the lead is reviewing.
     pending: Option<Submission>,
+    /// The last thing worth knowing: the defects it was sent back with.
+    note: String,
 }
 
 impl TaskSlot {
@@ -80,6 +82,8 @@ pub struct LeadRun<'a> {
     /// The folder's rewind history (the window's shadow repo).
     shadow: Option<chuck_store::Shadow>,
     pub first_checkpoint: Option<String>,
+    /// The user's words while the job runs.
+    pub steer: Option<Receiver<String>>,
 }
 
 /// Forget lines typed before a question is shown: they don't answer it.
@@ -248,7 +252,7 @@ impl<'a> LeadRun<'a> {
                   critic_rounds: 0, rejected_at: None, snapshot,
                   shadow: ctx.cfg.checkpoints.as_ref().filter(|_| ctx.cfg.access != chuck_sandbox::Access::ReadOnly)
                       .and_then(|store| chuck_store::Shadow::new(root, store).ok()),
-                  first_checkpoint: None }
+                  first_checkpoint: None, steer: None }
     }
 
     /// Snapshot the folder before a step that may change it. A failure turns
@@ -279,6 +283,37 @@ impl<'a> LeadRun<'a> {
             kernel.unblock(id);
             a.is_some_and(|a| matches!(a.trim().to_lowercase().as_str(), "yes" | "y"))
         }))
+    }
+
+    /// What the user typed since the last step, as the lead should read it.
+    fn steering(&self) -> Option<String> {
+        let rx = self.steer.as_ref()?;
+        let said: Vec<String> = rx.try_iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+        (!said.is_empty()).then(|| format!("[the user, while you work — this takes priority over your plan where it \
+            conflicts: {}]", said.join(" / ")))
+    }
+
+    /// Tell whoever watches where every task stands.
+    fn publish(&self) {
+        let views = self.tasks.iter().map(|t| crate::events::TaskView {
+            id: t.task.id.clone(),
+            title: t.task.title.clone(),
+            state: match &t.state {
+                TaskState::Queued => "queued",
+                TaskState::Running => "running",
+                TaskState::Review => "review",
+                TaskState::Merged => "merged",
+                TaskState::Failed(_) => "failed",
+            }.into(),
+            workers: t.workers.iter().filter_map(|w| self.workers.get(w)).map(|w| w.name.clone()).collect(),
+            deps: t.task.deps.clone(),
+            criteria: t.task.criteria.iter().map(|c| c.text.clone()).collect(),
+            note: match &t.state {
+                TaskState::Failed(g) => g.join("; "),
+                _ => t.note.clone(),
+            },
+        }).collect();
+        self.ctx.events.emit(Event::Tasks(views));
     }
 
     /// Workers are on it: a message from one of them will come.
@@ -525,6 +560,7 @@ impl<'a> LeadRun<'a> {
                     return "[a rejection needs its defects: one `- <defect>` line each, concrete enough to fix]".into();
                 }
                 slot.state = TaskState::Running;
+                slot.note = format!("sent back: {}", d.join("; "));
                 reject(&gate, d.clone(), &call.body);
                 format!("[{tid} sent back with {} defect(s); the worker continues in its copy]", d.len())
             }
@@ -673,7 +709,7 @@ impl<'a> LeadRun<'a> {
         let task = Task { id: id.clone(), title: spec.title, brief: spec.brief, criteria, scale: spec.scale,
                           prefer: spec.prefer, race: spec.race, deps: spec.after };
         self.tasks.push(TaskSlot { task, state: TaskState::Queued, workers: Vec::new(), held: Vec::new(),
-                                   pending: None });
+                                   pending: None, note: String::new() });
         let mut out = self.start_ready();
         if self.tasks.last().is_some_and(|t| t.state == TaskState::Queued) {
             out.push(format!("[{id} queued: it starts when its dependencies are merged and a worker is free]"));
@@ -830,10 +866,14 @@ impl<'a> LeadRun<'a> {
             if self.ctx.kernel.should_stop(self.id) {
                 break Err(Halt::Killed("killed".into()));
             }
+            if let Some(s) = self.steering() {
+                break Ok(vec![s]);
+            }
             match self.rx.recv_timeout(Duration::from_millis(200)) {
                 Ok(m) => {
                     let mut out = self.on_worker(m);
                     out.extend(self.drain());
+                    self.publish();
                     if !out.is_empty() {
                         break Ok(out);
                     }
@@ -865,6 +905,12 @@ impl<'a> LeadRun<'a> {
     /// The lead's whole run. Always tears the fleet down before returning.
     pub fn run(&mut self, first: &str) -> Outcome {
         let out = self.run_inner(first);
+        for t in self.tasks.iter_mut().filter(|t| t.open()) {
+            t.state = TaskState::Failed(vec!["stopped when the job ended".into()]);
+        }
+        if !self.tasks.is_empty() {
+            self.publish();
+        }
         let ids: Vec<AgentId> = self.workers.iter().filter(|(_, w)| w.live).map(|(id, _)| *id).collect();
         for id in ids {
             self.ctx.kernel.signal(id, chuck_core::Signal::Kill);
@@ -897,6 +943,16 @@ impl<'a> LeadRun<'a> {
                 warned_term = true;
                 convo.user("[the budget is nearly spent: this is your LAST turn. Say plainly what is finished and \
                     verified and what is not]");
+            }
+            if let Some(s) = self.steering() {
+                // fold into the pending feedback turn, so the conversation keeps alternating
+                match convo.msgs.last_mut() {
+                    Some(m) if m["role"] == "user" => {
+                        let t = format!("{}\n\n{s}", m["content"].as_str().unwrap_or(""));
+                        m["content"] = serde_json::Value::String(t);
+                    }
+                    _ => convo.user(&s),
+                }
             }
             convo.fit(ctx.cfg.context_chars);
             let reply = match think(ctx, self.id, &model, &convo) {
@@ -966,6 +1022,9 @@ impl<'a> LeadRun<'a> {
                 }
             }
             fb.extend(self.drain());
+            if !self.tasks.is_empty() {
+                self.publish();
+            }
             if !waiting {
                 if let Stall::Replan(why) = progress.turn(r.mutated, r.verified, &r.actions) {
                     replans += 1;

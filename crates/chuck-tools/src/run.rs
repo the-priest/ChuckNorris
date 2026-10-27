@@ -68,12 +68,20 @@ pub fn bash(cmd: &str, mut o: RunOpts<'_>) -> RunResult {
     }
     use std::os::unix::process::CommandExt;
     c.process_group(0);
+    // if Chuck itself dies (even SIGKILL), the command's shell dies with it
+    unsafe {
+        c.pre_exec(|| {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+            Ok(())
+        });
+    }
     let mut child = match c.spawn() {
         Ok(ch) => ch,
         Err(e) => return RunResult { exit: 127, output: format!("couldn't start: {e}"), timed_out: false,
                                      stopped: false, ms: 0 },
     };
     let pgid = child.id() as i32;
+    let _live = Live::register(pgid);
     let (tx, rx) = mpsc::channel::<Vec<u8>>();
     let mut readers = Vec::new();
     for pipe in [child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>),
@@ -189,6 +197,52 @@ impl Capped {
             out.push_str(&String::from_utf8_lossy(&self.tail.into_iter().collect::<Vec<_>>()));
         }
         out
+    }
+}
+
+/// Every command's process group while it runs, so Chuck can end them all
+/// when it quits (nothing an agent started may outlive the app).
+fn live() -> &'static std::sync::Mutex<std::collections::HashSet<i32>> {
+    static LIVE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<i32>>> = std::sync::OnceLock::new();
+    LIVE.get_or_init(Default::default)
+}
+
+struct Live(i32);
+
+impl Live {
+    fn register(pgid: i32) -> Live {
+        live().lock().unwrap_or_else(|e| e.into_inner()).insert(pgid);
+        Live(pgid)
+    }
+}
+
+impl Drop for Live {
+    fn drop(&mut self) {
+        live().lock().unwrap_or_else(|e| e.into_inner()).remove(&self.0);
+    }
+}
+
+/// How many commands are running right now (any agent, any thread).
+pub fn running() -> usize {
+    live().lock().unwrap_or_else(|e| e.into_inner()).len()
+}
+
+/// End every command still running — the whole process group of each,
+/// TERM then KILL. Called when the app quits.
+pub fn kill_all() {
+    let groups: Vec<i32> = live().lock().unwrap_or_else(|e| e.into_inner()).iter().copied().collect();
+    for g in &groups {
+        unsafe {
+            libc::killpg(*g, libc::SIGTERM);
+        }
+    }
+    if !groups.is_empty() {
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    for g in &groups {
+        unsafe {
+            libc::killpg(*g, libc::SIGKILL);
+        }
     }
 }
 

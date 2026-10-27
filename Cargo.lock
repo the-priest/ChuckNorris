@@ -133,6 +133,7 @@ dependencies = [
  "chuck-runtime",
  "chuck-sandbox",
  "chuck-store",
+ "chuck-tools",
  "chuck-ui",
  "libc",
  "serde_json",
@@ -221,9 +222,12 @@ dependencies = [
  "chuck-runtime",
  "chuck-sandbox",
  "chuck-store",
+ "chuck-tools",
  "gtk4",
  "libadwaita",
+ "libc",
  "regex",
+ "serde",
  "serde_json",
 ]
 

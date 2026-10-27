@@ -12,7 +12,7 @@ pub mod prompts;
 pub mod setup;
 
 pub use agent::{Ctx, Halt};
-pub use events::{Event, Events, Outcome};
+pub use events::{Event, Events, Outcome, TaskView};
 
 use chuck_core::{AgentId, DoneGate, FleetConfig, Kernel, Quota, Role, SpawnSpec};
 use chuck_model::{ChatModel, Reasoning};
@@ -97,12 +97,15 @@ pub struct Job {
     pub history: Vec<(String, String)>,
     /// Answers to the Lead's ```ask``` (None: nobody is there to answer).
     pub answers: Option<Receiver<String>>,
+    /// What the user types while the fleet works: the Lead reads it before
+    /// its next step (and stops waiting on workers to read it).
+    pub steer: Option<Receiver<String>>,
     pub stop: Arc<AtomicBool>,
 }
 
 impl Job {
     pub fn new(ask: impl Into<String>, folder: impl AsRef<Path>) -> Job {
-        Job { ask: ask.into(), folder: folder.as_ref().to_path_buf(), history: Vec::new(), answers: None,
+        Job { ask: ask.into(), folder: folder.as_ref().to_path_buf(), history: Vec::new(), answers: None, steer: None,
               stop: Arc::new(AtomicBool::new(false)) }
     }
 }
@@ -184,6 +187,7 @@ impl Runtime {
                                                model: self.cfg.fleet.deepseek_model.clone(), task: None });
         let first = first_message(&job);
         let mut run = lead::LeadRun::new(&ctx, lead, &folder, &job.ask, job.answers);
+        run.steer = job.steer;
         let outcome = run.run(&first);
         let status = match &outcome {
             Outcome::Done { .. } | Outcome::Answered { .. } => 0,

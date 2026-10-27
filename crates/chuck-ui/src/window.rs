@@ -1,21 +1,28 @@
-//! The Chuck window: a conversation with the Lead, the fleet's work under
-//! each reply, the fleet itself (/top) and the Done gate beside it.
+//! The Chuck window: the conversation with the Lead on the left, with each
+//! agent's work in a lane under the reply; everything the fleet is doing on
+//! the right, in sections you open when you want them.
 
+use crate::chat::{self, Entry, Saved};
 use crate::md::{self, Part};
+use crate::panel::Panel;
 use adw::prelude::*;
-use chuck_core::{AgentId, Kernel, ProcState, Role};
+use chuck_core::{AgentId, Kernel, ProcInfo, Role};
 use chuck_model::{fmt_tokens, fmt_usd, ChatModel};
 use chuck_runtime::{setup, Event, Events, Job, JobReport, Outcome, Runtime};
 use chuck_store::Settings;
 use gtk::{gdk, glib, pango};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// A lane shows this many of its latest actions; the rest fold into a
+/// "N earlier actions" row you can open. Nothing is ever removed.
+const LANE_KEEP: usize = 12;
 
 /// How the window is started: normally from the settings; a test or a
 /// screenshot can hand it a model and a scripted session.
@@ -31,14 +38,18 @@ pub struct Options {
     pub height: i32,
     /// Open Settings once the window is up.
     pub settings: bool,
+    /// Sections of the right panel to open (else: what the user had open).
+    pub open: Option<Vec<String>>,
 }
 
 struct Running {
     stop: Arc<AtomicBool>,
     answers: Sender<String>,
+    steer: Sender<String>,
     events: Receiver<Event>,
     kernel: Arc<Kernel>,
     done: Receiver<JobReport>,
+    started: Instant,
 }
 
 struct Ui {
@@ -46,30 +57,37 @@ struct Ui {
     stack: gtk::Stack,
     transcript: gtk::Box,
     input: gtk::TextView,
+    hint: gtk::Label,
     send: gtk::Button,
     stop: gtk::Button,
     status: gtk::Label,
     subtitle: gtk::Label,
     meter: gtk::Label,
-    fleet: gtk::ListBox,
-    phase: gtk::Label,
-    unmet: gtk::Box,
-    criteria: gtk::Box,
     folder_btn: gtk::Button,
+    new_btn: gtk::Button,
+}
+
+struct Lane {
+    older: gtk::Expander,
+    older_box: gtk::Box,
+    recent: gtk::Box,
+    folded: usize,
 }
 
 struct State {
     ui: Ui,
+    panel: Panel,
     opts: Options,
     folder: Option<PathBuf>,
-    history: Vec<(String, String)>,
+    saved: Saved,
     running: Option<Running>,
     names: HashMap<AgentId, (String, Role)>,
     models: HashMap<AgentId, String>,
-    lane: Option<gtk::Box>,
-    spent: f64,
+    lane: Option<Lane>,
+    last_ps: Vec<ProcInfo>,
     tokens: u64,
-    last_lead_text: String,
+    spent: f64,
+    unsaved: bool,
 }
 
 type Shared = Rc<RefCell<State>>;
@@ -132,7 +150,10 @@ fn render(text: &str) -> gtk::Box {
 fn card(kind: &str, class: &str) -> (gtk::Box, gtk::Box, gtk::Box) {
     let c = gtk::Box::new(gtk::Orientation::Vertical, 0);
     c.add_css_class("card");
-    c.add_css_class(class);
+    if !class.is_empty() {
+        c.add_css_class(class);
+    }
+    c.set_margin_top(10);
     let head = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     head.add_css_class("card-head");
     let k = label(kind, &["card-kind"]);
@@ -150,67 +171,155 @@ fn card(kind: &str, class: &str) -> (gtk::Box, gtk::Box, gtk::Box) {
 }
 
 impl State {
-    fn push(&mut self, w: &impl IsA<gtk::Widget>) {
+    fn append(&mut self, w: &impl IsA<gtk::Widget>) {
         self.ui.transcript.append(w);
         self.ui.stack.set_visible_child_name("chat");
     }
 
-    fn user_says(&mut self, text: &str) {
-        let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        row.add_css_class("user-row");
-        row.set_halign(gtk::Align::End);
-        let bubble = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        bubble.add_css_class("user-bubble");
-        let l = label(text, &[]);
-        l.set_selectable(true);
-        l.set_max_width_chars(70);
-        bubble.append(&l);
-        row.append(&bubble);
-        self.push(&row);
-        self.lane = None;
+    /// Record an entry and draw it.
+    fn add(&mut self, e: Entry) {
+        self.draw(&e);
+        self.saved.entries.push(e);
+        self.unsaved = true;
     }
 
-    fn lead_says(&mut self, text: &str) {
-        let col = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        col.add_css_class("bot-row");
-        let by = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        let av = label("C", &["avatar"]);
-        av.set_xalign(0.5);
-        by.append(&av);
-        by.append(&label("Lead", &["byline"]));
-        let model = self.names.iter().find(|(_, (n, _))| n == "lead").and_then(|(id, _)| self.models.get(id))
-            .cloned().unwrap_or_default();
-        by.append(&label(&model, &["byline-meta"]));
-        col.append(&by);
-        let body = render(text);
-        body.set_margin_start(28);
-        col.append(&body);
-        self.push(&col);
-        self.lane = None;
-        self.last_lead_text = text.to_string();
+    /// Record an entry that's already on screen (an answered card).
+    fn record(&mut self, e: Entry) {
+        self.saved.entries.push(e);
+        self.unsaved = true;
     }
 
-    fn lane_row(&mut self, markup_text: &str) {
-        if self.lane.is_none() {
-            let lane = gtk::Box::new(gtk::Orientation::Vertical, 3);
-            lane.add_css_class("lane");
-            lane.set_margin_top(8);
-            self.push(&lane);
-            self.lane = Some(lane);
+    fn draw(&mut self, e: &Entry) {
+        match e {
+            Entry::User { text } | Entry::Steer { text } => {
+                let steer = matches!(e, Entry::Steer { .. });
+                let row = gtk::Box::new(gtk::Orientation::Vertical, 2);
+                row.add_css_class("user-row");
+                row.set_halign(gtk::Align::End);
+                if steer {
+                    row.append(&label("to the Lead, while it works", &["steer-note"]));
+                }
+                let bubble = gtk::Box::new(gtk::Orientation::Vertical, 0);
+                bubble.add_css_class("user-bubble");
+                if steer {
+                    bubble.add_css_class("steer-bubble");
+                }
+                let l = label(text, &[]);
+                l.set_selectable(true);
+                l.set_max_width_chars(70);
+                bubble.append(&l);
+                row.append(&bubble);
+                self.append(&row);
+                self.lane = None;
+            }
+            Entry::Lead { text, model } => {
+                let col = gtk::Box::new(gtk::Orientation::Vertical, 6);
+                col.add_css_class("bot-row");
+                let by = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+                let av = label("C", &["avatar"]);
+                av.set_xalign(0.5);
+                by.append(&av);
+                by.append(&label("Lead", &["byline"]));
+                by.append(&label(model, &["byline-meta"]));
+                col.append(&by);
+                let body = render(text);
+                body.set_margin_start(28);
+                col.append(&body);
+                self.append(&col);
+                self.lane = None;
+            }
+            Entry::Act { markup: m } => {
+                if self.lane.is_none() {
+                    let root = gtk::Box::new(gtk::Orientation::Vertical, 3);
+                    root.add_css_class("lane");
+                    root.set_margin_top(8);
+                    let older_box = gtk::Box::new(gtk::Orientation::Vertical, 3);
+                    let older = gtk::Expander::new(Some(""));
+                    older.add_css_class("lane-older");
+                    older.set_child(Some(&older_box));
+                    older.set_visible(false);
+                    root.append(&older);
+                    let recent = gtk::Box::new(gtk::Orientation::Vertical, 3);
+                    root.append(&recent);
+                    self.append(&root);
+                    self.lane = Some(Lane { older, older_box, recent, folded: 0 });
+                }
+                let lane = self.lane.as_mut().unwrap();
+                let l = markup(m, &["act"]);
+                lane.recent.append(&l);
+                // fold the oldest visible line once the lane is long: still there, one click away
+                let mut n = 0;
+                let mut c = lane.recent.first_child();
+                while let Some(w) = c {
+                    n += 1;
+                    c = w.next_sibling();
+                }
+                if n > LANE_KEEP {
+                    if let Some(first) = lane.recent.first_child() {
+                        lane.recent.remove(&first);
+                        lane.older_box.append(&first);
+                        lane.folded += 1;
+                        lane.older.set_label(Some(&format!("{} earlier actions", lane.folded)));
+                        lane.older.set_visible(true);
+                    }
+                }
+            }
+            Entry::Card { kind, class, text } => {
+                let (c, body, _foot) = card(kind, class);
+                body.append(&render(text));
+                self.append(&c);
+                self.lane = None;
+            }
         }
-        let l = markup(markup_text, &["act"]);
-        l.set_wrap(true);
-        self.lane.as_ref().unwrap().append(&l);
+    }
+
+    /// Draw a whole saved conversation.
+    fn redraw(&mut self) {
+        while let Some(c) = self.ui.transcript.first_child() {
+            self.ui.transcript.remove(&c);
+        }
+        self.lane = None;
+        let entries = std::mem::take(&mut self.saved.entries);
+        for e in &entries {
+            self.draw(e);
+        }
+        self.saved.entries = entries;
+        self.ui.stack.set_visible_child_name(if self.saved.entries.is_empty() { "welcome" } else { "chat" });
+    }
+
+    fn save(&mut self) {
+        if let Some(f) = &self.folder {
+            if self.unsaved {
+                self.saved.folder = f.display().to_string();
+                chat::save(f, &self.saved);
+                self.unsaved = false;
+            }
+        }
+    }
+
+    fn act(&mut self, m: String) {
+        self.add(Entry::Act { markup: m });
     }
 
     fn who(&self, id: AgentId) -> String {
         self.names.get(&id).map(|(n, _)| n.clone()).unwrap_or_else(|| format!("#{id}"))
     }
 
+    fn is_lead(&self, id: AgentId) -> bool {
+        self.names.get(&id).is_some_and(|(n, r)| *r == Role::Lead && n == "lead")
+    }
+
     fn set_running(&mut self, on: bool) {
-        self.ui.send.set_visible(!on);
         self.ui.stop.set_visible(on);
-        self.ui.status.set_label(if on { "the fleet is working — Esc stops it" } else { "" });
+        self.ui.send.set_tooltip_text(Some(if on { "Tell the Lead (it reads it at its next step)" } else {
+            "Send (Enter) · new line: Shift+Enter" }));
+        self.ui.hint.set_label(if on { "Type to steer — the Lead reads it at its next step · Esc stops" } else {
+            "Tell the fleet what you want" });
+        self.ui.folder_btn.set_sensitive(!on);
+        self.ui.new_btn.set_sensitive(!on);
+        if !on {
+            self.ui.status.set_label("");
+        }
     }
 
     fn refresh_header(&self) {
@@ -225,9 +334,50 @@ impl State {
         self.ui.meter.set_markup(&format!("{} · <span foreground=\"#A78BFA\" weight=\"bold\">{}</span>",
                                           fmt_tokens(self.tokens), fmt_usd(self.spent)));
     }
+
+    /// The folder's conversation and checkpoints.
+    fn open_folder(&mut self, folder: Option<PathBuf>, shared: &Shared) {
+        self.save();
+        self.folder = folder;
+        self.saved = self.folder.as_deref().and_then(chat::load).unwrap_or_default();
+        self.redraw();
+        self.refresh_header();
+        self.panel.reset();
+        self.panel.restore(&self.saved.progress);
+        refresh_checkpoints(self, shared);
+    }
 }
 
-fn on_event(st: &mut State, e: Event) {
+fn refresh_checkpoints(st: &State, shared: &Shared) {
+    let points = st.folder.as_ref().and_then(|f| chuck_store::Shadow::new(f, &chuck_store::checkpoint::default_store()).ok())
+        .map(|sh| sh.points(15)).unwrap_or_default();
+    let sh = shared.clone();
+    st.panel.set_checkpoints(&points, st.running.is_some(), Rc::new(move |sha: String| rewind(&sh, &sha)));
+}
+
+fn rewind(shared: &Shared, sha: &str) {
+    let mut st = shared.borrow_mut();
+    if st.running.is_some() {
+        return;
+    }
+    let Some(folder) = st.folder.clone() else { return };
+    let r = chuck_store::Shadow::new(&folder, &chuck_store::checkpoint::default_store()).and_then(|s| s.restore(sha));
+    let text = match r {
+        Ok((undo, changed)) => format!("The folder is back to checkpoint `{}`: {} file(s) put back. This rewind is \
+            itself a checkpoint (`{}`), so it can be undone from the list.", &sha[..10.min(sha.len())], changed.len(),
+            &undo[..10.min(undo.len())]),
+        Err(e) => format!("Couldn't rewind: {e}"),
+    };
+    st.add(Entry::Card { kind: "REWOUND".into(), class: "ask-card".into(), text });
+    st.save();
+    refresh_checkpoints(&st, shared);
+}
+
+fn mark(ok: bool) -> &'static str {
+    if ok { "<span foreground=\"#4ADE9A\">✓</span>" } else { "<span foreground=\"#F87171\">✗</span>" }
+}
+
+fn on_event(st: &mut State, e: Event, shared: &Shared) {
     let esc = md::escape;
     match e {
         Event::AgentStarted { id, role, name, model, task } => {
@@ -239,17 +389,27 @@ fn on_event(st: &mut State, e: Event) {
                     (None, "critic") => " — reviewing the whole result".into(),
                     _ => String::new(),
                 };
-                st.lane_row(&format!("<span foreground=\"#5F5F6E\">+ {} ({}){}</span>", esc(&name), esc(short(&model)), esc(&what)));
+                st.act(format!("<span foreground=\"#5F5F6E\">+ {} ({}){}</span>", esc(&name), esc(short(&model)), esc(&what)));
+                st.panel.log(&name, format!("started{what}"));
             }
         }
         Event::Said { id, text } => {
-            if st.names.get(&id).is_some_and(|(n, r)| *r == Role::Lead && n == "lead") {
-                st.lead_says(&text);
+            let who = st.who(id);
+            if st.is_lead(id) {
+                let model = st.models.get(&id).cloned().unwrap_or_default();
+                st.add(Entry::Lead { text: text.clone(), model });
+                st.save(); // a reply is never lost, even if the app is killed
             } else {
-                let who = st.who(id);
-                st.lane_row(&format!("<span foreground=\"#5F5F6E\">{:<6} │ {}</span>", esc(&who), esc(&one_line(&text, 160))));
+                st.act(format!("<span foreground=\"#5F5F6E\">{:<6} │ {}</span>", esc(&who), esc(&one_line(&text, 160))));
             }
+            st.panel.log(&who, format!("said: {}", one_line(&text, 200)));
         }
+        Event::Running { id, tool, cmd } => {
+            let who = st.who(id);
+            st.panel.command_started(id, &who, &tool, &cmd);
+            st.panel.log(&who, format!("$ {}", one_line(&cmd, 200)));
+        }
+        Event::Output { id, chunk } => st.panel.output(id, &chunk),
         Event::Action { id, tool, arg, ok, summary } => {
             let who = st.who(id);
             let what = match tool.as_str() {
@@ -257,22 +417,25 @@ fn on_event(st: &mut State, e: Event) {
                 _ if summary.is_empty() => one_line(&arg, 100),
                 _ => one_line(&summary, 120),
             };
-            let mark = if ok { "<span foreground=\"#4ADE9A\">✓</span>" } else { "<span foreground=\"#F87171\">✗</span>" };
-            st.lane_row(&format!("{mark} <span foreground=\"#5F5F6E\">{:<6}</span> {} <span foreground=\"#8E8E9E\">{}</span>",
-                                 esc(&who), esc(&tool), esc(&what)));
+            if tool == "bash" || tool == "test" {
+                st.panel.command_finished(id, ok, &summary);
+            }
+            st.panel.log(&who, format!("{} {tool} {what}", if ok { "✓" } else { "✗" }));
+            st.act(format!("{} <span foreground=\"#5F5F6E\">{:<6}</span> {} <span foreground=\"#8E8E9E\">{}</span>",
+                           mark(ok), esc(&who), esc(&tool), esc(&what)));
         }
         Event::Assigned { task, title, worker, role } => {
             let who = st.who(worker);
-            st.lane_row(&format!("<span foreground=\"#A78BFA\">◆ {} “{}” → {} ({})</span>", esc(&task),
-                                 esc(&one_line(&title, 60)), esc(&who), role.label()));
+            st.act(format!("<span foreground=\"#A78BFA\">◆ {} “{}” → {} ({})</span>", esc(&task), esc(&one_line(&title, 60)),
+                           esc(&who), role.label()));
         }
         Event::Submitted { task, worker, lines } => {
             let who = st.who(worker);
-            st.lane_row(&format!("<span foreground=\"#A78BFA\">◆ {} submitted by {} ({lines} lines)</span>", esc(&task), esc(&who)));
+            st.act(format!("<span foreground=\"#A78BFA\">◆ {} submitted by {} ({lines} lines)</span>", esc(&task), esc(&who)));
         }
         Event::Reviewed { task, accepted, defects } => {
             let what = if task == "job" { "independent review".to_string() } else { task };
-            st.lane_row(&if accepted {
+            st.act(if accepted {
                 format!("<span foreground=\"#4ADE9A\">✓ {}: accepted</span>", esc(&what))
             } else {
                 format!("<span foreground=\"#F5B454\">↺ {}: sent back — {}</span>", esc(&what), esc(&one_line(&defects.join("; "), 160)))
@@ -287,85 +450,68 @@ fn on_event(st: &mut State, e: Event) {
                 s.push_str(&format!(", refused: {}", refused.join(", ")));
             }
             let color = if conflicts.is_empty() { "#4ADE9A" } else { "#F5B454" };
-            st.lane_row(&format!("<span foreground=\"{color}\">{}</span>", esc(&s)));
+            st.act(format!("<span foreground=\"{color}\">{}</span>", esc(&s)));
         }
         Event::Notice { id, text } => {
             let who = st.who(id);
-            st.lane_row(&format!("<span foreground=\"#F5B454\">! {}: {}</span>", esc(&who), esc(&text)));
+            st.panel.log(&who, format!("! {text}"));
+            st.act(format!("<span foreground=\"#F5B454\">! {}: {}</span>", esc(&who), esc(&text)));
         }
         Event::Usage { tokens, usd, .. } => {
             st.tokens += tokens;
             st.spent += usd;
             st.refresh_header();
         }
-        Event::Gate { id, task: None, phase, unmet } => {
-            if st.names.get(&id).is_some_and(|(n, _)| n == "lead") {
-                st.ui.phase.set_label(&format!("Phase: {phase}"));
-                st.ui.phase.remove_css_class("phase-incomplete");
-                if phase == "INCOMPLETE" {
-                    st.ui.phase.add_css_class("phase-incomplete");
-                }
-                while let Some(c) = st.ui.unmet.first_child() {
-                    st.ui.unmet.remove(&c);
-                }
-                for u in unmet.iter().take(8) {
-                    st.ui.unmet.append(&label(&format!("· {u}"), &["unmet"]));
-                }
-            }
+        Event::Gate { id, task: None, phase, unmet } if st.is_lead(id) => {
+            st.panel.set_gate(&phase, &unmet);
+            st.saved.progress.phase = phase;
+            st.saved.progress.unmet = unmet;
         }
         Event::Board { criteria } => {
-            while let Some(c) = st.ui.criteria.first_child() {
-                st.ui.criteria.remove(&c);
-            }
-            for (id, text, verify, ev) in criteria {
-                let row = gtk::Box::new(gtk::Orientation::Vertical, 3);
-                row.add_css_class("crit-row");
-                let top = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-                top.append(&label(&id, &["crit-id"]));
-                let t = label(&text, &["crit-text"]);
-                t.set_hexpand(true);
-                top.append(&t);
-                row.append(&top);
-                if let Some(v) = verify {
-                    row.append(&label(&format!("verify: {v}"), &["fleet-meta"]));
-                }
-                let chips = gtk::FlowBox::builder().selection_mode(gtk::SelectionMode::None).max_children_per_line(3).build();
-                if ev.is_empty() {
-                    chips.insert(&label("no evidence yet", &["chip", "chip-bad"]), -1);
-                }
-                for e in ev.iter().rev().take(4) {
-                    let cls = if e.contains("FAIL") || e.contains("→ exit 1") { "chip-bad" } else if e.contains("pass") { "chip-ok" } else { "chip" };
-                    chips.insert(&label(&one_line(e, 40), &["chip", cls]), -1);
-                }
-                row.append(&chips);
-                st.ui.criteria.append(&row);
-            }
+            st.panel.set_board(&criteria);
+            st.saved.progress.board = criteria;
+        }
+        Event::Plan { steps } => {
+            st.saved.progress.plan = steps.clone();
+            st.panel.set_plan(steps);
+        }
+        Event::Tasks(t) => {
+            st.panel.set_tasks(&t);
+            st.saved.progress.tasks = t.iter().map(|t| chat::TaskSnap { id: t.id.clone(), title: t.title.clone(),
+                state: t.state.clone(), workers: t.workers.clone(), deps: t.deps.clone(), criteria: t.criteria.clone(),
+                note: t.note.clone() }).collect();
         }
         Event::Ask { question, .. } => {
             let (c, body, foot) = card("THE LEAD ASKS", "ask-card");
-            body.append(&label(&question, &["prose"]));
+            body.append(&render(&question));
             let entry = gtk::Entry::builder().hexpand(true).placeholder_text("Your answer").build();
             let btn = gtk::Button::with_label("Answer");
             btn.add_css_class("suggested-action");
             foot.append(&entry);
             foot.append(&btn);
             let tx = st.running.as_ref().map(|r| r.answers.clone());
-            let (e2, f2) = (entry.clone(), foot.clone());
-            let answer = move || {
+            let (e2, f2, sh, q) = (entry.clone(), foot.clone(), shared.clone(), question.clone());
+            let answer = Rc::new(move || {
+                let a = e2.text().to_string();
                 if let Some(tx) = &tx {
-                    let _ = tx.send(e2.text().to_string());
+                    let _ = tx.send(a.clone());
                 }
                 f2.set_sensitive(false);
-            };
+                if let Ok(mut st) = sh.try_borrow_mut() {
+                    st.record(Entry::Card { kind: "THE LEAD ASKED".into(), class: "ask-card".into(),
+                                            text: format!("{q}\n\n**You:** {a}") });
+                }
+            });
             let a2 = answer.clone();
             btn.connect_clicked(move |_| a2());
             entry.connect_activate(move |_| answer());
-            st.push(&c);
+            st.append(&c);
             st.lane = None;
+            entry.grab_focus();
         }
         Event::Confirm { command, why, .. } => {
             let (c, body, foot) = card("CRITICAL — NEEDS YOUR YES", "crit-card");
-            body.append(&label("The lead wants to run:", &["prose"]));
+            body.append(&label("The Lead wants to run:", &["prose"]));
             let cmd = label(&command, &["cmd-text"]);
             cmd.set_selectable(true);
             body.append(&cmd);
@@ -377,45 +523,33 @@ fn on_event(st: &mut State, e: Event) {
             foot.append(&run);
             let tx = st.running.as_ref().map(|r| r.answers.clone());
             for (b, word) in [(run, "yes"), (no, "no")] {
-                let (tx, f) = (tx.clone(), foot.clone());
+                let (tx, f, sh, cmd) = (tx.clone(), foot.clone(), shared.clone(), command.clone());
                 b.connect_clicked(move |_| {
                     if let Some(tx) = &tx {
                         let _ = tx.send(word.into());
                     }
                     f.set_sensitive(false);
+                    if let Ok(mut st) = sh.try_borrow_mut() {
+                        st.record(Entry::Card { kind: "CRITICAL COMMAND".into(), class: "crit-card".into(),
+                            text: format!("`{cmd}`\n\nYou said **{}**.", if word == "yes" { "run it" } else { "no" }) });
+                    }
                 });
             }
-            st.push(&c);
+            st.append(&c);
             st.lane = None;
         }
-        Event::Finished(_) | Event::AgentEnded { .. } | Event::Output { .. } | Event::Thinking { .. }
-        | Event::Delta { .. } | Event::Gate { .. } => {}
+        Event::Finished(_) | Event::AgentEnded { .. } | Event::Thinking { .. } | Event::Delta { .. } | Event::Gate { .. } => {}
     }
 }
 
-fn show_gate(st: &State, gate: &chuck_core::DoneGate) {
-    let phase = gate.phase.label();
-    st.ui.phase.set_label(&format!("Phase: {phase}"));
-    st.ui.phase.remove_css_class("phase-incomplete");
-    if phase == "INCOMPLETE" {
-        st.ui.phase.add_css_class("phase-incomplete");
+fn finished(st: &mut State, report: JobReport, shared: &Shared) {
+    // the fleet's final state, read before the job is let go
+    if let Some(run) = &st.running {
+        st.last_ps = run.kernel.ps(true);
     }
-    while let Some(c) = st.ui.unmet.first_child() {
-        st.ui.unmet.remove(&c);
-    }
-    if !gate.is_done() {
-        for u in gate.check().iter().take(8) {
-            st.ui.unmet.append(&label(&format!("· {}", u.describe()), &["unmet"]));
-        }
-    }
-}
-
-fn finished(st: &mut State, report: JobReport) {
-    if !report.gate.criteria.is_empty() || report.gate.is_done() {
-        show_gate(st, &report.gate);
-        on_event(st, Event::Board { criteria: report.gate.board().into_iter()
-            .map(|(c, ev)| (c.id.to_string(), c.text, c.verify, ev)).collect() });
-    }
+    let ps = std::mem::take(&mut st.last_ps);
+    st.panel.set_agents(&ps, &st.models);
+    st.last_ps = ps;
     let (kind, class) = match &report.outcome {
         Outcome::Done { .. } => ("DONE", "done-card"),
         Outcome::Answered { .. } => ("", ""),
@@ -425,147 +559,168 @@ fn finished(st: &mut State, report: JobReport) {
     let reply = match &report.outcome {
         Outcome::Done { summary } => summary.clone(),
         Outcome::Answered { text } => text.clone(),
-        Outcome::Paused { gaps } => format!("Not finished. Still missing: {}", gaps.join("; ")),
+        Outcome::Paused { gaps } => format!("Not finished. Still missing:\n{}", gaps.iter().map(|g| format!("- {g}"))
+            .collect::<Vec<_>>().join("\n")),
         Outcome::Failed { error } => error.clone(),
     };
     if !kind.is_empty() {
-        let (c, body, foot) = card(&format!("{kind} · {} tokens · {}", fmt_tokens(report.tokens), fmt_usd(report.usd)), class);
-        match &report.outcome {
-            Outcome::Done { summary } => body.append(&render(summary)),
-            Outcome::Paused { gaps } => {
-                body.append(&label("Not finished. What is still missing:", &["prose"]));
-                for g in gaps {
-                    body.append(&label(&format!("·  {g}"), &["prose"]));
-                }
-            }
-            Outcome::Failed { error } => body.append(&label(error, &["prose"])),
-            Outcome::Answered { .. } => {}
+        let head = format!("{kind} · {} tokens · {}", fmt_tokens(report.tokens), fmt_usd(report.usd));
+        let mut text = reply.clone();
+        if let Some(cp) = &report.checkpoint {
+            text.push_str(&format!("\n\nUndo the whole job: **Rewind** checkpoint `{}` (right panel, Checkpoints).",
+                                   &cp[..10.min(cp.len())]));
         }
-        if let (Some(cp), Some(folder)) = (report.checkpoint.clone(), st.folder.clone()) {
-            let b = gtk::Button::with_label("Rewind this job");
-            b.add_css_class("pill");
-            let st_note = label("", &["sub"]);
-            let note = st_note.clone();
-            b.connect_clicked(move |b| {
-                let r = chuck_store::Shadow::new(&folder, &chuck_store::checkpoint::default_store())
-                    .and_then(|sh| sh.restore(&cp));
-                match r {
-                    Ok((undo, changed)) => {
-                        note.set_label(&format!("{} file(s) put back · undo: chuck rewind {}", changed.len(), &undo[..10]));
-                        b.set_sensitive(false);
-                    }
-                    Err(e) => note.set_label(&e.to_string()),
-                }
-            });
-            foot.append(&b);
-            foot.append(&st_note);
-        }
-        st.push(&c);
+        st.add(Entry::Card { kind: head, class: class.into(), text });
     }
-    st.history.push(("lead".into(), reply));
+    let gate = &report.gate;
+    if !gate.criteria.is_empty() || gate.is_done() {
+        let unmet: Vec<String> = if gate.is_done() { Vec::new() } else { gate.check().iter().map(|u| u.describe()).collect() };
+        let board: Vec<_> = gate.board().into_iter().map(|(c, ev)| (c.id.to_string(), c.text, c.verify, ev)).collect();
+        st.panel.set_gate(gate.phase.label(), &unmet);
+        st.panel.set_board(&board);
+        st.saved.progress.phase = gate.phase.label().to_string();
+        st.saved.progress.unmet = unmet;
+        st.saved.progress.board = board;
+    }
+    let done = matches!(report.outcome, Outcome::Done { .. });
+    st.panel.job_finished(done);
+    st.saved.progress.finished = done;
+    st.saved.history.push(("lead".into(), reply));
     st.lane = None;
+    st.running = None;
     st.set_running(false);
+    st.save();
+    refresh_checkpoints(st, shared);
 }
 
 fn start(shared: &Shared, text: String) {
     let mut st = shared.borrow_mut();
-    if st.running.is_some() || text.trim().is_empty() {
+    let text = text.trim().to_string();
+    if text.is_empty() {
         return;
     }
-    st.user_says(&text);
+    if let Some(r) = &st.running {
+        // mid-job: it steers the Lead
+        let _ = r.steer.send(text.clone());
+        st.add(Entry::Steer { text });
+        return;
+    }
+    st.add(Entry::User { text: text.clone() });
     let Some(folder) = st.folder.clone() else {
-        st.lead_says("Pick a project folder first (the button at the top): the fleet works on a folder.");
+        st.add(Entry::Lead { text: "Pick a project folder first (the button at the top): the fleet works on a folder."
+                                 .into(), model: String::new() });
         return;
     };
     let settings = Settings::load();
     let (model, cfg) = match (&st.opts.model, setup::from_settings(&settings, &folder, None)) {
-        (Some(m), _) => {
-            let cfg = chuck_runtime::RuntimeConfig { access: setup::access_of(&settings, &folder),
-                                                     ..Default::default() };
-            (m.clone(), cfg)
-        }
+        (Some(m), _) => (m.clone(), chuck_runtime::RuntimeConfig { access: setup::access_of(&settings, &folder),
+                                                                  ..Default::default() }),
         (None, Ok(s)) => {
             for n in &s.notes {
-                st.lane_row(&format!("<span foreground=\"#F5B454\">! {}</span>", md::escape(n)));
+                st.act(format!("<span foreground=\"#F5B454\">! {}</span>", md::escape(n)));
             }
             (s.model, s.cfg)
         }
         (None, Err(e)) => {
-            st.lead_says(&format!("I can't start: {e}"));
+            st.add(Entry::Card { kind: "CAN'T START".into(), class: "gap-card".into(), text: e });
             return;
         }
     };
+    st.panel.reset();
+    st.saved.progress = chat::Progress::default();
+    st.names.clear();
+    st.models.clear();
     let (tx, rx) = channel();
     let rt = Runtime::new(model, cfg, Events(Some(tx)));
     let kernel = rt.kernel.clone();
     let mut job = Job::new(text.clone(), &folder);
-    job.history = st.history.clone();
+    job.history = st.saved.history.clone();
     let (atx, arx) = channel();
     job.answers = Some(arx);
+    let (stx, srx) = channel();
+    job.steer = Some(srx);
     let stop = job.stop.clone();
     let (dtx, drx) = channel();
     std::thread::Builder::new().name("chuck-job".into()).spawn(move || {
         let _ = dtx.send(rt.run(job));
     }).expect("start the job thread");
-    st.history.push(("user".into(), text));
-    st.running = Some(Running { stop, answers: atx, events: rx, kernel, done: drx });
+    st.saved.history.push(("user".into(), text));
+    st.running = Some(Running { stop, answers: atx, steer: stx, events: rx, kernel, done: drx, started: Instant::now() });
     st.set_running(true);
+    st.save();
+    refresh_checkpoints(&st, shared);
 }
 
-/// Drain the fleet's events into the window; refresh /top.
+/// Drain the fleet's events into the window (every 60 ms).
 fn pump(shared: &Shared) {
     let mut st = shared.borrow_mut();
     let Some(run) = &st.running else { return };
-    let events: Vec<Event> = run.events.try_iter().take(400).collect();
+    let events: Vec<Event> = run.events.try_iter().take(500).collect();
     let report = run.done.try_recv().ok();
-    let ps = run.kernel.ps(true);
     for e in events {
-        on_event(&mut st, e);
-    }
-    // the fleet panel: every agent of this job, as the kernel sees it (/top)
-    while let Some(c) = st.ui.fleet.first_child() {
-        st.ui.fleet.remove(&c);
-    }
-    if ps.is_empty() {
-        st.ui.fleet.append(&label("Agents appear here while a job runs.", &["unmet"]));
-    }
-    for p in &ps {
-        let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
-        row.add_css_class("fleet-row");
-        let dot = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        dot.add_css_class("dot");
-        dot.add_css_class(match p.state {
-            ProcState::Running => "dot-run",
-            ProcState::Waiting | ProcState::Ready | ProcState::Stopped => "dot-wait",
-            ProcState::Done => "dot-done",
-            ProcState::Failed | ProcState::Killed => "dot-fail",
-        });
-        dot.set_valign(gtk::Align::Center);
-        row.append(&dot);
-        let col = gtk::Box::new(gtk::Orientation::Vertical, 1);
-        col.set_hexpand(true);
-        let model = st.models.get(&p.pid).cloned().unwrap_or_else(|| p.role.label().into());
-        let top = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        top.append(&label(&p.name, &["fleet-name"]));
-        top.append(&label(&model, &["fleet-meta"]));
-        col.append(&top);
-        let doing = if p.activity.is_empty() { p.state.label().to_string() } else { p.activity.clone() };
-        col.append(&label(&format!("{} · {} tok · {}", one_line(&doing, 34), fmt_tokens(p.tokens), fmt_usd(p.usd)), &["fleet-meta"]));
-        if !p.brief.is_empty() && p.role != Role::Lead {
-            col.append(&label(&one_line(&p.brief, 44), &["fleet-meta"]));
-        }
-        row.append(&col);
-        st.ui.fleet.append(&row);
+        on_event(&mut st, e, shared);
     }
     if let Some(r) = report {
-        // the last events of the job may still be queued
         let rest: Vec<Event> = st.running.as_ref().map(|r| r.events.try_iter().collect()).unwrap_or_default();
         for e in rest {
-            on_event(&mut st, e);
+            on_event(&mut st, e, shared);
         }
-        st.running = None;
-        finished(&mut st, r);
+        finished(&mut st, r, shared);
     }
+}
+
+/// Twice a second: the fleet as the kernel sees it, spend, the status line.
+fn tick(shared: &Shared) {
+    let mut st = shared.borrow_mut();
+    if let Some(run) = &st.running {
+        let ps = run.kernel.ps(true);
+        let elapsed = run.started.elapsed().as_secs();
+        let lead = ps.iter().find(|p| p.ppid.is_none());
+        let working = ps.iter().filter(|p| p.ppid.is_some() && p.state.alive()).count();
+        let lead_doing = lead.map(|p| match p.state {
+            chuck_core::ProcState::Running => "the Lead is thinking".to_string(),
+            _ if !p.activity.is_empty() => format!("the Lead: {}", p.activity),
+            _ => "the Lead is working".to_string(),
+        }).unwrap_or_default();
+        let cmds = chuck_tools::running();
+        let mut s = format!("{}:{:02}  ·  {lead_doing}", elapsed / 60, elapsed % 60);
+        if working > 0 {
+            s.push_str(&format!("  ·  {working} agent{} working", if working == 1 { "" } else { "s" }));
+        }
+        if cmds > 0 {
+            s.push_str(&format!("  ·  {cmds} command{} running", if cmds == 1 { "" } else { "s" }));
+        }
+        st.ui.status.set_label(&s);
+        let models = st.models.clone();
+        st.panel.set_agents(&ps, &models);
+        st.last_ps = ps;
+    }
+    let spend = chuck_store::Spend::at(&chuck_store::Spend::default_path());
+    let s = Settings::load();
+    let now = chuck_sandbox::now_secs();
+    let ps = st.last_ps.clone();
+    st.panel.set_spend(&ps, spend.today(now), spend.month(now), s.num("budget_day_usd", 0.0, 0.0, 1e5),
+                       s.num("budget_month_usd", 0.0, 0.0, 1e6));
+    st.panel.tick();
+}
+
+/// Stop the job and everything it started, and wait until it has stopped.
+fn shut_down(shared: &Shared) {
+    let mut st = shared.borrow_mut();
+    if let Some(run) = st.running.take() {
+        run.stop.store(true, Ordering::SeqCst);
+        chuck_tools::kill_all();
+        let t0 = Instant::now();
+        while t0.elapsed() < Duration::from_secs(6) {
+            if let Ok(r) = run.done.recv_timeout(Duration::from_millis(100)) {
+                st.running = Some(run);
+                finished(&mut st, r, shared);
+                break;
+            }
+            chuck_tools::kill_all();
+        }
+    }
+    st.save();
 }
 
 fn settings_dialog(shared: &Shared) {
@@ -731,6 +886,12 @@ fn save_shot(window: &adw::ApplicationWindow, path: &std::path::Path) -> Result<
     tex.save_to_png(path).map_err(|e| e.to_string())
 }
 
+fn panel_open_from_settings() -> Vec<String> {
+    Settings::load().map.get("fleet_panel_open").and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .unwrap_or_else(|| vec!["plan".into()])
+}
+
 pub fn build(app: &adw::Application, opts: Options) {
     let provider = gtk::CssProvider::new();
     provider.load_from_string(crate::style::CSS);
@@ -740,12 +901,12 @@ pub fn build(app: &adw::Application, opts: Options) {
     adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceDark);
 
     let window = adw::ApplicationWindow::builder().application(app).title("Chuck")
-        .default_width(if opts.width > 0 { opts.width } else { 1180 })
-        .default_height(if opts.height > 0 { opts.height } else { 780 }).build();
+        .default_width(if opts.width > 0 { opts.width } else { 1280 })
+        .default_height(if opts.height > 0 { opts.height } else { 820 }).build();
     window.add_css_class("main-window");
     let slot: Rc<RefCell<Option<Shared>>> = Rc::new(RefCell::new(None));
 
-    // header: the mark, where we are, what it costs, the fleet, settings
+    // header: the mark, where we are, what it costs, a new conversation, the panel, settings
     let header = adw::HeaderBar::new();
     header.set_title_widget(Some(&gtk::Box::new(gtk::Orientation::Horizontal, 0)));
     let titlebox = gtk::Box::new(gtk::Orientation::Horizontal, 10);
@@ -754,27 +915,34 @@ pub fn build(app: &adw::Application, opts: Options) {
     mark.set_valign(gtk::Align::Center);
     titlebox.append(&mark);
     let tcol = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    tcol.set_valign(gtk::Align::Center);
     tcol.append(&label("Chuck", &["title"]));
     let subtitle = label("", &["sub"]);
     subtitle.set_ellipsize(pango::EllipsizeMode::Middle);
     subtitle.set_wrap(false);
-    subtitle.set_max_width_chars(60);
+    subtitle.set_max_width_chars(56);
     tcol.append(&subtitle);
     titlebox.append(&tcol);
     header.pack_start(&titlebox);
     let folder_btn = gtk::Button::with_label("Choose a folder");
     folder_btn.add_css_class("pill");
+    folder_btn.set_tooltip_text(Some("The project the fleet works on"));
     header.pack_start(&folder_btn);
+    let new_btn = gtk::Button::from_icon_name("document-new-symbolic");
+    new_btn.add_css_class("headerbtn");
+    new_btn.set_tooltip_text(Some("New conversation (the current one is kept on disk)"));
+    header.pack_start(&new_btn);
     let gear = gtk::Button::from_icon_name("emblem-system-symbolic");
     gear.add_css_class("headerbtn");
     gear.set_tooltip_text(Some("Settings"));
     header.pack_end(&gear);
     let side_btn = gtk::ToggleButton::builder().icon_name("view-dual-symbolic").active(true).build();
     side_btn.add_css_class("headerbtn");
-    side_btn.set_tooltip_text(Some("The fleet and the Done gate"));
+    side_btn.set_tooltip_text(Some("Show or hide what the fleet is doing"));
     header.pack_end(&side_btn);
     let meter = label("", &["meter"]);
     meter.set_wrap(false);
+    meter.set_tooltip_text(Some("This window's tokens and spend"));
     header.pack_end(&meter);
 
     // the conversation
@@ -782,34 +950,67 @@ pub fn build(app: &adw::Application, opts: Options) {
     transcript.set_margin_start(28);
     transcript.set_margin_end(28);
     transcript.set_margin_bottom(18);
-    let clamp = adw::Clamp::builder().maximum_size(860).child(&transcript).build();
+    let clamp = adw::Clamp::builder().maximum_size(880).child(&transcript).build();
     let scroller = gtk::ScrolledWindow::builder().hscrollbar_policy(gtk::PolicyType::Never).child(&clamp).vexpand(true).build();
     scroller.add_css_class("chat-scroll");
-    // follow the conversation while you're at the bottom; stay put when you scrolled up to read
-    let stick = Rc::new(std::cell::Cell::new(true));
+    // follow the conversation while you're at the bottom; stay where you are when you scrolled up
+    // to read, with a button back down
+    let jump = gtk::Button::with_label("↓  new activity");
+    jump.add_css_class("jump-btn");
+    jump.set_halign(gtk::Align::Center);
+    jump.set_valign(gtk::Align::End);
+    jump.set_margin_bottom(12);
+    jump.set_visible(false);
+    let stick = Rc::new(Cell::new(true));
     let adj = scroller.vadjustment();
-    let s1 = stick.clone();
-    adj.connect_value_changed(move |a| s1.set(a.value() + a.page_size() >= a.upper() - 40.0));
-    let s2 = stick.clone();
-    adj.connect_upper_notify(move |a| {
-        if s2.get() {
-            // after this layout pass, when the page size is final too
-            let a = a.clone();
-            glib::idle_add_local_once(move || a.set_value(a.upper() - a.page_size()));
+    let (s1, j1) = (stick.clone(), jump.clone());
+    adj.connect_value_changed(move |a| {
+        let at_bottom = a.value() + a.page_size() >= a.upper() - 48.0;
+        s1.set(at_bottom);
+        if at_bottom {
+            j1.set_visible(false);
         }
     });
+    let (s2, j2) = (stick.clone(), jump.clone());
+    adj.connect_upper_notify(move |a| {
+        if s2.get() {
+            let a = a.clone();
+            glib::idle_add_local_once(move || a.set_value(a.upper() - a.page_size()));
+        } else if a.upper() > a.page_size() {
+            j2.set_visible(true);
+        }
+    });
+    let (a3, s3) = (adj.clone(), stick.clone());
+    jump.connect_clicked(move |b| {
+        s3.set(true);
+        a3.set_value(a3.upper() - a3.page_size());
+        b.set_visible(false);
+    });
+    let overlay = gtk::Overlay::new();
+    overlay.set_child(Some(&scroller));
+    overlay.add_overlay(&jump);
     let stack = gtk::Stack::new();
     stack.add_named(&welcome(slot.clone()), Some("welcome"));
-    stack.add_named(&scroller, Some("chat"));
+    stack.add_named(&overlay, Some("chat"));
     stack.set_vexpand(true);
 
     // the composer
     let input = gtk::TextView::builder().wrap_mode(gtk::WrapMode::WordChar).accepts_tab(false).hexpand(true)
         .top_margin(4).bottom_margin(4).build();
+    let hint = label("Tell the fleet what you want", &["composer-hint"]);
+    hint.set_can_target(false);
+    hint.set_valign(gtk::Align::Start);
+    hint.set_margin_top(4);
+    let in_overlay = gtk::Overlay::new();
+    in_overlay.set_child(Some(&input));
+    in_overlay.add_overlay(&hint);
+    let buf = input.buffer();
+    let h2 = hint.clone();
+    buf.connect_changed(move |b| h2.set_visible(b.char_count() == 0));
     let comp = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     comp.add_css_class("composer");
-    let insc = gtk::ScrolledWindow::builder().child(&input).hscrollbar_policy(gtk::PolicyType::Never)
-        .propagate_natural_height(true).max_content_height(180).hexpand(true).build();
+    let insc = gtk::ScrolledWindow::builder().child(&in_overlay).hscrollbar_policy(gtk::PolicyType::Never)
+        .propagate_natural_height(true).max_content_height(200).hexpand(true).build();
     comp.append(&insc);
     let send = gtk::Button::from_icon_name("go-up-symbolic");
     send.add_css_class("suggested-action");
@@ -821,40 +1022,43 @@ pub fn build(app: &adw::Application, opts: Options) {
     stop.add_css_class("sendbtn");
     stop.set_valign(gtk::Align::End);
     stop.set_visible(false);
-    stop.set_tooltip_text(Some("Stop every agent (Esc)"));
+    stop.set_tooltip_text(Some("Stop every agent and command (Esc)"));
     comp.append(&send);
     comp.append(&stop);
     let status = label("", &["statusbar"]);
+    status.set_wrap(false);
+    status.set_ellipsize(pango::EllipsizeMode::End);
     let bottom = gtk::Box::new(gtk::Orientation::Vertical, 4);
     bottom.set_margin_start(28);
     bottom.set_margin_end(28);
     bottom.set_margin_bottom(14);
-    bottom.append(&comp);
     bottom.append(&status);
-    let bclamp = adw::Clamp::builder().maximum_size(860).child(&bottom).build();
+    bottom.append(&comp);
+    let bclamp = adw::Clamp::builder().maximum_size(880).child(&bottom).build();
     let main = gtk::Box::new(gtk::Orientation::Vertical, 0);
     main.append(&stack);
     main.append(&bclamp);
 
-    // the side: the fleet (/top) and the Done gate
-    let side = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    side.add_css_class("side");
-    side.append(&label("FLEET", &["side-head"]));
-    let fleet = gtk::ListBox::new();
-    fleet.set_selection_mode(gtk::SelectionMode::None);
-    fleet.add_css_class("navigation-sidebar");
-    fleet.append(&label("Agents appear here while a job runs.", &["unmet"]));
-    side.append(&fleet);
-    side.append(&label("DONE GATE", &["side-head"]));
-    let phase = label("No job yet", &["phase"]);
-    side.append(&phase);
-    let unmet = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    side.append(&unmet);
-    let criteria = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    side.append(&criteria);
-    let side_scroll = gtk::ScrolledWindow::builder().child(&side).hscrollbar_policy(gtk::PolicyType::Never).build();
-    let split = adw::OverlaySplitView::builder().sidebar_position(gtk::PackType::End).sidebar(&side_scroll)
-        .content(&main).show_sidebar(true).min_sidebar_width(290.0).max_sidebar_width(340.0).build();
+    // the right side: everything the fleet is doing, in sections you open
+    let open = Rc::new(RefCell::new(opts.open.clone().unwrap_or_else(panel_open_from_settings)));
+    let o2 = open.clone();
+    let remember = opts.open.is_none();
+    let on_toggle: Rc<dyn Fn(&'static str, bool)> = Rc::new(move |name, is_open| {
+        let mut o = o2.borrow_mut();
+        o.retain(|x| x != name);
+        if is_open {
+            o.push(name.to_string());
+        }
+        if remember {
+            let mut s = Settings::load();
+            s.set("fleet_panel_open", serde_json::Value::Array(o.iter().map(|x| x.clone().into()).collect()));
+            let _ = s.save();
+        }
+    });
+    let panel = Panel::new(&open.borrow(), on_toggle);
+    let split = adw::OverlaySplitView::builder().sidebar_position(gtk::PackType::End).sidebar(&panel.root)
+        .content(&main).show_sidebar(true).min_sidebar_width(320.0).max_sidebar_width(380.0)
+        .sidebar_width_fraction(0.3).build();
     side_btn.bind_property("active", &split, "show-sidebar").bidirectional().build();
 
     let view = adw::ToolbarView::new();
@@ -865,50 +1069,50 @@ pub fn build(app: &adw::Application, opts: Options) {
     let folder = opts.folder.clone().or_else(|| {
         std::env::current_dir().ok().filter(|d| {
             let home = std::env::var_os("HOME").map(PathBuf::from);
-            Some(d) != home.as_ref() && d != std::path::Path::new("/")
+            Some(d) != home.as_ref() && d != Path::new("/")
         })
-    }).and_then(|f| f.canonicalize().ok());
-    let ui = Ui { window: window.clone(), stack, transcript, input: input.clone(), send: send.clone(),
-                  stop: stop.clone(), status, subtitle, meter, fleet, phase, unmet, criteria, folder_btn: folder_btn.clone() };
+    }).or_else(|| Settings::load().str("fleet_last_folder").map(PathBuf::from))
+        .and_then(|f| f.canonicalize().ok()).filter(|f| f.is_dir());
+    let ui = Ui { window: window.clone(), stack, transcript, input: input.clone(), hint, send: send.clone(),
+                  stop: stop.clone(), status, subtitle, meter, folder_btn: folder_btn.clone(), new_btn: new_btn.clone() };
     let shared: Shared = Rc::new(RefCell::new(State {
-        ui, opts: opts.clone(), folder, history: Vec::new(), running: None, names: HashMap::new(),
-        models: HashMap::new(), lane: None,
-        spent: 0.0, tokens: 0, last_lead_text: String::new(),
+        ui, panel, opts: opts.clone(), folder: None, saved: Saved::default(), running: None, names: HashMap::new(),
+        models: HashMap::new(), lane: None, last_ps: Vec::new(), tokens: 0, spent: 0.0, unsaved: false,
     }));
     *slot.borrow_mut() = Some(shared.clone());
-    shared.borrow().refresh_header();
+    shared.borrow_mut().open_folder(folder, &shared);
 
     let submit = {
         let sh = shared.clone();
         move || {
             let buf = sh.borrow().ui.input.buffer();
             let text = buf.text(&buf.start_iter(), &buf.end_iter(), false).to_string();
-            if sh.borrow().running.is_some() || text.trim().is_empty() {
+            if text.trim().is_empty() {
                 return;
             }
             buf.set_text("");
-            start(&sh, text.trim().to_string());
+            start(&sh, text);
         }
     };
     let s1 = submit.clone();
     send.connect_clicked(move |_| s1());
     let sh = shared.clone();
-    stop.connect_clicked(move |_| {
+    let stop_job = move || {
         if let Some(r) = &sh.borrow().running {
             r.stop.store(true, Ordering::SeqCst);
         }
-    });
+    };
+    let sj = stop_job.clone();
+    stop.connect_clicked(move |_| sj());
     let keys = gtk::EventControllerKey::new();
-    let (s2, sh2) = (submit.clone(), shared.clone());
+    let s2 = submit.clone();
     keys.connect_key_pressed(move |_, key, _, mods| {
         if (key == gdk::Key::Return || key == gdk::Key::KP_Enter) && !mods.contains(gdk::ModifierType::SHIFT_MASK) {
             s2();
             return glib::Propagation::Stop;
         }
         if key == gdk::Key::Escape {
-            if let Some(r) = &sh2.borrow().running {
-                r.stop.store(true, Ordering::SeqCst);
-            }
+            stop_job();
             return glib::Propagation::Stop;
         }
         glib::Propagation::Proceed
@@ -917,18 +1121,32 @@ pub fn build(app: &adw::Application, opts: Options) {
     let sh = shared.clone();
     gear.connect_clicked(move |_| settings_dialog(&sh));
     let sh = shared.clone();
+    new_btn.connect_clicked(move |_| {
+        let mut st = sh.borrow_mut();
+        if st.running.is_some() {
+            return;
+        }
+        st.save();
+        if let Some(f) = st.folder.clone() {
+            chat::archive(&f);
+        }
+        st.saved = Saved::default();
+        st.redraw();
+        st.panel.reset();
+        st.ui.input.grab_focus();
+    });
+    let sh = shared.clone();
     folder_btn.connect_clicked(move |_| {
         let dialog = gtk::FileDialog::builder().title("The project folder").modal(true).build();
         let sh = sh.clone();
         let win = sh.borrow().ui.window.clone();
         dialog.select_folder(Some(&win), gtk::gio::Cancellable::NONE, move |r| {
-            if let Ok(f) = r {
-                if let Some(p) = f.path() {
-                    let mut st = sh.borrow_mut();
-                    st.folder = p.canonicalize().ok();
-                    st.refresh_header();
-                }
-            }
+            let Some(p) = r.ok().and_then(|f| f.path()).and_then(|p| p.canonicalize().ok()) else { return };
+            let mut s = Settings::load();
+            s.set("fleet_last_folder", p.display().to_string().into());
+            let _ = s.save();
+            let shared = sh.clone();
+            sh.borrow_mut().open_folder(Some(p), &shared);
         });
     });
     let sh = shared.clone();
@@ -936,6 +1154,25 @@ pub fn build(app: &adw::Application, opts: Options) {
         pump(&sh);
         glib::ControlFlow::Continue
     });
+    let sh = shared.clone();
+    glib::timeout_add_local(Duration::from_millis(500), move || {
+        tick(&sh);
+        glib::ControlFlow::Continue
+    });
+
+    // closing — the window, Ctrl-C, a logout's SIGTERM/SIGHUP — stops every agent and command first
+    let sh = shared.clone();
+    window.connect_close_request(move |_| {
+        shut_down(&sh);
+        glib::Propagation::Proceed
+    });
+    for sig in [libc::SIGTERM, libc::SIGHUP, libc::SIGINT] {
+        let w = window.clone();
+        glib::unix_signal_add_local(sig, move || {
+            w.close();
+            glib::ControlFlow::Break
+        });
+    }
 
     // tools/bench.sh: report the first painted frame (against the shell's clock) and memory, then quit
     if let Ok(t0) = std::env::var("CHUCK_BENCH_FRAME") {
@@ -943,7 +1180,7 @@ pub fn build(app: &adw::Application, opts: Options) {
         window.connect_map(move |w| {
             let (app, t0) = (app.clone(), t0.clone());
             if let Some(clock) = w.frame_clock() {
-                let fired = Rc::new(std::cell::Cell::new(false));
+                let fired = Rc::new(Cell::new(false));
                 clock.connect_after_paint(move |_| {
                     if fired.replace(true) {
                         return;
@@ -972,13 +1209,17 @@ pub fn build(app: &adw::Application, opts: Options) {
     }
     if let Some((path, ms)) = opts.shot.clone() {
         let w = window.clone();
-        let app = app.clone();
+        let sh = shared.clone();
         glib::timeout_add_local_once(Duration::from_millis(ms), move || {
-            match save_shot(&w, &path) {
-                Ok(()) => eprintln!("saved {}", path.display()),
-                Err(e) => eprintln!("screenshot failed: {e}"),
-            }
-            app.quit();
+            tick(&sh);
+            let w2 = w.clone();
+            glib::timeout_add_local_once(Duration::from_millis(250), move || {
+                match save_shot(&w2, &path) {
+                    Ok(()) => eprintln!("saved {}", path.display()),
+                    Err(e) => eprintln!("screenshot failed: {e}"),
+                }
+                w2.close();
+            });
         });
     }
 }

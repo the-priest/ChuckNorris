@@ -698,3 +698,27 @@ fn a_whole_job_can_be_rewound() {
     assert!(!proj.join("made-by-shell.txt").exists(), "what a command made is undone too");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn what_the_user_types_mid_job_reaches_the_lead_next_step() {
+    let dir = tmp("steer");
+    let model = Arc::new(Scripted::new().respond(|req| {
+        if req.messages.len() == 2 {
+            return "```criteria\n- n :: verify: true\n```\n```bash\nsleep 0.6\n```".into();
+        }
+        "Noted.".into()
+    }));
+    let (stx, srx) = channel();
+    let mut job = Job::new("look around", &dir);
+    job.steer = Some(srx);
+    let rt = Runtime::new(model.clone(), RuntimeConfig { store: dir.join("store"), lead_steps: 2,
+                                                          ..RuntimeConfig::default() }, Events::none());
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let _ = stx.send("also check the README".to_string());
+    });
+    let _ = run_within(20, rt, job);
+    let second = last_user(&model.seen.lock().unwrap()[1]);
+    assert!(second.contains("[the user, while you work") && second.contains("also check the README"), "{second}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

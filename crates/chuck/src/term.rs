@@ -156,7 +156,20 @@ impl View {
                     st.dim(&format!("  gate: {phase} — {} open: {}", unmet.len(), one_line(&unmet.join("; "), 120)))
                 }
             }
-            Event::Gate { .. } | Event::Board { .. } | Event::Thinking { .. } | Event::Delta { .. } => return,
+            Event::Plan { steps } => {
+                let done = steps.iter().filter(|(_, d)| *d).count();
+                let now = steps.iter().find(|(_, d)| !d).map(|(s, _)| one_line(s, 80))
+                    .unwrap_or_else(|| "every step done".into());
+                st.accent(&format!("  ▤ plan {done}/{} — now: {now}", steps.len()))
+            }
+            Event::Running { id, cmd, .. } => {
+                if !self.verbose {
+                    return;
+                }
+                let who = self.who(*id);
+                st.dim(&format!("  ⏵ {who:<6} {}", one_line(cmd, 100)))
+            }
+            Event::Gate { .. } | Event::Board { .. } | Event::Tasks(_) | Event::Thinking { .. } | Event::Delta { .. } => return,
             Event::Notice { id, text } => {
                 let who = self.who(*id);
                 st.warn(&format!("  ! {who}: {text}"))

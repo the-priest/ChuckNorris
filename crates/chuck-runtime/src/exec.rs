@@ -108,6 +108,23 @@ pub fn proves_nothing(cmd: &str) -> bool {
     })
 }
 
+/// Plan lines, "- [x] done step" / "- [ ] open step" / "- step": (step, done).
+pub fn parse_plan(body: &str) -> Vec<(String, bool)> {
+    body.lines().filter_map(|l| {
+        let l = l.trim().trim_start_matches(['-', '*', '•']).trim();
+        let l = l.trim_start_matches(|c: char| c.is_ascii_digit()).trim_start_matches(['.', ')']).trim();
+        let (done, rest) = if let Some(r) = l.strip_prefix("[x]").or_else(|| l.strip_prefix("[X]")) {
+            (true, r)
+        } else if let Some(r) = l.strip_prefix("[ ]").or_else(|| l.strip_prefix("[]")) {
+            (false, r)
+        } else {
+            (false, l)
+        };
+        let rest = rest.trim();
+        (!rest.is_empty()).then(|| (rest.to_string(), done))
+    }).collect()
+}
+
 /// "- text :: verify: cmd" lines.
 pub fn parse_criteria(body: &str) -> Vec<(String, Option<String>)> {
     body.lines().filter_map(|l| {
@@ -356,6 +373,7 @@ impl<'a> Exec<'a> {
                 let before = fingerprint(self.root);
                 let t_start = now_secs();
                 let started = chuck_store::ledger::local_stamp("%Y-%m-%dT%H:%M:%S%z");
+                self.events.emit(Event::Running { id: self.id, tool: tag.into(), cmd: cmd.clone() });
                 let r = self.run_cmd(&cmd, wrap);
                 let changed = fingerprint(self.root) != before;
                 if let Some((ledger, who)) = &self.audit {
@@ -434,13 +452,13 @@ impl<'a> Exec<'a> {
                 res.feedback.push(format!("[criteria accepted — link evidence with `for cN`:\n{}]", list.join("\n")));
             }
             "plan" => {
-                let steps: Vec<String> = t.body.lines().map(|l| l.trim().trim_start_matches(['-', '*', '[', ']', ' ', 'x'])
-                    .trim().to_string()).filter(|l| !l.is_empty()).collect();
-                let n = steps.len();
-                self.gate.lock().unwrap().set_plan(steps);
+                let steps = parse_plan(&t.body);
+                let (n, done) = (steps.len(), steps.iter().filter(|(_, d)| *d).count());
+                self.gate.lock().unwrap().set_plan(steps.iter().map(|(s, _)| s.clone()).collect());
+                self.events.emit(Event::Plan { steps: steps.clone() });
                 res.actions.push("plan".into());
-                self.act("plan", "", n > 0, &format!("{n} steps"));
-                res.feedback.push(format!("[plan recorded: {n} steps]"));
+                self.act("plan", "", n > 0, &format!("{done}/{n} steps done"));
+                res.feedback.push(format!("[plan recorded: {done} of {n} steps done]"));
             }
             other => res.lead_calls.push(LeadCall { tag: other.into(), arg: arg.into(), body: t.body.clone() }),
         }
@@ -486,6 +504,12 @@ mod tests {
         let c = parse_criteria("- parser takes empty input :: verify: `pytest -q tests/p.py`\n- docs updated\n");
         assert_eq!(c, vec![("parser takes empty input".into(), Some("pytest -q tests/p.py".into())),
                            ("docs updated".into(), None)]);
+    }
+
+    #[test]
+    fn plans_with_progress() {
+        assert_eq!(parse_plan("- [x] read the parser\n- [ ] fix it\n3. verify\n* [X] two"), vec![
+            ("read the parser".into(), true), ("fix it".into(), false), ("verify".into(), false), ("two".into(), true)]);
     }
 
     #[test]

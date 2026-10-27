@@ -128,4 +128,65 @@ headerbar { background-color: @bg; border-bottom: 1px solid @line; box-shadow: n
 .phase { color: @ink; font-weight: 700; font-size: 12.5px; margin: 0 14px; }
 .phase-incomplete { color: @warn; }
 .unmet { color: @mute; font-size: 11.5px; margin: 2px 14px; }
+
+/* ── the right panel: sections you open ─────────────────────────────── */
+.side { background-color: @side; border-left: 1px solid @line; padding-bottom: 18px; }
+.sec { border-bottom: 1px solid @line; }
+.sec-head { padding: 11px 14px; border-radius: 0; min-height: 0; }
+.sec-head:hover { background-color: @surface; }
+.sec-chevron { color: @faint; -gtk-icon-size: 12px; }
+.sec-title { color: @accent_hi; font-size: 10.5px; font-weight: 800; letter-spacing: 1.2px; }
+.sec-summary { color: @mute; font-size: 11.5px; }
+.sec-strip { padding: 0 14px 11px 34px; }
+.sec-body { padding: 0 10px 12px 14px; }
+.plan-bar trough { min-height: 5px; border-radius: 99px; background-color: @surface3; }
+.plan-bar progress { min-height: 5px; border-radius: 99px; background-color: @accent; }
+.plan-now { color: @ink; font-size: 12px; }
+.plan-step { padding: 3px 4px 3px 20px; }
+.step-mark { font-size: 12px; min-width: 14px; }
+.step-text { font-size: 12.5px; }
+.step-done { color: @faint; }
+.step-done.step-mark { color: @good; }
+.step-now { color: @ink; font-weight: 700; }
+.step-now.step-mark { color: @accent_hi; }
+.step-todo { color: @mute; }
+expander.panel-row, .panel-row { padding: 4px 4px; border-radius: 8px; }
+expander.panel-row > title { padding: 4px 6px; border-radius: 8px; }
+expander.panel-row > title:hover { background-color: @surface; }
+expander.panel-row > title > arrow { color: @faint; min-width: 12px; }
+.panel-detail { padding: 6px 4px 8px 22px; }
+.panel-dim  { color: @faint; font-size: 11.5px; padding: 4px 6px; }
+.panel-meta { color: @faint; font-size: 11px; font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace; }
+.panel-text { color: @body; font-size: 12px; }
+.panel-warn { color: @warn; font-size: 11.5px; }
+.panel-sub  { color: @faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; margin: 8px 6px 2px 6px; }
+.panel-mono { color: #BDBDD0; font-size: 11px; font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace; }
+.task-id  { color: @accent_hi; font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace; font-size: 11.5px; font-weight: 700; }
+.task-title { color: @ink; font-size: 12.5px; }
+.agent-name { color: @ink; font-size: 12.5px; font-weight: 600; }
+.badge { border-radius: 6px; padding: 1px 7px; font-size: 10.5px; font-weight: 700;
+         font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace; background-color: @surface2; color: @mute; }
+.badge-running { color: @accent_hi; background-color: @accent_bg; }
+.badge-review  { color: @warn; background-color: alpha(@warn, 0.12); }
+.badge-queued  { color: @mute; }
+.badge-merged  { color: @good; background-color: alpha(@good, 0.12); }
+.badge-failed  { color: @bad; background-color: alpha(@bad, 0.12); }
+.cmd-live { color: @accent_hi; font-size: 11.5px; font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace; }
+.cmd-done { color: @body; font-size: 11.5px; font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace; }
+.gate-phase { color: @ink; font-weight: 700; font-size: 12.5px; padding: 2px 6px 6px 6px; }
+.phase-done { color: @good; }
+.phase-incomplete { color: @warn; }
+.pill-sm { background-color: @surface; border: 1px solid @line2; border-radius: 999px; padding: 2px 10px;
+           min-height: 0; color: @body; font-size: 11px; box-shadow: none; }
+.pill-sm:hover { border-color: alpha(@accent, 0.5); color: @ink; }
+
+/* ── chat details ───────────────────────────────────────────────────── */
+.jump-btn { background-color: @surface2; border: 1px solid alpha(@accent, 0.5); border-radius: 999px; color: @ink;
+            padding: 5px 14px; font-size: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.45); }
+.jump-btn:hover { background-color: @surface3; }
+.steer-note { color: @faint; font-size: 10.5px; }
+.steer-bubble { border-style: dashed; border-color: alpha(@accent, 0.45); }
+expander.lane-older > title { color: @faint; font-size: 11px; }
+expander.lane-older > title:hover { color: @mute; }
+.composer-hint { color: @faint; font-size: 14px; }
 "#;

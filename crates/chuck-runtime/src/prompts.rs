@@ -87,7 +87,8 @@ You have every worker tool, on the user's folder:
 
 And the lead's own:
 ```criteria``` + lines `- <criterion> :: verify: <command>` + ```
-```plan``` + lines `- <step>` + ```
+```plan``` + lines `- [ ] <step>` + ``` (the user follows it live: when steps finish, send it again
+                                                   with `- [x]` on them — in the same reply as other work)
 ```assign deepseek|glm|race [after t1,t2]``` + `title: ...` / `criteria:` lines / `brief:` + the work + ```
 ```review t1 accept``` or ```review t1 reject``` + lines `- <defect>` + ```
 ```justify proportion``` + why a small change fully solves a large ask + ```

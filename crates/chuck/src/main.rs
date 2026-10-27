@@ -48,8 +48,11 @@ EXIT STATUS
 
 static INTERRUPTS: AtomicU32 = AtomicU32::new(0);
 
+/// Only counts (a signal handler must not lock or allocate): the watcher
+/// thread stops the job on the first, ends every command and exits on the
+/// second; a third exits at once, whatever state things are in.
 extern "C" fn on_sigint(_: libc::c_int) {
-    if INTERRUPTS.fetch_add(1, Ordering::SeqCst) >= 1 {
+    if INTERRUPTS.fetch_add(1, Ordering::SeqCst) >= 2 {
         unsafe { libc::_exit(130) };
     }
 }
@@ -270,15 +273,23 @@ fn cmd_run(args: &[String]) -> i32 {
     let asking = job.answers.is_some();
     let stop = job.stop.clone();
     unsafe {
-        libc::signal(libc::SIGINT, on_sigint as *const () as libc::sighandler_t);
+        // Ctrl-C, a closed terminal, a logout: the job stops and every command it started ends
+        for sig in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+            libc::signal(sig, on_sigint as *const () as libc::sighandler_t);
+        }
     }
     let watcher_stop = stop.clone();
     let done = Arc::new(AtomicBool::new(false));
     let watcher_done = done.clone();
     std::thread::spawn(move || {
         while !watcher_done.load(Ordering::Relaxed) {
-            if INTERRUPTS.load(Ordering::SeqCst) > 0 {
+            let n = INTERRUPTS.load(Ordering::SeqCst);
+            if n > 0 {
                 watcher_stop.store(true, Ordering::SeqCst);
+            }
+            if n > 1 {
+                chuck_tools::kill_all();
+                std::process::exit(130);
             }
             std::thread::sleep(Duration::from_millis(100));
         }
@@ -304,6 +315,7 @@ fn cmd_run(args: &[String]) -> i32 {
         }
     }
     let report = worker.join().unwrap_or_else(|_| fail("the job crashed"));
+    chuck_tools::kill_all();
     done.store(true, Ordering::Relaxed);
     if let (Some(cp), false) = (&report.checkpoint, matches!(report.outcome, Outcome::Answered { .. })) {
         println!("{}", view.st.dim(&format!("undo all of it:  chuck rewind -C {} {}", folder.display(), &cp[..10])));
