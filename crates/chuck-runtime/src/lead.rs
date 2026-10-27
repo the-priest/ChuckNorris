@@ -872,7 +872,12 @@ impl<'a> LeadRun<'a> {
             g.check_work()
         };
         if !gaps.is_empty() {
-            return Ok(Err(format!("[done REFUSED by the gate — still missing:\n- {}]", list(&gaps))));
+            // the Lead answers for proportion itself: say how
+            let how = if gaps.iter().any(|u| matches!(u, Unmet::OutOfProportion { .. })) {
+                "\nIf that change really is all the job needs, say why with ```justify proportion``` + the reason in \
+                 its body; if not, finish the work."
+            } else { "" };
+            return Ok(Err(format!("[done REFUSED by the gate — still missing:\n- {}{how}]", list(&gaps))));
         }
         let seen = self.gate.lock().unwrap().evidence.len();
         if self.rejected_at.as_ref().is_some_and(|(n, s)| *n == seen && *s == summary) {

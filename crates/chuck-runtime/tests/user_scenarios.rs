@@ -288,3 +288,59 @@ fn a_lead_cannot_end_defined_work_with_a_plain_all_done() {
     assert!(r.resume.is_some(), "Keep going can carry it on");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+fn text(m: &serde_json::Value) -> String {
+    m["content"].as_str().unwrap_or("").to_string()
+}
+
+/// A whole fleet job where the worker misbehaves the way models do: its
+/// first move in its own tool format, its second never closed. It is told
+/// each time, does it properly, and the work is reviewed, merged, verified
+/// in the user's folder and finished through the gate.
+#[test]
+fn a_worker_that_writes_its_calls_wrong_is_corrected_and_the_job_finishes() {
+    let dir = tmp("worker-malformed");
+    let model = Arc::new(Scripted::new().respond(|req| {
+        let sys = text(&req.messages[0]);
+        let last = last_user(req);
+        if sys.starts_with("You are an independent reviewer") {
+            return "ACCEPT".into();
+        }
+        if sys.contains("You are ds-") || sys.contains("You are glm-") {
+            return if last.contains("NOTHING RAN") {
+                "Writing it.\n```write out.txt\nhello\n".into()
+            } else if last.contains("NOT run") || last.contains("never closed") {
+                "```write out.txt\nhello\n```\n```test grep -q hello out.txt```\n```submit\nout.txt says hello; verified.\n```".into()
+            } else if req.messages.len() == 2 {
+                "<function_calls>\n<invoke name=\"write\">\n<parameter name=\"path\">out.txt</parameter>\n</invoke>\n</function_calls>".into()
+            } else {
+                "ok".into()
+            };
+        }
+        if req.messages.len() == 2 {
+            return "```criteria\n- out.txt says hello :: verify: grep -q hello out.txt\n```\n\
+                    ```plan\n- [ ] t1: write out.txt\n- [ ] verify\n```\n\
+                    ```assign deepseek\ntitle: Write out.txt\ncriteria:\n- out.txt says hello :: verify: grep -q hello out.txt\n\
+                    brief: write hello into out.txt\n```".into();
+        }
+        if last.contains("SUBMISSION t1") {
+            return "```review t1 accept\nverified\n```".into();
+        }
+        if last.contains("```justify proportion```") {
+            // told how by the refusal (a real model reads it the same way)
+            return "```justify proportion\nOne line of text is the whole request.\n```\n```test grep -q hello out.txt```\n\
+                    ```done\nout.txt says hello, verified in your folder.\n```".into();
+        }
+        if req.messages.iter().any(|m| m["role"] == "user" && text(m).contains("t1 accepted")) {
+            return "```test grep -q hello out.txt```\n```done\nout.txt says hello, verified in your folder.\n```".into();
+        }
+        "Waiting for the worker.".into()
+    }));
+    let cfg = RuntimeConfig { store: dir.join("store"), access: chuck_sandbox::Access::Full, ..RuntimeConfig::default() };
+    let rt = Runtime::new(model.clone(), cfg, Events::none());
+    let r = rt.run(Job::new("put hello in out.txt", &dir));
+    assert!(matches!(r.outcome, Outcome::Done { .. }), "{:?}\n{:#?}", r.outcome,
+            model.seen.lock().unwrap().iter().map(last_user).collect::<Vec<_>>());
+    assert_eq!(std::fs::read_to_string(dir.join("out.txt")).unwrap().trim(), "hello");
+    let _ = std::fs::remove_dir_all(&dir);
+}

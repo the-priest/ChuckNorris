@@ -57,3 +57,21 @@ fn a_daemon_out_of_budget_reports_what_it_has() {
     assert_eq!((r.status, r.report.as_str()), (0, "Disk is fine so far; ran out of time."));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_daemon_whose_call_is_malformed_is_told_and_its_report_is_the_real_one() {
+    let dir = std::env::temp_dir().join(format!("chuck-dmn3-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let model = Arc::new(Scripted::new().replies([
+        "Checking.\n```bash systemctl --failed</parameter>",
+        "<tool_call>{\"name\": \"bash\", \"arguments\": {\"command\": \"df -h\"}}</tool_call>",
+        "```bash\necho disk-ok\n```",
+        "Disk is fine: disk-ok.",
+    ]));
+    let r = run(&dir, model.clone(), 100_000);
+    assert_eq!((r.status, r.report.as_str()), (0, "Disk is fine: disk-ok."));
+    let seen = model.seen.lock().unwrap();
+    assert!(last_user(&seen[1]).contains("NOT run"), "{}", last_user(&seen[1]));
+    assert!(last_user(&seen[2]).contains("NOTHING RAN"), "{}", last_user(&seen[2]));
+    let _ = std::fs::remove_dir_all(&dir);
+}

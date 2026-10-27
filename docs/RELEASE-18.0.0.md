@@ -38,7 +38,7 @@ is still the recommended way, because it also sets up the menu entry, bubblewrap
   - The project folder is fully writable.
   - Anything outside it waits for your yes: **Allow once**, **Allow for this job**, or **Refuse**.
   - Credentials stay hidden.
-  - Critical commands need you to type `yes`.
+  - Critical commands wait for your yes (**Run it** in the window, typing `yes` in a terminal).
 - **Robust against models that misbehave.**
   - Earlier chat goes to the model as real turns, so it doesn't imitate a transcript or invent your
     next message.

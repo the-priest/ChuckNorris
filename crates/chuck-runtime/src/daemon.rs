@@ -106,10 +106,21 @@ impl Runtime {
                     Err(Halt::Stopped) => break 'run (1, "(stopped)".to_string()),
                     Err(h) => break 'run (1, format!("(stopped: {})", h.describe())),
                 };
+                let reply = chuck_tools::without_made_up_turns(&reply).to_string();
                 convo.assistant(&reply);
                 let calls = tool_blocks(&reply, TAGS);
                 let writes = file_blocks(&reply);
                 if calls.is_empty() && writes.is_empty() {
+                    // a call written so nothing could run is not the report
+                    let open = chuck_tools::unclosed(&reply, TAGS);
+                    if !warned && (!open.is_empty() || chuck_tools::native_tool_markup(&reply)) {
+                        let mut fb: Vec<String> = open.iter().map(|o| format!("[NOT run: `{o}` was never closed with ```]")).collect();
+                        if fb.is_empty() {
+                            fb.push(crate::exec::NATIVE_CALLS.to_string());
+                        }
+                        convo.user(&fb.join("\n"));
+                        continue;
+                    }
                     break 'run (0, prose(&reply, TAGS));
                 }
                 if warned {
