@@ -27,11 +27,16 @@ ASSET_DIR="${DATA_DIR}/assets"
 LAUNCH="${HOME}/.local/bin/chucknorris"
 DESKTOP="${HOME}/.local/share/applications/org.thepriest.chucknorris.desktop"
 
-c1=$'\033[38;5;178m'; c2=$'\033[38;5;42m'; cd=$'\033[38;5;245m'; c0=$'\033[0m'
+# colours only on a terminal, and never with NO_COLOR set (the in-app updater reads this output)
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+  c1=$'\033[38;5;178m'; c2=$'\033[38;5;42m'; cd=$'\033[38;5;245m'; cr=$'\033[38;5;196m'; c0=$'\033[0m'
+else
+  c1=""; c2=""; cd=""; cr=""; c0=""
+fi
 step(){ printf '%s▸ %s%s\n' "$c1" "$1" "$c0"; }
 ok(){   printf '%s✓ %s%s\n' "$c2" "$1" "$c0"; }
 info(){ printf '%s  %s%s\n' "$cd" "$1" "$c0"; }
-die(){  printf '\033[38;5;196m✗ %s\033[0m\n' "$1" >&2; exit 1; }
+die(){  printf '%s✗ %s%s\n' "$cr" "$1" "$c0" >&2; exit 1; }
 
 mkdir -p "$APP_DIR" "$ASSET_DIR" "${HOME}/.local/bin" "${HOME}/.local/share/applications"
 
@@ -375,7 +380,7 @@ if [ "$RUST_OK" = "1" ]; then
   info "the app menu's Chuck and the chucknorris command both open it"
   info "add a SiliconFlow key in Settings (gear icon), or: chuck key"
 else
-  printf '\n\033[38;5;196m!! The Rust Chuck was NOT installed: %s\033[0m\n' "$RUST_WHY"
+  printf '\n%s!! The Rust Chuck was NOT installed: %s%s\n' "$cr" "$RUST_WHY" "$c0"
   printf '%s   Chuck opens the older Python window until this is fixed. Re-run the installer afterwards.%s\n' "$c1" "$c0"
   info "the Python window: chucknorris (or Chuck in the app menu)"
 fi

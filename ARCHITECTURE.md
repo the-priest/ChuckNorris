@@ -136,15 +136,19 @@ the Lead's verdict, and an **INCOMPLETE** label on anything not through it.
 | `kernel.py` | `chuck-core::kernel` | processes, quotas over ancestors, signals, mailboxes, blackboard, syscall log, slot scheduler with priority + ageing |
 | `worker.py`, `agents.py` | `chuck-runtime::{agent, lead}` | the worker loop and the Lead's orchestration; real threads, one per agent |
 | `missions.py` | `chuck-core::mission` | task DAG (Kahn), ready/blocked, test-gated merges |
-| `daemons.py` | `chuck-core::daemon` | triggers checked by plain code for free; read-only policy |
+| `daemons.py` | `chuck-daemon` | triggers checked by plain code for free; read-only shell policy; the inbox (same files) |
 | `budget.py`, `pricing.py`, `governor.py` | `chuck-core::budget`, `chuck-model::pricing` | day/month ledger, per-model prices |
 | `hibernate.py`, `checkpoint.py` | `chuck-store` | per-step checkpoints, shadow git, replay / fork, rewind |
 | `ledger.py`, `crashlog.py` | `chuck-store::ledger`, `chuck-store::crashlog` | hash-chained audit log; redacted crash log |
 | `safety.py` | `chuck-sandbox::safety` | critical / danger classifier (same rules) |
 | bubblewrap code in `chucknorris.py` | `chuck-sandbox::jail` | modes Full / Sandboxed / Offline / Read-only, hidden secrets, read-only `.git` hooks/config, git disarm |
 | `cow.py` | `chuck-tools::cow` | copy-on-write workspaces, three-way merge, links never followed |
-| `builder.py`, file blocks | `chuck-tools` | read/write/edit/patch/grep/glob/map/bash, fenced-block parser |
-| `net.py`, `web.py` | `chuck-model::http`, `chuck-tools::web` | one HTTP layer, proxy-aware, capped bodies |
+| `builder.py`, file blocks | `chuck-tools` | read/write/edit/patch/grep/glob/bash, fenced-block parser, all-or-nothing `patch` |
+| `net.py`, `web.py` | `chuck-web` | search (SearXNG, DuckDuckGo), page reads that never reach private addresses, images and videos |
+| `browser.py` | `chuck-web::browser` | a DevTools-protocol client for Brave/Chromium/Chrome; every request judged (public only, offline, folder files) |
+| `lsp.py`, `codesearch.py` | `chuck-code` | language-server def/refs/rename, syntax fallback, repo map, BM25 `find` |
+| `mcp.py` | `chuck-mcp` | stdio MCP client; tool annotations decide what may run when |
+| `palette.py` | `chuck-ui::palette` | Ctrl+P, the same ranking |
 | `config.py`, `chats.py`, `memory.py` | `chuck-store` | settings 0600, chats, memory |
 | GTK window | `chuck-ui` (gtk4-rs + libadwaita) | chat, work lane, fleet panel, DoneGate view, settings |
 | `voice.py`, `listen.py` | `chuck-voice` | Rust drives the existing Kokoro / Moonshine servers (they need Python's ONNX runtime); players probed, never silent |
@@ -160,7 +164,11 @@ crates/
                   fleet model resolution, pricing
   chuck-sandbox   bubblewrap argv, secrets, command safety classifier, git guard
   chuck-tools     tools + evidence capture, fenced-block parser, cow workspaces, checkpoints
-  chuck-store     settings, chats, audit ledger, missions/hibernate stores, crash log
+  chuck-store     settings, chats, audit ledger, checkpoints, memory, spend, crash log
+  chuck-web       search, page reads, the headless browser, pictures and videos
+  chuck-code      language servers, syntax answers, repo map, find
+  chuck-mcp       MCP servers over stdio
+  chuck-daemon    triggers, the read-only shell policy, the inbox
   chuck-voice     TTS/STT sidecar control, audio player probe
   chuck-ui        GTK4 + libadwaita: conversation, work lane, fleet (/top), Done gate, settings
   chuck           the binary: `chuck` (window), `chuck run "task"` (headless), `chuck top`
