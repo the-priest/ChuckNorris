@@ -2,22 +2,15 @@
 
 # Chuck
 
-### The operating system for AI agents.
+**An AI team that works on your Linux machine: it plans, writes the code, runs it, tests it, and
+counts a job as finished only when there is proof.**
 
-**Tell it what you want. It plans the work, runs the agents, tests what they change, and keeps to your budget.**
-
-A Linux desktop app where AI agents work on your machine the way programs run on an OS:
-as processes with budgets and permissions, in parallel, on safe copies of your code,
-asleep until something needs them, and never out of your sight.
-
-![version](https://img.shields.io/badge/version-18_·_Rust-8b5cf6?style=flat-square&labelColor=0c0c10)
-![gtk](https://img.shields.io/badge/GTK4-libadwaita-8b5cf6?style=flat-square&labelColor=0c0c10)
-![python](https://img.shields.io/badge/Python-3.11_·_3.12_·_3.13-8b5cf6?style=flat-square&labelColor=0c0c10)
-![suites](https://img.shields.io/badge/test_suites-24-2ea043?style=flat-square&labelColor=0c0c10)
-![deps](https://img.shields.io/badge/runtime_deps-stdlib_+_GTK-2ea043?style=flat-square&labelColor=0c0c10)
+![version](https://img.shields.io/badge/version-18.0.0-8b5cf6?style=flat-square&labelColor=0c0c10)
+![rust](https://img.shields.io/badge/Rust-GTK4_·_libadwaita-8b5cf6?style=flat-square&labelColor=0c0c10)
+![models](https://img.shields.io/badge/models-SiliconFlow-2ea043?style=flat-square&labelColor=0c0c10)
 ![licence](https://img.shields.io/badge/licence-MIT-8b5cf6?style=flat-square&labelColor=0c0c10)
 
-<img src="assets/screenshots/welcome.png" alt="Chuck's welcome screen: a field of code glyphs under the welcome card, with quick starts and the agent OS one click away" width="100%">
+<img src="assets/screenshots/welcome.png" alt="Chuck's window: the list of chats on the left, the welcome screen with its field of code glyphs rippling out from a click, and the fleet panel on the right" width="100%">
 
 </div>
 
@@ -25,479 +18,498 @@ asleep until something needs them, and never out of your sight.
 curl -fsSL https://raw.githubusercontent.com/the-priest/ChuckNorris/main/install.sh | bash && chucknorris
 ```
 
-Paste a SiliconFlow API key in Settings, pick a folder, and say what you want.
-
-> **Chuck 18 is a Rust app.** The one-liner above builds it and installs it over any Chuck you had
-> before: the menu entry and `chucknorris` open it. The earlier Python window stays installed only
-> as the fallback if the Rust build fails. See [Chuck in Rust](#chuck-in-rust) for what it does and
-> what isn't ported yet. An older Chuck offers the switch itself the next time it starts.
+Then add a SiliconFlow API key in Settings (the gear icon), pick a project folder, and say what you
+want. Prefer a download? Every version is on the
+[Releases page](https://github.com/the-priest/ChuckNorris/releases/latest).
 
 ---
 
-## What is Chuck?
+## Contents
 
-**Chuck is an AI that does the work on your computer, not just one that talks about it.** You say *"my disk is full"*, *"add tests to this project"* or *"why won't Bluetooth start?"*. Chuck runs the commands, reads and edits the files, tests what it changed, and tells you what it did and what it cost. The thinking happens on a model you rent online (SiliconFlow). Everything it *does* happens on your machine, in front of you.
+- [What Chuck does](#what-chuck-does)
+- [How a job runs](#how-a-job-runs)
+- [What "done" means](#what-done-means)
+- [Long jobs](#long-jobs)
+- [Safety](#safety)
+- [Chat mode](#chat-mode)
+- [Research and the browser](#research-and-the-browser)
+- [Daemons and reminders](#daemons-and-reminders)
+- [Voice, memory, MCP and code intelligence](#voice-memory-mcp-and-code-intelligence)
+- [The window](#the-window)
+- [The command line](#the-command-line)
+- [Install, update, uninstall](#install-update-uninstall)
+- [Settings](#settings)
+- [Where things live](#where-things-live)
+- [When something's wrong](#when-somethings-wrong)
+- [Building and testing](#building-and-testing)
 
-One assistant is easy. The hard part starts when you want several of them working at once, for hours, on real code: something has to decide who goes first, who may touch what, who pays for what, and what happens when one crashes. Computers solved that decades ago with an operating system. Chuck brings the same idea to AI agents:
+## What Chuck does
 
-| a computer has | Chuck has |
+You describe what you want in plain words, for example:
+
+- *"The parser crashes on empty input. Fix it and add tests."*
+- *"Build the Android app in this folder and get it running on the emulator."*
+- *"Why won't Bluetooth start?"*
+
+Chuck works it out on your machine. It reads your files, runs the commands, edits the code, builds
+it, runs the tests and checks the result. It shows you every step as it happens, and it doesn't
+stop until the work is really finished or there is a real reason to stop.
+
+Chuck is a team, not one chatbot. Everything runs on [SiliconFlow](https://siliconflow.com) with
+your own API key:
+
+| Who | Model | What it does |
+|---|---|---|
+| **The Lead** | DeepSeek-V4.1-Flash | Talks to you. Writes the acceptance criteria and the plan. Hands out tasks, reviews every result, and is the only one who can finish a job. |
+| **Up to 4 DeepSeek workers** | DeepSeek-V4.1-Flash | Build and fix. Each works in its own copy of your project. |
+| **Up to 4 GLM workers** | GLM-5.3-Flash | Same job, a different model family: a second way of thinking about the problem, in parallel. |
+
+The thinking happens online. Everything Chuck *does* (commands, file changes, builds, tests)
+happens on your computer, in front of you.
+
+## How a job runs
+
+<img src="assets/screenshots/fleet-working.png" alt="Mid-job: the Lead has written criteria and a four-step plan, two tasks run in parallel on a DeepSeek and a GLM worker, and the right panel shows the plan, the tasks and each agent's state" width="100%">
+
+1. **You ask.** Type it, or say it (the mic button, Ctrl+M).
+2. **The Lead looks before it acts.** It reads the project, runs harmless commands, and searches the
+   web when it needs to. Until it has written criteria, your folder is read-only to every command.
+3. **Criteria first.** The Lead writes down what "done" means, each item with a command that proves
+   it, for example *"empty input returns `[]` — verify: `pytest -q`"*. Bigger jobs also get a plan.
+   The plan sits at the top of the right panel and moves as steps are finished.
+4. **Work is split up.** The Lead does small things itself and hands larger pieces to workers. Each
+   worker gets its own copy of the project. Workers can't step on each other, or on your files,
+   while they work.
+5. **Workers prove their work.** A worker can only hand in a task once every criterion has
+   evidence, and the verification passed *after* its last change.
+6. **The Lead checks before anything reaches your folder.** It re-runs the verification on the
+   worker's copy. Then it reviews the change, and accepts it or sends it back with the defects
+   listed. Only accepted work is merged into your folder.
+7. **The whole result is verified and reviewed.** After merging, the Lead runs the checks on your
+   real folder. Then an independent critic reviews the whole change before the job may finish.
+8. **Done, with the evidence.** The job ends with a summary of what changed and how it was
+   verified. Every criterion and its evidence stays in the panel's Done gate.
+
+<img src="assets/screenshots/fleet-done.png" alt="A finished job: both tasks merged, the whole suite verified in the user's folder, the independent review accepted, and the DONE card with what changed and how it was verified" width="100%">
+
+You can type while the fleet works, and the Lead reads it at its next step. **Esc** or the stop
+button stops everything.
+
+## What "done" means
+
+"Done" is enforced by code that the models can't talk their way past, not left to the model's
+judgement:
+
+- **Nothing changes before there are criteria.** Larger work also needs a plan.
+- **Every criterion needs evidence.** That means a command with its real output, a test run, or a
+  diff. `echo ok` or `test true` never counts as a test.
+- **Verification must come after the last change.** Editing a file after a passing test makes that
+  pass count for nothing until it runs again.
+- **The real result is judged.** The gate compares your folder with a snapshot taken when the job
+  started, so a change made by a shell command counts too.
+- **Shortcuts are caught.** Leftover TODOs and stubs, or a tiny diff for a large request, block the
+  finish until fixed or justified.
+- **Prose isn't a finish.** Once criteria exist, a Lead that just writes "All done!" is told that
+  only ```` ```done``` ```` ends the job, and the gate checks that. If it does it again, the job
+  stops as INCOMPLETE rather than looking finished.
+- **Running out of budget is never "done".** The job ends INCOMPLETE, with the list of what is
+  missing.
+
+## Long jobs
+
+A large job can take hours of work, or days. Chuck has **no step limit and no time limit**. Only
+real reasons pause a job:
+
+- **The job's budget ran out** (Settings › Fleet › spending cap per job; $2 by default).
+- **Your daily or monthly spending limit was reached.** The card says so in its first line and has
+  a **Spending limits…** button.
+- **The Lead is stuck,** repeating itself even after being told to change its approach. Exploring a
+  big project is never mistaken for being stuck.
+- **You stopped it.**
+
+A paused job loses nothing. Its card says why it paused and what is still missing. **Keep going**
+(or `/continue`, or `chuck continue` in a terminal) carries on exactly where it stopped. It keeps
+the same criteria, evidence, plan and conversation, even after you closed Chuck or restarted the
+computer.
+
+Other things that keep long jobs going:
+
+- **API outages are waited out.** Chuck retries for up to six hours.
+- **Long commands are fine.** A build, a test suite or an emulator boot may run for up to 30
+  minutes; you can change that in Settings.
+- **Background processes survive.** A dev server or emulator the Lead starts with `nohup … &` keeps
+  running between its commands.
+- **Optional automatic continue.** Turn on *Keep going when a job's budget runs out* and Chuck
+  continues on its own with another job budget, as often as needed. It never goes past your daily
+  limit, so this option needs one set.
+
+## Safety
+
+<img src="assets/screenshots/ask-outside.png" alt="The Lead wants to copy a logo from a folder next to the project: the command waits, showing exactly which folder it reaches, with Refuse, Allow once and Allow for this job" width="100%">
+
+**Your project folder is the agents' to use. Anything outside it needs your yes.** This is the
+default for every folder:
+
+- **Inside the folder there are no limits.** Commands run with the folder fully writable.
+- **Outside the folder is hidden.** Commands run in a [bubblewrap](https://github.com/containers/bubblewrap)
+  jail. The rest of your home is hidden, the system is read-only, and each command gets its own
+  empty `/tmp`.
+- **Builds still work.** Your toolchains (`~/.cargo`, `~/.rustup`, SDKs, git's own config) stay
+  readable. Package caches (cargo, npm, pip, gradle…) stay writable.
+- **A command that names a path outside the folder waits for you.** That includes `../tools`,
+  `~/notes`, `/home/…`, or a file that really exists in `/tmp`. You get three buttons:
+  - **Refuse:** the command doesn't run, and the agent is told why.
+  - **Allow once:** it runs once, with just that folder (or file) added to the jail.
+  - **Allow for this job:** that folder stays available until the job ends.
+- **Chuck's own tools ask the same way.** Reading, searching, writing and editing a file outside
+  the folder all wait for your yes.
+- **Workers never ask.** A worker is refused outright and has to report it to the Lead.
+
+<img src="assets/screenshots/critical.png" alt="A command that pipes a download into bash waits for the user, with Refuse and Run it" width="100%">
+
+**Some commands always need your yes, in any mode.** Disk wipes, `rm -rf ~`, `curl … | sh` and
+other commands that can destroy data beyond what a checkpoint can restore wait for **Run it**.
+They never run from a worker, and never when nobody is there to answer. The classifier was checked
+command by command against the Python app's: same verdict on all 1,371 test commands.
+
+| Access (Settings › This folder's access) | Commands can | Network |
+|---|---|---|
+| **This folder freely, ask outside** (default) | change the folder; anything else only with your yes | yes |
+| **Full access** | run as you, anywhere (critical commands still ask) | yes |
+| **Sandboxed** | change only the folder | yes |
+| **Sandboxed, offline** | change only the folder; research is off too | no |
+| **Read-only** | change nothing | yes |
+
+**More safety nets:**
+
+- **Credentials stay hidden.** `~/.ssh`, keyrings, browser profiles and Chuck's own API key are
+  never visible to a command, in any jailed mode.
+- **Checkpoints.** Before every step that changes your folder, Chuck snapshots it in a private
+  store, never in your own `.git`. `/undo` puts the whole folder back to before the last job,
+  including changes made by shell commands. `/diff` shows every change. `chuck rewind --list` shows
+  every checkpoint, and a rewind can itself be undone.
+- **An evidence ledger.** Every command any agent runs is written to a tamper-evident hash chain.
+  `chuck ledger` verifies it and shows the latest entries.
+- **Spending limits.** Daily and monthly limits apply to every chat, agent and job together. Past a
+  limit no agent gets another call, and only you can raise it.
+- **Closing the window ends everything.** All agents stop, and every process Chuck started ends
+  with them, including ones started in the background or detached with `nohup` or `setsid`.
+  Nothing keeps running after you close Chuck.
+
+## Chat mode
+
+<img src="assets/screenshots/chat.png" alt="Chat mode: a question answered from the Python docs it fetched, with the source linked, a code snippet, and a request for the fleet with a Hand it to the fleet button" width="100%">
+
+The **Fleet | Chat** switch at the top turns Chuck into a direct assistant. Use it for questions,
+explanations, news, comparisons and how-tos:
+
+- **It researches when a fact can be checked.** It searches the web, reads the pages themselves,
+  and links the sources it relied on.
+- **It can show pictures and videos.** Ask to see something and you get a gallery. Videos come
+  with an **Open** button and a **Download** button (yt-dlp, at most 1080p).
+- **It can't change anything.** It doesn't run commands or touch your files.
+- **Work goes to the fleet only on your say-so.** When you want something done, Chat writes the
+  request for the fleet and shows **Hand it to the fleet**. Nothing runs until you press it.
+- **The conversation carries over.** Switching between Chat and Fleet keeps it: the fleet sees
+  what you discussed.
+
+From a terminal: `chuck ask "your question"`.
+
+## Research and the browser
+
+<img src="assets/screenshots/browser.png" alt="The Lead loads a todo page in a headless Chromium, clicks Add, and reports the JavaScript error with its file and line, a screenshot, and a description of what the page looks like" width="100%">
+
+**Search.** Every agent can search the web with ```` ```search``` ````. It asks your own SearXNG
+first if you have one, then four public instances at once, with DuckDuckGo as a fallback. It takes
+at most two results per site, so one site can't crowd out the rest.
+
+**Reading pages.** ```` ```fetch``` ```` reads a page as text, a part at a time. Some pages only
+fill in with JavaScript, or show a bot check that clears in a real browser. Those are read in the
+browser instead, and Chuck says so. Some protections apply to every page:
+
+- Fetches never reach local or private addresses, even through redirects.
+- Text from pages is treated as information, never as instructions.
+
+Every search and page read is listed with its link in the panel's **Research** section.
+
+**A real browser for checking work.** When there's something with a web UI to check, the Lead uses
+```` ```browse page.html 1024x640``` ````. That loads it in your own Brave, Chromium or Chrome
+(headless, with a throwaway profile) and lets it click, type, press keys and scroll. It reports:
+
+- every uncaught exception, console error and failed request, with its file and line;
+- the text on the page;
+- a screenshot, which GLM-5.3-Flash looks at and describes in a few lines.
+
+A clean page counts as evidence; a page with errors never does.
+
+## Daemons and reminders
+
+<img src="assets/screenshots/daemons.png" alt="A reminder card in the conversation, and the Inbox with a daemon's report: disk usage and a failed bluetooth service with proposed fixes" width="100%">
+
+Daemons and reminders cost nothing while they wait. Plain code checks each trigger every 30 seconds,
+and only when one fires does an agent wake up.
+
+- **Reminders:** `/remind in 20m: take the pizza out`, or `/remind every day at 8:30: stand-up`.
+- **Daemons:** `/daemon when a service fails: find out why and propose a fix`. A daemon can fire
+  on:
+  - a time or an interval;
+  - a folder changing;
+  - a failed service;
+  - a disk filling up;
+  - a command's output changing.
+
+A daemon's agent can only look, never change anything. Every command it runs must pass the
+read-only rules, and runs with the whole system mounted read-only. Its report goes to the panel's
+**Inbox**, with a desktop notification unless it found nothing to do. Daemons run while Chuck is
+open; `chuck daemons` and `chuck inbox` show them from a terminal.
+
+## Voice, memory, MCP and code intelligence
+
+**Voice.** Everything runs on your machine, and nothing is uploaded.
+
+- **Speaking:** with the speaker button on, replies are read aloud by Kokoro (the installer sets it
+  up), else Piper, else espeak-ng. Esc or a new message stops it.
+- **Listening:** the mic button (Ctrl+M) listens with Moonshine and puts what you said in the box.
+  Settings can make it send right away.
+
+**Standing rules.** Every agent follows:
+
+- `~/.config/chucknorris/CHUCK.md`, your rules for everything;
+- the project's own `CHUCK.md`, `AGENTS.md` or `CLAUDE.md`.
+
+**Memory.** The Lead and Chat keep durable facts with ```` ```remember``` ```` (start a fact with
+`project:` to keep it to that folder) and drop them with ```` ```forget``` ````. Only the few facts
+relevant to the request go into a prompt. The panel's **Memory** section lists every fact, with a
+button to forget each one.
+
+**MCP servers** come from `~/.config/chucknorris/mcp.json` (the format Claude Desktop uses). They
+start and end with the window, and Settings shows each one's state. A server runs outside every
+sandbox, so the rules are stricter than for commands:
+
+- workers never get MCP tools;
+- a tool that may change things asks you first, unless you mark its server `"trust": true`;
+- Chat mode only sees tools that declare themselves read-only.
+
+**Code intelligence.** Agents can find code by meaning:
+
+- ```` ```def save``` ```` and ```` ```refs Store.save``` ```` ask your language server
+  (rust-analyzer, pyright, typescript-language-server, gopls, clangd…), or fall back to syntax and
+  whole-word search.
+- ```` ```rename``` ```` renames a symbol across files through the server.
+- ```` ```find retry failed requests``` ```` ranks functions and docs by what they do.
+- ```` ```map``` ```` lists every file with what it defines.
+- ```` ```patch``` ```` applies a unified diff to many files all or nothing.
+
+## The window
+
+- **Left: Recent.** Every conversation, searchable, including the ones from the earlier Python
+  Chuck. Click one to reopen it.
+- **Middle: the conversation.** Each agent's work appears in a lane under the reply it belongs to:
+  commands, files written, searches, reviews, merges.
+- **Right: the live panel.** Every section starts closed with a one-line summary, so nothing piles
+  up:
+
+  | Section | Shows |
+  |---|---|
+  | Plan | The steps, a progress bar, and the current step. |
+  | Tasks | Who has each task, its criteria, and its state: queued, running, review, merged or failed. |
+  | Agents | Each agent's state, model and spend. |
+  | Commands | What's running now, with live output, and recent commands with exit codes. |
+  | Research | Every search and page read, with links. |
+  | Done gate | Each criterion and its evidence. |
+  | Spend | This job, today and this month, against your limits. |
+  | Checkpoints | Every point you can rewind to. |
+  | Inbox, Daemons & reminders | What daemons reported, and what's scheduled. |
+  | Memory | Every remembered fact. |
+
+<img src="assets/screenshots/palette.png" alt="The command palette, filtered by typing 'do': /doctor, /undo, /export, /daemon, voice and /diff" width="100%">
+
+| Key | Does |
 |---|---|
-| CPU time | **tokens and dollars**, metered per agent, with one daily or monthly limit for everything |
-| processes | **agents**, each with an id, a parent, a budget and a live status |
-| a scheduler | **model-call slots**, granted by priority, never past a budget |
-| permissions | **capabilities** (`read`, `write`, `exec`, `net`, `spawn`) checked on every tool call |
-| fork and copy-on-write | **background agents**, each working in its own copy of your folder, merged when you say so |
-| `make` and CI | **missions**: a big goal split into a task graph, every merge gated on your tests |
-| cron and systemd | **daemons** that sleep for free and wake on a schedule or an event |
-| hibernate | **checkpoints** after every step: agents survive a crash and resume |
-| RAM and swap | **the context window**, with old tool output paged out and paged back exactly |
-| `top`, `strace` | **`/top`** and **`/strace`**, live |
+| Enter · Shift+Enter | send · new line |
+| Esc | stop agents, commands and speech |
+| Ctrl+P or Ctrl+K | the command palette: every command and switch, found by typing a few letters |
+| Ctrl+M | talk |
 
-You don't need to know any of that to use it. It works underneath, the way your computer's OS does.
-
-## Just say what you want
-
-There are no commands to learn. Chuck understands what you mean and picks the right tool for the job: it does it itself, hands it to helpers that work at the same time, runs it in the background, or turns it into a mission. It decides what goes first and which model each part runs on. It only stops to ask when the decision is really yours.
-
-| you say | Chuck |
+| Command | Does |
 |---|---|
-| *"the tests in auth are failing, fix them"* | reads the failure, fixes the code, runs the tests until they pass |
-| *"add type hints everywhere, with mypy passing"* | plans a mission, runs the tasks in parallel, merges each one only after its tests pass |
-| *"keep working on the parser in the background"* | starts a background agent in its own copy of the folder; you keep talking |
-| *"every morning, tell me what went wrong in the journal"* | sets up a daemon that wakes at 8:30, reads the journal and leaves you a report |
-| *"remind me at 5 to call the bank"* | a reminder, with a desktop notification; no AI is woken for it, so it costs nothing |
-| *"what are my agents doing?"* · *"stop that one"* | shows the activity, or stops the agent |
-| *"keep my spending under $2 a day"* | sets the limit. Raising a limit always waits for your click. |
+| `/continue [what to add]` | carry on a paused job exactly where it stopped |
+| `/undo` · `/diff` | put the folder back to before the last job · show every change it made |
+| `/remind <when>: <what>` | a reminder |
+| `/daemon <when>: <what>` | something to look at when it happens; it reports to the Inbox |
+| `/doctor` | check the API key, the sandbox, search, voice, MCP, language servers, disk and the ledger |
+| `/cost` | what this window, today and this month cost |
+| `/export` | save the conversation as Markdown |
+| `/clear` | start a new conversation (the old one stays in Recent) |
+| `/update` · `/restart` | install the newest Chuck · restart into it |
+| `/help` | all of the above |
 
-Slash commands, the **Ctrl+P** palette and buttons are all there too, for when you'd rather click.
+## The command line
 
-## Watch it work
+`chuck` drives the same fleet from a terminal. It shares the window's settings, API key, ledger,
+spending limits and checkpoints.
 
-<img src="assets/screenshots/agent-build.png" alt="Chuck building a Tetris page: a NEW FILE card with the diff folded, a headless Chromium command rendering it at two widths, a LOOKED AT card with both screenshots side by side, and the final summary" width="100%">
-
-Everything the machine does hangs on the *work lane*, the rail under Chuck's name: files written (with a diff and a **Revert** button), commands with their real output and exit code, screenshots it looked at. What Chuck *says* stays in the main column, in the order it happened. Here it wrote a game, rendered it in a real browser at two widths, looked at both, and only then said it was done.
-
----
-
-## Agents that do real coding work
-
-**Two modes, one key.** **Agent** works on your machine: commands, files, tests, packages. **Chat** only answers, and nothing touches your system. **Tab** switches between them.
-
-**A working folder.** Click the folder chip (or **Ctrl+O**) and point the session at a project. Commands run there and file paths resolve there.
-
-**The tools a good engineer uses:**
-
-| tool | what it does |
+| Command | Does |
 |---|---|
-| `map` · `find` | A map of every file and what it defines. `find` locates code by what it *does* ("where do we retry failed requests?"), even when no line uses your words. |
-| `read` · `grep` · `glob` | Files of any size, read in pages; regex search (ripgrep when installed). Output is capped so a search never floods the context. |
-| `edit` · `write` · `patch` | Search/replace edits that send only the changed lines, whole new files, and multi-file diffs, all applied all-or-nothing and checkpointed. |
-| `bash` · `python` · `node` | Run one step at a time, checked for real defects before running, with live output and the real exit code. `cd` carries over like a terminal. |
-| `py` | One Python session per chat, notebook-style: load data once, keep using it, get plots back as images. |
-| `def` · `refs` · `rename` | Code navigation through a real language server (pyright, tsc, rust-analyzer, gopls, clangd): rename a symbol across files without touching comments and strings. |
-| `browse` · `look` · `screenshot` | A real headless browser: load a page, click, type, run JavaScript, and get back errors, failed requests and a screenshot that Chuck looks at. |
-| `diagnose` · `runtests` · `changes` | Linters and type checkers, the project's own tests, and the net diff of the whole task for self-review. |
-| `task` | Read-only helpers that research in parallel; only their summaries enter the conversation. |
-| `search` · `fetch` | Web research with sources. Pages that block plain requests are read through the browser. |
-| `mcp` | Any [Model Context Protocol](https://modelcontextprotocol.io) server's tools, configured in the same format Claude Desktop uses. |
+| `chuck` | open the window, in the current folder |
+| `chuck run "fix the failing test"` | run a job here (`-C DIR` for another folder, `--max-usd N` to cap it, `-v` for every detail) |
+| `chuck continue ["also add docs"]` | carry on a paused job |
+| `chuck ask "what changed in GTK 4.16?"` | Chat mode: an answer, researched when it should be |
+| `chuck key` | save your SiliconFlow API key |
+| `chuck models` | show the fleet's models, checked against your account |
+| `chuck doctor` | check everything Chuck depends on |
+| `chuck rewind [--list \| N]` | put the folder back to before the last job (or checkpoint N) |
+| `chuck ledger [N]` | verify the evidence chain and show the last N commands |
+| `chuck daemons [rm N \| pause N \| resume N]` · `chuck inbox [read]` | daemons and their reports |
+| `chuck update` · `chuck version` | install the newest Chuck · show the version |
 
-**It finishes the job.** Before Chuck says "done" it checks that it did what it said it would, that its plan is complete, and that the code it changed was actually run, tested or looked at. Ask for a game and you get a game, played in a browser, not *"I'll write the game now"*.
+Exit status: 0 done or answered, 2 incomplete (paused, with what is missing), 1 failed. Ctrl-C stops
+every agent.
 
-**You stay in charge while it works.**
-- **Steer mid-task.** Type while it works; your message reaches it at its next step.
-- **Plan mode.** Chuck investigates read-only and proposes a plan. Nothing changes until you press **Approve & run**.
-- **Undo anything.** Every change is a checkpoint. `/rewind` puts the files *and* the conversation back to before any step, including what a command changed. Your own `.git` is never touched.
-- **Git built in.** `/diff`, `/commit` (message written from the diff), `/review` (a bug hunt on your uncommitted changes) and `/pr` (branch, commit, tests, push and a written pull request).
+## Install, update, uninstall
 
-<table>
-<tr>
-<td width="50%"><img src="assets/screenshots/plan-mode.png" alt="Plan mode: a proposed four-step plan card with Approve & run and Revise"></td>
-<td width="50%"><img src="assets/screenshots/browse.png" alt="A BROWSER card: an uncaught error with its line, the key presses, a JavaScript result and a screenshot of the game"></td>
-</tr>
-</table>
-
-## Many agents at once
-
-### Missions: hand over the whole job
-
-```text
-/mission make the API return proper 4xx errors everywhere, with tests
-```
-
-A mission turns a goal that's too big for one agent into a small graph of tasks and shows you the plan, with a cost estimate. Then it runs it the way `make` runs a build. Each task starts as soon as the tasks it depends on are finished, several at a time, each in a fresh copy of your folder that already holds the earlier work. **Nothing is merged until the project's tests pass on that copy.** A task that fails its tests is sent back with the failure to fix it; if it still fails, the mission pauses and asks you to retry or skip. The whole mission has one budget, **Cancel** stops every agent in it, and it carries on after a restart. When you ask in plain words, a mission estimated under your auto-start limit ($0.50 by default) begins straight away; bigger ones, and any you start with `/mission`, wait for **Start**.
-
-<img src="assets/screenshots/os-mission.png" alt="A MISSION card with a progress bar and five tasks: three finished (one merged after its tests passed), one running, one waiting for it, each with Trace and Replay" width="100%">
-
-### Background agents: fork, then merge
-
-A background agent writes, runs and tests code **in its own copy of your folder** while you keep talking to Chuck. Run several; none can trample another. When one finishes, your tests run on its copy and the card tells you whether they pass. **Show diff** lets you pick exactly which files to take, and **Merge** brings them home three-way: your edits and its edits to the same file are combined, and overlapping edits are set aside for you instead of overwritten.
-
-<img src="assets/screenshots/os-background.png" alt="A background agent's card: done, two files changed in its copy, its report, and Show diff / Merge into folder / Discard / Trace / Replay" width="100%">
-
-### Agents that talk to each other, and to you
-
-- **Messages.** Tell a working agent something (*"also keep the old port as a fallback"*) and it arrives with its next results.
-- **Questions without stopping the world.** A background agent can ask you something in a card and wait, while every other agent keeps going.
-- **A shared board** where agents leave notes for each other (*"the tests need Postgres on :5432"*).
-- **They know their budget.** Every result tells an agent how many steps, tokens and minutes it has left, so it paces itself instead of being cut off mid-thought.
-
-<img src="assets/screenshots/os-ask.png" alt="A background agent asks a question in a card with an answer box while the rest of the session carries on" width="100%">
-
-## Always on, for free
-
-### Daemons: agents that sleep until they're needed
-
-```text
-/daemon daily 08:30: summarise new errors in the journal since yesterday
-/daemon when a service fails: find out why and propose a fix
-/daemon when disk / is above 90%: find what's filling it and what's safe to delete
-```
-
-An agent that keeps checking *"is the disk full yet?"* pays for every look. A daemon's trigger is plain code (a clock, a file changing, a failed service, disk usage, a command's output), checked every 30 seconds **at no cost**. Only when it fires is an agent woken, told what happened, and asked to report. Unattended daemons **look but never change anything**: the whole system is read-only to them. Reports land in your inbox with a notification, and **Act on it** hands one to the agent.
-
-<table>
-<tr>
-<td width="50%"><img src="assets/screenshots/os-daemons.png" alt="DAEMONS: four daemons with what they do, their trigger, state and run count, each with Run now / Pause / Delete"></td>
-<td width="50%"><img src="assets/screenshots/os-inbox.png" alt="INBOX: two daemon reports with when and why, each with Act on it"></td>
-</tr>
-</table>
-
-### Talk to it from your editor
-
-Turn on `/watch` and keep coding in VS Code, Neovim, JetBrains or anything else. Write a comment that ends in `AI!` and save:
-
-```python
-def total(items):   # make this skip None values AI!
-```
-
-Chuck sees it, does it, and removes the marker. End a comment with `AI?` and it answers in the chat instead, changing nothing. Watching costs nothing until a marker appears.
-
-### Or from your terminal
-
-While Chuck is open, running `chucknorris` again talks to the running app, so it works from scripts, cron and git hooks:
-
-```bash
-chucknorris --here "the tests in auth are failing, fix them"
-chucknorris --mission "add type hints everywhere, with mypy passing"
-chucknorris --remind "in 20m: stretch"
-chucknorris --top        # what every agent is doing, printed right here
-```
-
-## Always in control
-
-- **Ctrl+P** opens a command palette with every action Chuck has: agents, missions, daemons, chats, models, folders and settings. Type a few letters, press Enter.
-- **The tray** in the header shows what's going on at a glance: a question waiting for you, agents working, a mission running, a new report. Click it for one card with all of it.
-- **`/top`** lists every agent like processes: state, tokens, cost, speed and what each is doing, with Pause, Continue and Kill.
-- **Budgets everywhere.** Every agent has a budget, a helper can never spend more than the agent that started it, and a daily or monthly limit (`/budget`) covers everything together. At the limit, Chuck pauses and asks.
-- **Replay and fork.** Every step of a background agent is saved. `/replay` walks through a run step by step; `/fork` starts a new agent from any step, with the files exactly as they were then.
-- **The governor** runs cheap work (read-only helpers, daemons, summaries) on a faster, cheaper model, with your chat model kept for the work that matters.
-
-<table>
-<tr>
-<td width="50%"><img src="assets/screenshots/os-top.png" alt="/top: every agent with state, priority, tokens, cost, tokens per second, run time and what it is doing, with Pause / Continue / Kill"></td>
-<td width="50%"><img src="assets/screenshots/os-activity.png" alt="The header tray lit up with a question waiting, and the ACTIVITY card listing it with the working agents, an unread report and today's spend"></td>
-</tr>
-<tr>
-<td><img src="assets/screenshots/palette.png" alt="The command palette with the Agent OS group: Activity, Processes, New mission, Missions, Background agent, Daemons, Inbox, Board, Budget, Governor"></td>
-<td><img src="assets/screenshots/os-replay.png" alt="REPLAY: each step of a background agent's run with the tools it called and a Fork here button"></td>
-</tr>
-</table>
-
-## Safe by design
-
-An agent that can do real work can also do real damage, so safety is built into the layers underneath, not bolted on:
-
-- **Per-folder access** (shown on the folder chip): *Full access*; *Sandboxed*, where everything runs under [bubblewrap](https://github.com/containers/bubblewrap) with the system read-only and only the project writable; *Sandboxed, offline*, the same with no network; or *Read-only*. Give an unfamiliar repository the sandbox and let it work.
-- **Your secrets stay hidden** from sandboxed agents: SSH and GPG keys, cloud credentials, browser profiles, token files and Chuck's own API key.
-- **Nothing escapes through git.** In a sandboxed folder, agents can't plant git hooks or settings that would run code later, when *you* use git.
-- **The critical gate.** Commands that could wreck the machine (disk wipes, `rm -rf ~`, `curl … | sh`, removing core packages) arrive disarmed and wait for your click. Agents running unattended never get sudo.
-- **Everything is reversible.** Checkpoints before every step that changes anything, `/rewind` for files and conversation, and background agents that only touch your folder when you merge.
-- **A tamper-evident log.** Every command lands in a hash-chained ledger you can verify in Settings.
-
-## Voice
-
-**Chuck talks** with [Kokoro](https://github.com/thewh1teagle/kokoro-onnx), a natural-sounding voice that runs locally on your CPU. Speech starts about half a second after a reply arrives, and code, paths and tables are read the way a person would read them, or skipped.
-
-**And listens.** Click the mic or press **Ctrl+M** and just talk; it stops when you pause. Recognition is [Moonshine](https://github.com/usefulsensors/moonshine), also fully local. Talking over Chuck interrupts him. **Settings › Voice › Test the microphone** checks your input in one second.
-
-## Context and memory
-
-- **Project rules.** Put your conventions in `CHUCK.md`, `AGENTS.md` or `CLAUDE.md` and they go with every request. `/init` writes one for you.
-- **Memory you can trust.** Durable facts persist across chats; a new fact replaces the old one instead of contradicting it, and project facts stay with their project. Everything is visible and editable in the Memory panel.
-- **Long sessions don't forget.** Old tool output is paged out of the context and paged back exactly when needed; summarising only happens when even that no longer fits. `/context` shows what the next request will send.
-- **Attach anything.** Drag in files, paste screenshots, or `@file` from the project. Images reach the model as images.
-- **Your own commands.** A prompt in `.chuck/commands/<name>.md` becomes `/name`.
-
-## Models and costs
-
-The header meter shows this chat's cost and tokens, from the usage the API actually reports. A click opens the breakdown, the session total and your account balance.
-
-| model | input / 1M | output / 1M | sees images |
-|---|---|---|---|
-| `zai-org/GLM-5.3-Flash` *(default)* | $0.15 | $0.50 | yes |
-| `deepseek-ai/DeepSeek-V4.1-Flash` | $0.158 ($0.01 cached) | $0.633 | via vision model |
-| `deepseek-ai/DeepSeek-V4-Flash` | $0.13 | $0.28 | via vision model |
-| `zai-org/GLM-5.3` | $1.40 ($0.26 cached) | $4.40 | yes |
-| **Free:** `Qwen/Qwen3-8B`, `THUDM/GLM-4-9B-0414`, `deepseek-ai/DeepSeek-R1-0528-Qwen3-8B` | $0 | $0 | no |
-
-List prices as of October 2026. **Settings → Fetch** pulls the live list your key can use, and you can set a custom price for any model. Chuck is careful with tokens: small prompts, a cache-friendly layout, cheap edits that send only changed lines, and batched read-only tools.
-
-<p align="center"><img src="assets/screenshots/usage.png" alt="Usage popover: cost, input with cache hits, output with reasoning, price, session total and balance" width="320"></p>
-
-## When something goes wrong
-
-- **A model is down?** The request goes to a fallback model, and the chat says so.
-- **Closed or crashed mid-task?** Chats are saved at every step, and background agents and missions resume where they were.
-- **Esc** stops the current run and everything it started.
-- **`/doctor`** checks your setup in one card (key, balance, model, browser, voice, MCP servers, disk) and tells you how to fix each problem.
-- **Updates** are offered when a new version is out; `/update` installs it without sudo.
-
-## Keyboard
-
-| key | action |
-|---|---|
-| **Tab** | switch Agent / Chat |
-| **Enter** · **Shift+Enter** | send (or steer while it works) · new line |
-| **Ctrl+P** · **Ctrl+K** | command palette |
-| **Ctrl+M** | talk to Chuck |
-| **Ctrl+O** | working folder |
-| **Ctrl+R** · **↑** | retry the last answer · edit your last message |
-| **Ctrl+N** · **Ctrl+B** · **Ctrl+,** | new chat · chats sidebar · settings |
-| **Esc** | stop the current run |
-| **/** · **@** | commands · attach a file |
-
-## Install
+**One line:**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/the-priest/ChuckNorris/main/install.sh | bash
 ```
 
-Or read the installer first:
+It replaces any Chuck you had before: the app-menu entry and the `chucknorris` command open the
+new one. Your settings, key, chats, memory, daemons and spending
+history carry over. What it does, in order:
+
+1. Installs the system packages with your package manager, which asks for your password:
+   - GTK 4 and libadwaita;
+   - bubblewrap;
+   - a screenshot tool, espeak-ng and yt-dlp;
+   - build tools.
+
+   It knows pacman (Arch, CachyOS), apt and dnf.
+2. Installs Rust 1.88 or newer if yours is older or missing: your distro's package, or rustup into
+   `~/.cargo`, downloaded to a file first and never piped into a shell.
+3. Builds Chuck from the exact commit it downloaded, into `~/.local/bin/chuck`.
+4. Sets up the local voice models (about 600 MB). `CHUCK_VOICE=0` skips this.
+5. Writes the menu entry, the icon and the `chucknorris` launcher.
+
+Prefer to read it first? Clone and run it:
 
 ```bash
 git clone https://github.com/the-priest/ChuckNorris.git && cd ChuckNorris && ./install.sh
 ```
 
-The app's own updater follows `main`. The installer builds
-`chuck` with Rust 1.88 or newer. It uses your Rust if you have it, then your distro's package, and
-as a last resort installs rustup into `~/.cargo`. `CHUCK_RUST=0` skips this step.
+**A prebuilt binary** for x86-64 is attached to every
+[release](https://github.com/the-priest/ChuckNorris/releases/latest), with its SHA-256. It needs
+GTK 4.14+ and libadwaita 1.5+ installed. Unpack it and run `./chuck`. The installer is still the
+better way, because it also sets up the menu entry, bubblewrap and voice.
 
-## Chuck in Rust
+**Requirements:**
 
-Chuck is a Rust app built around a fixed team on SiliconFlow:
-one **Lead** (DeepSeek-V4.1-Flash) that talks to you, writes the acceptance criteria, plans, reviews
-and owns "done", and up to **four DeepSeek and four GLM-5.3-Flash workers**. Each worker is its own
-process and thread, working in its own copy of your project.
+- Linux with GTK 4.14+ and libadwaita 1.5+. That's Arch, CachyOS, Fedora 40+, Ubuntu 24.04+ or
+  Debian 13+, and newer releases.
+- [bubblewrap](https://github.com/containers/bubblewrap), for the jails. The installer adds it.
+- A [SiliconFlow](https://siliconflow.com) API key.
+- Optional:
+  - Brave, Chromium or Chrome, for page checks and script-only pages;
+  - a language server, for code intelligence.
 
-<img src="assets/screenshots/fleet-run.png" alt="Chuck: the Lead plans and assigns two tasks, a DeepSeek and a GLM worker do them in parallel, each is reviewed, merged and verified, the independent review accepts it, and the Done gate on the right shows every criterion with its evidence" width="100%">
+**Updating.** Chuck checks once a day whether a newer version is out (Settings can turn that off).
+`/update` in the window, or `chuck update`, rebuilds it in place; `/restart` opens the new one.
 
-On the left is your conversation with the Lead, with every agent's work in a lane under each reply.
-The right side shows everything the fleet is doing, in sections that start closed. Each shows a
-one-line summary until you click it open, so nothing is hidden and nothing piles up:
+**An older Chuck** (the Python app) offers the switch by itself. Its update brings in the new files,
+and the next time it starts it offers **Install it**. That stays installed as a fallback: it is
+what opens only if the Rust build fails, and the installer says so loudly.
 
-- **Plan:** the steps, with a progress bar and the current step always in view.
-- **Tasks:** who is on each task, its criteria, and whether it's queued, running, in review, merged
-  or failed.
-- **Agents:** each agent's state, model and spend, with its own history.
-- **Commands:** what's running right now, with live output, then recent commands with their exit
-  codes and output.
-- **Done gate:** each criterion and its evidence.
-- **Spend:** this job, today and this month, against your limits.
-- **Checkpoints:** every point you can rewind to.
-
-<img src="assets/screenshots/fleet-midrun.png" alt="Mid-job: the plan at step 2 of 4, two tasks running in parallel on a DeepSeek and a GLM worker, and each agent's state in the right panel" width="100%">
-
-Type while the fleet works to steer the Lead; it reads your words at its next step. Critical
-commands stop and ask for your yes right in the conversation. Every conversation is listed on the
-left (**Recent**, searchable, including the Python app's chats); the plan on the right moves as the
-Lead marks steps done. Closing the window stops every agent and ends everything it started, including
-what was left running in the background or detached itself (an emulator started with `nohup … &`, an
-`adb` server); nothing keeps running.
-
-**Work goes on until it's genuinely done.** There's no step or time limit: a big job can take hours or
-days of turns. Only real limits pause it: the job's budget, your daily or monthly limit, or the Lead being
-stuck (repeating itself after being told to replan). Exploring a large project is never mistaken for being
-stuck. An API outage is waited out (up to six hours, retrying). A paused job keeps everything: the INCOMPLETE
-card says why it paused, and **Keep going** (or `/continue`, or `chuck continue`) carries on exactly where it
-stopped, with the same criteria, evidence and conversation, even after Chuck was closed. Settings › Fleet can
-keep going on its own when only the job's budget ran out, never past your daily limit.
-
-<img src="assets/screenshots/fleet-critical.png" alt="A critical command (curl piped into bash) waiting in the conversation for the user to press Run it or Refuse" width="100%">
+**Uninstalling:**
 
 ```bash
-cd ~/code/my-project
-chuck                 # the window
-chuck run "the parser crashes on empty input: fix it and add a test"
-chuck models          # are the fleet's models on your account?
-chuck key             # save the API key (the window shares it)
-chuck rewind          # undo the last job (chuck rewind --list for every checkpoint)
-chuck ledger          # verify the evidence chain, show the last commands run
+rm -f ~/.local/bin/chuck ~/.local/bin/chucknorris ~/.local/share/applications/org.thepriest.chucknorris.desktop
+rm -rf ~/.local/share/chucknorris ~/.cache/chuck      # app data, chats, checkpoints, build cache
+rm -rf ~/.config/chucknorris                          # settings, API key, daemons, standing rules
+rm -f ~/.local/share/icons/hicolor/*/apps/org.thepriest.chucknorris.png
 ```
 
-"Done" is enforced in code, not left to the prompt:
+## Settings
 
-- Nothing changes until acceptance criteria exist, and larger work also needs a plan.
-- Every criterion needs evidence: a command and its real output, a test run, or a diff.
-- Verification must pass after the *last* change. An edit made after a passing test makes it count for nothing.
-- A worker's submission is refused while anything is missing. The Lead re-runs the checks on the
-  worker's copy before anything is merged into your folder.
-- Leftover TODOs and stubs, or a tiny diff for a large ask, block completion until fixed or justified.
-- An independent critic pass reviews the whole result before the Lead can finish.
-- Running out of budget ends the job **INCOMPLETE**, with the list of what is missing, never "done".
-- The gate and the critic judge the real result. That's your folder compared against a snapshot taken
-  when the job started, so a change made with a shell command counts too. `test true` or `echo ok`
-  never counts as a test.
+The gear icon, or Ctrl+P → Settings.
 
-Safety follows the same rules as the window:
+| Group | Setting |
+|---|---|
+| SiliconFlow | Your API key. `chuck key` saves the same one. |
+| Fleet | How many DeepSeek and GLM workers (0–4 each). Spending cap per job. The longest one command may run. Keep going on its own when a job's budget runs out. |
+| Reasoning | How much the models may think (off to 32k tokens). The longest thinking time. When to give up on a silent connection. |
+| Spending limits | Daily and monthly, across everything (0 = no limit). |
+| This folder's access | The five modes in [Safety](#safety), per folder. |
+| Research | Your own SearXNG. A proxy for web reads (e.g. Tor's `socks5://127.0.0.1:9050`). Which browser to use, and whether to read blocked pages in it. |
+| Voice | Read replies aloud, the engine and voice, and send what you say right away. Each part shows which engine is in use and why. |
+| MCP servers | Each server's state and tool count, and a reload button. |
+| Chuck | The version, and the daily update check. |
 
-- **Workers run jailed.** Each one works in its own copy under bubblewrap: the rest of the system is
-  read-only, credentials (`~/.ssh`, keyrings, browser profiles, the API key) are hidden, and git
-  hooks can't be planted.
-- **This folder freely, anything outside it only with your yes** (the default access). Commands run
-  jailed: the project folder is fully writable, the rest of your home is hidden (your toolchains
-  stay readable and build caches writable, so builds work), the system is read-only. A command that
-  names a path outside the folder (`../tools`, `~/notes`, `/home/…`) waits for you: **Refuse**,
-  **Allow once**, or **Allow for this job**. Chuck's own read, grep, write and edit ask the same way.
-  Workers can't ask: they're refused and report it to the Lead. Settings also offers full access,
-  sandboxed, offline and read-only. Until the criteria exist, commands run with the folder read-only.
-- **Critical commands wait for you.** Disk wipes, `rm -rf ~` and `curl | sh` run only after you type
-  `yes`, and never from a worker or with nobody at the keyboard. The classifier is a line-by-line
-  port of the window's, checked for identical verdicts on 1,371 commands.
+## Where things live
 
-`chuck` and the window share one evidence ledger and one budget. Every command an agent runs goes
-into the same tamper-evident hash chain (`chuck ledger` verifies it), and every model call counts
-toward the same daily and monthly limits. Past a limit no agent gets another call. Only you can
-raise it.
+| Path | What |
+|---|---|
+| `~/.config/chucknorris/settings.json` | Settings and the API key (readable only by you) |
+| `~/.config/chucknorris/CHUCK.md` | Your standing rules for every agent |
+| `~/.config/chucknorris/mcp.json` | MCP servers |
+| `~/.config/chucknorris/daemons.json`, `inbox.json` | Daemons, reminders and their reports |
+| `~/.local/share/chucknorris/fleet-chats/` | Conversations |
+| `~/.local/share/chucknorris/checkpoints/` | Rewind history (never inside your project) |
+| `~/.local/share/chucknorris/resume/` | Paused jobs, ready for Keep going |
+| `~/.local/share/chucknorris/memory/` | Remembered facts |
+| `~/.local/share/chucknorris/spend.json` | Spending history behind the limits |
+| `~/.local/state/chucknorris/chuck.log` | Errors, with keys blanked (`/doctor` shows the latest) |
 
-Before every step that changes your folder, `chuck` takes a checkpoint in the window's own rewind
-history. `chuck rewind` puts the whole folder back to before the last job, including whatever shell
-commands changed, and a rewind can itself be undone.
+## When something's wrong
 
-Every agent can research the web: ```` ```search``` ```` asks SearXNG (your own instance first, then
-four public ones at once) with DuckDuckGo as the fallback, at most two results per site; ```` ```fetch``` ````
-reads a page as text, a part at a time, never from a local or private address, and says plainly when a
-site blocks it or needs JavaScript. Every search and page read is listed, with links, in the panel's
-**Research** section. A folder set to *sandboxed, offline* keeps the whole job offline, research included.
+Start with **`/doctor`** (or `chuck doctor`). It checks the API key, the sandbox, search, voice, MCP
+and language servers, disk space and the evidence chain, and says what to do about each problem.
 
-**Chat mode** (the *Fleet | Chat* switch at the top, or `chuck ask "…"`) is Chuck answering directly:
-it looks up what it should check, cites the pages it read, and can't change anything. When you want
-something done on your machine it writes the request for the fleet and shows a **Hand it to the fleet**
-button; nothing runs until you press it.
+| You see | It means |
+|---|---|
+| **CAN'T START: the monthly spending limit is reached** | Your own limit. Press **Spending limits…** to raise it, or wait for the new month. |
+| **INCOMPLETE · … budget** | The job's cap ran out. Press **Keep going**; everything is kept. |
+| A command fails with *No such file* for a path outside the project | You pressed Refuse, or the path doesn't exist. Commands only see the folder plus what you allowed. |
+| *bubblewrap isn't installed* | Install it (`sudo pacman -Syu bubblewrap` / `sudo apt install bubblewrap`). Until then, sandboxed modes refuse to run commands. |
+| The installer says the Rust build failed | The last lines of the error are shown, and the whole log is in `~/.local/share/chucknorris/rust-build.log`. The older Python window opens meanwhile. |
+| *Needs GTK 4.14+ and libadwaita 1.5+* | Your distribution release is too old for the Rust app. |
 
-![Chat mode: an answer with its source, and work proposed for the fleet](assets/screenshots/fleet-chat.png)
-
-**MCP servers** come from the same `~/.config/chucknorris/mcp.json` the Python app reads (the format
-Claude Desktop uses), start with the window and end with it. Settings lists each one with its state
-and tool count, and can reload them. Because a server runs outside every sandbox, the rules are
-stricter than a command's:
-- workers never get MCP tools;
-- before the acceptance criteria exist, or in a read-only folder, only tools that declare themselves
-  read-only run, and an offline folder gets none;
-- a tool that may change or delete things (the protocol's default when a tool doesn't say) asks you
-  first, unless you mark its server `"trust": true`;
-- Chat mode sees only the read-only tools.
-
-Agents find code by meaning: ```` ```def save``` ```` and ```` ```refs Store.save``` ```` ask the
-language server you have installed (pyright, basedpyright, pylsp, jedi, typescript-language-server or
-TypeScript 7's tsc, rust-analyzer, gopls, clangd; or the one named in the `lsp_servers` setting). Without
-one, they fall back to syntax and a whole-word search, and say so. ```` ```map``` ```` lists every file with
-what it defines. The Lead's ```` ```rename old new``` ```` lets the server rename a symbol and its real uses
-across files; it refuses if the server's view of a file differs from the file on disk, and runs only
-through the Done gate. Servers run in the folder's sandbox (some run project code) and serve the Lead's
-folder only; workers get the syntax answers, since a server for a worker's copy would run outside its jail.
-
-**Daemons and reminders** cost nothing while they wait. Type `/remind in 20m: take the pizza out` or
-`/daemon when a service fails: find out why and propose a fix` (or ask in Chat). Plain code checks
-each trigger every 30 seconds: a time, an interval, a folder changing, a failed service, a disk filling
-up, or a command's output changing. Only when one fires does an agent wake, with its own token and time
-quota. That agent can only look: each command must pass the read-only rules (no `sh -c`, `xargs`, `rm`,
-`systemctl restart`, writing to files…) and runs with the whole system mounted read-only. Its report
-goes to the panel's **Inbox**, with a desktop notification unless it found nothing to do. Reminders
-need no agent. Everything runs only while Chuck is open; `chuck daemons` and `chuck inbox` show them from
-a terminal. Daemons and reports live in the same files as the Python app's.
-
-![A reminder, and a daemon's report in the Inbox](assets/screenshots/fleet-daemons.png)
-
-**Voice** is on this machine and nothing is uploaded. With the speaker button in the header on, answers
-are read aloud by Kokoro (the installer sets it up), else Piper, else espeak-ng. Kokoro stays loaded
-between replies, and each reply streams into one player with no gaps. Esc or a new message silences it.
-The mic button (Ctrl+M) listens with Moonshine and puts what you said in the box, or sends it if you turn
-that on in Settings › Voice. Settings shows which engine is speaking and why, and lets you pick the
-voice, the speed and test it.
-
-**Memory and standing rules.** Every agent follows `~/.config/chucknorris/CHUCK.md` and the folder's
-`CHUCK.md`, `AGENTS.md` or `CLAUDE.md`. The Lead and Chat keep durable facts with ```` ```remember``` ````
-(start with `project:` to keep a fact to that folder) and drop them with ```` ```forget``` ````. Only the few
-facts relevant to what you asked go into a prompt, never the whole store. The panel's **Memory** section
-lists every fact, with a button to forget each one. It is the Python app's memory file, so what it
-remembered carries over.
-
-**Commands in the box:** `/help`, `/undo` (put the folder back to before the last job), `/diff` (every change
-it made), `/doctor` (checks the API key, the sandbox, search, voice, MCP and language servers, disk and
-the evidence chain), `/update` (installs the newest Chuck, then `/restart`), `/export`
-(the conversation as Markdown), `/cost`, `/clear`, `/remind`, `/daemon`. Once a day Chuck asks GitHub
-whether a newer version is out (Settings can turn that off). From a terminal: `chuck doctor`,
-`chuck update`.
-
-**A real browser.** The Lead checks anything with a web UI the way a person would:
-```` ```browse index.html 1024x640``` ```` with action lines under it (click, type, press keys, scroll, wait,
-evaluate) loads the page in your own Brave, Chromium or Chrome, headless, and reports every uncaught
-exception, console error and failed request with its file and line, the visible text, and a screenshot.
-The Lead's model can't see, so GLM-5.3-Flash looks at the screenshot and describes it in a few lines
-(one cheap call). A clean look counts as evidence for the criteria it names; a page with errors never does.
-The browser starts with a throwaway profile and nothing that phones home, can't download anything, and is
-killed with its whole process group when the call ends. In a restricted folder it opens only that folder's
-files; in an offline folder the page reaches no network at all.
-
-![The Lead browses a page: a JS error with its line, the screenshot, and what the vision model saw](assets/screenshots/fleet-browse.png)
-
-When ```` ```fetch``` ```` meets a page that is empty until its scripts run, or a bot check that clears
-itself in a real browser, it reads the page in the browser instead and says so. Every request that page
-makes is checked first: only public addresses, however it redirects. Settings › Research picks the
-browser or turns this off.
-
-**Pictures and videos in Chat.** Ask to see something and Chat shows a gallery: pictures found through
-SearXNG's image search (DuckDuckGo's as the fallback), downloaded only from public addresses, at most
-12 MB each, and kept only if the bytes really are a picture (never SVG). A click opens the page each came
-from. Videos come as cards with their poster and length, an **Open** button, and **Download**, which saves
-one video (at most 1080p and 2 GB) to your Downloads folder with yt-dlp and stops if you close Chuck.
-
-Agents also find code by what it does: ```` ```find retry failed requests``` ```` ranks every function,
-class and doc section by how well its name, docstring and identifiers match (BM25, with the same word
-stemming as the Python app), code before its tests. ```` ```patch``` ```` applies a unified diff to any
-number of files all or nothing: hunks are placed by their context, a hunk that doesn't match changes nothing
-anywhere, and new files, deletions and renames work.
-
-**Ctrl+P** opens the command palette: every command and switch, found by typing a few letters. Errors are
-written to `~/.local/state/chucknorris/chuck.log` (keys blanked, readable only by you), the same log the
-Python app keeps; `/doctor` shows the latest.
-
-What isn't ported to Rust: Camoufox (a Firefox build) as the browser; the Rust app drives Brave, Chromium
-or Chrome.
-[ARCHITECTURE.md](ARCHITECTURE.md) has the design and the plan.
-
-Arch and CachyOS are first-class; apt and dnf are supported. The installer sets up GTK4 and libadwaita, bubblewrap, a screenshot tool, the local voice models (about 600 MB, skip with `CHUCK_VOICE=0`) and the linters Chuck uses to check code. At runtime Chuck needs only Python's standard library and GTK; everything optional degrades gracefully when it's missing.
-
-## Tests
+## Building and testing
 
 ```bash
-./run_tests.sh
+cargo build --release -p chuck                  # the app: target/release/chuck
+cargo test --workspace                          # every crate's tests
+cargo clippy --workspace --all-targets          # lint
+xvfb-run -a cargo run -p chuck-ui --example shot -- run out.png   # render the real window
 ```
 
-Twenty-four suites drive the real application end to end against a stubbed toolkit: whole conversations in both modes, real edits in real folders, background agents merging three-way, missions gated on tests, daemons that must only look, crashes resumed and runs forked from past steps, real bubblewrap sandboxes that must block writes and network, real language servers, and the safety gate against destructive commands. One suite feeds the app 180 random model replies that must never hang it, run something they shouldn't, or write outside the folder. The screenshots on this page are renders of the real app on GTK 4, driven by scripted model replies so they can be reproduced.
+The tests run real jobs end to end. A scripted model stands in for SiliconFlow; it is as strict
+about messages as the real API, and it misbehaves the way real models do. It:
 
-## Good to know
+- writes calls in its own tool format;
+- forgets to close them;
+- invents the user's next line;
+- stops halfway.
 
-- **The model runs in the cloud.** Your prompts, attached files and screenshots go to SiliconFlow. Everything else stays on your machine.
-- **Chuck is as good as the model behind it.** Planning, orchestration and code quality depend on the model you choose; the OS makes it safe, metered and recoverable.
-- **The safety gate is a net, not a proof.** It catches the destructive commands that matter, and the sandbox is the real wall. Read the cards that ask for your confirmation.
-- **Prices change.** The table is a snapshot; set a custom price in Settings if yours differs.
-- **It's a personal project,** built with care and shared freely, not a product with an SLA.
+A local HTTP server stands in for the web. `crates/chuck-runtime/tests/user_scenarios.rs` replays
+sessions the way people have them. `./run_tests.sh` runs the older Python app's suites.
 
----
+| Crate | What |
+|---|---|
+| `chuck` | the `chuck` command |
+| `chuck-ui` | the GTK 4 / libadwaita window |
+| `chuck-runtime` | the Lead, workers, Chat, daemons' agents, the browser check |
+| `chuck-core` | the kernel (agents as processes with quotas), the Done gate, evidence |
+| `chuck-model` | the SiliconFlow client (streaming, retries, reasoning limits) |
+| `chuck-sandbox` | bubblewrap jails, access modes, the critical-command classifier |
+| `chuck-tools` | the block parser, files, commands, copy-on-write workspaces, search |
+| `chuck-store` | settings, ledger, spending, checkpoints, memory, logs |
+| `chuck-web` | search, page reading, the headless browser |
+| `chuck-code` | language servers, the repo map, ranked code search |
+| `chuck-mcp` | the MCP client |
+| `chuck-daemon` | triggers, reminders, the inbox |
+| `chuck-voice` | speech in and out |
 
-<div align="center">
+[ARCHITECTURE.md](ARCHITECTURE.md) explains the design, [CHANGELOG.md](CHANGELOG.md) what changed,
+and [docs/rust-benchmarks.md](docs/rust-benchmarks.md) measures the Rust app against the Python one.
 
-**MIT.** Made by **The Priest** · *In memory of a legend, 1940–2026.*
-
-</div>
+Licence: MIT.

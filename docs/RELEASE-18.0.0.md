@@ -39,6 +39,12 @@ is still the recommended way, because it also sets up the menu entry, bubblewrap
   - Anything outside it waits for your yes: **Allow once**, **Allow for this job**, or **Refuse**.
   - Credentials stay hidden.
   - Critical commands need you to type `yes`.
+- **Robust against models that misbehave.**
+  - Earlier chat goes to the model as real turns, so it doesn't imitate a transcript or invent your
+    next message.
+  - Calls written in a model's own tool format, or never closed, either run or are reported back to
+    it, never silently dropped.
+  - Every mode is tested with sessions replayed the way people actually have them.
 - **Closing the window ends everything Chuck started**, including background and detached processes.
 - **The window:**
   - Recent chats (including the Python app's).

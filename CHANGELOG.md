@@ -10,6 +10,12 @@ Chuck is now a Rust app (`crates/`), and the installer puts it over any earlier 
 - Long jobs have no step or time limit. A paused job says why, and **Keep going** resumes it.
 - Default access: the project folder freely, anything outside it only with your yes.
 - Closing the window ends every process Chuck started.
+- Chat and the Lead get the earlier conversation as real turns. A search written in a model's own
+  tool format (`</parameter>`, `<tool_call>`), or left unclosed, runs or is reported back to it. A
+  made-up "user:" turn is cut.
+- Once criteria exist, the Lead can't end a job with a plain "done" in prose. A real file in `/tmp`
+  counts as outside the folder.
+- A new README, and new screenshots of the Rust app.
 - The Python app stays installed as the fallback. It now offers the switch to the Rust app.
 
 ## Unreleased (v17, in progress)

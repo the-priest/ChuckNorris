@@ -141,7 +141,7 @@ the Lead's verdict, and an **INCOMPLETE** label on anything not through it.
 | `hibernate.py`, `checkpoint.py` | `chuck-store` | per-step checkpoints, shadow git, replay / fork, rewind |
 | `ledger.py`, `crashlog.py` | `chuck-store::ledger`, `chuck-store::crashlog` | hash-chained audit log; redacted crash log |
 | `safety.py` | `chuck-sandbox::safety` | critical / danger classifier (same rules) |
-| bubblewrap code in `chucknorris.py` | `chuck-sandbox::jail` | modes Full / Sandboxed / Offline / Read-only, hidden secrets, read-only `.git` hooks/config, git disarm |
+| bubblewrap code in `chucknorris.py` | `chuck-sandbox::{jail, outside}` | modes Guarded (the folder freely, a path outside it only with the user's yes, then mounted alone) / Full / Sandboxed / Offline / Read-only; hidden secrets, read-only `.git` hooks/config, git disarm |
 | `cow.py` | `chuck-tools::cow` | copy-on-write workspaces, three-way merge, links never followed |
 | `builder.py`, file blocks | `chuck-tools` | read/write/edit/patch/grep/glob/bash, fenced-block parser, all-or-nothing `patch` |
 | `net.py`, `web.py` | `chuck-web` | search (SearXNG, DuckDuckGo), page reads that never reach private addresses, images and videos |
@@ -171,7 +171,8 @@ crates/
   chuck-daemon    triggers, the read-only shell policy, the inbox
   chuck-voice     TTS/STT sidecar control, audio player probe
   chuck-ui        GTK4 + libadwaita: conversation, work lane, fleet (/top), Done gate, settings
-  chuck           the binary: `chuck` (window), `chuck run "task"` (headless), `chuck top`
+  chuck           the binary: `chuck` (window), `chuck run "task"` (headless), `chuck continue`,
+                  `chuck ask`, `chuck rewind`, `chuck ledger`, `chuck doctor`…
 ```
 
 Concurrency model: one OS thread per agent (nine at most by default), channels
