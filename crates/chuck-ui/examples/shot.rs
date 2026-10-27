@@ -137,7 +137,7 @@ fn main() {
     std::fs::write(proj.join("src/parse.py"), "def parse(s):\n    return [int(x) for x in s.split(',')]\n").unwrap();
     // a stand-in pytest so the render doesn't depend on one being installed
     std::fs::write(proj.join("pytest.sh"), "#!/bin/sh\necho '3 passed in 0.02s'\n").unwrap();
-    let (web, base) = if mode == "research" || mode == "chat" || mode == "pictures" { research_web() } else { (None, String::new()) };
+    let (web, base) = if matches!(mode.as_str(), "research" | "chat" | "badchat" | "pictures") { research_web() } else { (None, String::new()) };
     if mode == "daemons" {
         // a reminder and a daemon, both due: the window's first check fires them
         let cfg = chuck_store::settings::config_dir();
@@ -169,6 +169,13 @@ fn main() {
              Want it fixed in your parser, with tests? The fleet can do that:\n\
              ```agent\nIn src/parse.py, make parse() skip empty and blank fields instead of crashing, and add tests for \
              empty input, blank fields and normal numbers.\n```")])),
+        // a model misbehaving the way real ones do: calls in its own tool format, no closing fences,
+        // the user's next line written by itself
+        "badchat" => Arc::new(Scripted::new().replies([
+            "Let me fire searches with different phrasing.\n\n```search python int empty string</parameter>\n\n\
+             ```search int() ValueError invalid literal</parameter>\n\nuser: your not even trying\n\nlead: You're right.".to_string(),
+            format!("`int('')` raises **ValueError**: an empty string isn't an integer literal \
+             ([Built-in Functions]({base}/docs/functions)).")])),
         "browse" => {
             std::fs::write(proj.join("index.html"), "<!doctype html><title>Todo</title><style>body{font:16px sans-serif;\
                 margin:40px;background:#f6f6fb}h1{color:#5b3fd6}</style><h1>Todo</h1><input id=t placeholder='New task'>\
@@ -210,7 +217,7 @@ fn main() {
     let send = match mode.as_str() {
         "welcome" | "daemons" | "palette" | "wave" => None,
         "confirm" => Some("Clean the build output".to_string()),
-        "research" | "chat" => Some("Why does int() fail on an empty string? Check the docs.".to_string()),
+        "research" | "chat" | "badchat" => Some("Why does int() fail on an empty string? Check the docs.".to_string()),
         "voice" => Some("What does ls -la show?".to_string()),
         "pictures" => Some("Show me red pandas".to_string()),
         "browse" => Some("Does adding a task work on the page?".to_string()),
@@ -229,7 +236,7 @@ fn main() {
     let open: Vec<String> = match mode.as_str() {
         "run" | "live" => vec!["plan", "tasks", "gate"],
         "midrun" => vec!["plan", "tasks", "agents", "commands"],
-        "research" | "chat" | "pictures" => vec!["research"],
+        "research" | "chat" | "badchat" | "pictures" => vec!["research"],
         "daemons" => vec!["inbox", "daemons"],
         _ => vec!["plan"],
     }.into_iter().map(String::from).collect();
@@ -240,7 +247,7 @@ fn main() {
     let code = chuck_ui::run(chuck_ui::Options { model, folder: Some(proj), send,
                                                  shot: Some((out, ms)), width: 1280, height: 860,
                                                  settings: mode == "settings", open: Some(open), web,
-                                                 chat: Some(mode == "chat" || mode == "voice" || mode == "pictures"),
+                                                 chat: Some(matches!(mode.as_str(), "chat" | "badchat" | "voice" | "pictures")),
                                                  listen: mode == "voice",
                                                  palette: (mode == "palette").then(|| "do".to_string()),
                                                  poke: (mode == "wave").then_some((400.0, 380.0)) });

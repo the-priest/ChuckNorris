@@ -180,6 +180,10 @@ impl Runtime {
                 convo.assistant(&reply);
                 let said = prose(&reply, CHAT_TAGS);
                 let calls = tool_blocks(&reply, CHAT_TAGS);
+                // what it says comes before what it does, as it wrote them
+                if !said.trim().is_empty() {
+                    self.events.emit(Event::Said { id, text: said.clone() });
+                }
                 let mut feedback = Vec::new();
                 if step < CHAT_STEPS {
                     if calls.is_empty() && native_tool_markup(&reply) {
@@ -238,9 +242,6 @@ impl Runtime {
                     feedback.push(text);
                 }
                 let researching = !feedback.is_empty();
-                if !said.trim().is_empty() {
-                    self.events.emit(Event::Said { id, text: said.clone() });
-                }
                 if let Some(request) = handoff {
                     self.events.emit(Event::Handoff { request: request.clone() });
                     break 'turn Outcome::Answered { text: if said.trim().is_empty() {
