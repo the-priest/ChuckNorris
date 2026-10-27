@@ -54,12 +54,16 @@ impl Access {
 /// What a jailed command must never see: credentials, and Chuck's own
 /// config (the API key). Hidden behind empty mounts.
 pub const HIDE_DIRS: &[&str] = &[".ssh", ".gnupg", ".aws", ".kube", ".docker", ".password-store", ".config/gh",
-    ".config/chucknorris", ".local/share/keyrings", ".config/gcloud", ".azure", ".config/rclone",
+    ".config/chucknorris", ".local/share/keyrings", ".config/gcloud", ".azure", ".config/rclone", ".config/glab-cli",
     // browser profiles: cookies and saved passwords are logins
     ".mozilla", ".config/BraveSoftware", ".config/chromium", ".config/google-chrome", ".thunderbird"];
 /// Single files that hold tokens: shown as empty.
+/// Some sit inside folders a build needs (cargo's registry token in ~/.cargo,
+/// git's credential store, Maven's and Gradle's publishing passwords).
 pub const HIDE_FILES: &[&str] = &[".netrc", ".git-credentials", ".pypirc", ".npmrc", ".pgpass", ".my.cnf",
-    ".config/hub"];
+    ".config/hub", ".config/git/credentials", ".cargo/credentials", ".cargo/credentials.toml", ".vault-token",
+    ".m2/settings.xml", ".m2/settings-security.xml", ".gradle/gradle.properties", ".config/pip/pip.conf",
+    ".pip/pip.conf", ".gem/credentials"];
 
 /// Toolchains under your home a jailed build needs to read (compilers,
 /// SDKs, version managers).
@@ -67,7 +71,7 @@ pub const TOOLCHAIN_DIRS: &[&str] = &[".cargo", ".rustup", ".local/bin", ".local
     ".pyenv", ".rbenv", ".sdkman", ".deno", ".bun", ".volta", ".nimble", ".ghcup", ".elan", ".juliaup", "go/bin",
     "go/pkg", ".jdks", ".java", "Android/Sdk", "android-sdk", ".dotnet", "flutter", ".pub-cache", ".zig",
     // who you are to git, and your tools' own settings (never credentials: those stay hidden)
-    ".gitconfig", ".config/git", ".gitignore_global", ".editorconfig", ".config/pip"];
+    ".gitconfig", ".config/git", ".gitignore_global", ".editorconfig"];
 /// Build caches a jailed build writes (downloads, compiled dependencies,
 /// emulators' disks): reused, never your documents.
 pub const CACHE_DIRS: &[&str] = &[".cache", ".gradle", ".m2", ".ivy2", ".sbt", ".npm", ".yarn", ".android", ".konan",
@@ -291,8 +295,11 @@ impl Jail {
 /// jailed command wrote (they'd run unconfined in your next git command).
 fn git_runs() -> &'static regex::Regex {
     static R: OnceLock<regex::Regex> = OnceLock::new();
+    // allow: protocol.ext.allow lets an ext:: remote run a command; smtpserver may name a program;
+    // vcs picks a remote helper program
     R.get_or_init(|| regex::Regex::new(concat!(r"(?im)^(\s*)((?:fsmonitor|hookspath|sshcommand|pager|editor|askpass|",
-        r"textconv|clean|smudge|process|helper|program|gitproxy|external|driver|cmd|path|uploadpack|receivepack)\s*=",
+        r"textconv|clean|smudge|process|helper|program|gitproxy|external|driver|cmd|path|uploadpack|receivepack|",
+        r"uploadarchive|allow|smtpserver|vcs)\s*=",
         r"|[\w.-]+\s*=\s*!)")).unwrap())
 }
 
@@ -322,6 +329,29 @@ fn git_dirs(root: &Path, limit: usize) -> Vec<PathBuf> {
             it.skip_current_dir();
         }
     }
+    // a `.git` FILE ("gitdir: <path>") makes another folder the repo: one under root counts too
+    let mut it = walkdir::WalkDir::new(root).follow_links(false).into_iter();
+    let mut seen = 0;
+    while let Some(Ok(e)) = it.next() {
+        seen += 1;
+        if seen > limit * 4 {
+            break;
+        }
+        if e.file_type().is_dir() && e.depth() > 0 && GIT_SCAN_SKIP.contains(&e.file_name().to_string_lossy().as_ref()) {
+            it.skip_current_dir();
+            continue;
+        }
+        if e.file_type().is_file() && e.file_name() == ".git" {
+            let Ok(text) = std::fs::read_to_string(e.path()) else { continue };
+            let Some(to) = text.lines().find_map(|l| l.trim().strip_prefix("gitdir:")).map(str::trim) else { continue };
+            let dir = e.path().parent().unwrap_or(root).join(to);
+            if let Ok(real) = dir.canonicalize() {
+                if real.starts_with(root.canonicalize().unwrap_or_else(|_| root.to_path_buf())) && !out.contains(&real) {
+                    out.push(real);
+                }
+            }
+        }
+    }
     out
 }
 
@@ -343,7 +373,12 @@ pub fn git_disarm(root: &Path, since: i64) -> Vec<String> {
     for g in git_dirs(root, 20_000) {
         let rel = g.strip_prefix(root).unwrap_or(&g).display().to_string();
         let hooks = g.join("hooks");
-        if hooks.is_dir() && !hooks.is_symlink() {
+        if hooks.is_symlink() && changed_since(&hooks, since) {
+            // hooks that live somewhere else now: that somewhere is in reach of the jail
+            if std::fs::remove_file(&hooks).is_ok() {
+                out.push(format!("{rel}/hooks"));
+            }
+        } else if hooks.is_dir() && !hooks.is_symlink() {
             for e in std::fs::read_dir(&hooks).into_iter().flatten().flatten() {
                 let n = e.file_name().to_string_lossy().into_owned();
                 let f = e.path();
@@ -470,6 +505,18 @@ mod tests {
         assert!(d.join("sub/.git/hooks/pre-commit.sample").exists());
         let cfg = std::fs::read_to_string(d.join("sub/.git/config")).unwrap();
         assert!(cfg.contains("# disabled by Chuck: fsmonitor =") && cfg.contains("# disabled by Chuck: x = !"), "{cfg}");
+        // a hooks folder swapped for a link, and a repo made of another folder by a `.git` file
+        std::fs::create_dir_all(d.join("planted")).unwrap();
+        std::fs::create_dir_all(d.join("ln/.git")).unwrap();
+        std::os::unix::fs::symlink(d.join("planted"), d.join("ln/.git/hooks")).unwrap();
+        std::fs::create_dir_all(d.join("elsewhere")).unwrap();
+        std::fs::write(d.join("elsewhere/config"), "[protocol \"ext\"]\n\tallow = always\n[sendemail]\n\tsmtpserver = /tmp/x\n").unwrap();
+        std::fs::create_dir_all(d.join("wt")).unwrap();
+        std::fs::write(d.join("wt/.git"), "gitdir: ../elsewhere\n").unwrap();
+        let gone = git_disarm(&d, t0);
+        assert!(gone.contains(&"ln/.git/hooks".to_string()) && !d.join("ln/.git/hooks").exists(), "{gone:?}");
+        let cfg = std::fs::read_to_string(d.join("elsewhere/config")).unwrap();
+        assert!(cfg.contains("# disabled by Chuck: allow =") && cfg.contains("# disabled by Chuck: smtpserver ="), "{cfg}");
         let _ = std::fs::remove_dir_all(&d);
     }
 }
