@@ -4,6 +4,7 @@
 pub mod blocks;
 pub mod cow;
 pub mod fs;
+pub mod patch;
 pub mod run;
 pub mod search;
 

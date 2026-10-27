@@ -8,10 +8,12 @@ Tools are fenced blocks; use several per reply; results come back next turn:
 ```grep <regex> [path]```   ```glob <pattern>```       search the code
 ```write path``` + the whole file + ```           (use ```` if the file itself contains ```)
 ```edit path``` + <<<<<<< SEARCH / exact lines / ======= / new lines / >>>>>>> REPLACE + ```
+```patch``` + a unified diff (git diff style, any number of files) + ```   applied all or nothing
 ```bash``` + commands + ```                         run commands here (no sudo); output comes back
 ```test <command> [for c1,c2]```                   a verification run: the tests, build or linters
 ```map```   ```def <name>```   ```refs <name>```  the project's files and what they define; where a name
                                                    (or Class.method) is defined; every use of it
+```find <what the code does>```                   code ranked by meaning when you don't know its name
 ```search <query>```   ```fetch <url> [part]```     the web: search, then read the pages that matter
 Research when it matters (an API you don't know, an error message, current versions): read the sources
 themselves, not just snippets; cross-check claims across different sites; cite the URLs you relied on.

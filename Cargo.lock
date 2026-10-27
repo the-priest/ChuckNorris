@@ -147,6 +147,7 @@ name = "chuck-code"
 version = "18.0.0-alpha.1"
 dependencies = [
  "chuck-tools",
+ "fancy-regex",
  "libc",
  "regex",
  "serde_json",

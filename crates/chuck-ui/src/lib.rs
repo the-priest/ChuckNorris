@@ -6,6 +6,7 @@ pub mod doctor;
 pub mod update;
 mod md;
 mod media;
+mod palette;
 mod panel;
 mod style;
 mod window;
@@ -17,6 +18,7 @@ use adw::prelude::*;
 /// Open the window; returns when it's closed — and nothing the fleet started
 /// is left running.
 pub fn run(opts: Options) -> i32 {
+    chuck_store::crashlog::install();
     let app = adw::Application::builder().application_id("org.thepriest.chucknorris")
         .flags(gtk::gio::ApplicationFlags::NON_UNIQUE).build();
     app.connect_activate(move |app| window::build(app, opts.clone()));

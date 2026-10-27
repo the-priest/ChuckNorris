@@ -3,6 +3,7 @@
 
 pub mod budget;
 pub mod checkpoint;
+pub mod crashlog;
 pub mod ledger;
 pub mod memory;
 pub mod settings;

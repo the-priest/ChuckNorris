@@ -2,6 +2,7 @@
 //! everywhere it's really used, and the repo map — by meaning through a
 //! language server when one is installed, by syntax when not (and saying so).
 
+pub mod find;
 pub mod lsp;
 pub mod syntax;
 

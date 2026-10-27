@@ -417,6 +417,7 @@ fn cmd_run(args: &[String], chat: bool) -> i32 {
 }
 
 fn main() {
+    chuck_store::crashlog::install();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let code = match args.first().map(String::as_str) {
         Some("run") => cmd_run(&args[1..], false),

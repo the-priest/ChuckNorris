@@ -446,8 +446,18 @@ SearXNG's image search (DuckDuckGo's as the fallback), downloaded only from publ
 from. Videos come as cards with their poster and length, an **Open** button, and **Download**, which saves
 one video (at most 1080p and 2 GB) to your Downloads folder with yt-dlp and stops if you close Chuck.
 
-What isn't ported to Rust yet, so isn't in this branch's app: Camoufox (a Firefox build) as the browser,
-ranked code search (```` ```find``` ````) and ```` ```patch``` ````, the crash log, and the command palette.
+Agents also find code by what it does: ```` ```find retry failed requests``` ```` ranks every function,
+class and doc section by how well its name, docstring and identifiers match (BM25, with the same word
+stemming as the Python app), code before its tests. ```` ```patch``` ```` applies a unified diff to any
+number of files all or nothing: hunks are placed by their context, a hunk that doesn't match changes nothing
+anywhere, and new files, deletions and renames work.
+
+**Ctrl+P** opens the command palette: every command and switch, found by typing a few letters. Errors are
+written to `~/.local/state/chucknorris/chuck.log` (keys blanked, readable only by you), the same log the
+Python app keeps; `/doctor` shows the latest.
+
+What isn't ported to Rust: Camoufox (a Firefox build) as the browser; the Rust app drives Brave, Chromium
+or Chrome.
 [ARCHITECTURE.md](ARCHITECTURE.md) has the design and the plan.
 
 Arch and CachyOS are first-class; apt and dnf are supported. The installer sets up GTK4 and libadwaita, bubblewrap, a screenshot tool, the local voice models (about 600 MB, skip with `CHUCK_VOICE=0`) and the linters Chuck uses to check code. At runtime Chuck needs only Python's standard library and GTK; everything optional degrades gracefully when it's missing.

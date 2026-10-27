@@ -46,6 +46,8 @@ pub struct Options {
     pub chat: Option<bool>,
     /// Start listening once the window is up (as if the mic was clicked).
     pub listen: bool,
+    /// Open the command palette once the window is up, with this typed.
+    pub palette: Option<String>,
 }
 
 struct Running {
@@ -768,6 +770,9 @@ fn finished(st: &mut State, report: JobReport, shared: &Shared) {
     let ps = std::mem::take(&mut st.last_ps);
     st.panel.set_agents(&ps, &st.models);
     st.last_ps = ps;
+    if let Outcome::Failed { error } = &report.outcome {
+        chuck_store::crashlog::record("job failed", error);
+    }
     let (kind, class) = match &report.outcome {
         Outcome::Done { .. } => ("DONE", "done-card"),
         Outcome::Answered { .. } => ("", ""),
@@ -1141,7 +1146,8 @@ when disk / is above 90%, when ~/src changes…); it only looks and reports to t
 - `/undo` — put the folder back to before the last job · `/diff` — every change the last job made
 - `/doctor` — check everything Chuck depends on · `/update` — install the newest Chuck · `/restart`
 - `/export` — save this conversation as Markdown · `/cost` — what was spent · `/clear` — a new conversation
-- Ctrl+M talks · Esc stops (agents, commands and speech) · the right panel shows everything as it happens";
+- Ctrl+P finds any command · Ctrl+M talks · Esc stops (agents, commands and speech) · the right panel shows \
+everything as it happens";
 
 /// A command typed into the composer. True: it was one (handled here).
 fn slash(st: &mut State, shared: &Shared, text: &str) -> bool {
@@ -2156,6 +2162,68 @@ pub fn build(app: &adw::Application, opts: Options) {
         glib::Propagation::Proceed
     });
     window.add_controller(mic_key);
+    // Ctrl+P (or Ctrl+K) anywhere: the command palette
+    let pal_key = gtk::EventControllerKey::new();
+    {
+        let (sh, win) = (shared.clone(), window.clone());
+        let (gear, new_btn, folder_btn, fleet_btn, chat_btn, speaker, side_btn, stop) = (gear.clone(), new_btn.clone(),
+            folder_btn.clone(), fleet_btn.clone(), chat_btn.clone(), speaker.clone(), side_btn.clone(), stop.clone());
+        let open = move |query: &str| {
+            use crate::palette::Item;
+            let click = |b: &gtk::Button| { let b = b.clone(); Box::new(move || b.emit_clicked()) as Box<dyn Fn()> };
+            let run = |cmd: &'static str| { let sh = sh.clone(); Box::new(move || start(&sh, cmd.into())) as Box<dyn Fn()> };
+            let type_in = |text: &'static str| {
+                let sh = sh.clone();
+                Box::new(move || {
+                    let input = sh.borrow().ui.input.clone();
+                    input.buffer().set_text(text);
+                    input.buffer().place_cursor(&input.buffer().end_iter());
+                    input.grab_focus();
+                }) as Box<dyn Fn()>
+            };
+            let toggle = |b: &gtk::ToggleButton| { let b = b.clone(); Box::new(move || b.set_active(!b.is_active())) as Box<dyn Fn()> };
+            let it = |title: &str, group: &'static str, keywords: &'static str, shortcut: &'static str, run: Box<dyn Fn()>| Item {
+                title: title.into(), group, keywords, shortcut, run };
+            let (fb, cb) = (fleet_btn.clone(), chat_btn.clone());
+            let sh2 = sh.clone();
+            let items = vec![
+                it("New conversation", "Chat", "clear fresh reset", "", click(&new_btn)),
+                it("Switch to Chat", "Chat", "mode answer ask question", "", Box::new(move || cb.set_active(true))),
+                it("Switch to Fleet", "Chat", "mode agents lead workers", "", Box::new(move || fb.set_active(true))),
+                it("Stop everything", "Chat", "cancel halt kill agents commands", "Esc", click(&stop)),
+                it("/help — every command", "Commands", "commands keys", "", run("/help")),
+                it("/doctor — check everything Chuck depends on", "Commands", "health diagnose problems", "", run("/doctor")),
+                it("/update — install the newest Chuck", "Commands", "upgrade version", "", run("/update")),
+                it("/restart — open the new Chuck", "Commands", "reload", "", run("/restart")),
+                it("/cost — what was spent", "Commands", "money budget spend tokens", "", run("/cost")),
+                it("/export — save this conversation as Markdown", "Commands", "markdown save file", "", run("/export")),
+                it("/remind — a reminder", "Commands", "alarm timer later", "", type_in("/remind in 20m: ")),
+                it("/daemon — watch something and report", "Commands", "monitor trigger watch", "", type_in("/daemon every 2h: ")),
+                it("Choose a folder", "Folder", "project open directory", "", click(&folder_btn)),
+                it("/undo — put the folder back to before the last job", "Folder", "rewind revert checkpoint", "", run("/undo")),
+                it("/diff — every change the last job made", "Folder", "changes review", "", run("/diff")),
+                it("Talk", "Voice", "microphone listen speak dictate", "Ctrl+M", Box::new(move || mic_clicked(&sh2))),
+                it("Read replies aloud on or off", "Voice", "speaker speech tts mute", "", toggle(&speaker)),
+                it("Show or hide the side panel", "View", "panel right sidebar fleet", "", toggle(&side_btn)),
+                it("Settings", "Settings", "preferences key budget models voice research mcp", "", click(&gear)),
+            ];
+            crate::palette::show(&win, items, query);
+        };
+        let open = Rc::new(open);
+        let o2 = open.clone();
+        pal_key.connect_key_pressed(move |_, key, _, mods| {
+            if !(mods.contains(gdk::ModifierType::CONTROL_MASK)
+                && matches!(key, gdk::Key::p | gdk::Key::P | gdk::Key::k | gdk::Key::K)) {
+                return glib::Propagation::Proceed;
+            }
+            o2("");
+            glib::Propagation::Stop
+        });
+        if let Some(q) = opts.palette.clone() {
+            glib::timeout_add_local_once(Duration::from_millis(300), move || open(&q));
+        }
+    }
+    window.add_controller(pal_key);
     let sh = shared.clone();
     mic.connect_clicked(move |_| mic_clicked(&sh));
     {

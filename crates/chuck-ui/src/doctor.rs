@@ -135,6 +135,11 @@ pub fn run(folder: Option<&Path>, mcp: Option<&chuck_mcp::Manager>) -> Vec<Check
         Some(g) => out.push(c("Disk", State::Ok, format!("{g:.0} GB free"))),
         None => {}
     }
+    let errs = chuck_store::crashlog::recent(3, 7);
+    out.push(if errs.is_empty() { c("Errors", State::Ok, "none in the last 7 days") } else {
+        c("Errors", State::Warn, format!("{} in the last 7 days, latest {} {}: {} — the log is {}", errs.len(), errs[0].0,
+            errs[0].1, errs[0].2.chars().take(160).collect::<String>(), chuck_store::crashlog::log_path().display()))
+    });
     let ledger = chuck_store::Ledger::at(&chuck_store::Ledger::default_path());
     let v = ledger.verify();
     out.push(if v.ok { c("Evidence ledger", State::Ok, format!("{} commands recorded; the chain checks out", v.count)) } else {

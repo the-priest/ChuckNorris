@@ -11,9 +11,9 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-pub const WORKER_TAGS: &[&str] = &["read", "grep", "glob", "map", "def", "refs", "rename", "bash", "sh", "test", "search", "fetch",
+pub const WORKER_TAGS: &[&str] = &["read", "grep", "glob", "map", "find", "def", "refs", "rename", "bash", "sh", "test", "search", "fetch",
     "mcp", "browse", "submit"];
-pub const LEAD_TAGS: &[&str] = &["read", "grep", "glob", "map", "def", "refs", "rename", "bash", "sh", "test", "search",
+pub const LEAD_TAGS: &[&str] = &["read", "grep", "glob", "map", "find", "def", "refs", "rename", "bash", "sh", "test", "search",
     "fetch", "mcp", "browse", "remember", "forget", "criteria", "plan", "assign",
     "review", "justify", "done", "ask"];
 const CLIP: usize = 20_000;
@@ -272,10 +272,7 @@ impl<'a> Exec<'a> {
         let r = match b.tag.as_str() {
             "write" => chuck_tools::write_file(self.root, &b.path, &b.body),
             "edit" => chuck_tools::edit_file(self.root, &b.path, &b.body),
-            _ => {
-                res.feedback.push("[patch: use ```edit``` blocks (SEARCH/REPLACE) or ```write```]".into());
-                return;
-            }
+            _ => return self.patch(&b.body, all, res),
         };
         match r {
             Ok(ch) => {
@@ -293,6 +290,75 @@ impl<'a> Exec<'a> {
                 res.feedback.push(format!("[{} failed, nothing was changed: {e}]", b.tag));
             }
         }
+    }
+
+    /// A unified diff: worked out whole first, then written; if a write
+    /// fails midway, the files already written are put back.
+    fn patch(&self, body: &str, all: &[CriterionId], res: &mut StepResult) {
+        let plan = match chuck_tools::patch::plan(self.root, body) {
+            Ok(p) => p,
+            Err(e) => {
+                self.act("patch", "", false, &e.to_string());
+                res.feedback.push(format!("[patch NOT applied, nothing was changed: {e}]"));
+                return;
+            }
+        };
+        if let Some(rel) = plan.iter().find(|(rel, ..)| self.sandbox.access != Access::Full
+            && chuck_tools::safe(self.root, rel).is_ok_and(|p| secret_path(&p))).map(|p| p.0.clone())
+        {
+            res.feedback.push(format!("[patch NOT applied: {rel} is a credential, hidden in a restricted folder]"));
+            return;
+        }
+        let mut done: Vec<chuck_tools::Change> = Vec::new();
+        let mut failed = None;
+        for (rel, before, after) in &plan {
+            let r = match after {
+                Some(a) => chuck_tools::write_file(self.root, rel, a),
+                None => chuck_tools::delete_file(self.root, rel),
+            };
+            match r {
+                Ok(ch) if ch.before == *before => done.push(ch),
+                Ok(ch) => {
+                    done.push(ch);
+                    failed = Some(format!("{rel} changed while the patch was applied"));
+                    break;
+                }
+                Err(e) => {
+                    failed = Some(format!("{rel}: {e}"));
+                    break;
+                }
+            }
+        }
+        if let Some(why) = failed {
+            for ch in done.iter().rev() {
+                let _ = match &ch.before {
+                    Some(b) => chuck_tools::write_file(self.root, &ch.rel, b).map(|_| ()),
+                    None => chuck_tools::delete_file(self.root, &ch.rel).map(|_| ()),
+                };
+            }
+            self.act("patch", "", false, &why);
+            res.feedback.push(format!("[patch NOT applied ({why}); the files it had written were put back]"));
+            return;
+        }
+        let mut names = Vec::new();
+        let (mut plus, mut minus) = (0, 0);
+        for ch in &done {
+            let (patch, added, removed) = ch.diff();
+            self.gate.lock().unwrap().record(self.id, all.to_vec(), EvidenceKind::Diff {
+                files: vec![ch.rel.clone()], added, removed, patch }, true);
+            plus += added;
+            minus += removed;
+            names.push(match (&ch.before, &ch.after) {
+                (None, _) => format!("{} (new)", ch.rel),
+                (_, None) => format!("{} (deleted)", ch.rel),
+                _ => ch.rel.clone(),
+            });
+        }
+        res.mutated = true;
+        let s = format!("patched {} file(s) (+{plus} −{minus}): {}", done.len(), names.join(", "));
+        self.kernel.syscall(self.id, "patch", &names.join(" "), 0.0, body.len(), false);
+        self.act("patch", &names.join(" "), true, &s);
+        res.feedback.push(format!("[{s}]"));
     }
 
     fn tool(&self, t: &chuck_tools::ToolBlock, res: &mut StepResult) {
@@ -453,7 +519,7 @@ impl<'a> Exec<'a> {
             }
             "search" | "fetch" => self.web(tag, arg, t.body.trim(), res),
             "mcp" => self.mcp(t, res),
-            "map" | "def" | "refs" => self.code(tag, arg, t.body.trim(), res),
+            "map" | "def" | "refs" | "find" => self.code(tag, arg, t.body.trim(), res),
             "rename" => self.rename(arg, t.body.trim(), res),
             "remember" | "forget" => {
                 let what = if arg.is_empty() { t.body.trim() } else { arg };
@@ -530,6 +596,8 @@ impl<'a> Exec<'a> {
         let timeout = Duration::from_secs(45);
         let (ok, text) = match tag {
             "map" => (true, format!("REPO MAP of {}:\n{}", self.root.display(), chuck_code::repo_map(self.root, 16_000))),
+            "find" if what.is_empty() => (false, "[find: say what you're looking for, e.g. ```find retry failed requests```]".into()),
+            "find" => (true, chuck_code::find::report(self.root, what, &chuck_code::find::find(self.root, what, 8))),
             _ if what.is_empty() => (false, format!("[{tag}: give a name, e.g. ```{tag} save``` or ```{tag} Store.save```]")),
             "def" => match chuck_code::definitions(self.servers(), self.root, what, timeout) {
                 Ok((hits, how)) => (true, chuck_code::lsp::report_defs(what, &hits, &how, 30)),
