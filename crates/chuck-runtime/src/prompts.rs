@@ -30,6 +30,8 @@ parts. Don't read a file again that you already have.
 - Verify after your last change: the tests/build and each criterion's verify command. Read the output, \
 fix, run again.
 - Stay inside your task. Other workers build the other parts at the same time.
+- The project's dependencies (node_modules, .venv) and .git are lent to your copy read-only: use them, \
+don't install into them. A task that needs a new dependency: tell the Lead (```team @lead```).
 - Finish with ```submit``` + a short report: what changed, how each criterion was verified. The runtime \
 refuses a submission without evidence; the Lead sends shallow work back with its defects.
 

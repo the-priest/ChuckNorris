@@ -519,8 +519,16 @@ impl Panel {
             top.append(&m);
             col.append(&top);
             let doing = if p.activity.is_empty() { p.state.label().to_string() } else { p.activity.clone() };
-            col.append(&label(&format!("{} · {} · {}", one_line(&doing, 30), fmt_tokens(p.tokens), fmt_usd(p.usd)),
-                              &["panel-meta"]));
+            // a parent is charged what its children spend: its own share, then the team's
+            let kids: (u64, f64) = ps.iter().filter(|c| c.ppid == Some(p.pid))
+                .fold((0, 0.0), |(t, u), c| (t + c.tokens, u + c.usd));
+            let spent = if kids.1 > 0.0 || kids.0 > 0 {
+                format!("own {} · {} · team {}", fmt_tokens(p.tokens.saturating_sub(kids.0)),
+                        fmt_usd((p.usd - kids.1).max(0.0)), fmt_usd(p.usd))
+            } else {
+                format!("{} · {}", fmt_tokens(p.tokens), fmt_usd(p.usd))
+            };
+            col.append(&label(&format!("{} · {spent}", one_line(&doing, 40)), &["panel-meta"]));
             if !p.brief.is_empty() && p.role != Role::Lead {
                 col.append(&label(&one_line(&p.brief, 48), &["panel-meta"]));
             }

@@ -217,3 +217,123 @@ fn a_worker_whose_call_crashes_is_reported_not_retried() {
     assert!(rt.kernel.ps(true).iter().filter(|p| p.role.is_worker()).all(|p| !p.state.alive()));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn four_workers_build_at_the_same_time() {
+    // each worker's model call takes a second and its command two: one at a time would be 4 × 4 s
+    let dir = tmp("parallel");
+    let model = Arc::new(Scripted::new().respond(|req| {
+        if text(&req.messages[0]) == chuck_runtime::prompts::CRITIC {
+            return "ACCEPT".into();
+        }
+        let me = worker(req);
+        if let Some(t) = ["t1", "t2", "t3", "t4"].iter().find(|t| me.contains(&format!("TASK {t}"))) {
+            std::thread::sleep(Duration::from_millis(1000));
+            return if req.messages.len() == 2 {
+                // half of them check with bash: a criterion's verify command counts whichever tool runs it
+                let check = if *t == "t2" || *t == "t4" { format!("```bash\ngrep -q {t} {t}.txt\n```") }
+                            else { format!("```test grep -q {t} {t}.txt```") };
+                format!("```bash\nsleep 2\n```\n```write {t}.txt\n{t}\n```\n{check}\n```submit\n{t} done\n```")
+            } else { "ok".into() };
+        }
+        let last = last_user(req);
+        if req.messages.len() == 2 {
+            let mut s = String::from("```criteria\n- every part exists :: verify: ls t1.txt t2.txt t3.txt t4.txt\n```\n\
+                ```plan\n- t1\n- t2\n- t3\n- t4\n```\n");
+            for t in 1..=4 {
+                s.push_str(&format!("```assign worker\ntitle: part {t}\ncriteria:\n- t{t}.txt exists :: verify: grep -q t{t} \
+                    t{t}.txt\nbrief: write t{t}.txt\n```\n"));
+            }
+            return s;
+        }
+        let mut out = String::new();
+        for t in 1..=4 {
+            if last.contains(&format!("SUBMISSION t{t} ")) {
+                out.push_str(&format!("```review t{t} accept\nok\n```\n"));
+            }
+        }
+        if !out.is_empty() {
+            return out;
+        }
+        if (1..=4).all(|t| heard(req, &format!("t{t} accepted"))) {
+            return "```test ls t1.txt t2.txt t3.txt t4.txt```\n```justify proportion\nfour small files\n```\n\
+                ```done\nall four parts exist (ls passes).\n```".into();
+        }
+        "Waiting.".into()
+    }));
+    let rt = Runtime::new(model.clone(), RuntimeConfig { store: dir.join("store"), ..RuntimeConfig::default() },
+                          Events::none());
+    let t0 = std::time::Instant::now();
+    let (report, _) = run_within(60, rt, Job::new("write the four parts", &dir));
+    assert!(matches!(report.outcome, Outcome::Done { .. }), "{:?}", report.outcome);
+    let took = t0.elapsed();
+    assert!(took < Duration::from_secs(9), "the workers took turns: {took:?}");
+    assert!(!model.seen.lock().unwrap().iter().any(|r| !worker(r).is_empty() && heard(r, "submission REFUSED")),
+            "a check run with bash was refused");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_workers_copy_has_the_projects_dependencies_and_history_read_only() {
+    if std::process::Command::new("node").arg("--version").output().is_err()
+        || std::process::Command::new("git").arg("--version").output().is_err() {
+        return;
+    }
+    let dir = tmp("deps");
+    let proj = dir.join("proj");
+    std::fs::create_dir_all(proj.join("node_modules/leftpad")).unwrap();
+    std::fs::write(proj.join("node_modules/leftpad/index.js"), "module.exports = s => '  ' + s;\n").unwrap();
+    std::fs::write(proj.join("check.js"), "const pad = require('leftpad');\nif (pad('x') !== '  x') process.exit(1);\n\
+        console.log('pad ok');\n").unwrap();
+    let git = |args: &[&str]| assert!(std::process::Command::new("git").args(args).current_dir(&proj).output().unwrap()
+        .status.success());
+    git(&["init", "-q"]);
+    git(&["-c", "user.email=t@t", "-c", "user.name=t", "add", "check.js"]);
+    git(&["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "first commit"]);
+    let model = Arc::new(Scripted::new().respond(|req| {
+        if text(&req.messages[0]) == chuck_runtime::prompts::CRITIC {
+            return "ACCEPT".into();
+        }
+        if !worker(req).is_empty() {
+            return if req.messages.len() == 2 {
+                "```bash\ngit log --oneline | head -1\ntouch node_modules/leftpad/changed && echo WROTE-DEPS || echo DEPS-READ-ONLY\n\
+                 node check.js\n```".into()
+            } else if req.messages.len() == 4 {
+                "```write notes.txt\nuses leftpad\n```\n```test node check.js```\n```submit\nnotes written; node check.js passes\n```".into()
+            } else { "ok".into() };
+        }
+        let last = last_user(req);
+        if req.messages.len() == 2 {
+            return "```criteria\n- check.js passes :: verify: node check.js\n```\n```plan\n- t1: notes\n```\n\
+                ```assign worker\ntitle: notes\ncriteria:\n- check.js passes :: verify: node check.js\nbrief: write notes.txt\n```".into();
+        }
+        if last.contains("SUBMISSION t1") {
+            return "```review t1 accept\nok\n```".into();
+        }
+        if heard(req, "t1 accepted") {
+            return "```test node check.js```\n```justify proportion\na note\n```\n```done\nnotes.txt added; node check.js \
+                passes.\n```".into();
+        }
+        "Waiting.".into()
+    }));
+    let (tx, rx) = channel();
+    let rt = Runtime::new(model.clone(), RuntimeConfig { store: dir.join("store"), ..RuntimeConfig::default() },
+                          Events(Some(tx)));
+    let (report, _) = run_within(60, rt, Job::new("add notes", &proj));
+    let seen = model.seen.lock().unwrap();
+    let fb: Vec<String> = seen.iter().filter(|r| !worker(r).is_empty() && r.messages.len() > 2).map(last_user).collect();
+    let fb = fb.join("\n");
+    assert!(matches!(report.outcome, Outcome::Done { .. }), "{:?}\n{fb}", report.outcome);
+    assert!(fb.contains("first commit"), "git history is there: {fb}");
+    assert!(fb.contains("pad ok"), "the dependency is there: {fb}");
+    if chuck_sandbox::bwrap().is_some() {
+        assert!(fb.contains("DEPS-READ-ONLY") && !proj.join("node_modules/leftpad/changed").exists(), "{fb}");
+    }
+    // home: the work, and nothing of the links
+    assert!(proj.join("notes.txt").exists());
+    assert!(!proj.join("node_modules").is_symlink() && proj.join("node_modules/leftpad/index.js").is_file());
+    let merged = rx.try_iter().find_map(|e| match e { Event::Merged { refused, applied, .. } => Some((refused, applied)), _ => None });
+    let (refused, applied) = merged.unwrap();
+    assert!(refused.is_empty() && applied == 1, "{refused:?} {applied}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

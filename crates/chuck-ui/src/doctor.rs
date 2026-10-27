@@ -101,7 +101,11 @@ pub fn run(folder: Option<&Path>, mcp: Option<&chuck_mcp::Manager>) -> Vec<Check
     match pick(&pref, Purpose::Read) {
         Ok(e) => out.push(c("Blocked pages", if matches!(e, chuck_web::browser::Engine::Camoufox(_)) { State::Ok } else {
                 State::Warn }, format!("read with {}{}", e.describe(), if matches!(e, chuck_web::browser::Engine::Camoufox(_)) {
-                String::new() } else { format!(" — Camoufox gets past more bot checks: {}", chuck_web::camoufox::INSTALL) }))),
+                String::new() } else {
+                    // why not Camoufox, exactly (not installed, or its browser not downloaded)
+                    format!(" — Camoufox gets past more bot checks. {}",
+                            chuck_web::camoufox::find(None).err().unwrap_or_else(|| chuck_web::camoufox::INSTALL.into()))
+                }))),
         Err(e) => out.push(c("Blocked pages", State::Warn, format!("{e}: pages that need JavaScript or turn bots away \
             can't be read"))),
     }

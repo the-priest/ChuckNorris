@@ -236,13 +236,41 @@ impl Convo {
 struct AgentSink<'a> {
     id: AgentId,
     ctx: &'a Ctx,
+    /// When the call began, what has streamed in so far (characters of
+    /// reasoning, of reply), and when the agent's line last said so.
+    t0: std::time::Instant,
+    thought: usize,
+    wrote: usize,
+    shown: Option<std::time::Instant>,
+}
+
+impl AgentSink<'_> {
+    /// What the call is doing, on the agent's line, about once a second: a
+    /// long reply is seen growing, never a silent "thinking · 0".
+    fn progress(&mut self) {
+        if self.shown.is_some_and(|t| t.elapsed() < Duration::from_secs(1)) {
+            return;
+        }
+        self.shown = Some(std::time::Instant::now());
+        let secs = self.t0.elapsed().as_secs();
+        let what = if self.wrote > 0 {
+            format!("writing · ~{} tokens · {secs}s", (self.wrote / 4).max(1))
+        } else {
+            format!("thinking · ~{} tokens · {secs}s", (self.thought / 4).max(1))
+        };
+        self.ctx.kernel.progress(self.id, &what);
+    }
 }
 
 impl Sink for AgentSink<'_> {
     fn think(&mut self, c: &str) {
+        self.thought += c.len();
+        self.progress();
         self.ctx.events.emit(Event::Thinking { id: self.id, chunk: c.into() });
     }
     fn delta(&mut self, c: &str) {
+        self.wrote += c.len();
+        self.progress();
         self.ctx.events.emit(Event::Delta { id: self.id, chunk: c.into() });
     }
     fn notice(&mut self, n: Notice) {
@@ -289,11 +317,11 @@ pub fn think(ctx: &Ctx, id: AgentId, model: &str, convo: &Convo) -> Result<Strin
                 Err(k) => return Err(Halt::Killed(k.0)),
             }
         }
-        ctx.kernel.note(id, "thinking");
+        ctx.kernel.note(id, "waiting for the model's first word");
         let mut req = ChatRequest::new(model, msgs.clone());
         req.reasoning = ctx.cfg.reasoning;
         req.max_tokens = ctx.cfg.max_tokens;
-        let mut sink = AgentSink { id, ctx };
+        let mut sink = AgentSink { id, ctx, t0: std::time::Instant::now(), thought: 0, wrote: 0, shown: None };
         let r = chuck_model::chat_interruptible(&ctx.model, &req, &mut sink);
         ctx.kernel.release(id);
         let out = match r {
@@ -385,6 +413,8 @@ pub struct WorkerSpec {
     pub roster: String,
     /// The team post it starts reading after (the roster covers what came before).
     pub heard: u64,
+    /// The project's dependency (and history) folders its copy borrows.
+    pub lent: Vec<std::path::PathBuf>,
 }
 
 fn describe(gaps: &[Unmet]) -> Vec<String> {
@@ -434,7 +464,7 @@ pub fn run_worker(ctx: Ctx, w: WorkerSpec) {
                               web: ctx.cfg.web.as_deref(), sources: ctx.cfg.sources,
                               mcp: ctx.cfg.mcp.as_deref(), lsp: ctx.cfg.lsp.as_deref(),
                               memory: ctx.cfg.memory.as_deref(), allowed_outside: None,
-                              team: Some((&w.team, &w.name)), hold: None };
+                              team: Some((&w.team, &w.name)), hold: None, lent: &w.lent };
             let r = exec.run(&reply);
             let mut fb = r.feedback.clone();
             if let Some(report) = &r.submit {
@@ -511,6 +541,8 @@ pub fn run_worker(ctx: Ctx, w: WorkerSpec) {
         ("paused", Some(format!("used all {} steps", ctx.cfg.worker_steps)))
     };
     if let Some(why) = ended {
+        // never a silent exit: the user sees why, as the Lead does
+        ctx.events.emit(Event::Notice { id: w.id, text: format!("stopped on {} without finishing: {why}", w.task.id) });
         let gaps = w.gate.lock().unwrap().pause();
         let _ = w.to_lead.send(ToLead::Ended { task: w.task.id.clone(), worker: w.id, gaps, why });
     }

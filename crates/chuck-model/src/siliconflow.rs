@@ -32,6 +32,8 @@ pub struct SiliconFlow {
     attempts: u32,
     no_stream_opts: AtomicBool,
     no_think_opts: Mutex<HashSet<String>>,
+    /// The longest a reply may go without a word before it is tried again.
+    stall: Duration,
 }
 
 impl SiliconFlow {
@@ -60,6 +62,7 @@ impl SiliconFlow {
             attempts: 3,
             no_stream_opts: AtomicBool::new(false),
             no_think_opts: Mutex::new(HashSet::new()),
+            stall: stall.max(Duration::from_secs(1)),
         })
     }
 
@@ -181,7 +184,7 @@ impl ChatModel for SiliconFlow {
                 }
                 return Err(e);
             }
-            match stream(resp, req, sink, cut_once) {
+            match stream(resp, req, sink, cut_once, self.stall) {
                 Ok(Attempt::Done(mut out)) => {
                     out.model = req.model.clone();
                     return Ok(out);
@@ -233,9 +236,12 @@ impl ChatModel for SiliconFlow {
 
 type StreamErr = Box<(ModelError, Option<Outcome>)>;
 
-fn stream(resp: ureq::http::Response<ureq::Body>, req: &ChatRequest, sink: &mut dyn Sink, cut_once: bool)
-    -> Result<Attempt, StreamErr>
+fn stream(resp: ureq::http::Response<ureq::Body>, req: &ChatRequest, sink: &mut dyn Sink, cut_once: bool,
+          stall: Duration) -> Result<Attempt, StreamErr>
 {
+    // bytes that carry no words (keep-alive lines while the server queues the request, empty
+    // deltas) don't count as an answer: past `stall` without one word, the call is tried again
+    let mut heard = Instant::now();
     let reader = resp.into_body().into_reader();
     let mut lines = BufReader::new(reader.take(MAX_STREAM_BYTES as u64));
     let mut out = Outcome::default();
@@ -262,6 +268,11 @@ fn stream(resp: ureq::http::Response<ureq::Body>, req: &ChatRequest, sink: &mut 
             break; // the server closed the stream
         }
         let line = buf.trim();
+        if heard.elapsed() > stall {
+            let err = ModelError::Network(format!("the API sent nothing to read for {}s (it may be queueing the \
+                request)", heard.elapsed().as_secs()));
+            return Err(Box::new((err, if out.text.is_empty() { None } else { Some(out) })));
+        }
         let Some(data) = line.strip_prefix("data:") else { continue };
         let data = data.trim();
         if data == "[DONE]" {
@@ -280,6 +291,7 @@ fn stream(resp: ureq::http::Response<ureq::Body>, req: &ChatRequest, sink: &mut 
         let delta = ch.get("delta").cloned().unwrap_or(Value::Null);
         if let Some(r) = delta.get("reasoning_content").and_then(|r| r.as_str()) {
             if !r.is_empty() {
+                heard = Instant::now();
                 sink.think(r);
                 out.reasoning.push_str(r);
                 if out.text.is_empty() && !cut_once {
@@ -296,6 +308,7 @@ fn stream(resp: ureq::http::Response<ureq::Body>, req: &ChatRequest, sink: &mut 
         }
         if let Some(c) = delta.get("content").and_then(|c| c.as_str()) {
             if !c.is_empty() {
+                heard = Instant::now();
                 sink.delta(c);
                 out.text.push_str(c);
             }

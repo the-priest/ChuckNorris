@@ -91,24 +91,48 @@ mkdir -p "${DATA_DIR}/voices"
 
 # Camoufox: a Firefox build sites can't tell from a person, the browser Chuck
 # reads blocked pages with. In an environment of its own (no system Python is
-# touched); an update from inside Chuck only sets it up if it isn't there.
-# CHUCK_CAMOUFOX=0 skips it.
+# touched). Set up once: an install or update finds it ready and leaves it
+# alone (upgrading the package would make it want a different browser build,
+# which it would then try to download on every page Chuck reads).
+# CHUCK_CAMOUFOX=0 skips it; CHUCK_CAMOUFOX_UPGRADE=1 moves it to the newest release.
 CF_VENV="${DATA_DIR}/camoufox"
+CF_LOG="${DATA_DIR}/camoufox-setup.log"
+# is the package there with the browser build it pairs with? (looks only: downloads nothing)
+cf_ready() {
+  [ -x "${CF_VENV}/bin/python" ] && "${CF_VENV}/bin/python" - >/dev/null 2>&1 <<'PY'
+from camoufox.pkgman import camoufox_path, launch_path
+path = camoufox_path(download_if_missing=False)
+try:
+    launch_path(path)
+except TypeError:
+    launch_path()
+PY
+}
 if [ "${CHUCK_CAMOUFOX:-1}" = "1" ]; then
-  if [ "${CHUCK_DEPS:-1}" = "0" ] && [ -x "${CF_VENV}/bin/python" ] \
-     && "${CF_VENV}/bin/python" -c "import camoufox.sync_api" >/dev/null 2>&1; then
+  if cf_ready && [ "${CHUCK_CAMOUFOX_UPGRADE:-0}" != "1" ]; then
     info "Camoufox: already set up"
   else
-    step "setting up Camoufox (the browser for pages that turn bots away; about 300 MB)"
-    CF_LOG="${DATA_DIR}/camoufox-setup.log"
-    if { [ -x "${CF_VENV}/bin/python" ] || python3 -m venv "$CF_VENV"; } >"$CF_LOG" 2>&1 \
-       && "${CF_VENV}/bin/python" -m pip install -q -U pip >>"$CF_LOG" 2>&1 \
-       && "${CF_VENV}/bin/python" -m pip install -q -U 'camoufox[geoip]' >>"$CF_LOG" 2>&1; then
-      if "${CF_VENV}/bin/python" -m camoufox fetch >>"$CF_LOG" 2>&1; then
-        ok "Camoufox ready"
-      else
-        info "Camoufox is installed, but its browser didn't download — run: ${CF_VENV}/bin/python -m camoufox fetch"
+    step "setting up Camoufox (the browser for pages that turn bots away; about 300 MB, once)"
+    : >"$CF_LOG"
+    cf_ok=1
+    if [ ! -x "${CF_VENV}/bin/python" ]; then
+      { python3 -m venv "$CF_VENV" && "${CF_VENV}/bin/python" -m pip install -q -U pip; } >>"$CF_LOG" 2>&1 || cf_ok=0
+    fi
+    if [ "$cf_ok" = "1" ]; then
+      if [ "${CHUCK_CAMOUFOX_UPGRADE:-0}" = "1" ]; then
+        "${CF_VENV}/bin/python" -m pip install -q -U 'camoufox[geoip]' >>"$CF_LOG" 2>&1 || cf_ok=0
+      elif ! "${CF_VENV}/bin/python" -c "import camoufox" >/dev/null 2>&1; then
+        "${CF_VENV}/bin/python" -m pip install -q 'camoufox[geoip]' >>"$CF_LOG" 2>&1 || cf_ok=0
       fi
+    fi
+    # the browser build this package pairs with (and its add-on): only when it isn't there
+    if [ "$cf_ok" = "1" ] && ! cf_ready; then
+      "${CF_VENV}/bin/python" -m camoufox fetch >>"$CF_LOG" 2>&1 || true
+    fi
+    if cf_ready; then
+      ok "Camoufox ready"
+    elif [ "$cf_ok" = "1" ]; then
+      info "Camoufox is installed, but its browser didn't download (see ${CF_LOG}) — run: ${CF_VENV}/bin/python -m camoufox fetch"
     else
       info "Camoufox couldn't be set up (see ${CF_LOG}) — Chuck uses Brave/Chromium/Chrome instead"
     fi

@@ -23,15 +23,22 @@ def log(**kw):
 class Camoufox:
     def __init__(self, **kw):
         self.kw = kw
-        if SITE.get("not_installed"):
-            raise FileNotFoundError("Camoufox is not installed. Please run `camoufox fetch`")
+        from . import addons, pkgman
+        # as the real launch does: no binary given means the package's own, downloaded if missing
+        if not kw.get("executable_path"):
+            pkgman.launch_path()
+        addons.ensure(kw.get("exclude_addons"))
         if kw.get("geoip") and SITE.get("no_geoip"):
             raise ImportError("the geoip extra isn't installed")
+        if kw.get("geoip") and SITE.get("stale_geoip"):
+            log(download="geoip")
+            time.sleep(600)
 
     def __enter__(self):
         # Playwright starts the browser in a session of its own
         self.proc = subprocess.Popen(["sleep", "300"], start_new_session=True)
-        log(launch={k: v for k, v in self.kw.items()}, browser_pid=self.proc.pid)
+        log(launch={k: ([a.name for a in v] if k == "exclude_addons" else v) for k, v in self.kw.items()},
+            browser_pid=self.proc.pid)
         return Browser()
 
     def __exit__(self, *a):

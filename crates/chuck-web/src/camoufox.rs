@@ -45,8 +45,17 @@ pub const INSTALL: &str = "re-run Chuck's installer (it sets Camoufox up), or: p
 pub struct Install {
     /// The Python whose `camoufox` package launches it.
     pub python: PathBuf,
-    /// A Camoufox binary of the user's choosing (None: the package's own).
+    /// The browser binary: the user's choice, or the build the package has
+    /// downloaded. Always handed to the package, so a launch never starts a
+    /// download of its own (300 MB, cut off by the call's time limit, again
+    /// on every page).
     pub exe: Option<PathBuf>,
+    /// uBlock Origin is unpacked: without it the package would fetch it at
+    /// launch, so it is left out instead.
+    pub addons: bool,
+    /// A current GeoIP database is there (else the package downloads one at
+    /// launch): a proxy's country then sets the time zone and language.
+    pub geoip: bool,
 }
 
 /// Where the installer puts Camoufox's own Python environment.
@@ -55,40 +64,95 @@ pub fn venv() -> PathBuf {
         .join(".local/share/chucknorris/camoufox")
 }
 
-/// Does `python` have the camoufox package? (At most 20 s.)
-fn has_camoufox(python: &Path) -> bool {
+/// Asks a Python what its camoufox package has, without it downloading
+/// anything: one JSON line.
+const PROBE: &str = r#"
+import json, os, sys
+def say(**kw):
+    print(json.dumps(kw)); sys.exit(0)
+try:
+    from camoufox.pkgman import camoufox_path, launch_path
+except Exception as e:
+    say(package=False, why=str(e).splitlines()[0] if str(e) else type(e).__name__)
+try:
+    path = camoufox_path(download_if_missing=False)
+    try:
+        exe = launch_path(path)
+    except TypeError:
+        exe = launch_path()
+except Exception as e:
+    say(package=True, why=(str(e).splitlines() or [type(e).__name__])[0])
+addons = geoip = False
+try:
+    from camoufox.addons import get_addon_path
+    addons = os.path.exists(os.path.join(get_addon_path("UBO"), "manifest.json"))
+except Exception:
+    pass
+try:
+    from camoufox.geolocation import get_mmdb_path, needs_update
+    geoip = get_mmdb_path("ipv4").exists() and not needs_update()
+except Exception:
+    pass
+say(package=True, exe=exe, addons=addons, geoip=geoip)
+"#;
+
+/// What a Python's camoufox package has: Ok(the browser and its extras),
+/// Err((the package is there, why it can't run)). At most 30 s.
+fn probe(python: &Path) -> Result<(PathBuf, bool, bool), (bool, String)> {
     let mut c = Command::new(python);
-    c.args(["-c", "import camoufox.sync_api"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
-        .current_dir(std::env::temp_dir());
+    // run from an empty place, without the caller's import paths (a user-site install still counts)
+    c.args(["-c", PROBE]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null())
+        .current_dir(std::env::temp_dir()).env_remove("PYTHONPATH").env_remove("PYTHONSTARTUP");
     chuck_tools::tag(&mut c);
-    let Ok(mut child) = c.spawn() else { return false };
-    let end = Instant::now() + Duration::from_secs(20);
+    let Ok(mut child) = c.spawn() else { return Err((false, format!("{} doesn't run", python.display()))) };
+    let end = Instant::now() + Duration::from_secs(30);
     loop {
         match child.try_wait() {
-            Ok(Some(st)) => return st.success(),
+            Ok(Some(_)) => break,
             Ok(None) if Instant::now() < end => std::thread::sleep(Duration::from_millis(25)),
             _ => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return false;
+                return Err((false, format!("{} took over 30 s to answer", python.display())));
             }
         }
     }
+    let mut out = String::new();
+    if let Some(mut o) = child.stdout.take() {
+        let _ = o.read_to_string(&mut out);
+    }
+    let v: Value = out.lines().rev().find_map(|l| serde_json::from_str(l).ok())
+        .ok_or_else(|| (false, "no camoufox package".to_string()))?;
+    let package = v["package"].as_bool().unwrap_or(false);
+    match v["exe"].as_str() {
+        Some(exe) => Ok((PathBuf::from(exe), v["addons"].as_bool().unwrap_or(false), v["geoip"].as_bool().unwrap_or(false))),
+        None => Err((package, v["why"].as_str().unwrap_or("").to_string())),
+    }
 }
 
-/// The Python that can launch Camoufox: its own environment first, then the
-/// system's. Answers are remembered for a while (Settings, the doctor and
-/// every page read ask), a no for less long, so installing it is noticed.
-/// When the Python was last looked for, and what was found.
-type Seen = Option<(Instant, Option<PathBuf>)>;
+/// What `python`'s camoufox package can run, looked at without downloading
+/// anything: Err says what is missing and how to get it.
+pub fn check(python: &Path) -> Result<Install, String> {
+    match probe(python) {
+        Ok((exe, addons, geoip)) => Ok(Install { python: python.to_path_buf(), exe: Some(exe), addons, geoip }),
+        Err((true, why)) => Err(format!("Camoufox's browser isn't downloaded ({}): run `{} -m camoufox fetch`, or \
+            re-run Chuck's installer", why.trim_end_matches('.'), python.display())),
+        Err((false, _)) => Err(format!("Camoufox isn't installed: {INSTALL}")),
+    }
+}
 
-fn python() -> Result<PathBuf, String> {
+/// When Camoufox was last looked for, and what was found.
+type Seen = Option<(Instant, Result<Install, String>)>;
+
+/// Camoufox as installed: its own environment first, then the system's
+/// Python. Answers are remembered for a while (Settings, the doctor and
+/// every page read ask), a no for less long, so setting it up is noticed.
+fn installed() -> Result<Install, String> {
     static SEEN: OnceLock<Mutex<Seen>> = OnceLock::new();
     let seen = SEEN.get_or_init(|| Mutex::new(None));
     if let Some((at, found)) = seen.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
-        let fresh = at.elapsed() < if found.is_some() { Duration::from_secs(600) } else { Duration::from_secs(30) };
-        if fresh {
-            return found.clone().ok_or_else(|| format!("Camoufox isn't installed: {INSTALL}"));
+        if at.elapsed() < if found.is_ok() { Duration::from_secs(600) } else { Duration::from_secs(30) } {
+            return found.clone();
         }
     }
     let mut candidates = vec![venv().join("bin/python")];
@@ -97,9 +161,22 @@ fn python() -> Result<PathBuf, String> {
     {
         candidates.push(p);
     }
-    let found = candidates.into_iter().find(|p| p.is_file() && has_camoufox(p));
+    let mut found = Err(format!("Camoufox isn't installed: {INSTALL}"));
+    for py in candidates.into_iter().filter(|p| p.is_file()) {
+        match check(&py) {
+            Ok(i) => {
+                found = Ok(i);
+                break;
+            }
+            // the package without its browser: that is what to say, not "not installed"
+            Err(e) if e.starts_with("Camoufox's browser") && found.as_ref().is_err_and(|f| f.contains("isn't installed")) => {
+                found = Err(e);
+            }
+            Err(_) => {}
+        }
+    }
     *seen.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), found.clone()));
-    found.ok_or_else(|| format!("Camoufox isn't installed: {INSTALL}"))
+    found
 }
 
 /// Camoufox, ready to run (`exe`: a binary the user named).
@@ -109,7 +186,11 @@ pub fn find(exe: Option<PathBuf>) -> Result<Install, String> {
             return Err(format!("Camoufox not found at {}", e.display()));
         }
     }
-    Ok(Install { python: python()?, exe })
+    let mut i = installed()?;
+    if exe.is_some() {
+        i.exe = exe;
+    }
+    Ok(i)
 }
 
 // ── a folder's files over HTTP, and nothing else ─────────────────────────
@@ -410,6 +491,7 @@ pub fn browse(target: &str, actions: &[String], o: &Options, install: &Install) 
         "probe": crate::browser::CHALLENGE_PROBE, "challenge": crate::browser::CHALLENGE,
         "screenshot": o.screenshot, "judge": judging, "proxy": proxy,
         "exe": install.exe.as_ref().map(|e| e.display().to_string()),
+        "addons": install.addons, "geoip": install.geoip,
     });
     let Running { _bridge, mut stdin, lines: rx, log } = start(&install.python)?;
     writeln!(stdin, "{req}").map_err(|e| format!("Camoufox's Python: {e}"))?;

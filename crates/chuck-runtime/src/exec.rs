@@ -123,6 +123,26 @@ pub struct Exec<'a> {
     /// Why this agent may not change the project now (the lead, while its
     /// workers own the changes): reads and checks still run.
     pub hold: Option<String>,
+    /// The project's own folders a worker's copy borrows (its dependencies,
+    /// its history): shown read-only in the worker's jail.
+    pub lent: &'a [std::path::PathBuf],
+}
+
+/// The environment a command in a copy with a borrowed virtualenv needs:
+/// the copy's own code ahead of whatever the environment installed in
+/// editable mode (which points at the real project).
+pub fn copy_env(root: &Path, lent: &[std::path::PathBuf]) -> Vec<(String, String)> {
+    if !lent.iter().any(|p| p.file_name().is_some_and(|n| n == ".venv" || n == "venv")) {
+        return Vec::new();
+    }
+    let mut paths = vec![root.display().to_string()];
+    if root.join("src").is_dir() {
+        paths.push(root.join("src").display().to_string());
+    }
+    if let Some(old) = std::env::var_os("PYTHONPATH").filter(|o| !o.is_empty()) {
+        paths.push(old.to_string_lossy().into_owned());
+    }
+    vec![("PYTHONPATH".into(), paths.join(":"))]
 }
 
 /// How a command that reaches outside the folder may run.
@@ -275,7 +295,7 @@ impl<'a> Exec<'a> {
                 Access::Sandbox => Jail::new(self.root).offline(),
                 Access::Guarded => Jail::new(self.root).guarded(),
                 _ => Jail::new(self.root),
-            };
+            }.lend(self.lent);
             return Ok((s.bwrap.then(|| j().wrap()), false));
         }
         let look = |j: Jail| (Some(j.read_only().wrap()), true);
@@ -387,6 +407,7 @@ impl<'a> Exec<'a> {
         o.wrap = wrap;
         o.stop = Some(self.stop.clone());
         o.on_chunk = Some(&mut on);
+        o.env = copy_env(self.root, self.lent);
         bash(cmd, o)
     }
 
@@ -735,14 +756,16 @@ impl<'a> Exec<'a> {
                     res.feedback.push("[warning: that command changed files before acceptance criteria were \
                         written — the gate will not accept changes made without criteria]".into());
                 }
-                let hollow = tag == "test" && proves_nothing(&cmd);
-                let kind = if tag == "test" && !hollow {
+                // a criterion's own verify command is its verification, whichever tool ran it
+                let is_check = tag == "test" || (!criteria.is_empty() && !explicit);
+                let hollow = is_check && proves_nothing(&cmd);
+                let kind = if is_check && !hollow {
                     let (passed, failed) = test_counts(&r.output);
                     EvidenceKind::Test { cmd: checked.clone(), exit: r.exit, passed, failed, output: out.clone() }
                 } else {
                     EvidenceKind::Command { cmd: checked.clone(), exit: r.exit, output: out.clone() }
                 };
-                let verified = tag == "test" && !hollow && r.ok();
+                let verified = is_check && !hollow && r.ok();
                 if explicit && !hollow {
                     g.record_linked(self.id, criteria, kind, changed);
                 } else {

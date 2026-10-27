@@ -64,6 +64,8 @@ struct Worker {
     stop: Arc<AtomicBool>,
     join: Option<JoinHandle<()>>,
     live: bool,
+    /// The project folders its copy borrows (see `Workspace::lend`).
+    lent: Vec<PathBuf>,
 }
 
 pub struct LeadRun<'a> {
@@ -436,6 +438,10 @@ impl<'a> LeadRun<'a> {
                 return Err(format!("couldn't make {name} a copy of the project: {e}"));
             }
         };
+        // the copy borrows the project's dependencies (and, read-only in a jail, its git history):
+        // without them its tests can't run, and it could never prove its work
+        let jailed = self.ctx.cfg.bwrap && chuck_sandbox::bwrap().is_some();
+        let lent = ws.lend(jailed);
         let mut g = task.gate();
         if g.plan.is_empty() {
             g.set_plan(vec![task.title.clone()]); // the lead's task graph is the plan
@@ -445,7 +451,7 @@ impl<'a> LeadRun<'a> {
         let stop = Arc::new(AtomicBool::new(false));
         let spec = WorkerSpec { id, role, name: name.clone(), task: task.clone(), ws: ws.clone(), gate: gate.clone(),
                                 stop: stop.clone(), to_lead: self.tx.clone(), inbox: wrx, team: self.team.clone(),
-                                roster: self.roster(&name), heard: self.team.cursor() };
+                                roster: self.roster(&name), heard: self.team.cursor(), lent: lent.clone() };
         let ctx = self.ctx.clone();
         // announced here, before Assigned: whoever listens knows the name first
         self.ctx.events.emit(Event::AgentStarted { id, role, name: name.clone(),
@@ -456,7 +462,7 @@ impl<'a> LeadRun<'a> {
             .map_err(|e| format!("couldn't start {name}: {e}"))?;
         self.ctx.events.emit(Event::Assigned { task: task.id.clone(), title: task.title.clone(), worker: id, role });
         self.workers.insert(id, Worker { role, name, ws, gate, tx: wtx, stop, join: Some(join),
-                                         live: true });
+                                         live: true, lent });
         Ok(id)
     }
 
@@ -651,11 +657,13 @@ impl<'a> LeadRun<'a> {
         out
     }
 
-    fn run_check(&self, cmd: &str, cwd: &Path) -> chuck_tools::RunResult {
+    fn run_check(&self, cmd: &str, cwd: &Path, lent: &[PathBuf]) -> chuck_tools::RunResult {
         let mut o = RunOpts::new(cwd);
         o.timeout = self.ctx.cfg.cmd_timeout;
+        // the same borrowed folders the worker had: its checks pass or fail here as they did there
+        o.env = crate::exec::copy_env(cwd, lent);
         if self.ctx.cfg.bwrap {
-            o.wrap = Some(chuck_sandbox::Jail::new(cwd).wrap()); // a worker's copy runs its code: jailed
+            o.wrap = Some(chuck_sandbox::Jail::new(cwd).lend(lent).wrap()); // a worker's copy runs its code: jailed
         }
         o.stop = Some(self.ctx.stop.clone());
         bash(cmd, o)
@@ -674,7 +682,7 @@ impl<'a> LeadRun<'a> {
             return format!("[review: {tid} has no submission waiting (it is {:?})]", slot.state);
         };
         let Some(w) = self.workers.get(&sub.worker) else { return format!("[review: {tid}'s worker is gone]") };
-        let (gate, wtx, work) = (w.gate.clone(), w.tx.clone(), w.ws.work.clone());
+        let (gate, wtx, work, lent) = (w.gate.clone(), w.tx.clone(), w.ws.work.clone(), w.lent.clone());
         let reject = |gate: &Arc<Mutex<DoneGate>>, d: Vec<String>, notes: &str| {
             let _ = gate.lock().unwrap().review(self.id, Role::Lead, Verdict::Rejected(d.clone()), notes);
             let _ = wtx.send(ToWorker::Rejected(d.clone()));
@@ -722,7 +730,7 @@ impl<'a> LeadRun<'a> {
                         failed.push(format!("`{cmd}` is a critical command: it isn't run unattended to check work"));
                         continue;
                     }
-                    let r = self.run_check(cmd, &work);
+                    let r = self.run_check(cmd, &work, &lent);
                     let (passed, nfail) = test_counts(&r.output);
                     gate.lock().unwrap().record(self.id, ids.clone(), EvidenceKind::Test {
                         cmd: cmd.clone(), exit: r.exit, passed, failed: nfail, output: clip(&r.output, 6000) }, false);
@@ -1268,7 +1276,7 @@ impl<'a> LeadRun<'a> {
                               web: ctx.cfg.web.as_deref(), sources: ctx.cfg.sources,
                               mcp: ctx.cfg.mcp.as_deref(), lsp: ctx.cfg.lsp.as_deref(),
                               memory: ctx.cfg.memory.as_deref(), allowed_outside: Some(&outside),
-                              team: Some((&team, "lead")), hold };
+                              team: Some((&team, "lead")), hold, lent: &[] };
             let r = exec.run(&reply);
             self.mutated |= r.mutated;
             let mut fb = r.feedback.clone();

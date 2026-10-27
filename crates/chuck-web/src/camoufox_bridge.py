@@ -88,12 +88,21 @@ def main():
     common = {"headless": True}
     if req.get("proxy"):
         common["proxy"] = {"server": req["proxy"]}
+    # the binary Chuck found: given, the package never downloads a browser of its own at launch
     if req.get("exe"):
         common["executable_path"] = req["exe"]
+    # an add-on that isn't unpacked would be downloaded at launch: left out instead
+    if not req.get("addons"):
+        try:
+            from camoufox import DefaultAddons
+            common["exclude_addons"] = list(DefaultAddons)
+        except Exception:
+            pass
     private = dict(common, block_webrtc=True, firefox_user_prefs=prefs)
-    # best first: with a proxy, a time zone and language that match its country (needs
-    # camoufox[geoip]); then without that; then the plainest launch an old Camoufox takes
-    attempts = ([dict(private, geoip=True)] if req.get("proxy") else []) + [private, common]
+    # best first: with a proxy, a time zone and language that match its country (only with the
+    # GeoIP database already there: it is never fetched at launch); then without that; then the
+    # plainest launch an old Camoufox takes
+    attempts = ([dict(private, geoip=True)] if req.get("proxy") and req.get("geoip") else []) + [private, common]
     launch_error = None
     for kw in attempts:
         try:

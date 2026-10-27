@@ -129,6 +129,9 @@ impl Task {
         if self.scale == Scale::Large {
             g.set_plan(vec![self.title.clone()]); // the Lead's plan is the task graph
         }
+        // a worker can't argue proportion (only the Lead can): the Lead weighs the size of the change
+        // when it reviews the diff, so a small, complete change is never stuck at the worker's gate
+        g.accept_justification(Role::Lead, "proportion");
         g
     }
 }
@@ -176,6 +179,20 @@ mod tests {
         // an older saved config (no worker model) gets the workhorse
         let old: FleetConfig = serde_json::from_str(r#"{"deepseek_model":"a","glm_model":"b","deepseek_workers":4,"glm_workers":4}"#).unwrap();
         assert_eq!(old.worker_model, WORKER_MODEL);
+    }
+
+    #[test]
+    fn a_large_task_with_a_small_complete_change_can_be_handed_in() {
+        use crate::evidence::{Criterion, CriterionId, EvidenceKind};
+        let t = Task { id: "t1".into(), title: "fix".into(), brief: "b".into(), scale: Scale::Large,
+                       criteria: vec![Criterion { id: CriterionId(1), text: "works".into(), verify: Some("make test".into()) }],
+                       prefer: Role::DeepSeekWorker, race: false, deps: Vec::new() };
+        let mut g = t.gate();
+        g.record(AgentId(9), vec![CriterionId(1)], EvidenceKind::Diff { files: vec!["a.rs".into()], added: 3, removed: 1,
+                 patch: "+a\n+b\n+c\n-d\n".into() }, true);
+        g.record(AgentId(9), vec![CriterionId(1)], EvidenceKind::Test { cmd: "make test".into(), exit: 0, passed: Some(1),
+                 failed: Some(0), output: "ok".into() }, false);
+        assert_eq!(g.submit(), Ok(()));
     }
 
     #[test]

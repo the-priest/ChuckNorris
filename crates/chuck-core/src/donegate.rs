@@ -86,7 +86,8 @@ impl Unmet {
             Unmet::NoPlan => "non-trivial work needs a plan before changes".into(),
             Unmet::NoEvidence(c, t) => format!("{c} has no evidence: {}", clip(t, 90)),
             Unmet::NotVerifiedSinceLastChange => {
-                "nothing was verified (tests/build/run) after the last change".into()
+                "nothing was verified after the last change: run the tests/build/criteria's verify commands \
+                 again (```test <command>```)".into()
             }
             Unmet::VerifyCommandNotRun(c, cmd) => {
                 format!("{c}'s verification `{}` hasn't passed since the last change (run it, or an equivalent check \

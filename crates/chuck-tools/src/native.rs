@@ -262,7 +262,157 @@ pub fn normalize_calls(text: &str, tags: &[&str]) -> (String, usize) {
         // the wrappers around rewritten calls carry nothing
         out = wrapper_rx().replace_all(&out, "").into_owned();
     }
-    (split_glued_openers(&out, tags), n)
+    let (out, m) = tag_calls(&out, tags);
+    (split_glued_openers(&out, tags), n + m)
+}
+
+fn tag_open_rx() -> &'static regex::Regex {
+    static R: OnceLock<regex::Regex> = OnceLock::new();
+    R.get_or_init(|| re(r"<([A-Za-z_][\w\-]*)((?:\s[^<>]*?)?)\s*(/?)>"))
+}
+
+fn attr_rx() -> &'static regex::Regex {
+    static R: OnceLock<regex::Regex> = OnceLock::new();
+    R.get_or_init(|| re(r#"([A-Za-z_][\w\-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')"#))
+}
+
+/// Byte ranges of the text inside code: fenced blocks (fence lines
+/// included) and `inline code`.
+fn code_ranges(text: &str) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut open: Option<(usize, usize)> = None; // (start, fence length)
+    let mut at = 0;
+    for line in text.split_inclusive('\n') {
+        let t = line.trim_start();
+        let ticks = t.chars().take_while(|c| *c == '`').count();
+        match open {
+            Some((start, len)) => {
+                if ticks >= len && t.trim_end().chars().all(|c| c == '`') {
+                    out.push((start, at + line.len()));
+                    open = None;
+                }
+            }
+            None if ticks >= 3 => {
+                // a one-line block (```read x```) closes on its own line
+                if t[ticks..].contains(&"`".repeat(ticks)) {
+                    out.push((at, at + line.len()));
+                } else {
+                    open = Some((at, ticks));
+                }
+            }
+            None => {
+                let mut i = 0;
+                let b = line.as_bytes();
+                while i < b.len() {
+                    if b[i] == b'`' {
+                        if let Some(j) = line[i + 1..].find('`') {
+                            out.push((at + i, at + i + 1 + j + 1));
+                            i += j + 2;
+                            continue;
+                        }
+                    }
+                    i += 1;
+                }
+            }
+        }
+        at += line.len();
+    }
+    if let Some((start, _)) = open {
+        out.push((start, text.len()));
+    }
+    out
+}
+
+/// A body as a block holds it: blank edges off, one fence around it removed.
+fn unwrap_body(body: &str) -> String {
+    let b = body.trim_matches('\n').trim_end();
+    let lines: Vec<&str> = b.lines().collect();
+    if lines.len() >= 2 && lines[0].trim_start().starts_with("```") && lines[lines.len() - 1].trim() == "```" {
+        return lines[1..lines.len() - 1].join("\n");
+    }
+    b.to_string()
+}
+
+/// `<read INTERFACES.md>`, `<read path="a.js"/>`, `<bash>npm test</bash>`,
+/// `<write path="a.js">…</write>`: a tag named for a tool the agent has,
+/// written outside code, made into its block. Text inside code (a file being
+/// written, `<search>` in an example) is never touched.
+fn tag_calls(text: &str, tags: &[&str]) -> (String, usize) {
+    if !text.contains('<') {
+        return (text.to_string(), 0);
+    }
+    let code = code_ranges(text);
+    let in_code = |i: usize| code.iter().any(|(a, b)| i >= *a && i < *b);
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0;
+    let mut n = 0;
+    let mut from = 0;
+    while let Some(c) = tag_open_rx().captures_at(text, from) {
+        let whole = c.get(0).unwrap();
+        from = whole.end();
+        if whole.start() < last || in_code(whole.start()) {
+            continue;
+        }
+        let name = &c[1];
+        let Some(tag) = tag_for(name, tags) else { continue };
+        let attrs = c[2].trim();
+        let self_closed = &c[3] == "/";
+        // its body, up to the closing tag (when there is one)
+        let close = format!("</{name}>");
+        let (body, end) = if self_closed {
+            (String::new(), whole.end())
+        } else {
+            match text[whole.end()..].find(&close) {
+                Some(i) => (unwrap_body(&text[whole.end()..whole.end() + i]), whole.end() + i + close.len()),
+                None => (String::new(), whole.end()),
+            }
+        };
+        let mut params: Vec<(String, String)> = attr_rx().captures_iter(attrs)
+            .map(|a| (a[1].to_string(), a.get(2).or(a.get(3)).map_or("", |m| m.as_str()).to_string())).collect();
+        let bare = if params.is_empty() { attrs.to_string() } else { String::new() };
+        if bare.is_empty() && params.is_empty() && body.trim().is_empty() && tag != "map" {
+            continue; // `<read>` alone says nothing to run
+        }
+        let b = if params.is_empty() {
+            // `<tag arg>body</tag>`: the argument line and the body, as a block has them
+            let (arg, body) = if bare.is_empty() && !body.contains('\n')
+                && !matches!(tag.as_str(), "bash" | "sh" | "write" | "edit" | "patch" | "submit" | "done" | "team") {
+                (body.trim().to_string(), String::new())
+            } else {
+                (bare, body)
+            };
+            let f = fence_for(&body);
+            Some(if body.trim().is_empty() && !matches!(tag.as_str(), "bash" | "sh") {
+                format!("```{tag} {}```", arg.trim())
+            } else if body.trim().is_empty() {
+                format!("```{tag}\n{}\n```", arg.trim())
+            } else {
+                format!("{f}{tag}{}{}\n{}\n{f}", if arg.trim().is_empty() { "" } else { " " }, arg.trim(), body)
+            })
+        } else {
+            if !body.trim().is_empty() {
+                let key = match tag.as_str() {
+                    "bash" | "sh" | "test" => "command",
+                    "write" => "content",
+                    "submit" | "done" => "report",
+                    "team" => "message",
+                    "grep" => "pattern",
+                    "search" => "query",
+                    _ => "body",
+                };
+                params.push((key.into(), body.clone()));
+            }
+            block(&tag, &Params(params))
+        };
+        let Some(b) = b else { continue };
+        out.push_str(&text[last..whole.start()]);
+        out.push_str(&format!("\n{b}\n"));
+        last = end;
+        from = end;
+        n += 1;
+    }
+    out.push_str(&text[last..]);
+    (out, n)
 }
 
 /// "Here they are: ```criteria" → the text, then the opener on its own line.
@@ -309,6 +459,37 @@ mod tests {
     const LEAD: &[&str] = &["read", "grep", "glob", "bash", "test", "search", "fetch", "criteria", "plan", "assign",
         "review", "done", "team", "cancel"];
     const WORKER: &[&str] = &["read", "grep", "glob", "bash", "test", "search", "fetch", "submit", "team"];
+
+    #[test]
+    fn tags_named_for_tools_run_and_code_is_never_touched() {
+        // as DeepSeek-V4-Flash wrote it in a real job
+        let t = "Let me look at key files. <read INTERFACES.md> <read tests/oracle-modules.test.js>";
+        let (out, n) = normalize_calls(t, WORKER);
+        assert_eq!(n, 2, "{out}");
+        let b = tool_blocks(&out, WORKER);
+        assert_eq!(b.iter().map(|b| (b.tag.as_str(), b.arg.as_str())).collect::<Vec<_>>(),
+                   vec![("read", "INTERFACES.md"), ("read", "tests/oracle-modules.test.js")]);
+        assert_eq!(crate::prose(&out, WORKER).trim(), "Let me look at key files.");
+        // the other shapes of it
+        let t = "<bash>npm test -- --run</bash>\n<read path=\"js/game.js\" start_line=\"10\" end_line=\"40\"/>\n\
+                 <write path=\"js/a.js\">\nexport const a = 1;\n</write>\n<grep>createGame js/</grep>\n\
+                 <team @ds-2>engine.js exports create(seed)</team>\n<submit>\nDone: tests pass.\n</submit>";
+        let (out, n) = normalize_calls(t, WORKER);
+        assert_eq!(n, 6, "{out}");
+        let b = tool_blocks(&out, WORKER);
+        assert_eq!((b[0].tag.as_str(), b[0].body.as_str()), ("bash", "npm test -- --run"));
+        assert_eq!((b[1].tag.as_str(), b[1].arg.as_str()), ("read", "js/game.js:10-40"));
+        assert_eq!((b[2].tag.as_str(), b[2].arg.as_str()), ("grep", "createGame js/"));
+        assert_eq!((b[3].tag.as_str(), b[3].arg.as_str(), b[3].body.as_str()), ("team", "@ds-2", "engine.js exports create(seed)"));
+        assert_eq!((b[4].tag.as_str(), b[4].body.as_str()), ("submit", "Done: tests pass."));
+        let f = file_blocks(&out);
+        assert_eq!((f[0].path.as_str(), f[0].body.as_str()), ("js/a.js", "export const a = 1;\n"));
+        // a file's own markup, an example in backticks, and HTML that names no tool stay as they are
+        let html = "```write index.html\n<search><map name=\"m\"></map></search>\n<read me>\n```\nUse `<read x>` then <div>ok</div>.";
+        assert_eq!(normalize_calls(html, LEAD), (html.to_string(), 0));
+        let (out, n) = normalize_calls("<read>", WORKER);
+        assert_eq!((out.as_str(), n), ("<read>", 0), "a bare tag says nothing to run");
+    }
 
     #[test]
     fn deepseek_dsml_runs_as_blocks() {

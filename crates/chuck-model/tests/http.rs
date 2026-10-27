@@ -62,6 +62,19 @@ fn handle(mut c: TcpStream, seen: Seen) {
         "nousage" if v.get("stream_options").is_some() => {
             return plain(&mut c, "400 Bad Request", r#"{"message":"unknown field stream_options"}"#)
         }
+        "queued" if n % 2 == 1 => {
+            // the connection stays busy, but with nothing to read: keep-alives and empty deltas
+            let _ = write!(c, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n");
+            for i in 0..50 {
+                let line = if i % 2 == 0 { ": keep-alive\n\n".to_string() } else {
+                    format!("data: {}\n\n", json!({"choices": [{"delta": {"role": "assistant", "content": ""}}]})) };
+                if write!(c, "{line}").and_then(|_| c.flush()).is_err() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            return;
+        }
         "stall" if n % 2 == 1 => {
             let _ = write!(c, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n");
             std::thread::sleep(Duration::from_secs(4)); // then nothing at all
@@ -156,6 +169,17 @@ fn options_a_server_refuses_are_dropped_and_the_question_answered() {
     assert_eq!(r2.unwrap().text, "the answer");
     let s = seen.lock().unwrap();
     assert!(s.last().unwrap().get("stream_options").is_none());
+}
+
+#[test]
+fn a_connection_kept_alive_without_a_word_is_retried_not_waited_on() {
+    let (base, _) = serve();
+    let t0 = Instant::now();
+    let (r, sink) = ask(&client(&base, 1), "queued", Reasoning::default());
+    assert_eq!(r.unwrap().text, "the answer");
+    assert!(t0.elapsed() < Duration::from_secs(5), "{:?}", t0.elapsed());
+    assert!(sink.notices.iter().any(|n| matches!(n, Notice::Retrying { why, .. } if why.contains("nothing to read"))),
+            "{:?}", sink.notices);
 }
 
 #[test]

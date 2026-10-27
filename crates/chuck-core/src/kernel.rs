@@ -559,6 +559,17 @@ impl Kernel {
         ok
     }
 
+    /// What a call in flight has done so far (shown, not journaled: it
+    /// changes every second).
+    pub fn progress(&self, pid: AgentId, activity: &str) {
+        {
+            let mut st = self.lock();
+            let Some(p) = st.procs.get_mut(&pid) else { return };
+            p.activity = activity.chars().take(160).collect();
+        }
+        self.changed();
+    }
+
     pub fn note(&self, pid: AgentId, activity: &str) {
         {
             let mut st = self.lock();

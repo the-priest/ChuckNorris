@@ -34,7 +34,9 @@ impl Fake {
                                          py.display())).unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
-        Some(Fake { install: Install { python: wrapper, exe: None }, dir })
+        let install = chuck_web::camoufox::check(&wrapper)
+            .unwrap_or(Install { python: wrapper, exe: None, addons: false, geoip: false });
+        Some(Fake { install, dir })
     }
 
     fn options(&self) -> Options {
@@ -173,10 +175,32 @@ fn stopping_ends_the_bridge_and_the_browser_it_started() {
 }
 
 #[test]
-fn a_camoufox_that_was_never_downloaded_says_how_to_get_it() {
+fn a_camoufox_that_was_never_downloaded_says_how_to_get_it_and_downloads_nothing() {
+    // the real package downloads its browser (300 MB) when asked for it; Chuck must only look
     let Some(f) = Fake::new("missing", json!({"not_installed": true})) else { return };
-    let e = browser::browse("https://93.184.216.34/", &[], &f.options()).unwrap_err();
-    assert!(e.starts_with("Camoufox: ") && e.contains("camoufox fetch"), "{e}");
+    let t0 = Instant::now();
+    let e = chuck_web::camoufox::check(&f.install.python).unwrap_err();
+    assert!(t0.elapsed() < Duration::from_secs(10), "it waited on a download");
+    assert!(e.starts_with("Camoufox's browser isn't downloaded") && e.contains("-m camoufox fetch"), "{e}");
+    assert!(!f.log().iter().any(|l| l.get("download").is_some()), "{:?}", f.log());
+}
+
+#[test]
+fn a_set_up_camoufox_is_launched_with_its_binary_so_it_never_downloads() {
+    let Some(f) = Fake::new("ready", json!({"no_addons": true, "stale_geoip": true})) else { return };
+    let exe = f.install.exe.clone().expect("the probe found the browser");
+    assert!(exe.ends_with("browser/camoufox-bin") && !f.install.addons && !f.install.geoip, "{:?}", f.install);
+    let mut o = f.options();
+    o.proxy = Some(Proxy::Url("socks5://127.0.0.1:9050".into()));
+    let t0 = Instant::now();
+    browser::browse("https://93.184.216.34/", &[], &o).unwrap();
+    assert!(t0.elapsed() < Duration::from_secs(15));
+    let log = f.log();
+    assert!(!log.iter().any(|l| l.get("download").is_some()), "nothing fetched at launch: {log:?}");
+    let launch = log.into_iter().find_map(|l| l.get("launch").cloned()).unwrap();
+    assert_eq!(launch["executable_path"], exe.display().to_string());
+    assert_eq!(launch["exclude_addons"], json!(["UBO"]), "an add-on that isn't there is left out, not fetched");
+    assert!(launch.get("geoip").is_none(), "no GeoIP database: no geoip launch (it would download one)");
 }
 
 #[test]

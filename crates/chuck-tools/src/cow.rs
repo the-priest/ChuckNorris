@@ -16,6 +16,9 @@ use std::path::{Path, PathBuf};
 pub const SKIP: &[&str] = &[".git", "node_modules", ".venv", "venv", "__pycache__", ".mypy_cache",
     ".pytest_cache", ".ruff_cache", ".cache", "target", ".next", ".nuxt", ".gradle", "dist", "build", ".tox",
     ".chuck-conflicts"];
+/// Dependencies and history a worker needs but must not change: never
+/// copied, lent instead (see [`Workspace::lend`]).
+pub const LENT: &[&str] = &["node_modules", ".venv", "venv", ".git"];
 pub const MAX_BYTES: u64 = 400 << 20;
 pub const MAX_FILES: usize = 50_000;
 
@@ -59,6 +62,9 @@ fn files(root: &Path) -> Result<Vec<String>, CowError> {
         if ft.is_symlink() {
             if !e.path().exists() {
                 continue; // dangling
+            }
+            if LENT.contains(&e.file_name().to_string_lossy().as_ref()) {
+                continue; // a lent folder: the project's own, never a change of the worker's
             }
         } else if !ft.is_file() {
             continue; // a pipe, socket or device: reading it could hang
@@ -137,6 +143,43 @@ impl Workspace {
             return Err(e);
         }
         Ok(ws)
+    }
+
+    /// Lend the copy what it can't work without and must not change: the
+    /// project's dependencies (`node_modules`, `.venv`, `venv`, at the top
+    /// and one folder down) and, when `git` (only where a jail keeps it
+    /// read-only), its `.git`. Each appears in the copy as a link to the
+    /// real one; diffs and merges pass the links by. Returns the real
+    /// folders, for the jail to show read-only.
+    pub fn lend(&self, git: bool) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let mut places = vec![PathBuf::new()];
+        if let Ok(rd) = fs::read_dir(&self.source) {
+            let mut subs: Vec<PathBuf> = rd.flatten()
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()) && !SKIP.contains(&e.file_name().to_string_lossy().as_ref())
+                        && !e.file_name().to_string_lossy().starts_with('.'))
+                .map(|e| PathBuf::from(e.file_name())).collect();
+            subs.sort();
+            places.extend(subs);
+        }
+        for place in places {
+            for name in LENT {
+                if *name == ".git" && (!git || !place.as_os_str().is_empty()) {
+                    continue;
+                }
+                let real = self.source.join(&place).join(name);
+                let link = self.work.join(&place).join(name);
+                if !real.is_dir() || real.is_symlink() || !link.parent().is_some_and(Path::is_dir)
+                    || link.symlink_metadata().is_ok()
+                {
+                    continue;
+                }
+                if std::os::unix::fs::symlink(&real, &link).is_ok() {
+                    out.push(real);
+                }
+            }
+        }
+        out
     }
 
     /// What the worker changed.

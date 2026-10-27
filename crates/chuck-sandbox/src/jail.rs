@@ -162,6 +162,12 @@ impl Jail {
         self
     }
 
+    /// Shown read-only at their own paths (a worker's lent dependencies).
+    pub fn lend(mut self, paths: &[PathBuf]) -> Jail {
+        self.extra_ro.extend(paths.iter().cloned());
+        self
+    }
+
     pub fn read_only(mut self) -> Jail {
         self.write = false;
         self
@@ -248,6 +254,11 @@ impl Jail {
         // git there: code inside may change the project, never what git runs
         for (b, rw) in &binds {
             if !rw {
+                continue;
+            }
+            // a linked .git (a worker's copy borrows the project's) is read-only already, and bwrap
+            // can't mount anything through a link
+            if b.join(".git").is_symlink() {
                 continue;
             }
             for sub in [".git/hooks", ".git/config"] {
