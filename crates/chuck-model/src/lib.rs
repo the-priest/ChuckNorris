@@ -271,7 +271,8 @@ mod interrupt_tests {
     fn a_normal_call_passes_through() {
         let m: Arc<dyn ChatModel> = Arc::new(Scripted::new().replies(["hello there"]));
         let mut c = Collect::default();
-        let out = chat_interruptible(&m, &ChatRequest::new("m", vec![]), &mut c).unwrap();
+        let out = chat_interruptible(&m, &ChatRequest::new("m", vec![serde_json::json!({"role": "user", "content": "hi"})]), &mut c)
+            .unwrap();
         assert_eq!(out.text, "hello there");
         assert_eq!(c.text, "hello there");
     }

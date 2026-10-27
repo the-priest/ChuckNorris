@@ -84,7 +84,12 @@ fn earlier_turns_are_remembered_and_a_promise_is_followed_through() {
     let r = rt.chat(job);
     assert_eq!(r.outcome, Outcome::Answered { text: "Arch ships it in extra.".into() });
     let seen = model.seen.lock().unwrap();
-    assert!(last_user(&seen[0]).contains("apt install ripgrep") && last_user(&seen[0]).contains("NOW:\nand on Arch?"));
+    // the earlier turns are real turns, not a transcript to imitate
+    let roles: Vec<&str> = seen[0].messages.iter().map(|m| m["role"].as_str().unwrap()).collect();
+    assert_eq!(roles, ["system", "user", "assistant", "user"]);
+    assert_eq!(seen[0].messages[2]["content"], "apt install ripgrep");
+    assert_eq!(last_user(&seen[0]), "and on Arch?");
+    assert!(seen[0].messages.iter().all(|m| !m["content"].as_str().unwrap_or("").contains("NOW:")));
     assert!(last_user(&seen[1]).contains("didn't do it"));
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -172,19 +172,53 @@ pub struct Runtime {
     pub events: Events,
 }
 
+/// What the memory store is asked about: the request with the chat leading
+/// up to it.
 pub(crate) fn first_message(job: &Job) -> String {
-    if job.history.is_empty() {
-        return job.ask.clone();
-    }
-    let mut earlier = String::new();
-    for (role, text) in job.history.iter().rev() {
-        let line = format!("{role}: {}\n\n", chuck_core::evidence::clip(text, 3000));
-        if earlier.len() + line.len() > 24_000 {
+    let mut q: Vec<&str> = job.history.iter().rev().take(2).map(|(_, t)| t.as_str()).collect();
+    q.reverse();
+    q.push(&job.ask);
+    q.join("\n")
+}
+
+/// The chat before this request as real turns (true: the user's), newest
+/// kept within a budget, each clipped; consecutive turns of one side are
+/// joined so the roles alternate, starting with the user and ending with
+/// Chuck, so the request is the next user turn.
+pub(crate) fn turns(history: &[(String, String)]) -> Vec<(bool, String)> {
+    let mut kept: Vec<(bool, String)> = Vec::new();
+    let mut size = 0;
+    for (role, text) in history.iter().rev() {
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        let text = chuck_core::evidence::clip(text, 3000);
+        if size + text.len() > 24_000 {
             break;
         }
-        earlier.insert_str(0, &line);
+        size += text.len();
+        kept.push((matches!(role.as_str(), "user" | "you"), text));
     }
-    format!("EARLIER IN THIS CHAT:\n{earlier}NOW:\n{}", job.ask)
+    kept.reverse();
+    let mut out: Vec<(bool, String)> = Vec::new();
+    for (user, text) in kept {
+        match out.last_mut() {
+            Some((u, t)) if *u == user => {
+                t.push_str("\n\n");
+                t.push_str(&text);
+            }
+            _ => out.push((user, text)),
+        }
+    }
+    while out.first().is_some_and(|(u, _)| !u) {
+        out.remove(0);
+    }
+    if out.last().is_some_and(|(u, _)| *u) {
+        // the user spoke and got no answer (stopped, or it failed)
+        out.push((false, "(no answer: that turn was stopped before Chuck replied)".into()));
+    }
+    out
 }
 
 /// Copies left behind by a job whose process is gone (a crash, a power cut):
@@ -243,12 +277,13 @@ impl Runtime {
                                                model: self.cfg.fleet.deepseek_model.clone(), task: None });
         let resumed = job.resume.clone();
         // carrying on: the user's words are only what they add now
-        let first = if resumed.is_some() { job.ask.clone() } else { first_message(&job) };
+        let first = job.ask.clone();
+        let history = if resumed.is_some() { Vec::new() } else { turns(&job.history) };
         let ask = resumed.as_ref().map_or(job.ask.clone(), |r| r.ask.clone());
         let mut run = lead::LeadRun::new(&ctx, lead, &folder, &ask, job.answers);
         run.steer = job.steer;
         run.resume = job.resume;
-        let outcome = run.run(&first);
+        let outcome = run.run(&first, &history);
         let status = match &outcome {
             Outcome::Done { .. } | Outcome::Answered { .. } => 0,
             _ => 1,
@@ -267,11 +302,11 @@ impl Runtime {
         // a paused job can carry on later, even after Chuck was closed; a finished one is done with
         let resume = match &outcome {
             Outcome::Paused { gaps } if run.mutated() || !gate.criteria.is_empty() || run.tasks_assigned() > 0 => {
-                let convo = if run.last_msgs.len() >= 2 { run.last_msgs.clone() } else {
-                    vec![serde_json::json!({"role": "system", "content": ""}), serde_json::json!({"role": "user", "content": first})]
+                let (convo, head) = if run.last_msgs.len() >= 2 { (run.last_msgs.clone(), run.last_head) } else {
+                    (vec![serde_json::json!({"role": "system", "content": ""}), serde_json::json!({"role": "user", "content": first})], 1)
                 };
                 let r = resume::Resume {
-                    ask: ask.clone(), folder: folder.display().to_string(), convo, gate: gate.clone(),
+                    ask: ask.clone(), folder: folder.display().to_string(), convo, head, gate: gate.clone(),
                     mutated: run.mutated(), checkpoint: checkpoint.clone(), tasks: run.tasks_assigned(),
                     why: run.paused_why.clone().unwrap_or_else(|| gaps.first().cloned().unwrap_or_default()),
                     gaps: gaps.clone(), spent_usd: resumed.as_ref().map_or(0.0, |r| r.spent_usd) + usd,

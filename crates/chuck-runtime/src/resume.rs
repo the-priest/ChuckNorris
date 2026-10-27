@@ -16,6 +16,9 @@ pub struct Resume {
     pub folder: String,
     /// The Lead's conversation so far.
     pub convo: Vec<Value>,
+    /// Where the task is in it (after any earlier turns of the chat).
+    #[serde(default = "one")]
+    pub head: usize,
     pub gate: DoneGate,
     /// The job had changed the folder.
     pub mutated: bool,
@@ -31,6 +34,10 @@ pub struct Resume {
     /// How many times it has been continued.
     pub runs: u32,
     pub saved_at: f64,
+}
+
+fn one() -> usize {
+    1
 }
 
 impl Resume {

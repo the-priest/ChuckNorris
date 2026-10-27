@@ -58,11 +58,16 @@ pub struct Convo {
     /// The task as given, kept apart so trimming notes never touch it.
     first: String,
     trimmed: usize,
+    /// Where the task is: after the system prompt and any earlier turns of
+    /// the conversation it continues. Nothing at or before it is trimmed.
+    head: usize,
 }
 
 /// Turns kept whole at the end of a conversation.
 const KEEP_RECENT: usize = 6;
 const ELIDED: &str = "elided to keep the context small";
+const TRIM_NOTE_END: &str = "earlier messages were trimmed to fit the context; the gate keeps every piece of evidence, so \
+    re-read files rather than relying on memory]";
 
 /// Keep the head and the tail of an over-long message (errors live at the
 /// end, what was asked lives at the start).
@@ -84,22 +89,74 @@ fn squeeze(s: &str, max: usize) -> String {
 
 impl Convo {
     pub fn new(system: &str, first: &str) -> Convo {
-        Convo { msgs: vec![json!({"role": "system", "content": system}), json!({"role": "user", "content": first})],
-                elided: 0, first: first.to_string(), trimmed: 0 }
+        Convo::with_history(system, &[], first)
     }
 
-    /// A conversation as it was saved (a paused job carrying on).
-    pub fn restore(msgs: Vec<Value>) -> Convo {
-        let first = msgs.get(1).and_then(|m| m["content"].as_str()).unwrap_or("").to_string();
-        Convo { msgs, elided: 0, first, trimmed: 0 }
+    /// The task as the next turn of a conversation: the earlier turns go in
+    /// as the real messages they were (a transcript pasted into one message
+    /// gets imitated: the model writes the user's next line itself).
+    pub fn with_history(system: &str, history: &[(bool, String)], first: &str) -> Convo {
+        let mut msgs = vec![json!({"role": "system", "content": system})];
+        for (user, text) in history {
+            msgs.push(json!({"role": if *user { "user" } else { "assistant" }, "content": text}));
+        }
+        msgs.push(json!({"role": "user", "content": first}));
+        let head = msgs.len() - 1;
+        Convo { msgs, elided: 0, first: first.to_string(), trimmed: 0, head }
+    }
+
+    /// A conversation as it was saved (a paused job carrying on); `head`:
+    /// where its task is.
+    pub fn restore(msgs: Vec<Value>, head: usize) -> Convo {
+        let head = head.clamp(1, msgs.len().saturating_sub(1).max(1));
+        let mut first = msgs.get(head).and_then(|m| m["content"].as_str()).unwrap_or("").to_string();
+        // the trimming note is the conversation's, not the task's: taken off,
+        // and its count kept, so a later trim says the total once
+        let mut trimmed = 0;
+        if let Some(at) = first.rfind("\n\n[") {
+            let note = &first[at + 3..];
+            if let Some(n) = note.strip_suffix(TRIM_NOTE_END).and_then(|n| n.split(' ').next()).and_then(|n| n.parse().ok()) {
+                trimmed = n;
+                first.truncate(at);
+            }
+        }
+        Convo { msgs, elided: 0, first, trimmed, head }
+    }
+
+    /// Where the task is (see `restore`).
+    pub fn head(&self) -> usize {
+        self.head
     }
 
     pub fn user(&mut self, text: &str) {
-        self.msgs.push(json!({"role": "user", "content": text}));
+        self.push("user", text);
     }
 
     pub fn assistant(&mut self, text: &str) {
-        self.msgs.push(json!({"role": "assistant", "content": text}));
+        self.push("assistant", text);
+    }
+
+    /// Turns alternate (a strict API refuses two of one side in a row, and
+    /// a model reads them as one anyway): a second note from the same side
+    /// joins the one before it; an empty one is left out.
+    fn push(&mut self, role: &str, text: &str) {
+        let text = if text.trim().is_empty() {
+            if role == "user" { return } else { "(no reply)" }
+        } else {
+            text
+        };
+        let last = self.msgs.len() - 1;
+        if last > 0 && self.msgs[last]["role"] == role {
+            if let Some(prev) = self.msgs[last]["content"].as_str() {
+                let joined = format!("{prev}\n\n{text}");
+                if last == self.head {
+                    self.first = format!("{}\n\n{text}", self.first);
+                }
+                self.msgs[last]["content"] = Value::String(joined);
+                return;
+            }
+        }
+        self.msgs.push(json!({"role": role, "content": text}));
     }
 
     fn chars(&self) -> usize {
@@ -113,12 +170,13 @@ impl Convo {
     /// only once per compaction, not on every call. Recent turns, the system
     /// prompt and the task are never touched; files are on disk to re-read.
     fn compact(&mut self, soft: usize) -> usize {
-        if self.chars() <= soft || self.msgs.len() <= 2 + KEEP_RECENT {
+        let from = self.head + 1;
+        if self.chars() <= soft || self.msgs.len() <= from + KEEP_RECENT {
             return 0;
         }
         let mut saved = 0;
         let end = self.msgs.len() - KEEP_RECENT;
-        for m in &mut self.msgs[2..end] {
+        for m in &mut self.msgs[from..end] {
             let text = m["content"].as_str().unwrap_or("").to_string();
             let limit = if m["role"] == "assistant" { 3000 } else { 1500 };
             if text.len() <= limit || text.contains(ELIDED) {
@@ -145,20 +203,21 @@ impl Convo {
     /// still too big on its own, keep its head and tail.
     pub fn fit(&mut self, max_chars: usize) {
         self.compact(max_chars / 2);
+        // pairs after the task go, oldest first (the roles keep alternating)
+        let (a, b) = (self.head + 1, self.head + 3);
         if self.chars() > max_chars {
-            while self.chars() > max_chars * 3 / 4 && self.msgs.len() > 4 {
-                self.msgs.drain(2..4);
+            while self.chars() > max_chars * 3 / 4 && self.msgs.len() > b {
+                self.msgs.drain(a..b);
                 self.trimmed += 2;
             }
         }
-        while self.chars() > max_chars && self.msgs.len() > 4 {
-            self.msgs.drain(2..4);
+        while self.chars() > max_chars && self.msgs.len() > b {
+            self.msgs.drain(a..b);
             self.trimmed += 2;
         }
         if self.trimmed > 0 {
-            let note = format!("[{} earlier messages were trimmed to fit the context; the gate keeps every \
-                piece of evidence, so re-read files rather than relying on memory]", self.trimmed);
-            self.msgs[1]["content"] = Value::String(format!("{}\n\n{note}", self.first));
+            let note = format!("[{} {TRIM_NOTE_END}", self.trimmed);
+            self.msgs[self.head]["content"] = Value::String(format!("{}\n\n{note}", self.first));
         }
         let total = self.chars();
         if total > max_chars {
@@ -456,6 +515,42 @@ mod tests {
         assert!(c.msgs.last().unwrap()["content"].as_str().unwrap().starts_with("result 9"));
         c.fit(1000);
         assert_eq!(c.msgs[1]["content"].as_str().unwrap().matches("trimmed").count(), 1);
+    }
+
+    #[test]
+    fn a_task_after_earlier_turns_is_kept_and_found_again_after_a_pause() {
+        let hist = vec![(true, "earlier question".to_string()), (false, "earlier answer".to_string())];
+        let mut c = Convo::with_history("sys", &hist, "the task");
+        assert_eq!(c.head(), 3);
+        // notes from one side in a row become one turn; an empty one is left out
+        c.user("note a");
+        c.user("  ");
+        assert_eq!(c.msgs.len(), 4);
+        assert!(c.msgs[3]["content"].as_str().unwrap().starts_with("the task\n\nnote a"));
+        for i in 0..10 {
+            c.assistant(&format!("reply {i} {}", "x".repeat(100)));
+            c.user(&format!("result {i} {}", "y".repeat(100)));
+        }
+        c.fit(1200);
+        let roles: Vec<&str> = c.msgs.iter().map(|m| m["role"].as_str().unwrap()).collect();
+        assert_eq!(&roles[..5], ["system", "user", "assistant", "user", "assistant"], "the earlier turns and the task stay");
+        assert!(roles.windows(2).skip(1).all(|w| w[0] != w[1]), "{roles:?}");
+        assert!(c.msgs[3]["content"].as_str().unwrap().starts_with("the task\n\nnote a\n\n["));
+        // paused and carried on: the task is where it was
+        let r = Convo::restore(c.msgs.clone(), c.head());
+        assert_eq!((r.head(), r.first.as_str(), r.trimmed), (3, "the task\n\nnote a", 14));
+        let mut r = r;
+        for i in 0..10 {
+            r.assistant(&format!("more {i} {}", "x".repeat(100)));
+            r.user(&format!("out {i} {}", "y".repeat(100)));
+        }
+        r.fit(1200);
+        let task = r.msgs[3]["content"].as_str().unwrap();
+        assert_eq!(task.matches("trimmed").count(), 1, "{task}");
+        assert!(task.contains("[34 earlier messages"), "{task}");
+        // a resume saved before there was a head (older files) still works
+        assert_eq!(Convo::restore(c.msgs.clone(), 1).head(), 1);
+        assert_eq!(Convo::restore(vec![], 9).head(), 1);
     }
 
     #[test]

@@ -45,9 +45,39 @@ impl Scripted {
     }
 }
 
+/// What a strict chat API refuses: after the system prompt, turns must
+/// alternate user / assistant, start with the user, end with the user (it
+/// is asked to reply), and none may be empty. A fake that accepts what the
+/// real one wouldn't hides bugs.
+pub fn shape_problem(req: &ChatRequest) -> Option<String> {
+    let turns: Vec<&serde_json::Value> = req.messages.iter().skip_while(|m| m["role"] == "system").collect();
+    if turns.iter().any(|m| m["role"] == "system") {
+        return Some("a system message after the conversation started".into());
+    }
+    let mut want = "user";
+    for (i, m) in turns.iter().enumerate() {
+        if m["role"] != want {
+            return Some(format!("message {i} is {} where a {want} turn belongs (roles must alternate)", m["role"]));
+        }
+        let empty = match &m["content"] {
+            serde_json::Value::String(t) => t.trim().is_empty(),
+            serde_json::Value::Array(a) => a.is_empty(),
+            _ => true,
+        };
+        if empty {
+            return Some(format!("message {i} ({want}) is empty"));
+        }
+        want = if want == "user" { "assistant" } else { "user" };
+    }
+    (want != "assistant").then(|| "the last message isn't the user's".into())
+}
+
 impl ChatModel for Scripted {
     fn chat(&self, req: &ChatRequest, sink: &mut dyn Sink) -> Result<Outcome, ModelError> {
         self.seen.lock().unwrap().push(req.clone());
+        if let Some(p) = shape_problem(req) {
+            return Err(ModelError::Http { status: 400, message: format!("invalid messages: {p}") });
+        }
         if sink.should_stop() {
             return Err(ModelError::Stopped);
         }
