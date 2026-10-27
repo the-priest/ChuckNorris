@@ -156,6 +156,43 @@ fn label(text: &str, classes: &[&str]) -> gtk::Label {
     l
 }
 
+/// A button that reads `text` aloud, and stops it while it reads (whether
+/// replies are read aloud by themselves or not: this is asked for).
+fn read_aloud(voice: &chuck_voice::Voice, status: &gtk::Label, text: &str) -> gtk::Button {
+    let b = gtk::Button::from_icon_name("chuck-speaker-symbolic");
+    b.add_css_class("flat");
+    b.add_css_class("read-aloud");
+    b.set_valign(gtk::Align::Center);
+    b.set_tooltip_text(Some("Read this aloud"));
+    let mine = Rc::new(std::cell::Cell::new(0u64));
+    let (voice, status, text) = (voice.clone(), status.clone(), text.to_string());
+    b.connect_clicked(move |b| {
+        if voice.speaking(mine.get()) {
+            voice.stop();
+            return;
+        }
+        let p = chuck_voice::Prefs::from(&Settings::load());
+        if voice.engine_for(&p).is_none() {
+            status.set_label(&format!("Can't read aloud: {}", voice.status(&p)));
+            return;
+        }
+        mine.set(voice.speak(&text, &p));
+        b.set_icon_name("chuck-stop-symbolic");
+        b.set_tooltip_text(Some("Stop reading"));
+        // back to "read" when it's done (or another one started)
+        let (b2, v2, m2) = (b.clone(), voice.clone(), mine.clone());
+        glib::timeout_add_local(Duration::from_millis(300), move || {
+            if v2.speaking(m2.get()) {
+                return glib::ControlFlow::Continue;
+            }
+            b2.set_icon_name("chuck-speaker-symbolic");
+            b2.set_tooltip_text(Some("Read this aloud"));
+            glib::ControlFlow::Break
+        });
+    });
+    b
+}
+
 fn markup(m: &str, classes: &[&str]) -> gtk::Label {
     let l = label("", classes);
     l.set_markup(m);
@@ -333,7 +370,10 @@ impl State {
                 av.set_xalign(0.5);
                 by.append(&av);
                 by.append(&label(if *chat { "Chuck" } else { "Lead" }, &["byline"]));
-                by.append(&label(model, &["byline-meta"]));
+                let meta = label(model, &["byline-meta"]);
+                meta.set_hexpand(true);
+                by.append(&meta);
+                by.append(&read_aloud(&self.voice, &self.ui.status, text));
                 col.append(&by);
                 let body = render(text);
                 body.set_margin_start(28);
@@ -380,6 +420,9 @@ impl State {
             Entry::Card { kind, class, text } => {
                 let (c, body, foot) = card(kind, class);
                 body.append(&render(text));
+                if let Some(head) = c.first_child().and_downcast::<gtk::Box>() {
+                    head.append(&read_aloud(&self.voice, &self.ui.status, text));
+                }
                 // a job that can't start over a limit: the way to the limits, right there
                 if text.contains("spending limit") {
                     let raise = gtk::Button::with_label("Spending limits…");
@@ -395,6 +438,9 @@ impl State {
             Entry::Paused { head, text } => {
                 let (c, body, foot) = card(head, "gap-card");
                 body.append(&render(text));
+                if let Some(h) = c.first_child().and_downcast::<gtk::Box>() {
+                    h.append(&read_aloud(&self.voice, &self.ui.status, text));
+                }
                 let btn = gtk::Button::with_label("Keep going");
                 btn.add_css_class("suggested-action");
                 btn.add_css_class("pill-sm");

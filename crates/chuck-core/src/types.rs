@@ -146,7 +146,7 @@ impl std::ops::BitOr for Caps {
 pub fn tool_cap(tool: &str) -> Option<Caps> {
     Some(match tool {
         "read" | "grep" | "glob" | "map" | "page" | "find" | "def" | "refs" | "look" => Caps::READ,
-        "write" | "edit" | "patch" | "rename" | "rmfile" => Caps::WRITE,
+        "write" | "append" | "edit" | "patch" | "rename" | "rmfile" => Caps::WRITE,
         // an MCP tool runs code outside Chuck: as much as a command
         "bash" | "sh" | "python" | "py" | "node" | "runtests" | "diagnose" | "mcp" => Caps::EXEC,
         "search" | "fetch" | "browse" => Caps::NET,

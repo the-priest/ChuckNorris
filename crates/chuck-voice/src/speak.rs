@@ -431,6 +431,8 @@ struct Inner {
 #[derive(Clone, Default)]
 pub struct Voice {
     gen: Arc<AtomicU64>,
+    /// The newest speech that has ended (finished, or stopped).
+    ended: Arc<AtomicU64>,
     inner: Arc<Mutex<Inner>>,
     /// Kokoro is used by one reply at a time.
     synth_lock: Arc<Mutex<()>>,
@@ -488,7 +490,13 @@ impl Voice {
 
     /// Silence, now.
     pub fn stop(&self) {
-        self.gen.fetch_add(1, Ordering::SeqCst);
+        let g = self.gen.fetch_add(1, Ordering::SeqCst) + 1;
+        self.ended.fetch_max(g, Ordering::SeqCst);
+    }
+
+    /// Is speech `gen` (what [`Voice::speak`] returned) still being spoken?
+    pub fn speaking(&self, gen: u64) -> bool {
+        gen != 0 && self.gen.load(Ordering::SeqCst) == gen && self.ended.load(Ordering::SeqCst) < gen
     }
 
     /// Stop and end Kokoro (the app is closing).
@@ -533,22 +541,28 @@ impl Voice {
         None
     }
 
-    /// Speak `text` in full; returns at once. Anything already speaking stops.
-    pub fn speak(&self, text: &str, p: &Prefs) {
+    /// Speak `text` in full; returns at once, with the speech's number for
+    /// [`Voice::speaking`] (0: nothing to say). Anything already speaking stops.
+    pub fn speak(&self, text: &str, p: &Prefs) -> u64 {
         let clean: String = clean::clean(text).chars().take(p.max_chars).collect();
         if clean.is_empty() {
-            return;
+            return 0;
         }
         let gen = self.gen.fetch_add(1, Ordering::SeqCst) + 1;
         let me = self.clone();
         let p = p.clone();
-        std::thread::Builder::new().name("speak".into()).spawn(move || {
+        let started = std::thread::Builder::new().name("speak".into()).spawn(move || {
             match me.engine_for(&p) {
                 Some("kokoro") => me.speak_kokoro(&clean, gen, &p),
                 Some(e) => me.speak_files(&clean, gen, &p, e),
                 None => {}
             }
-        }).ok();
+            me.ended.fetch_max(gen, Ordering::SeqCst);
+        });
+        if started.is_err() {
+            self.ended.fetch_max(gen, Ordering::SeqCst);
+        }
+        gen
     }
 
     fn scratch() -> PathBuf {

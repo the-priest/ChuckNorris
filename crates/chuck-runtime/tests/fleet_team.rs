@@ -391,3 +391,31 @@ fn a_whole_job_done_through_function_calls_alone() {
     assert!(plan.iter().all(|(_, d)| *d));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_file_too_big_for_one_reply_is_written_whole() {
+    // the length limit cuts a write call mid-file: what arrived is kept, and the model continues it as text
+    let dir = tmp("bigfile");
+    let model = Arc::new(Scripted::new().respond(|req| {
+        if text(&req.messages[0]) == chuck_runtime::prompts::CRITIC {
+            return "ACCEPT".into();
+        }
+        let last = last_user(req);
+        if last.contains("cut off by the length limit") {
+            assert!(req.tools.is_none(), "a continuation is text");
+            let so_far = req.messages.iter().rev().find(|m| m["role"] == "assistant").map(text).unwrap_or_default();
+            assert!(so_far.ends_with("```write big.js\nline 1\nline 2 \"q\"\n"), "{so_far}");
+            return "line 3\n```\n```test grep -q 'line 3' big.js```\n```done\nbig.js has all 3 lines (grep passes).\n```".into();
+        }
+        if req.messages.len() == 2 {
+            return "```criteria\n- big.js is whole :: verify: grep -q 'line 3' big.js\n```\n\
+                    @call write {\"path\": \"big.js\", \"content\": \"line 1\\nline 2 \\\"q\\\"\\n@cut".into();
+        }
+        "```done\nbig.js has all 3 lines (grep passes).\n```".into()
+    }));
+    let rt = Runtime::new(model, RuntimeConfig { store: dir.join("store"), ..RuntimeConfig::default() }, Events::none());
+    let (report, _) = run_within(30, rt, Job::new("write big.js", &dir));
+    assert!(matches!(report.outcome, Outcome::Done { .. }), "{:?}", report.outcome);
+    assert_eq!(std::fs::read_to_string(dir.join("big.js")).unwrap(), "line 1\nline 2 \"q\"\nline 3\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}

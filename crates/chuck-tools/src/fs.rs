@@ -189,6 +189,29 @@ pub fn write_file(root: &Path, rel: &str, content: &str) -> Result<Change, FsErr
     Ok(Change { rel: rel_of(root, &p), path: p, before, after: Some(data) })
 }
 
+/// Add to the end of a file (created when missing): a big file written in
+/// parts. The file's own line endings are kept.
+pub fn append_file(root: &Path, rel: &str, content: &str) -> Result<Change, FsError> {
+    let p = writable(root, rel)?;
+    if p.is_dir() {
+        return Err(FsError::Refused(format!("{rel} is a folder")));
+    }
+    let before = if p.is_file() {
+        Some(read_keep(&p).map_err(|e| FsError::Failed(format!("couldn't read {rel}: {e}")))?)
+    } else {
+        None
+    };
+    let mut whole = before.clone().unwrap_or_default();
+    // the part goes on a line of its own
+    if !whole.is_empty() && !whole.ends_with('\n') {
+        whole.push_str(eol_of(&whole));
+    }
+    whole.push_str(content);
+    let mut ch = write_file(root, rel, &whole)?;
+    ch.before = before;
+    Ok(ch)
+}
+
 fn rel_of(root: &Path, p: &Path) -> String {
     let base = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     p.strip_prefix(&base).map(|r| r.to_string_lossy().into_owned()).unwrap_or_else(|_| p.display().to_string())
@@ -217,6 +240,40 @@ fn loose_find(hay: &str, needle: &str) -> Option<(usize, usize)> {
     Some((start, end))
 }
 
+/// SEARCH text copied from a `read` page keeps its line numbers ("  229  if
+/// (x) {"): without them, when every line has one.
+fn without_line_numbers(search: &str) -> Option<String> {
+    static RX: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let rx = RX.get_or_init(|| regex::Regex::new(r"^\s*\d+  ").expect("valid regex"));
+    let lines: Vec<&str> = search.split('\n').collect();
+    if !lines.iter().filter(|l| !l.trim().is_empty()).all(|l| rx.is_match(l)) {
+        return None;
+    }
+    Some(lines.iter().map(|l| rx.replace(l, "").into_owned()).collect::<Vec<_>>().join("\n"))
+}
+
+/// Where in `text` the SEARCH was most likely meant: the lines around the
+/// best match of its first line, exactly as the file has them.
+fn nearest(text: &str, search: &str) -> Option<String> {
+    let want = search.lines().map(str::trim).find(|l| l.len() >= 3)?;
+    let lines: Vec<&str> = text.lines().collect();
+    let score = |l: &str| {
+        let l = l.trim();
+        if l == want { return usize::MAX; }
+        // words in common, then a shared start
+        let words = want.split(|c: char| !c.is_alphanumeric() && c != '_').filter(|w| w.len() > 1)
+            .filter(|w| l.contains(*w)).count();
+        words * 100 + l.chars().zip(want.chars()).take_while(|(a, b)| a == b).count()
+    };
+    let (i, best) = lines.iter().enumerate().map(|(i, l)| (i, score(l))).max_by_key(|(_, s)| *s)?;
+    if best < 100 {
+        return None;
+    }
+    let n = search.lines().count().max(1);
+    let (a, b) = (i.saturating_sub(2), (i + n + 2).min(lines.len()));
+    Some(format!("near line {}:\n{}", i + 1, lines[a..b].join("\n")))
+}
+
 /// Apply SEARCH/REPLACE blocks: all or nothing. An empty SEARCH on a file
 /// that doesn't exist creates it.
 pub fn edit_file(root: &Path, rel: &str, body: &str) -> Result<Change, FsError> {
@@ -239,12 +296,19 @@ pub fn edit_file(root: &Path, rel: &str, body: &str) -> Result<Change, FsError> 
         if search.trim().is_empty() {
             return Err(FsError::Refused(format!("block {n}: empty SEARCH on an existing file")));
         }
+        // quoted from a read page with its line numbers: the lines without them
+        let unnumbered = if text.contains(search.as_str()) { None } else { without_line_numbers(search) };
+        let search = unnumbered.as_ref().unwrap_or(search);
         match text.matches(search.as_str()).count() {
             1 => text = text.replacen(search.as_str(), repl, 1),
             0 => match loose_find(&text, search) {
                 Some((a, b)) => text = format!("{}{}{}", &text[..a], repl, &text[b..]),
-                None => return Err(FsError::Refused(format!(
-                    "block {n}: SEARCH text not found in {rel} — read the file and quote the current lines exactly"))),
+                None => return Err(FsError::Refused(match nearest(&text, search) {
+                    Some(near) => format!("block {n}: SEARCH text not found in {rel}. The file has, {near}\n\
+                        (quote those lines exactly, without line numbers)"),
+                    None => format!("block {n}: SEARCH text not found in {rel} — read the file and quote the current \
+                        lines exactly"),
+                })),
             },
             c => return Err(FsError::Refused(format!(
                 "block {n}: SEARCH matches {c} places in {rel} — include more surrounding lines so it is unique"))),
@@ -273,14 +337,30 @@ pub fn delete_file(root: &Path, rel: &str) -> Result<Change, FsError> {
 
 /// A page of a file: numbered lines `start..end` (1-based), at most `limit`
 /// characters, ending with the exact call for the next page when cut.
-pub fn read_page(root: &Path, spec: &str, limit: usize) -> Result<String, FsError> {
-    let (path, start, end) = match spec.rsplit_once(':') {
-        Some((p, range)) if range.chars().next().is_some_and(|c| c.is_ascii_digit()) => {
-            let (a, b) = range.split_once('-').unwrap_or((range, ""));
-            (p, a.parse().unwrap_or(1usize).max(1), b.parse().ok())
+/// `path`, `path:120`, `path:120-400`, and the other ways a range gets
+/// written (`path:120:400`, `path:120,400`, `path#L120-L400`, `path 120-400`):
+/// (path, first line, last line). A name that exists as written is a name.
+pub fn page_spec<'a>(root: &Path, spec: &'a str) -> (&'a str, usize, Option<usize>) {
+    static RX: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let rx = RX.get_or_init(|| regex::Regex::new(
+        r"^(.+?)(?::\s*|#L|\s+)(\d+)(?:\s*(?:-|:|,|\.\.)\s*L?(\d*))?$").expect("valid regex"));
+    let spec = spec.trim();
+    if root.join(spec).exists() {
+        return (spec, 1, None);
+    }
+    match rx.captures(spec) {
+        Some(c) => {
+            let path = c.get(1).map_or(spec, |m| m.as_str().trim_end());
+            let start = c[2].parse().unwrap_or(1usize).max(1);
+            let end = c.get(3).and_then(|m| m.as_str().parse().ok()).filter(|e| *e >= start);
+            (path, start, end)
         }
-        _ => (spec, 1usize, None),
-    };
+        None => (spec, 1, None),
+    }
+}
+
+pub fn read_page(root: &Path, spec: &str, limit: usize) -> Result<String, FsError> {
+    let (path, start, end) = page_spec(root, spec);
     let p = safe(root, path)?;
     let meta = fs::metadata(&p).map_err(|e| FsError::Failed(format!("{path}: {e}")))?;
     if meta.is_dir() {
@@ -370,6 +450,23 @@ mod tests {
     }
 
     #[test]
+    fn every_way_of_writing_a_range_reads_that_range() {
+        let r = tmp();
+        fs::create_dir_all(r.join("js")).unwrap();
+        fs::write(r.join("js/game.js"), (1..=10).map(|i| format!("line {i}\n")).collect::<String>()).unwrap();
+        fs::write(r.join("odd:3"), "a file named with a colon\n").unwrap();
+        for spec in ["js/game.js:3-5", "js/game.js:3:5", "js/game.js:3,5", "js/game.js#L3-L5", "js/game.js 3-5",
+                     "js/game.js:3..5", "js/game.js: 3 - 5"] {
+            let p = read_page(&r, spec, 4000).unwrap_or_else(|e| panic!("{spec}: {e:?}"));
+            assert!(p.contains("line 3") && p.contains("line 5") && !p.contains("line 6") && !p.contains("line 2\n"),
+                    "{spec}: {p}");
+        }
+        let one = read_page(&r, "js/game.js:1", 4000).unwrap();
+        assert!(one.contains("line 1") && one.contains("line 10"), "from line 1 on");
+        assert!(read_page(&r, "odd:3", 4000).unwrap().contains("a file named with a colon"), "a real name stays a name");
+    }
+
+    #[test]
     fn writes_stay_inside_the_folder() {
         let r = tmp();
         assert!(write_file(&r, "src/a.py", "x = 1\n").is_ok());
@@ -401,6 +498,19 @@ mod tests {
         let bad = "<<<<<<< SEARCH\nreturn 2\n=======\nreturn 3\n>>>>>>> REPLACE\n<<<<<<< SEARCH\nnope\n=======\nx\n>>>>>>> REPLACE";
         assert!(edit_file(&r, "a.py", bad).is_err());
         assert_eq!(fs::read_to_string(r.join("a.py")).unwrap(), "def f():\n    return 2\n");
+    }
+
+    #[test]
+    fn an_edit_quoted_with_line_numbers_applies_and_a_miss_shows_the_real_lines() {
+        let r = tmp();
+        fs::write(r.join("e.js"), "function clear() {\n  for (const row of full) {\n    rows.splice(row, 1);\n  }\n}\n").unwrap();
+        let numbered = "<<<<<<< SEARCH\n    2    for (const row of full) {\n    3      rows.splice(row, 1);\n=======\n  \
+            for (const row of full.sort()) {\n    rows.splice(row, 1);\n>>>>>>> REPLACE";
+        let ch = edit_file(&r, "e.js", numbered).unwrap();
+        assert!(ch.after.unwrap().contains("full.sort()"));
+        let miss = "<<<<<<< SEARCH\n  for (let row of full.sort()) {\n=======\nx\n>>>>>>> REPLACE";
+        let e = edit_file(&r, "e.js", miss).unwrap_err().to_string();
+        assert!(e.contains("near line 2") && e.contains("  for (const row of full.sort()) {"), "{e}");
     }
 
     #[test]

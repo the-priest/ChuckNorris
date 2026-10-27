@@ -101,7 +101,8 @@ impl Default for RuntimeConfig {
             fleet: FleetConfig::default(),
             reasoning: Reasoning::default(),
             native_tools: true,
-            max_tokens: 8192,
+            // a reply's ceiling, not its size (only what's written is billed): a big file fits in one
+            max_tokens: 32768,
             // no real cap: work ends when it's done, out of budget or stuck — never on a step count
             lead_steps: 1_000_000,
             worker_steps: 100_000,

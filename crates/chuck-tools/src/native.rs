@@ -54,7 +54,7 @@ fn tag_for(name: &str, tags: &[&str]) -> Option<String> {
     let n = name.trim().to_ascii_lowercase();
     let n = n.rsplit(['.', ':']).next().unwrap_or(&n).replace('-', "_");
     // files are written by any agent that can act (they are blocks of their own, not tags)
-    let has = |t: &str| tags.contains(&t) || (matches!(t, "write" | "edit" | "patch") && tags.contains(&"bash"));
+    let has = |t: &str| tags.contains(&t) || (matches!(t, "write" | "append" | "edit" | "patch") && tags.contains(&"bash"));
     if has(&n) {
         return Some(n);
     }
@@ -147,12 +147,12 @@ fn block(tag: &str, p: &Params) -> Option<String> {
                 _ => one(&path),
             })
         }
-        "write" => {
+        "write" | "append" => {
             let path = p.get(&["path", "file", "file_path", "filepath", "filename", "target_file"])?;
             // no content given: not an empty file by accident (the agent hears the call didn't run)
             let content = p.get(&["content", "contents", "text", "body", "data", "file_content", "code", "file_text"])?;
             let f = fence_for(&content);
-            Some(format!("{f}write {}\n{}{}{f}", path.trim(), content, if content.ends_with('\n') { "" } else { "\n" }))
+            Some(format!("{f}{tag} {}\n{}{}{f}", path.trim(), content, if content.ends_with('\n') { "" } else { "\n" }))
         }
         "edit" => {
             let path = p.get(&["path", "file", "file_path", "filepath", "filename", "target_file"])?;
@@ -227,6 +227,78 @@ pub fn call_block(name: &str, args: &str, tags: &[&str]) -> Option<String> {
     });
     let params = params_of_json(&serde_json::json!({ "arguments": v }));
     tag_for(name, tags).and_then(|t| block(&t, &params))
+}
+
+/// A JSON string value read up to where the text stops: (the value so far,
+/// whether it was closed).
+fn json_str_until(s: &str) -> (String, bool) {
+    let mut out = String::new();
+    let mut it = s.chars();
+    while let Some(c) = it.next() {
+        match c {
+            '"' => return (out, true),
+            '\\' => match it.next() {
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some('r') => out.push('\r'),
+                Some('b') => out.push('\u{8}'),
+                Some('f') => out.push('\u{c}'),
+                Some('u') => {
+                    let hex: String = it.by_ref().take(4).collect();
+                    if hex.len() < 4 {
+                        break; // cut inside the escape
+                    }
+                    let Ok(n) = u32::from_str_radix(&hex, 16) else { break };
+                    if (0xD800..0xDC00).contains(&n) {
+                        // a surrogate pair: the low half follows as \uXXXX
+                        let rest: String = it.by_ref().take(6).collect();
+                        let low = rest.strip_prefix("\\u").and_then(|h| u32::from_str_radix(h, 16).ok());
+                        match low {
+                            Some(l) => out.extend(char::from_u32(0x10000 + ((n - 0xD800) << 10) + (l - 0xDC00))),
+                            None => break,
+                        }
+                    } else {
+                        out.extend(char::from_u32(n));
+                    }
+                }
+                Some(o) => out.push(o),
+                None => break,
+            },
+            c => out.push(c),
+        }
+    }
+    (out, false)
+}
+
+/// The string value of `key` in JSON that may be cut short.
+fn partial_field(args: &str, keys: &[&str]) -> Option<(String, bool)> {
+    keys.iter().find_map(|k| {
+        let rx = re(&format!(r#""{}"\s*:\s*""#, regex::escape(k)));
+        rx.find(args).map(|m| json_str_until(&args[m.end()..]))
+    })
+}
+
+/// A call the length limit cut off (its arguments end mid-way), as the
+/// block it was becoming, left open so the model can continue it as text:
+/// a big file's write keeps every character that arrived. None: nothing
+/// usable arrived (or the tool takes no long body).
+pub fn partial_block(name: &str, args: &str, tags: &[&str]) -> Option<String> {
+    let tag = tag_for(name, tags)?;
+    let (key, keys): (&str, &[&str]) = match tag.as_str() {
+        "write" | "append" => ("path", &["content", "contents", "text", "body", "file_content", "code"]),
+        "bash" | "sh" => ("", &["command", "cmd", "script"]),
+        _ => return None,
+    };
+    let path = if key.is_empty() { String::new() } else {
+        let (p, closed) = partial_field(args, &["path", "file_path", "file", "filename"])?;
+        if !closed || p.trim().is_empty() {
+            return None; // not even the file's name arrived
+        }
+        p
+    };
+    let (body, _) = partial_field(args, keys).unwrap_or_default();
+    let f = fence_for(&body);
+    Some(format!("{f}{tag}{}{}\n{body}", if path.is_empty() { "" } else { " " }, path.trim()))
 }
 
 /// Rewrite every native call `tags` has a tool for as its fenced block;
@@ -391,7 +463,7 @@ fn tag_calls(text: &str, tags: &[&str]) -> (String, usize) {
         let b = if params.is_empty() {
             // `<tag arg>body</tag>`: the argument line and the body, as a block has them
             let (arg, body) = if bare.is_empty() && !body.contains('\n')
-                && !matches!(tag.as_str(), "bash" | "sh" | "write" | "edit" | "patch" | "submit" | "done" | "team") {
+                && !matches!(tag.as_str(), "bash" | "sh" | "write" | "append" | "edit" | "patch" | "submit" | "done" | "team") {
                 (body.trim().to_string(), String::new())
             } else {
                 (bare, body)
@@ -450,7 +522,7 @@ fn split_glued_openers(text: &str, tags: &[&str]) -> String {
             let rest = &line[at..].trim_start_matches('`');
             let tag_end = rest.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-')).unwrap_or(rest.len());
             let tag = &rest[..tag_end];
-            let known = tags.contains(&tag) || matches!(tag, "write" | "edit" | "patch");
+            let known = tags.contains(&tag) || matches!(tag, "write" | "append" | "edit" | "patch");
             // an opener: a known tag, and no closing fence after it on this line
             (known && !tag.is_empty() && !rest[tag_end..].contains("```")).then_some(at)
         });
@@ -504,6 +576,21 @@ mod tests {
         assert_eq!(normalize_calls(html, LEAD), (html.to_string(), 0));
         let (out, n) = normalize_calls("<read>", WORKER);
         assert_eq!((out.as_str(), n), ("<read>", 0), "a bare tag says nothing to run");
+    }
+
+    #[test]
+    fn a_call_cut_off_mid_file_keeps_what_arrived_as_an_open_block() {
+        let args = r#"{"path": "js/big.js", "content": "const a = \"x\";\nfunction f() {\n  return '\u00e9\ud83d\ude00';\n  // and so o"#;
+        let b = partial_block("write", args, WORKER).unwrap();
+        assert_eq!(b, "```write js/big.js\nconst a = \"x\";\nfunction f() {\n  return 'é😀';\n  // and so o");
+        // cut inside an escape: up to the escape
+        assert!(partial_block("write", r#"{"path": "a", "content": "ab\u00"#, WORKER).unwrap().ends_with("\nab"));
+        // the name not complete yet: nothing to continue
+        assert!(partial_block("write", r#"{"path": "js/bi"#, WORKER).is_none());
+        // a body holding a fence gets a longer one
+        assert!(partial_block("write", r#"{"path": "R.md", "content": "```sh\nls"#, WORKER).unwrap().starts_with("````write R.md\n"));
+        assert_eq!(partial_block("bash", r#"{"command": "for i in 1 2; do ech"#, WORKER).unwrap(), "```bash\nfor i in 1 2; do ech");
+        assert!(partial_block("read", r#"{"path": "a"#, WORKER).is_none());
     }
 
     #[test]

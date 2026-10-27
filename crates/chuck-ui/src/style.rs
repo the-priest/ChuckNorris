@@ -76,6 +76,8 @@ headerbar { background-color: @bg; border-bottom: 1px solid @line; box-shadow: n
 .modes button:checked { background-color: @accent_bg; color: @accent_hi; }
 .byline { color: @ink; font-size: 12.5px; font-weight: 700; }
 .byline-meta { color: @faint; font-size: 11px; }
+.read-aloud { min-height: 22px; min-width: 22px; padding: 0 4px; opacity: 0.55; }
+.read-aloud:hover { opacity: 1; }
 .avatar { background-color: #17151F; border: 1px solid alpha(@accent, 0.5); border-radius: 7px; color: @accent_hi;
           font-size: 11px; font-weight: 800; min-width: 20px; min-height: 20px; }
 .lane   { margin-left: 9px; border-left: 2px solid @line2; padding: 6px 0 6px 21px; }

@@ -37,10 +37,10 @@ fn re(p: &str) -> regex::Regex {
     regex::Regex::new(p).expect("valid regex")
 }
 
-/// `[ \t]*(```|````)(write|edit|patch)` not followed by a letter.
+/// `[ \t]*(```|````)(write|append|edit|patch)` not followed by a letter.
 fn file_fence(line: &str) -> Option<(String, String, String)> {
     static R: OnceLock<regex::Regex> = OnceLock::new();
-    let r = R.get_or_init(|| re(r"^[ \t]*(`{3,4})(write|edit|patch)(.*)$"));
+    let r = R.get_or_init(|| re(r"^[ \t]*(`{3,4})(write|append|edit|patch)(.*)$"));
     let c = r.captures(line)?;
     let rest = c.get(3).map_or("", |m| m.as_str());
     if rest.chars().next().is_some_and(|ch| ch.is_ascii_alphabetic()) {

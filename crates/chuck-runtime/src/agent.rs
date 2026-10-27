@@ -329,7 +329,8 @@ pub fn think_with(ctx: &Ctx, id: AgentId, model: &str, convo: &Convo, tags: &[&s
         let mut req = ChatRequest::new(model, msgs.clone());
         req.reasoning = ctx.cfg.reasoning;
         req.max_tokens = ctx.cfg.max_tokens;
-        req.tools = tools.clone();
+        // a continuation goes on as text (a cut function call can't be continued as one)
+        req.tools = if round == 0 { tools.clone() } else { None };
         let mut sink = AgentSink { id, ctx, t0: std::time::Instant::now(), thought: 0, wrote: 0, shown: None };
         let r = chuck_model::chat_interruptible(&ctx.model, &req, &mut sink);
         ctx.kernel.release(id);
@@ -375,14 +376,24 @@ pub fn think_with(ctx: &Ctx, id: AgentId, model: &str, convo: &Convo, tags: &[&s
                                        cached: usage.cached });
         text.push_str(&out.text);
         // what it called, as the blocks they mean (one a text block already carries isn't run twice)
-        for (name, args) in &out.calls {
-            let b = chuck_tools::native::call_block(name, args, tags).unwrap_or_else(|| {
-                // a call that can't be made into a block: kept as a call, so the agent hears it didn't run
-                format!("<tool_call>{}</tool_call>", json!({"name": name, "arguments": args}))
-            });
-            if !text.contains(&b) {
-                text.push_str(&format!("\n{b}\n"));
+        let n = out.calls.len();
+        for (i, (name, args)) in out.calls.iter().enumerate() {
+            if let Some(b) = chuck_tools::native::call_block(name, args, tags) {
+                if !text.contains(&b) {
+                    text.push_str(&format!("\n{b}\n"));
+                }
+                continue;
             }
+            // the last call, cut by the length limit mid-way (a big file): what arrived stays, as the
+            // open block it was becoming, and the next round continues it in text
+            if out.was_cut() && i + 1 == n {
+                if let Some(open) = chuck_tools::native::partial_block(name, args, tags) {
+                    text.push_str(&format!("\n{open}"));
+                    continue;
+                }
+            }
+            // a call that can't be made into a block: kept as a call, so the agent hears it didn't run
+            text.push_str(&format!("\n<tool_call>{}</tool_call>\n", json!({"name": name, "arguments": args})));
         }
         if !out.was_cut() || round == 2 {
             break;
@@ -394,6 +405,17 @@ pub fn think_with(ctx: &Ctx, id: AgentId, model: &str, convo: &Convo, tags: &[&s
     }
     ctx.kernel.note(id, "acting");
     Ok(text)
+}
+
+/// `text` with the project's own path, wherever it names it (a whole path
+/// component: `/p/proj` never matches inside `/p/proj2`), made the copy's.
+pub fn in_copy(text: &str, source: &std::path::Path, copy: &std::path::Path) -> String {
+    let src = source.display().to_string();
+    if src.len() < 2 || !text.contains(&src) {
+        return text.to_string();
+    }
+    let rx = regex::Regex::new(&format!(r#"{}(/|["'`\s:;)]|$)"#, regex::escape(&src))).expect("valid regex");
+    rx.replace_all(text, |c: &regex::Captures| format!("{}{}", copy.display(), &c[1])).into_owned()
 }
 
 /// The most a worker's conversation holds (characters).
@@ -470,6 +492,8 @@ pub fn run_worker(ctx: Ctx, w: WorkerSpec) {
             // calls in the model's own format (DeepSeek's DSML…) run as the blocks they mean
             let reply = chuck_tools::normalize_calls(&reply, WORKER_TAGS).0;
             let reply = chuck_tools::without_made_up_turns(&reply).to_string();
+            // the real project's path (as the Lead's brief names it) means the same place in the copy
+            let reply = in_copy(&reply, &w.ws.source, &w.ws.work);
             convo.assistant(&reply);
             let said = chuck_tools::prose(&reply, WORKER_TAGS);
             if !said.trim().is_empty() {
@@ -572,6 +596,14 @@ pub fn run_worker(ctx: Ctx, w: WorkerSpec) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_projects_path_means_the_copy() {
+        let (src, copy) = (std::path::Path::new("/home/u/chuck training"), std::path::Path::new("/c/work"));
+        assert_eq!(in_copy("```read /home/u/chuck training/js/a.js```", src, copy), "```read /c/work/js/a.js```");
+        assert_eq!(in_copy("cd \"/home/u/chuck training\" && ls", src, copy), "cd \"/c/work\" && ls");
+        assert_eq!(in_copy("ls /home/u/chuck training2/x", src, copy), "ls /home/u/chuck training2/x", "another folder");
+    }
 
     #[test]
     fn convo_trims_oldest_pairs_and_keeps_the_task() {

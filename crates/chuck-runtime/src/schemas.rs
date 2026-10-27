@@ -43,6 +43,8 @@ fn one(tag: &str) -> Option<Value> {
                            "end_line": json!({"type": "integer"})}), &["path"]),
         "write" => f("write", "Write a whole file (created or replaced).",
                      json!({"path": s("relative path"), "content": s("the complete file")}), &["path", "content"]),
+        "append" => f("append", "Add to the end of a file (a big file: write the first part, then append the rest).",
+                      json!({"path": s("relative path"), "content": s("what to add")}), &["path", "content"]),
         "edit" => f("edit", "Replace an exact, unique piece of a file.",
                     json!({"path": s("relative path"), "old_string": s("the current lines, exactly"),
                            "new_string": s("what replaces them")}), &["path", "old_string", "new_string"]),
@@ -101,7 +103,7 @@ fn one(tag: &str) -> Option<Value> {
 pub fn tools(tags: &[&str]) -> Value {
     let mut names: Vec<&str> = tags.iter().copied().filter(|t| *t != "sh").collect();
     if tags.contains(&"bash") {
-        names.extend(["write", "edit", "patch"]);
+        names.extend(["write", "append", "edit", "patch"]);
     }
     Value::Array(names.into_iter().filter_map(one).collect())
 }

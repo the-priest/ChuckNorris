@@ -85,6 +85,11 @@ impl ChatModel for Scripted {
         let queued = self.queues.lock().unwrap_or_else(|e| e.into_inner()).get_mut(&req.model).and_then(|q| q.pop_front());
         let queued = queued.or_else(|| self.shared.lock().unwrap_or_else(|e| e.into_inner()).pop_front());
         let text = queued.or_else(|| self.responder.as_ref().map(|f| f(req))).unwrap_or_else(|| "Done.".to_string());
+        // `@cut` at the end: the reply stops at the length limit there
+        let (text, cut) = match text.strip_suffix("@cut") {
+            Some(t) => (t.to_string(), true),
+            None => (text, false),
+        };
         // `@call name {json}` lines are function calls, as the API returns them when tools were offered
         let mut calls = Vec::new();
         let text = if req.tools.is_some() && text.contains("@call ") {
@@ -106,7 +111,7 @@ impl ChatModel for Scripted {
         Ok(Outcome {
             usage: Some(Usage { prompt: (req.sent_chars() / 4) as u64 + 50, completion: (text.len() / 4) as u64 + 5,
                                 cached: 0, reasoning: 0 }),
-            text, reasoning: String::new(), finish: Some(if calls.is_empty() { "stop" } else { "tool_calls" }.into()),
+            text, reasoning: String::new(), finish: Some(if cut { "length" } else if calls.is_empty() { "stop" } else { "tool_calls" }.into()),
             model: req.model.clone(), calls,
         })
     }

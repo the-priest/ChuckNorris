@@ -34,6 +34,8 @@ pub struct SiliconFlow {
     no_think_opts: Mutex<HashSet<String>>,
     /// Models whose server refused `tools`: asked without them since.
     no_tools: Mutex<HashSet<String>>,
+    /// The most `max_tokens` a model's server took, once it refused more.
+    max_cap: Mutex<std::collections::HashMap<String, u32>>,
     /// The longest a reply may go without a word before it is tried again.
     stall: Duration,
 }
@@ -65,6 +67,7 @@ impl SiliconFlow {
             no_stream_opts: AtomicBool::new(false),
             no_think_opts: Mutex::new(HashSet::new()),
             no_tools: Mutex::new(HashSet::new()),
+            max_cap: Mutex::new(Default::default()),
             stall: stall.max(Duration::from_secs(1)),
         })
     }
@@ -79,7 +82,8 @@ impl SiliconFlow {
             "messages": req.messages,
             "stream": true,
             "temperature": req.temperature.clamp(0.0, 1.5),
-            "max_tokens": req.max_tokens.clamp(256, 32768),
+            "max_tokens": req.max_tokens.clamp(256, 32768)
+                .min(self.max_cap.lock().unwrap().get(&req.model).copied().unwrap_or(u32::MAX)),
         });
         if !self.no_stream_opts.load(Ordering::Relaxed) {
             p["stream_options"] = json!({"include_usage": true});
@@ -172,6 +176,16 @@ impl ChatModel for SiliconFlow {
                     {
                         self.no_stream_opts.store(true, Ordering::Relaxed);
                         sink.notice(Notice::OptionDropped("stream_options"));
+                        continue;
+                    }
+                    // too long a reply asked for (or past the context with it): half as much, remembered
+                    let asked = payload["max_tokens"].as_u64().unwrap_or(0) as u32;
+                    if asked > 4096 && (low.contains("max_tokens") || low.contains("max_new_tokens")
+                        || low.contains("maximum context") || low.contains("context length"))
+                    {
+                        self.max_cap.lock().unwrap().insert(req.model.clone(), asked / 2);
+                        sink.notice(Notice::Retrying { attempt: 0, why: format!("the API takes fewer than {asked} \
+                            reply tokens: asking for {}", asked / 2) });
                         continue;
                     }
                     if payload.get("tools").is_some() && (low.contains("tool") || low.contains("function")) {

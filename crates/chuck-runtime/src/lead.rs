@@ -1302,6 +1302,10 @@ impl<'a> LeadRun<'a> {
                 fb.push(line);
             }
             let waiting = !self.open_tasks().is_empty();
+            // what was just assigned, reviewed or cancelled shows now, not when a worker next reports
+            if !self.tasks.is_empty() {
+                self.publish();
+            }
             // workers on it, nothing to review, nothing refused: the Lead's next turn is when one of
             // them hands in (or asks it something) — never a turn spent polling
             let mut waited = false;
@@ -1321,8 +1325,9 @@ impl<'a> LeadRun<'a> {
                 } else if promised(&said) && !nudged {
                     // "Let me look at the project first." with no tool: not an answer — don't stop there
                     nudged = true;
-                    fb.push("[you said what you'd do next but used no tool, so nothing happened — do it now with \
-                        the tools. If that reply was your whole answer to the user, say so plainly instead.]".into());
+                    fb.push("[you said what you'd do next but used no tool, so nothing happened. Do it now with the \
+                        tools — without repeating what you already said (the user has read it). If that reply was \
+                        your whole answer, say so in one line.]".into());
                 } else if !self.mutated && self.tasks.is_empty() && self.gate.lock().unwrap().criteria.is_empty() {
                     return Outcome::Answered { text: said.trim().to_string() };
                 } else if !self.mutated && self.tasks.is_empty() {

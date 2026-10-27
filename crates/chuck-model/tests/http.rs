@@ -62,6 +62,9 @@ fn handle(mut c: TcpStream, seen: Seen) {
         "nousage" if v.get("stream_options").is_some() => {
             return plain(&mut c, "400 Bad Request", r#"{"message":"unknown field stream_options"}"#)
         }
+        "bigask" if v["max_tokens"].as_u64().unwrap_or(0) > 16384 => {
+            return plain(&mut c, "400 Bad Request", r#"{"message":"max_tokens must be less than or equal to 16384"}"#)
+        }
         "notools" if v.get("tools").is_some() => {
             return plain(&mut c, "400 Bad Request", r#"{"message":"tools is not supported for this model"}"#)
         }
@@ -200,6 +203,18 @@ fn function_calls_come_back_whole_from_their_pieces() {
     assert_eq!(out.text, "Checking.");
     assert_eq!(out.calls, vec![("bash".to_string(), "{\"command\": \"ls -la\"}".to_string()),
                                ("read".to_string(), "{\"path\": \"a.rs\"}".to_string())]);
+}
+
+#[test]
+fn a_reply_ceiling_the_server_refuses_is_halved_and_remembered() {
+    let (base, seen) = serve();
+    let m = client(&base, 5);
+    let mut req = ChatRequest::new("deepseek-ai/DeepSeek-V4-Flash", vec![json!({"role": "user", "content": "bigask"})]);
+    req.max_tokens = 32768;
+    assert_eq!(m.chat(&req, &mut Collect::default()).unwrap().text, "the answer");
+    m.chat(&req, &mut Collect::default()).unwrap();
+    let s = seen.lock().unwrap();
+    assert_eq!(s.iter().map(|v| v["max_tokens"].as_u64().unwrap()).collect::<Vec<_>>(), vec![32768, 16384, 16384]);
 }
 
 #[test]

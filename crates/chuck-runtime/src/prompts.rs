@@ -53,7 +53,10 @@ pub fn worker() -> String {
 
 /// A worker's first message: who it is, its task, its team.
 pub fn worker_first(name: &str, model: &str, task: &Task, root: &str, roster: &str) -> String {
-    let mut s = format!("You are {name} ({model}).\n\n{}\n\nYour copy of the project: {root}", task_brief(task));
+    // the copy's own (long) path isn't shown: relative paths are shorter, and the same in every copy
+    let _ = root;
+    let mut s = format!("You are {name} ({model}).\n\n{}\n\nYou work in your own copy of the project: commands \
+        start in it, and paths are relative to it (js/game.js).", task_brief(task));
     if !roster.is_empty() {
         s.push_str("\n\n");
         s.push_str(roster);

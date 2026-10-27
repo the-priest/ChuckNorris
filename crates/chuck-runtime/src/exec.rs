@@ -421,7 +421,8 @@ impl<'a> Exec<'a> {
         for open in chuck_tools::unclosed(reply, tags) {
             res.malformed = true;
             res.feedback.push(format!("[NOT run: `{open}` was never closed with ``` (or ```` for a four-backtick \
-                block), so nothing in it was done — send it again, closed]"));
+                block), so nothing in it was done — send it again, closed. A file too big for one reply: ```write``` \
+                its first part, then ```append``` the rest a part at a time]"));
         }
         let mut items: Vec<(usize, Item)> = file_blocks(reply).into_iter().map(|b| (b.start, Item::File(b))).collect();
         items.extend(tool_blocks(reply, tags).into_iter().map(|b| (b.start, Item::Tool(b))));
@@ -483,6 +484,7 @@ impl<'a> Exec<'a> {
         let t0 = Instant::now();
         let r = match b.tag.as_str() {
             "write" => chuck_tools::write_file(&dir, &rel, &b.body),
+            "append" => chuck_tools::append_file(&dir, &rel, &b.body),
             "edit" => chuck_tools::edit_file(&dir, &rel, &b.body),
             _ => return self.patch(&b.body, all, res),
         };
