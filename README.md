@@ -83,8 +83,9 @@ happens on your computer, in front of you.
 5. **The team talks.** Workers post to a shared channel: what they provide ("`engine.js` exports
    `create(seed)`"), a file they need from another task, a question for the Lead. The right panel's
    **Team talk** shows every message. While workers build, the Lead waits: it wakes when one hands
-   in, asks it something, or you type. Until then it can look but not change your folder, so
-   nothing it does collides with their work. It can take a task back (`cancel`) and do it another way.
+   in, asks it something, or you type. The Lead is the boss: it can change any file at any time. A
+   worker on that file is told at once, and at the merge the Lead's version stands (an overlapping
+   change of the worker's is kept in `.chuck-conflicts/`). It can also take a task back (`cancel`).
 6. **Workers prove their work.** A worker can only hand in a task once every criterion has
    evidence, and the verification passed *after* its last change.
 7. **The Lead checks before anything reaches your folder.** It re-runs the verification on the

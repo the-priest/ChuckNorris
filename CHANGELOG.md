@@ -28,8 +28,12 @@ Chuck is now a Rust app (`crates/`), and the installer puts it over any earlier 
     is in the new **Team talk** section.
   - The Lead waits while workers build: no turn spent polling. It wakes on a submission, a message
     to it, or your words.
-  - Until the workers hand in, the Lead can't change the folder under them. ```` ```cancel tN``` ````
-    takes a task back.
+  - The Lead is the boss: it can change any file at any time. A worker on that file is told, and the
+    Lead's version stands at the merge. ```` ```cancel tN``` ```` takes a task back.
+  - Each agent's line shows what it is typing, live.
+  - **Chuck pops up** in the corner with what the Lead has to say: its news, its questions, the
+    finished job. His mouth moves while it's read aloud, and Settings › Voice turns him off.
+  - The Lead fixes a bug or small change itself instead of handing it out.
   - The plan ticks off a step when its task merges.
 - Tool calls in DeepSeek's own format (DSML, `<invoke>`, `<tool_call>`) run as the blocks they
   mean, for workers too. Before this, workers' calls were dropped, so the Lead ended up doing all

@@ -79,6 +79,8 @@ struct Ui {
     chat_btn: gtk::ToggleButton,
     mic: gtk::Button,
     speaker: gtk::ToggleButton,
+    /// Chuck himself, popping up with what the Lead has to say.
+    buddy: crate::buddy::Buddy,
     hero: gtk::Label,
     lede: gtk::Label,
     /// The Recent list on the left, and its search.
@@ -784,10 +786,15 @@ fn on_event(st: &mut State, e: Event, shared: &Shared) {
             }
         }
         Event::Said { id, text } => {
+            st.panel.stream_done(id); // its reply is whole: what follows is a new call
             let who = st.who(id);
             if st.is_lead(id) {
                 let model = st.models.get(&id).cloned().unwrap_or_default();
                 let chat = st.names.get(&id).is_some_and(|(n, _)| n == "chuck");
+                // the Lead's news mid-job (a chat's answer pops up whole when it's finished)
+                if !chat {
+                    buddy_says(st, &text, None);
+                }
                 st.add(Entry::Lead { text: text.clone(), model, chat });
                 st.save(); // a reply is never lost, even if the app is killed
             } else {
@@ -854,7 +861,8 @@ fn on_event(st: &mut State, e: Event, shared: &Shared) {
             st.panel.log(&who, format!("! {text}"));
             st.act(format!("<span foreground=\"#F5B454\">! {}: {}</span>", esc(&who), esc(&text)));
         }
-        Event::Usage { tokens, usd, prompt, cached, .. } => {
+        Event::Usage { id, tokens, usd, prompt, cached } => {
+            st.panel.stream_done(id); // a call ended: its words are in, nothing is being typed
             st.tokens += tokens;
             st.spent += usd;
             st.prompt += prompt;
@@ -895,6 +903,8 @@ fn on_event(st: &mut State, e: Event, shared: &Shared) {
                 title: v.title, url: v.url, thumb: v.thumb.map(|t| t.display().to_string()), length: v.length }).collect() });
         }
         Event::Ask { question, .. } => {
+            let speech = speak(st, &question);
+            buddy_says(st, &question, speech);
             let (c, body, foot) = card("THE LEAD ASKS", "ask-card");
             body.append(&render(&question));
             let entry = gtk::Entry::builder().hexpand(true).placeholder_text("Your answer").build();
@@ -923,6 +933,8 @@ fn on_event(st: &mut State, e: Event, shared: &Shared) {
             entry.grab_focus();
         }
         Event::Confirm { command, why, outside, .. } => {
+            buddy_says(st, &if outside.is_empty() { format!("I need your yes for a critical command: {why}") } else {
+                format!("I need your yes to reach outside the folder: {}", outside.join(", ")) }, None);
             let out = !outside.is_empty();
             let (c, body, foot) = if out { card("OUTSIDE THE FOLDER — MAY IT?", "ask-card") } else {
                 card("CRITICAL — NEEDS YOUR YES", "crit-card") };
@@ -982,7 +994,11 @@ fn on_event(st: &mut State, e: Event, shared: &Shared) {
             st.add(Entry::Handoff { request });
             st.save();
         }
-        Event::Finished(_) | Event::AgentEnded { .. } | Event::Thinking { .. } | Event::Delta { .. } | Event::Gate { .. } => {}
+        // what each agent is typing, live, for its line in the panel
+        Event::Thinking { id, chunk } => st.panel.stream(id, true, &chunk),
+        Event::Delta { id, chunk } => st.panel.stream(id, false, &chunk),
+        Event::AgentEnded { id, .. } => st.panel.stream_done(id),
+        Event::Finished(_) | Event::Gate { .. } => {}
     }
 }
 
@@ -1050,7 +1066,10 @@ fn finished(st: &mut State, report: JobReport, shared: &Shared) {
         st.saved.progress.board = board;
     }
     if matches!(report.outcome, Outcome::Done { .. } | Outcome::Answered { .. }) {
-        speak(st, &reply);
+        let speech = speak(st, &reply);
+        buddy_says(st, &reply, speech);
+    } else if matches!(report.outcome, Outcome::Paused { .. }) {
+        buddy_says(st, &format!("I had to stop. {}", reply.lines().next().unwrap_or("")), None);
     }
     if report.checkpoint.is_some() {
         st.saved.progress.checkpoint = report.checkpoint.clone();
@@ -1324,11 +1343,19 @@ fn speaker_look(b: &gtk::ToggleButton, on: bool) {
         "Read replies aloud" }));
 }
 
-/// Read a reply aloud, if that's on.
-fn speak(st: &State, text: &str) {
+/// Read a reply aloud, if that's on: the speech, for whoever moves with it.
+fn speak(st: &State, text: &str) -> Option<(chuck_voice::Voice, u64)> {
     let s = Settings::load();
     if st.ui.speaker.is_active() && s.map.get("tts").and_then(|v| v.as_bool()).unwrap_or(true) {
-        st.voice.speak(text, &chuck_voice::Prefs::from(&s));
+        return Some((st.voice.clone(), st.voice.speak(text, &chuck_voice::Prefs::from(&s))));
+    }
+    None
+}
+
+/// Chuck pops up with it (if he's on, in Settings › Voice).
+fn buddy_says(st: &State, text: &str, speech: Option<(chuck_voice::Voice, u64)>) {
+    if Settings::load().map.get("buddy").and_then(|v| v.as_bool()).unwrap_or(true) {
+        st.ui.buddy.say(text, speech);
     }
 }
 
@@ -1916,6 +1943,9 @@ fn settings_dialog(shared: &Shared) {
             (Kokoro) and voice input (Moonshine).").build();
     let tts = adw::SwitchRow::builder().title("Read replies aloud")
         .active(s.map.get("tts").and_then(|v| v.as_bool()).unwrap_or(true)).build();
+    let buddy_row = adw::SwitchRow::builder().title("Chuck pops up")
+        .subtitle("With what the Lead has to say: its news, its questions, the finished job")
+        .active(s.map.get("buddy").and_then(|v| v.as_bool()).unwrap_or(true)).build();
     let engines = [("auto", "Automatic (the most natural installed)"), ("kokoro", "Kokoro — natural"),
                    ("piper", "Piper"), ("espeak", "espeak-ng — robotic")];
     let engine = adw::ComboRow::builder().title("Engine")
@@ -1951,7 +1981,7 @@ fn settings_dialog(shared: &Shared) {
     let lstatus = adw::ActionRow::builder().title("Listening")
         .subtitle(md::escape(&chuck_voice::listen::status(s.str("mic_command").unwrap_or("")))).build();
     lstatus.set_subtitle_lines(2);
-    for r in [tts.upcast_ref::<gtk::Widget>(), engine.upcast_ref(), kvoice.upcast_ref(), speed.upcast_ref(),
+    for r in [tts.upcast_ref::<gtk::Widget>(), buddy_row.upcast_ref(), engine.upcast_ref(), kvoice.upcast_ref(), speed.upcast_ref(),
               vstatus.upcast_ref(), autosend.upcast_ref(), lstatus.upcast_ref()] {
         voice_group.add(r);
     }
@@ -2062,6 +2092,7 @@ fn settings_dialog(shared: &Shared) {
         }
         s.set("stealth_fetch", stealth.is_active().into());
         s.set("tts", tts.is_active().into());
+        s.set("buddy", buddy_row.is_active().into());
         s.set("check_updates", updates.is_active().into());
         s.set("voice_engine", engines[engine.selected() as usize].0.into());
         s.set("kokoro_voice", voices[kvoice.selected() as usize].0.into());
@@ -2285,6 +2316,8 @@ pub fn build(app: &adw::Application, opts: Options) {
     let overlay = gtk::Overlay::new();
     overlay.set_child(Some(&scroller));
     overlay.add_overlay(&jump);
+    let buddy = crate::buddy::Buddy::new();
+    overlay.add_overlay(&buddy.root);
     let stack = gtk::Stack::new();
     let (welcome_page, hero, lede) = welcome(slot.clone());
     // behind the welcome: the net of code glyphs that ripples where you click
@@ -2422,7 +2455,7 @@ pub fn build(app: &adw::Application, opts: Options) {
     let ui = Ui { window: window.clone(), stack, transcript, input: input.clone(), hint, send: send.clone(),
                   stop: stop.clone(), status, subtitle, meter, folder_btn: folder_btn.clone(), new_btn: new_btn.clone(),
                   fleet_btn: fleet_btn.clone(), chat_btn: chat_btn.clone(), mic: mic.clone(), speaker: speaker.clone(),
-                  hero, lede, chats: chats_list.clone(), chats_search: chats_search.clone() };
+                  hero, lede, chats: chats_list.clone(), chats_search: chats_search.clone(), buddy: buddy.clone() };
     // MCP servers start in the background: the window doesn't wait for them
     let mcp = Arc::new(chuck_mcp::Manager::new(chuck_mcp::config_path()));
     if mcp.configured() {

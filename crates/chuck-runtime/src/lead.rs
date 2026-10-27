@@ -466,6 +466,19 @@ impl<'a> LeadRun<'a> {
         Ok(id)
     }
 
+    /// The files running workers have changed in their copies: (path, who, task).
+    fn claimed(&self) -> Vec<(String, String, String)> {
+        let mut out = Vec::new();
+        for t in self.tasks.iter().filter(|t| matches!(t.state, TaskState::Running | TaskState::Review)) {
+            for w in t.workers.iter().filter_map(|id| self.workers.get(id)).filter(|w| w.live) {
+                for f in w.ws.changes().map(|c| c.into_keys().collect::<Vec<_>>()).unwrap_or_default() {
+                    out.push((f, w.name.clone(), t.task.id.clone()));
+                }
+            }
+        }
+        out
+    }
+
     /// Who else is on the job and on what, and what the team has said: a
     /// new worker's first picture of the others.
     fn roster(&self, me: &str) -> String {
@@ -1263,11 +1276,9 @@ impl<'a> LeadRun<'a> {
                                                        self.team.clone());
             // while workers build, the project is theirs: what the Lead changed under them would collide
             // with their merges (it looks, reviews and steers; ```cancel``` takes a task back)
-            let running: Vec<String> = self.tasks.iter().filter(|t| matches!(t.state, TaskState::Running | TaskState::Review))
-                .map(|t| t.task.id.clone()).collect();
-            let hold = (!running.is_empty()).then(|| format!("[refused: the workers are changing the project now ({}) \
-                — a change of yours would collide with their merges. Review what they hand in, guide them with \
-                ```team```, or take a task back with ```cancel tN <why>```; then change it yourself]", running.join(", ")));
+            // while workers build, the files they have changed: the Lead may change them too (it's the boss),
+            // and the worker on one hears it at once
+            let claimed = self.claimed();
             let exec = Exec { id: self.id, role: Role::Lead, kernel: &ctx.kernel, root: &root_dir, gate: &job_gate,
                               sandbox: Sandbox { access: ctx.cfg.access, bwrap: ctx.cfg.bwrap, worker: false },
                               approve: self.approver(), audit: ctx.cfg.audit.clone().map(|l| (l, "lead".into())),
@@ -1276,7 +1287,7 @@ impl<'a> LeadRun<'a> {
                               web: ctx.cfg.web.as_deref(), sources: ctx.cfg.sources,
                               mcp: ctx.cfg.mcp.as_deref(), lsp: ctx.cfg.lsp.as_deref(),
                               memory: ctx.cfg.memory.as_deref(), allowed_outside: Some(&outside),
-                              team: Some((&team, "lead")), hold, lent: &[] };
+                              team: Some((&team, "lead")), hold: None, lent: &[], claimed: &claimed };
             let r = exec.run(&reply);
             self.mutated |= r.mutated;
             let mut fb = r.feedback.clone();

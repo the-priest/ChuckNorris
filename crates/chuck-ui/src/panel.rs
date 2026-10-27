@@ -165,6 +165,8 @@ pub struct Panel {
     recent: VecDeque<Cmd>,
     recent_dirty: bool,
     agents_sig: String,
+    /// What each agent's call in flight has streamed lately: (thinking, the tail).
+    live: HashMap<AgentId, (bool, String)>,
 }
 
 impl Panel {
@@ -223,7 +225,7 @@ impl Panel {
                         research, searches: 0, pages: 0, gate,
                         gate_phase, gate_unmet, gate_criteria, spend, checkpoints, inbox, daemons, memory, steps: Vec::new(), finished: false,
                         logs: HashMap::new(), running: HashMap::new(), recent: VecDeque::new(), recent_dirty: false,
-                        agents_sig: String::new() };
+                        agents_sig: String::new(), live: HashMap::new() };
         p.plan.summary.set_label("no plan yet");
         p.tasks.summary.set_label("none");
         p.team.summary.set_label("quiet");
@@ -458,6 +460,37 @@ impl Panel {
 
     // ── agents ──
 
+    /// A piece of what an agent is thinking or writing right now.
+    pub fn stream(&mut self, id: AgentId, thinking: bool, chunk: &str) {
+        let e = self.live.entry(id).or_insert((thinking, String::new()));
+        if e.0 != thinking {
+            *e = (thinking, String::new()); // from thinking to writing: a new line of sight
+        }
+        e.1.push_str(chunk);
+        if e.1.len() > 600 {
+            let mut cut = e.1.len() - 300;
+            while !e.1.is_char_boundary(cut) {
+                cut += 1;
+            }
+            e.1.drain(..cut);
+        }
+    }
+
+    /// Its call ended: nothing is being typed until the next one.
+    pub fn stream_done(&mut self, id: AgentId) {
+        self.live.remove(&id);
+    }
+
+    /// The last line it is typing, as one line (the newest words win).
+    fn typing(&self, id: AgentId) -> Option<(bool, String)> {
+        let (thinking, t) = self.live.get(&id)?;
+        let line = t.trim_end().rsplit('\n').map(str::trim).find(|l| !l.is_empty())?;
+        let chars: Vec<char> = line.chars().collect();
+        let shown: String = if chars.len() > 70 { format!("…{}", chars[chars.len() - 70..].iter().collect::<String>()) }
+            else { line.to_string() };
+        Some((*thinking, shown))
+    }
+
     /// A line of what an agent did, for its own history.
     pub fn log(&mut self, who: &str, line: String) {
         let l = self.logs.entry(who.to_string()).or_default();
@@ -479,8 +512,9 @@ impl Panel {
             format!("{} active · {} finished · {}", active.len(), ended.len(), fmt_usd(usd))
         });
         // only rebuild when something visible changed (and only while open)
-        let sig: String = active.iter().map(|p| format!("{}{:?}{}{}{}", p.pid, p.state, p.activity, p.tokens,
-            self.logs.get(&p.name).map_or(0, |l| l.len()))).chain(std::iter::once(ended.len().to_string())).collect();
+        let sig: String = active.iter().map(|p| format!("{}{:?}{}{}{}{:?}", p.pid, p.state, p.activity, p.tokens,
+            self.logs.get(&p.name).map_or(0, |l| l.len()), self.typing(p.pid)))
+            .chain(std::iter::once(ended.len().to_string())).collect();
         if !self.agents.open() || sig == self.agents_sig {
             if !self.agents.open() {
                 self.agents_sig.clear();
@@ -532,8 +566,15 @@ impl Panel {
             if !p.brief.is_empty() && p.role != Role::Lead {
                 col.append(&label(&one_line(&p.brief, 48), &["panel-meta"]));
             }
-            // what it did last: the line that says what it is on
-            if let Some(last) = self.logs.get(&p.name).and_then(|l| l.back()) {
+            // what it is typing this moment, live: a line that moves is an agent at work
+            if let Some((thinking, line)) = self.typing(p.pid) {
+                let l = label(&format!("{} {line}", if thinking { "💭" } else { "✎" }), &["panel-typing"]);
+                l.set_wrap(false);
+                l.set_ellipsize(pango::EllipsizeMode::Start);
+                l.set_tooltip_text(Some(if thinking { "what it is thinking, live" } else { "what it is writing, live" }));
+                col.append(&l);
+            } else if let Some(last) = self.logs.get(&p.name).and_then(|l| l.back()) {
+                // what it did last: the line that says what it is on
                 let l = label(&one_line(last, 60), &["panel-dim"]);
                 l.set_wrap(false);
                 l.set_ellipsize(pango::EllipsizeMode::End);

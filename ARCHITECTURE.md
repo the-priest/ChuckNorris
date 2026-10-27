@@ -74,9 +74,11 @@ exists for whoever sets `fleet_glm_pool`; by default GLM is only the eyes.
 - **The Lead waits.** While a task runs and nothing waits for review, the Lead's
   next model call happens only when a worker submits or ends, a post is
   addressed to `@lead`, or the user types. A turn whose lead call was refused
-  is answered right away instead. While tasks run, the Lead's Exec has a
-  `hold`: writes are refused and commands run read-only. ```` ```cancel tN``` ````
-  stops a task's workers and fails the task.
+  is answered right away instead. The Lead may change any file at any time. When
+  a running worker has changed the same file in its copy, that worker is told at
+  once (a team post). At its merge the project's version stands, and an
+  overlapping change of the worker's is parked in `.chuck-conflicts/`.
+  ```` ```cancel tN``` ```` stops a task's workers, fails the task, and frees its files.
 - A worker thread that ends without a word, or a model call that panics, is
   reported to the Lead as a stopped task. It is never waited on.
 - Tools are also offered as API functions (`chuck-runtime::schemas`). A call comes back parsed and

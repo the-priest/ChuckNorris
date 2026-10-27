@@ -1,6 +1,7 @@
 //! chuck-ui — the GTK4 window: talk to the Lead, watch the whole fleet work
 //! in an organised side panel, see the Done gate fill in.
 
+mod buddy;
 mod chat;
 mod glyphs;
 mod icons;

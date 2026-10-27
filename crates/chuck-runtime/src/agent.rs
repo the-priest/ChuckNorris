@@ -507,7 +507,7 @@ pub fn run_worker(ctx: Ctx, w: WorkerSpec) {
                               web: ctx.cfg.web.as_deref(), sources: ctx.cfg.sources,
                               mcp: ctx.cfg.mcp.as_deref(), lsp: ctx.cfg.lsp.as_deref(),
                               memory: ctx.cfg.memory.as_deref(), allowed_outside: None,
-                              team: Some((&w.team, &w.name)), hold: None, lent: &w.lent };
+                              team: Some((&w.team, &w.name)), hold: None, lent: &w.lent, claimed: &[] };
             let r = exec.run(&reply);
             let mut fb = r.feedback.clone();
             if let Some(report) = &r.submit {

@@ -126,6 +126,37 @@ pub struct Exec<'a> {
     /// The project's own folders a worker's copy borrows (its dependencies,
     /// its history): shown read-only in the worker's jail.
     pub lent: &'a [std::path::PathBuf],
+    /// Files a running worker has changed in its copy (path, who, task): the
+    /// Lead may change them too (it's the boss), and that worker is told.
+    pub claimed: &'a [(String, String, String)],
+}
+
+impl Exec<'_> {
+    /// Who is changing `path` in their copy, if anyone (the Lead's view).
+    fn claimed_by(&self, path: &str) -> Option<&(String, String, String)> {
+        if self.claimed.is_empty() {
+            return None;
+        }
+        let base = self.root.canonicalize().unwrap_or_else(|_| self.root.to_path_buf());
+        let rel = chuck_tools::safe(self.root, path).ok()
+            .and_then(|p| p.strip_prefix(&base).ok().map(|r| r.to_string_lossy().into_owned()))
+            .unwrap_or_else(|| path.trim_start_matches("./").to_string());
+        self.claimed.iter().find(|(f, _, _)| *f == rel)
+    }
+
+    /// The Lead changed a file a worker is changing too: the Lead is the boss, so it stands, and the
+    /// worker hears it at once (at its merge the Lead's version stays; an overlapping one of its own is
+    /// set aside in .chuck-conflicts/).
+    fn overrule(&self, c: &(String, String, String), res: &mut StepResult) {
+        let note = format!("the Lead changed {} in the project while you work on it. The project's version wins: \
+            build on it (read it again from the project if you need it) — your overlapping change would be set aside", c.0);
+        if let Some((team, me)) = self.team {
+            team.post(me, Some(&c.1), &note);
+            self.events.emit(Event::Team { from: me.to_string(), to: Some(c.1.clone()), text: note });
+        }
+        res.feedback.push(format!("[note: {} is changing {} too ({}); it was told yours stands — at its merge an \
+            overlapping change of its own goes to .chuck-conflicts/]", c.1, c.0, c.2));
+    }
 }
 
 /// The environment a command in a copy with a borrowed virtualenv needs:
@@ -460,6 +491,9 @@ impl<'a> Exec<'a> {
             res.feedback.push(e);
             return;
         }
+        if let Some(c) = (b.tag != "patch").then(|| self.claimed_by(&b.path)).flatten() {
+            self.overrule(c, res);
+        }
         if let Err(e) = self.allowed("write", &b.path).and_then(|_| self.mutation_ok()) {
             self.act(&b.tag, &b.path, false, &e);
             res.feedback.push(e);
@@ -517,6 +551,9 @@ impl<'a> Exec<'a> {
                 return;
             }
         };
+        for c in plan.iter().filter_map(|(rel, ..)| self.claimed_by(rel)) {
+            self.overrule(c, res);
+        }
         if let Some(rel) = plan.iter().find(|(rel, ..)| self.sandbox.access != Access::Full
             && chuck_tools::safe(self.root, rel).is_ok_and(|p| secret_path(&p))).map(|p| p.0.clone())
         {

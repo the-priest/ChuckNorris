@@ -119,12 +119,11 @@ fn workers_talk_and_the_lead_waits_answers_and_merges() {
     assert!(matches!(report.outcome, Outcome::Done { .. }), "{:?}", report.outcome);
     let events: Vec<Event> = rx.try_iter().collect();
 
-    // both merged; the Lead's own write under the workers was refused and never landed
+    // both merged; a file no worker touches was the Lead's to write while they built
     assert!(dir.join("engine.js").exists() && dir.join("server.js").exists());
-    assert!(!dir.join("hack.txt").exists());
+    assert_eq!(std::fs::read_to_string(dir.join("hack.txt")).unwrap(), "mine\n");
     let seen = model.seen.lock().unwrap();
     let lead: Vec<&ChatRequest> = seen.iter().filter(|r| is_lead(r)).collect();
-    assert!(lead.iter().any(|r| last_user(r).contains("the workers are changing the project now")));
     // it woke for the question, the submissions and the end: never just to say "Waiting."
     assert!(lead.len() <= 6, "the Lead polled: {} turns", lead.len());
     assert!(!lead.iter().any(|r| r.messages.iter().any(|m| m["role"] == "assistant" && text(m) == "Waiting.")),
@@ -417,5 +416,55 @@ fn a_file_too_big_for_one_reply_is_written_whole() {
     let (report, _) = run_within(30, rt, Job::new("write big.js", &dir));
     assert!(matches!(report.outcome, Outcome::Done { .. }), "{:?}", report.outcome);
     assert_eq!(std::fs::read_to_string(dir.join("big.js")).unwrap(), "line 1\nline 2 \"q\"\nline 3\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_lead_is_the_boss_its_change_stands_and_the_worker_is_told() {
+    let dir = tmp("claims");
+    std::fs::write(dir.join("a.txt"), "a0\n").unwrap();
+    std::fs::write(dir.join("b.txt"), "b0\n").unwrap();
+    let model = Arc::new(Scripted::new().respond(|req| {
+        if text(&req.messages[0]) == chuck_runtime::prompts::CRITIC {
+            return "ACCEPT".into();
+        }
+        if !worker(req).is_empty() {
+            if req.messages.len() == 2 {
+                return "```write a.txt\na1\n```\n```team @lead a.txt is written; checking it next```".into();
+            }
+            if heard(req, "the Lead changed a.txt") && !heard(req, "submission") {
+                return "```test grep -qx a1 a.txt```\n```submit\na.txt says a1\n```".into();
+            }
+            std::thread::sleep(Duration::from_millis(100));
+            return "```read a.txt```".into();
+        }
+        let last = last_user(req);
+        if req.messages.len() == 2 {
+            return "```criteria\n- b says b1 :: verify: grep -qx b1 b.txt\n```\n\
+                ```plan\n- t1: a\n- b\n```\n```assign worker\ntitle: a\ncriteria:\n- a says a1 :: verify: grep -qx a1 \
+                a.txt\nbrief: a.txt only\n```".into();
+        }
+        if last.contains("ds-1 → lead: a.txt is written") {
+            // a.txt is ds-1's file too: the Lead changes it anyway, and b.txt
+            return "```write a.txt\nmine\n```\n```write b.txt\nb1\n```".into();
+        }
+        if last.contains("SUBMISSION t1") {
+            return "```review t1 accept\nok\n```".into();
+        }
+        if heard(req, "t1 accepted") {
+            return "```test grep -qx b1 b.txt```\n```justify proportion\none line\n```\n\
+                ```done\nb says b1 (grep passes); a.txt kept the Lead's version.\n```".into();
+        }
+        "Waiting.".into()
+    }));
+    let rt = Runtime::new(model.clone(), RuntimeConfig { store: dir.join("store"), ..RuntimeConfig::default() },
+                          Events::none());
+    let (report, _) = run_within(30, rt, Job::new("set a and b", &dir));
+    assert!(matches!(report.outcome, Outcome::Done { .. }), "{:?}", report.outcome);
+    assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "mine\n", "the boss's version stands");
+    assert_eq!(std::fs::read_to_string(dir.join("b.txt")).unwrap(), "b1\n");
+    assert!(dir.join(".chuck-conflicts").exists(), "the worker's overlapping version is set aside, not lost");
+    let seen = model.seen.lock().unwrap();
+    assert!(seen.iter().filter(|r| is_lead(r)).any(|r| last_user(r).contains("ds-1 is changing a.txt too (t1)")));
     let _ = std::fs::remove_dir_all(&dir);
 }

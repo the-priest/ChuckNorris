@@ -78,6 +78,10 @@ headerbar { background-color: @bg; border-bottom: 1px solid @line; box-shadow: n
 .byline-meta { color: @faint; font-size: 11px; }
 .read-aloud { min-height: 22px; min-width: 22px; padding: 0 4px; opacity: 0.55; }
 .read-aloud:hover { opacity: 1; }
+.buddy-bubble { background-color: #1E1B2B; color: @ink; border: 1px solid alpha(@accent, 0.55);
+                border-radius: 14px 14px 4px 14px; padding: 10px 13px; font-size: 13px;
+                box-shadow: 0 6px 22px alpha(black, 0.45); margin-bottom: 26px; }
+.panel-typing { color: alpha(@accent_hi, 0.85); font-family: monospace; font-size: 11px; }
 .avatar { background-color: #17151F; border: 1px solid alpha(@accent, 0.5); border-radius: 7px; color: @accent_hi;
           font-size: 11px; font-weight: 800; min-width: 20px; min-height: 20px; }
 .lane   { margin-left: 9px; border-left: 2px solid @line2; padding: 6px 0 6px 21px; }
