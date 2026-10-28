@@ -107,9 +107,13 @@ impl Default for RuntimeConfig {
     fn default() -> RuntimeConfig {
         RuntimeConfig {
             models: Models::default(),
-            reasoning: Reasoning::default(),
+            // DeepSeek's Flash models think by default, and in a tool loop that is where a job's time goes
+            // (and, at worst, a whole budget thought through with nothing said): off unless asked for
+            reasoning: Reasoning { budget: 0, ..Reasoning::default() },
             ask_wait: crate::lead::ASK_WAIT,
-            native_tools: true,
+            // calls written as fenced blocks: a file goes out as itself, not JSON-escaped (fewer tokens),
+            // and a reply cut mid-file continues as text. Function calls stay an option (Settings)
+            native_tools: false,
             debug: false,
             // a reply's ceiling, not its size (only what's written is billed): a big file fits in one
             max_tokens: 32768,

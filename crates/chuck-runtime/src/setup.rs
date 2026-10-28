@@ -40,6 +40,20 @@ pub fn access_of(s: &Settings, folder: &Path) -> Access {
     }).and_then(|(_, v)| v.as_str()).map_or(Access::Guarded, Access::parse)
 }
 
+/// Once: thinking off and calls as text — the settings a faster Chuck starts
+/// from (a reasoning level saved before was the old default for most). Turning
+/// either back on in Settings sticks; this never runs twice.
+pub fn migrate() {
+    let mut s = Settings::load();
+    if s.map.contains_key("fast_v2") {
+        return;
+    }
+    s.set("reasoning_budget", 0.into());
+    s.set("native_tools", false.into());
+    s.set("fast_v2", true.into());
+    let _ = s.save();
+}
+
 /// The models, from the settings (`fleet_deepseek_model` / `fleet_glm_model`:
 /// the names older versions saved them under).
 pub fn models(s: &Settings) -> Models {
@@ -118,12 +132,12 @@ pub fn from_settings(s: &Settings, folder: &Path, max_usd: Option<f64>) -> Resul
         }
     }
     // the tools as functions the API parses (off: every call written as a fenced block)
-    cfg.native_tools = s.map.get("native_tools").and_then(|v| v.as_bool()).unwrap_or(true);
+    cfg.native_tools = s.map.get("native_tools").and_then(|v| v.as_bool()).unwrap_or(false);
     cfg.debug = s.map.get("debug").and_then(|v| v.as_bool()).unwrap_or(false);
     // what gets in the agents' way is written down (always: it costs nothing), for it to be fixed
     chuck_store::snags::set_path(Some(chuck_store::snags::default_path()));
     cfg.reasoning = Reasoning {
-        budget: s.num("reasoning_budget", 2048.0, 0.0, 32768.0) as u32,
+        budget: s.num("reasoning_budget", 0.0, 0.0, 32768.0) as u32,
         max_think_secs: s.num("max_think_seconds", 90.0, 0.0, 1800.0) as u32,
     };
     let mut usd = max_usd.unwrap_or_else(|| s.num("fleet_job_usd", 2.0, 0.01, 1000.0));

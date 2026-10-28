@@ -60,7 +60,7 @@ fn a_whole_job_done_through_function_calls_alone() {
         }
         "Hmm.".into()
     }));
-    let rt = Runtime::new(model.clone(), RuntimeConfig { store: dir.join("store"), ..RuntimeConfig::default() },
+    let rt = Runtime::new(model.clone(), RuntimeConfig { store: dir.join("store"), native_tools: true, ..RuntimeConfig::default() },
                           Events::none());
     let (report, _) = run_within(30, rt, Job::new("make the game module", &dir));
     assert!(matches!(report.outcome, Outcome::Done { .. }), "{:?}", report.outcome);
@@ -126,7 +126,7 @@ fn a_file_too_big_for_one_reply_is_written_whole() {
         }
         "```done\nbig.js has all 3 lines (grep passes).\n```".into()
     }));
-    let rt = Runtime::new(model, RuntimeConfig { store: dir.join("store"), ..RuntimeConfig::default() }, Events::none());
+    let rt = Runtime::new(model, RuntimeConfig { store: dir.join("store"), native_tools: true, ..RuntimeConfig::default() }, Events::none());
     let (report, _) = run_within(30, rt, Job::new("write big.js", &dir));
     assert!(matches!(report.outcome, Outcome::Done { .. }), "{:?}", report.outcome);
     assert_eq!(std::fs::read_to_string(dir.join("big.js")).unwrap(), "line 1\nline 2 \"q\"\nline 3\n");
@@ -207,7 +207,7 @@ fn alone_one_model_builds_it_in_one_reply() {
 }
 
 #[test]
-fn alone_it_thinks_to_plan_and_to_debug_not_to_carry_on() {
+fn with_reasoning_on_it_thinks_to_plan_and_to_debug_not_to_carry_on() {
     let dir = tmp("solo-think");
     let model = Arc::new(Scripted::new().respond(|req| {
         match req.messages.iter().filter(|m| m["role"] == "assistant").count() {
@@ -217,7 +217,8 @@ fn alone_it_thinks_to_plan_and_to_debug_not_to_carry_on() {
             _ => "```test grep -qx A a.txt```\n```done\na.txt holds A.\n```".into(),
         }
     }));
-    let rt = Runtime::new(model.clone(), RuntimeConfig { store: dir.join("store"), ..RuntimeConfig::default() },
+    let rt = Runtime::new(model.clone(), RuntimeConfig { store: dir.join("store"),
+                                                          reasoning: chuck_model::Reasoning::default(), ..RuntimeConfig::default() },
                           Events(None));
     let (report, _) = run_within(20, rt, Job::new("a holds A", &dir));
     assert!(matches!(report.outcome, Outcome::Done { .. }), "{:?}", report.outcome);
@@ -238,7 +239,7 @@ fn a_file_is_shown_as_it_is_written_by_call_or_by_block() {
     let second = "```write b.js\nlet b = 1;\nlet c = 2;\n```\n```test test -f a.js && test -f b.js```\n```done\na.js and b.js.\n```";
     let model = Arc::new(Scripted::new().replies([first, second.to_string()]));
     let (tx, rx) = channel();
-    let rt = Runtime::new(model, RuntimeConfig { store: dir.join("store"), ..RuntimeConfig::default() }, Events(Some(tx)));
+    let rt = Runtime::new(model, RuntimeConfig { store: dir.join("store"), native_tools: true, ..RuntimeConfig::default() }, Events(Some(tx)));
     let (report, _) = run_within(20, rt, Job::new("write a and b", &dir));
     assert!(matches!(report.outcome, Outcome::Done { .. }), "{:?}", report.outcome);
     assert_eq!(std::fs::read_to_string(dir.join("a.js")).unwrap().lines().count(), 120);
@@ -369,4 +370,29 @@ fn a_pasted_screenshot_reaches_chuck_as_what_the_eyes_saw() {
     assert!(first.contains("why does it break?") && first.contains("TypeError: board is undefined")
             && first.contains(&shot.display().to_string()), "{first}");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn by_default_it_never_thinks_writes_calls_as_text_and_knows_the_folder() {
+    // as Basilisk runs DeepSeek: no thinking (a tool loop's time goes there), calls as text (a file isn't
+    // JSON-escaped), and the folder's files up front (no round trip spent listing them)
+    let dir = tmp("defaults");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/game.js"), "let board = [];\n").unwrap();
+    let model = Arc::new(Scripted::new().respond(|_| {
+        "```criteria\n- game.js has the board :: verify: grep -q board src/game.js\n```\n\
+         ```test grep -q board src/game.js```\n```done\nsrc/game.js has the board.\n```".into()
+    }));
+    let (report, _) = run_within(20, solo_rt(model.clone(), &dir), Job::new("check the board", &dir));
+    assert!(matches!(report.outcome, Outcome::Done { .. }), "{:?}", report.outcome);
+    let seen = model.seen.lock().unwrap();
+    let r = &seen[0];
+    assert_eq!(r.reasoning.budget, 0, "no thinking");
+    assert!(r.tools.is_none(), "no function schemas: the calls are written as text");
+    assert!(text(&r.messages[0]).contains("THE PROJECT'S FILES NOW") && text(&r.messages[0]).contains("src/game.js"));
+    let _ = std::fs::remove_dir_all(&dir);
+    // an empty folder says so: there is nothing to look at first
+    let empty = tmp("empty");
+    assert!(chuck_runtime::prompts::folder_view(&empty).starts_with("THE FOLDER IS EMPTY"));
+    let _ = std::fs::remove_dir_all(&empty);
 }

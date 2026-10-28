@@ -15,4 +15,4 @@ pub use snapshot::{changes_between, diff_between, ChangeKind, Snapshot};
 pub use fs::{append_file, delete_file, edit_file, read_page, safe, unified, write_file, Change, FsError};
 pub use run::{bash, kill_all, kill_env, kill_session, pids_with_env, running, session, session_pids, tag, RunOpts, RunResult, Service, Wrap,
     SESSION_VAR};
-pub use search::{fingerprint, glob, grep};
+pub use search::{fingerprint, glob, grep, listing};

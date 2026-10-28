@@ -14,6 +14,25 @@ fn walk(root: &Path) -> impl Iterator<Item = walkdir::DirEntry> {
         .filter(|e| e.file_type().is_file())
 }
 
+/// The folder's files at a glance, shallowest first (at most `max`, three
+/// folders deep; dependencies and build output left out), and how many more
+/// there are past those. Cheap on any folder: it stops looking at `max * 20`.
+pub fn listing(root: &Path, max: usize) -> (Vec<String>, usize) {
+    let seen: Vec<(usize, String)> = walkdir::WalkDir::new(root).follow_links(false).max_depth(3)
+        .sort_by_file_name().into_iter()
+        .filter_entry(|e| e.depth() == 0 || !(e.file_type().is_dir()
+            && SKIP.contains(&e.file_name().to_string_lossy().as_ref())))
+        .flatten().filter(|e| e.file_type().is_file())
+        .filter_map(|e| Some((e.depth(), e.path().strip_prefix(root).ok()?.to_string_lossy().into_owned())))
+        .take(max * 20).collect();
+    let mut files = seen;
+    files.sort();
+    let more = files.len().saturating_sub(max);
+    let mut shown: Vec<String> = files.into_iter().take(max).map(|(_, p)| p).collect();
+    shown.sort();
+    (shown, more)
+}
+
 const BINARY_EXT: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "ico", "pdf", "zip", "gz", "xz", "zst", "so",
     "o", "a", "bin", "pyc", "lock", "woff", "woff2", "ttf", "mp3", "mp4", "onnx", "wasm"];
 
@@ -121,6 +140,11 @@ mod tests {
         assert_eq!(grep(&d, r"^\s+pass_", "", 10).unwrap(), "src/c.py:2:    pass_through()");
         assert_eq!(grep(&d, r"retry\(\):$", "", 10).unwrap(), "src/a.py:1:def retry():");
         assert_eq!(glob(&d, "*.py", 10).unwrap(), "src/a.py\nsrc/c.py");
+        // the listing: shallowest first, dependencies left out, the rest counted
+        let (files, more) = listing(&d, 2);
+        assert_eq!((files, more), (vec!["src/a.py".to_string(), "src/c.py".to_string()], 0));
+        let (files, more) = listing(&d, 1);
+        assert_eq!((files.len(), more), (1, 1));
         let f1 = fingerprint(&d);
         assert_eq!(f1, fingerprint(&d));
         std::thread::sleep(std::time::Duration::from_millis(10));

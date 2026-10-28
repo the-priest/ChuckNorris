@@ -2,6 +2,12 @@
 
 ## Unreleased — one fast model
 
+- **Fast like Basilisk.** Chuck now runs DeepSeek-V4.1-Flash the way Basilisk does: thinking off on
+  every turn (in a tool loop it is where a job's time goes), and tool calls written as text rather
+  than API functions (a file goes out as itself instead of JSON-escaped, and a reply cut mid-file
+  continues cleanly). Existing installs switch once; both can be turned back on in Settings.
+- The project's files are in Chuck's first message, so the first reply builds instead of spending
+  a round trip on `ls`.
 - **The fleet is gone.** One model (DeepSeek-V4.1-Flash) does the whole job: criteria, code,
   checks and done, usually in its first reply. No workers, tasks, reviews, merges or critic.
 - **Faster.** Every turn gets the full reply budget: a turn after one that only looked was capped

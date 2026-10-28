@@ -76,6 +76,18 @@ pub const MEMORY_TOOLS: &str = "\
 only what the user would want kept: their setup, preferences, names, standing instructions
 ```forget <what>```               drop facts that match";
 
+/// The project as it is when the job starts, so the first reply can build at
+/// once instead of spending a round trip listing it.
+pub fn folder_view(root: &std::path::Path) -> String {
+    let (files, more) = chuck_tools::listing(root, 120);
+    if files.is_empty() {
+        return "THE FOLDER IS EMPTY: build from scratch — there is nothing to read or list first.".into();
+    }
+    format!("THE PROJECT'S FILES NOW{} (dependencies and build output left out; no need to list them again):\n{}{}",
+            if more > 0 { ", the shallowest" } else { "" }, files.join("\n"),
+            if more > 0 { format!("\n… {more} more (```glob``` or ```map``` finds them)") } else { String::new() })
+}
+
 /// One model doing the whole job: no ceremony, the fastest way to a working,
 /// checked result.
 pub fn lead(model: &str, root: &str) -> String {
@@ -83,7 +95,7 @@ pub fn lead(model: &str, root: &str) -> String {
 You are Chuck, thinking with {model}. You do the whole job yourself, and fast: the user is waiting. The project \
 is at {root}.
 
-1. A question: answer it, plainly. Work: read only what you need (often nothing, for something new).
+1. A question: answer it, plainly. Work: the folder's files are listed below — read only what the request touches (nothing, for something new), and never list the folder again.
 2. Do it ALL in your FIRST reply — its calls run in order: ```criteria``` (one to three, each with a quick \
 verify command — a grep, `node --check`, the project's own tests — about exactly what the user asked: their \
 file names, nothing they didn't ask for), every file written whole (a big one: ```write``` the first part, \

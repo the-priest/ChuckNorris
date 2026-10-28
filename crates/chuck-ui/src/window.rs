@@ -2044,6 +2044,11 @@ fn settings_dialog(shared: &Shared) {
     jobs.add(&cap);
     jobs.add(&cmd_min);
     jobs.add(&auto);
+    let native_row = adw::SwitchRow::builder().title("Tool calls as API functions")
+        .subtitle("Off (fastest, and what works best on SiliconFlow): Chuck writes its tool calls as text, so a file \
+                   goes out as itself rather than JSON-escaped")
+        .active(s.map.get("native_tools").and_then(|v| v.as_bool()) == Some(true)).build();
+    jobs.add(&native_row);
     jobs.add(&debug_row);
     page.add(&jobs);
 
@@ -2053,7 +2058,7 @@ fn settings_dialog(shared: &Shared) {
     let names: Vec<&str> = levels.iter().map(|(n, _)| *n).collect();
     let rz = adw::ComboRow::builder().title("Reasoning before it builds")
         .subtitle("It thinks on its first turn and after something fails; the rest of the job goes without").model(&gtk::StringList::new(&names)).build();
-    let cur = s.num("reasoning_budget", 2048.0, 0.0, 32768.0);
+    let cur = s.num("reasoning_budget", 0.0, 0.0, 32768.0);
     rz.set_selected(levels.iter().position(|(_, v)| *v >= cur).unwrap_or(2) as u32);
     let think = adw::SpinRow::with_range(0.0, 1800.0, 10.0);
     think.set_title("Max thinking time (s)");
@@ -2328,6 +2333,7 @@ fn settings_dialog(shared: &Shared) {
             s.set("siliconflow_api_key", k.into());
         }
         s.set("fleet_job_usd", cap.value().into());
+        s.set("native_tools", native_row.is_active().into());
         s.set("fleet_auto_continue", auto.is_active().into());
         s.set("command_timeout", ((cmd_min.value() * 60.0) as i64).into());
         s.set("reasoning_budget", (levels[rz.selected() as usize].1 as i64).into());

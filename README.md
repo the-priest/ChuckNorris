@@ -72,8 +72,8 @@ happens on your computer, in front of you.
 
 1. **You ask.** Type it, say it (the mic button, Ctrl+M), or paste a screenshot (Ctrl+V) or drop a
    picture on the box: the eyes describe it, and Chuck works from that and the file.
-2. **It looks only as much as it needs.** Something new usually needs no reading at all; in an
-   existing project it reads what the request touches. Until it has written criteria, your folder
+2. **It looks only as much as it needs.** The project's files come with your request, so
+   something new needs no reading at all; in an existing project it reads what the request touches. Until it has written criteria, your folder
    is read-only to every command.
 3. **Criteria first.** Chuck writes down what "done" means, each item with a command that proves it,
    for example *"empty input returns `[]` — verify: `pytest -q`"*.
@@ -450,8 +450,8 @@ The gear icon, or Ctrl+P → Settings.
 | Group | Setting |
 |---|---|
 | SiliconFlow | Your API key. `chuck key` saves the same one. |
-| Jobs | Spending cap per job. The longest one command may run. Keep going on its own when a job's budget runs out. Debug mode. |
-| Reasoning | How much Chuck thinks before it builds and after something fails (off to 32k tokens). The longest thinking time. When to give up on a silent connection. |
+| Jobs | Spending cap per job. The longest one command may run. Keep going on its own when a job's budget runs out. Tool calls as API functions (off: text, faster). Debug mode. |
+| Reasoning | Off by default (fastest). Turned up, Chuck thinks before it builds and after something fails (1k to 32k tokens). The longest thinking time. When to give up on a silent connection. |
 | Spending limits | Daily and monthly, across everything (0 = no limit). |
 | This folder's access | The five modes in [Safety](#safety), per folder. |
 | Research | Your own SearXNG. A proxy for web reads (e.g. Tor's `socks5://127.0.0.1:9050`; Camoufox then also takes the proxy's time zone and language). Which browser to use (Automatic, Camoufox, Brave, Chromium, Chrome), and whether to read blocked pages in it. |
