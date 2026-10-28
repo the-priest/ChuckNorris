@@ -84,6 +84,9 @@ Chuck is now a Rust app (`crates/`), and the installer puts it over any earlier 
   command still waits for you, however long.)
 - The independent review can't send a job round forever: after 3 rejections, a `done` the gate
   accepts finishes, with the review's open points in the summary.
+- Root is refused where a command starts (`sudo …`, `… && sudo …`, `bash -c "sudo …"`, `env X=1 sudo`,
+  `xargs sudo`, `run0`), no longer anywhere in the line: `grep -rn su .` or a commit message
+  mentioning sudo run.
 - The gate's unfinished-code check reads TODO/FIXME/XXX/HACK in comments only: a Tetris piece drawn
   as `"XXX"` or a to-do app's `<h1>TODO</h1>` no longer blocks a hand-in.
 - Finished work said in prose isn't lost: a worker that checks everything and then just says it's

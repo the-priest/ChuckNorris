@@ -1298,7 +1298,12 @@ pub fn research(web: Option<&chuck_web::Web>, sources: usize, tag: &str, what: &
 /// nobody can). Destruction is the classifier's (chuck-sandbox::safety).
 pub fn refuse_command(cmd: &str, role: Role) -> Option<String> {
     static RX: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    let rx = RX.get_or_init(|| regex::Regex::new(r"(?i)(^|[\s;&|(`]|\$\()(sudo|doas|pkexec|su)(\s|$)").unwrap());
+    // where a command starts (not anywhere: `grep -rn su .` and a commit message about sudo are not root), and
+    // behind the prefixes that run what follows them
+    let rx = RX.get_or_init(|| regex::Regex::new(concat!(
+        r#"(?i)(?:^|[;&|(`\n"']|\$\()\s*"#,
+        r"(?:(?:env(?:\s+-\S+)*(?:\s+\w+=\S*)*|nohup|exec|time|nice(?:\s+-n\s*-?\d+)?|command|builtin|xargs(?:\s+-\S+)*|\w+=\S*)\s+)*",
+        r"(?:sudo|doas|pkexec|su|run0)(?:\s|$)")).unwrap());
     if rx.is_match(cmd) {
         return Some(format!("[refused: a {} doesn't get root — say what needs root and why, and the user can \
             run it]", role.label()));
@@ -1309,6 +1314,19 @@ pub fn refuse_command(cmd: &str, role: Role) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn root_is_refused_where_a_command_starts_and_nowhere_else() {
+        for c in ["sudo pacman -Syu", "ls && sudo rm x", "echo hi; su -c id", "cat f | sudo tee /etc/x", "$(sudo id)",
+                  "bash -c \"sudo make install\"", "env FOO=1 sudo id", "nohup sudo x &", "xargs -0 sudo rm", "doas sh",
+                  "SUDO_ASKPASS=/x sudo -A id", "pkexec bash", "  sudo id", "run0 id"] {
+            assert!(refuse_command(c, Role::DeepSeekWorker).is_some(), "{c}");
+        }
+        for c in ["grep -rn su .", "git commit -m 'fix the su prompt'", "grep -n \"sudo\" install.sh", "echo pseudo",
+                  "ls susan", "rg 'doas|sudo' -n", "cat su.txt", "npm run build", "python3 -m sudoku"] {
+            assert!(refuse_command(c, Role::DeepSeekWorker).is_none(), "{c}");
+        }
+    }
 
     #[test]
     fn for_and_criteria_parsing() {
