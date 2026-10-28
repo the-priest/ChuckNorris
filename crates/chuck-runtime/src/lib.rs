@@ -50,6 +50,11 @@ pub struct RuntimeConfig {
     /// limits them or goes wrong (```snag```), for it to be fixed.
     pub debug: bool,
     pub max_tokens: u32,
+    /// The ceiling for a turn that isn't writing a file — reading, checking,
+    /// planning, answering. Small, so the provider schedules and streams it
+    /// fast and a reasoning model can't fill a huge budget; a building turn
+    /// gets the full `max_tokens`, and a reply cut short is continued.
+    pub turn_tokens: u32,
     pub lead_steps: usize,
     pub worker_steps: usize,
     pub cmd_timeout: Duration,
@@ -120,6 +125,7 @@ impl Default for RuntimeConfig {
             debug: false,
             // a reply's ceiling, not its size (only what's written is billed): a big file fits in one
             max_tokens: 32768,
+            turn_tokens: 4096,
             // no real cap: work ends when it's done, out of budget or stuck — never on a step count
             lead_steps: 1_000_000,
             worker_steps: 100_000,

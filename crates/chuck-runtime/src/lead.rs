@@ -1536,6 +1536,9 @@ impl<'a> LeadRun<'a> {
         self.checkpoint_soon(&format!("before \"{}\"", clip(&ask, 60)));
         let mut progress = Progress::default();
         let mut think_next = true;
+        // a building turn (writes a file) gets the full budget; a reading/checking/planning turn a small one,
+        // so it schedules and streams fast. True on the first turn and after one that changed files or went wrong
+        let mut build_next = true;
         let mut warned_term = false;
         let mut nudged = false;
         let mut gate_nudged = false;
@@ -1564,7 +1567,8 @@ impl<'a> LeadRun<'a> {
             // alone, thinking is where a job's time goes: it thinks to plan (the first turn) and to debug (after a
             // turn that went wrong); reading a result and carrying on needs none
             let reasoning = (solo && !think_next).then_some(chuck_model::Reasoning { budget: 0, ..ctx.cfg.reasoning });
-            let reply = match crate::agent::think_as(ctx, self.id, &model, &convo, LEAD_TAGS, reasoning) {
+            let room = if build_next { ctx.cfg.max_tokens } else { ctx.cfg.turn_tokens };
+            let reply = match crate::agent::think_as(ctx, self.id, &model, &convo, LEAD_TAGS, reasoning, Some(room)) {
                 Ok(r) => r,
                 Err(h) => return self.pause(&h.describe()),
             };
@@ -1610,6 +1614,8 @@ impl<'a> LeadRun<'a> {
             // something went wrong this turn (a check failed, a call missed or was refused): the next one thinks
             think_next = r.malformed || r.feedback.iter().any(|l| crate::exec::friction(l).is_some()
                 || l.contains("→ exit ") && !l.contains("→ exit 0"));
+            // the next turn may write: right after a change, a failure, or a review that sent work back
+            build_next = r.mutated || think_next;
             let mut fb = r.feedback.clone();
             let mut refused = false;
             for call in &r.lead_calls {
@@ -1633,6 +1639,7 @@ impl<'a> LeadRun<'a> {
                 fb.push(line);
             }
             think_next |= fb.iter().any(|l| l.contains("REFUSED") || l.contains("NOT accepted"));
+            build_next |= think_next;
             let waiting = !self.open_tasks().is_empty();
             // what was just assigned, reviewed or cancelled shows now, not when a worker next reports
             if !self.tasks.is_empty() {

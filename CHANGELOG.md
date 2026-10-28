@@ -103,6 +103,14 @@ Chuck is now a Rust app (`crates/`), and the installer puts it over any earlier 
   - the placeholder characters the renderer uses could be faked by a reply.
   The tests check every parser, cutter and cleaner, the Markdown → markup (always valid Pango),
   the safety classifier, and that no file op writes through a link out of the folder.
+- Each turn asks the model for only the tokens it needs: a small ceiling (4096) for reading, checking,
+  planning and answering turns, the full 32k only when a file is being written (the first turn, and
+  after a change, a failure or a rejection). A smaller ceiling schedules and streams faster and keeps
+  a reasoning model from filling a huge budget; a reply that is cut short is still continued, so a
+  wrong guess costs at most one extra round-trip. This is the single biggest speed lever.
+- Games and apps come out complete in one pass: the solo prompt asks for real end-to-end logic, a
+  single self-contained HTML file (everything inline, no CDN or build step), full mechanics, a clean
+  dark UI, keyboard/mouse, and smooth requestAnimationFrame animation — not a stub or a demo.
 - Faster alone: the whole job in ONE reply when it goes right (criteria, files, checks and `done`
   run in order), and thinking only where it pays — the first turn (planning) and after one that went
   wrong (debugging); reading a result and carrying on is done without it.

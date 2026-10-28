@@ -925,3 +925,27 @@ fn a_file_is_shown_as_it_is_written_by_call_or_by_block() {
     assert!(writes.iter().filter(|(p, _, d)| p == "a.js" && !d).count() >= 1, "and while it grew: {writes:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_reading_turn_asks_for_a_small_budget_a_writing_turn_the_full_one() {
+    // solo: turn 1 writes (full budget), turn 2 only reads (small), turn 3 checks and finishes
+    let dir = tmp("budget");
+    std::fs::write(dir.join("notes.txt"), "the port is 9090\n").unwrap();
+    let model = Arc::new(Scripted::new().respond(|req| {
+        match req.messages.iter().filter(|m| m["role"] == "assistant").count() {
+            0 => "```criteria\n- a.txt holds A :: verify: grep -qx A a.txt\n```\n```write a.txt\nA\n```".into(),
+            1 => "```read notes.txt```".into(),
+            _ => "```test grep -qx A a.txt```\n```done\na.txt holds A.\n```".into(),
+        }
+    }));
+    let fleet = chuck_core::FleetConfig { deepseek_workers: 0, glm_workers: 0, ..chuck_core::FleetConfig::default() };
+    let cfg = RuntimeConfig { store: dir.join("store"), fleet, max_tokens: 32768, turn_tokens: 4096, ..RuntimeConfig::default() };
+    let rt = Runtime::new(model.clone(), cfg, Events(None));
+    let (report, _) = run_within(20, rt, Job::new("write a", &dir));
+    assert!(matches!(report.outcome, Outcome::Done { .. }), "{:?}", report.outcome);
+    let budgets: Vec<u32> = model.seen.lock().unwrap().iter().map(|r| r.max_tokens).collect();
+    assert_eq!(budgets[0], 32768, "the first turn builds: full budget — {budgets:?}");
+    // the turn after a plain read (nothing changed, nothing failed) asks small
+    assert_eq!(budgets[2], 4096, "a turn after a no-change turn is small — {budgets:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

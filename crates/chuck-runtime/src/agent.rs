@@ -446,12 +446,13 @@ pub fn think(ctx: &Ctx, id: AgentId, model: &str, convo: &Convo) -> Result<Strin
 /// comes back as the fenced block it means, appended to the reply, so the
 /// rest of the loop reads it as if it had been written that way.
 pub fn think_with(ctx: &Ctx, id: AgentId, model: &str, convo: &Convo, tags: &[&str]) -> Result<String, Halt> {
-    think_as(ctx, id, model, convo, tags, None)
+    think_as(ctx, id, model, convo, tags, None, None)
 }
 
-/// [`think_with`], with this call's reasoning set (None: the agent's own).
+/// [`think_with`], with this call's reasoning and reply budget set (None
+/// each: the agent's own, the full `max_tokens`).
 pub fn think_as(ctx: &Ctx, id: AgentId, model: &str, convo: &Convo, tags: &[&str],
-                reasoning: Option<chuck_model::Reasoning>) -> Result<String, Halt> {
+                reasoning: Option<chuck_model::Reasoning>, max_tokens: Option<u32>) -> Result<String, Halt> {
     let tools = (ctx.cfg.native_tools && !tags.is_empty()).then(|| crate::schemas::tools(tags));
     let mut msgs = convo.msgs.clone();
     let mut text = String::new();
@@ -484,7 +485,8 @@ pub fn think_as(ctx: &Ctx, id: AgentId, model: &str, convo: &Convo, tags: &[&str
         let mut req = ChatRequest::new(model, msgs.clone());
         req.reasoning = reasoning.unwrap_or(if ctx.kernel.role(id).is_some_and(|r| r.is_worker()) {
             ctx.cfg.worker_reasoning } else { ctx.cfg.reasoning });
-        req.max_tokens = ctx.cfg.max_tokens;
+        // a continuation gets the full budget: the reply was cut, so it IS a long one
+        req.max_tokens = if round == 0 { max_tokens.unwrap_or(ctx.cfg.max_tokens) } else { ctx.cfg.max_tokens };
         // a continuation goes on as text (a cut function call can't be continued as one)
         req.tools = if round == 0 { tools.clone() } else { None };
         let mut sink = AgentSink { id, ctx, got: String::new(), checked: 0, runaway: None,
@@ -668,6 +670,8 @@ pub fn run_worker(ctx: Ctx, w: WorkerSpec) {
     let mut heard = w.heard;
     let mut progress = Progress::default();
     let mut warned_term = false;
+    // workers build: the full budget on the first turn and after a change/rejection, small while reading
+    let mut build_next = true;
     let (status, ended) = 'life: {
         for _step in 0..ctx.cfg.worker_steps {
             if w.stop.load(Ordering::Relaxed) {
@@ -680,7 +684,8 @@ pub fn run_worker(ctx: Ctx, w: WorkerSpec) {
             }
             // a worker's context is one task's: kept smaller than the Lead's, so each call costs less
             convo.fit(ctx.cfg.context_chars.min(WORKER_CONTEXT));
-            let reply = match think_with(&ctx, w.id, &model, &convo, WORKER_TAGS) {
+            let room = if build_next { ctx.cfg.max_tokens } else { ctx.cfg.turn_tokens };
+            let reply = match think_as(&ctx, w.id, &model, &convo, WORKER_TAGS, None, Some(room)) {
                 Ok(r) => r,
                 Err(_) if w.stop.load(Ordering::Relaxed) => break 'life ("stopped", None),
                 Err(h) => break 'life ("paused", Some(h.describe())),
@@ -705,6 +710,9 @@ pub fn run_worker(ctx: Ctx, w: WorkerSpec) {
                               memory: ctx.cfg.memory.as_deref(), allowed_outside: None,
                               team: Some((&w.team, &w.name)), hold: None, lent: &w.lent, claimed: &[] };
             let r = exec.run(&reply);
+            // the next turn may write: after a change, a failure, or a missed call
+            build_next = r.mutated || r.malformed || r.feedback.iter().any(|l| crate::exec::friction(l).is_some()
+                || l.contains("→ exit ") && !l.contains("→ exit 0"));
             {
                 let mut p = w.pulse.lock().unwrap_or_else(|e| e.into_inner());
                 p.turns += 1;
@@ -775,6 +783,8 @@ pub fn run_worker(ctx: Ctx, w: WorkerSpec) {
                             ToWorker::Stop => break 'life ("stopped", None),
                             ToWorker::Rejected(defects) => {
                                 warned_term = false;
+                                build_next = true; // it fixes defects now: it will write
+                                
                                 fb = vec![format!("[the lead REJECTED your submission. Fix every defect, verify again \
                                     after your last change, and resubmit:\n- {}]", defects.join("\n- "))];
                             }
