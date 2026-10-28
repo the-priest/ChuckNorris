@@ -357,6 +357,7 @@ fn stream(resp: ureq::http::Response<ureq::Body>, req: &ChatRequest, sink: &mut 
                 }
                 if let Some(a) = f.get("arguments").and_then(|a| a.as_str()) {
                     calls[i].1.push_str(a);
+                    sink.call(i, &calls[i].0, a);
                 }
                 heard = Instant::now();
             }

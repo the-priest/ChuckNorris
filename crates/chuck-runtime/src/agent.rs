@@ -288,9 +288,79 @@ struct AgentSink<'a> {
     thought: usize,
     wrote: usize,
     shown: Option<std::time::Instant>,
+    /// Function calls as their arguments stream in: (name, the JSON so far).
+    calls: Vec<(String, String)>,
+    /// The file being written, as last shown: (path, lines, the newest lines), and when.
+    live: Option<(String, usize, String)>,
+    live_at: Option<std::time::Instant>,
+    /// The reply has a ```write``` / ```append``` block in it (looked for in what's new only).
+    fenced_write: bool,
+}
+
+/// A fenced ```write``` / ```append``` block still being written at the end
+/// of `text` (or the last one, closed): (path, its content so far).
+fn open_write(text: &str) -> Option<(String, String)> {
+    static RX: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let rx = RX.get_or_init(|| regex::Regex::new(r"(?m)^(`{3,4})(?:write|append)[ \t]+(\S+)[^\n]*\n").unwrap());
+    let c = rx.captures_iter(text).last()?;
+    let body = &text[c.get(0)?.end()..];
+    let fence = format!("\n{}", &c[1]);
+    let body = if body.starts_with(&c[1]) { "" } else { body.find(&fence).map_or(body, |e| &body[..e]) };
+    Some((c[2].to_string(), body.to_string()))
+}
+
+/// The string value of `key` in JSON that may still be arriving (decoded as
+/// far as it goes).
+fn partial_field(json: &str, key: &str) -> Option<String> {
+    let at = json.find(&format!("\"{key}\""))? + key.len() + 2;
+    let rest = json[at..].trim_start().strip_prefix(':')?.trim_start().strip_prefix('"')?;
+    let mut out = String::new();
+    let mut chars = rest.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => break,
+            '\\' => match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some('r') => {}
+                Some('u') => {
+                    let hex: String = chars.by_ref().take(4).collect();
+                    if let Some(ch) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                        out.push(ch);
+                    }
+                }
+                Some(o) => out.push(o),
+                None => break,
+            },
+            _ => out.push(c),
+        }
+    }
+    Some(out)
 }
 
 impl AgentSink<'_> {
+    /// The file being written, shown as it grows (about three times a second;
+    /// `last`: the reply is complete).
+    fn live_file(&mut self, last: bool) {
+        if !last && self.live_at.is_some_and(|t| t.elapsed() < Duration::from_millis(300)) {
+            return;
+        }
+        let from_call = self.calls.iter().rev().filter(|(n, _)| n == "write" || n == "append")
+            .find_map(|(_, a)| Some((partial_field(a, "path")?, partial_field(a, "content").unwrap_or_default())))
+            .filter(|(p, _)| !p.is_empty());
+        let Some((path, content)) = from_call.or_else(|| open_write(&self.got)) else { return };
+        self.live_at = Some(std::time::Instant::now());
+        let lines = content.lines().count();
+        let all: Vec<&str> = content.lines().collect();
+        let tail = all[all.len().saturating_sub(14)..].iter()
+            .map(|l| l.chars().take(160).collect::<String>()).collect::<Vec<_>>().join("\n");
+        if !last && self.live.as_ref().is_some_and(|(p, n, _)| *p == path && *n == lines) {
+            return; // nothing new to show
+        }
+        self.ctx.events.emit(Event::Writing { id: self.id, path: path.clone(), lines, tail: tail.clone(), done: last });
+        self.live = Some((path, lines, tail));
+    }
+
     /// What the call is doing, on the agent's line, about once a second: a
     /// long reply is seen growing, never a silent "thinking · 0".
     fn progress(&mut self) {
@@ -323,6 +393,32 @@ impl Sink for AgentSink<'_> {
         self.wrote += c.len();
         self.progress();
         self.ctx.events.emit(Event::Delta { id: self.id, chunk: c.into() });
+        if !self.fenced_write {
+            let mut from = self.got.len().saturating_sub(c.len() + 24);
+            while !self.got.is_char_boundary(from) {
+                from -= 1;
+            }
+            let new = &self.got[from..];
+            self.fenced_write = new.contains("```write") || new.contains("```append");
+        }
+        if self.fenced_write {
+            self.live_file(false);
+        }
+    }
+    fn call(&mut self, i: usize, name: &str, piece: &str) {
+        let i = i.min(255);
+        while self.calls.len() <= i {
+            self.calls.push((String::new(), String::new()));
+        }
+        if self.calls[i].0.is_empty() {
+            self.calls[i].0 = name.to_string();
+        }
+        self.calls[i].1.push_str(piece);
+        self.wrote += piece.len();
+        self.progress();
+        if name == "write" || name == "append" || self.calls[i].0 == "write" || self.calls[i].0 == "append" {
+            self.live_file(false);
+        }
     }
     fn notice(&mut self, n: Notice) {
         let text = match n {
@@ -350,6 +446,12 @@ pub fn think(ctx: &Ctx, id: AgentId, model: &str, convo: &Convo) -> Result<Strin
 /// comes back as the fenced block it means, appended to the reply, so the
 /// rest of the loop reads it as if it had been written that way.
 pub fn think_with(ctx: &Ctx, id: AgentId, model: &str, convo: &Convo, tags: &[&str]) -> Result<String, Halt> {
+    think_as(ctx, id, model, convo, tags, None)
+}
+
+/// [`think_with`], with this call's reasoning set (None: the agent's own).
+pub fn think_as(ctx: &Ctx, id: AgentId, model: &str, convo: &Convo, tags: &[&str],
+                reasoning: Option<chuck_model::Reasoning>) -> Result<String, Halt> {
     let tools = (ctx.cfg.native_tools && !tags.is_empty()).then(|| crate::schemas::tools(tags));
     let mut msgs = convo.msgs.clone();
     let mut text = String::new();
@@ -380,14 +482,18 @@ pub fn think_with(ctx: &Ctx, id: AgentId, model: &str, convo: &Convo, tags: &[&s
         }
         ctx.kernel.note(id, "waiting for the model's first word");
         let mut req = ChatRequest::new(model, msgs.clone());
-        req.reasoning = if ctx.kernel.role(id).is_some_and(|r| r.is_worker()) { ctx.cfg.worker_reasoning } else {
-            ctx.cfg.reasoning };
+        req.reasoning = reasoning.unwrap_or(if ctx.kernel.role(id).is_some_and(|r| r.is_worker()) {
+            ctx.cfg.worker_reasoning } else { ctx.cfg.reasoning });
         req.max_tokens = ctx.cfg.max_tokens;
         // a continuation goes on as text (a cut function call can't be continued as one)
         req.tools = if round == 0 { tools.clone() } else { None };
         let mut sink = AgentSink { id, ctx, got: String::new(), checked: 0, runaway: None,
-                                   t0: std::time::Instant::now(), thought: 0, wrote: 0, shown: None };
+                                   t0: std::time::Instant::now(), thought: 0, wrote: 0, shown: None, calls: Vec::new(),
+                                   live: None, live_at: None, fenced_write: false };
         let r = chuck_model::chat_interruptible(&ctx.model, &req, &mut sink);
+        if sink.live.is_some() {
+            sink.live_file(true); // the file as the reply left it
+        }
         ctx.kernel.release(id);
         // a reply caught in a loop: stopped at once, what came before the loop kept, the agent told
         let r = match (r, sink.runaway) {
@@ -733,6 +839,23 @@ mod tests {
         assert!(runaway_at(&board).is_none());
         let code: String = (0..400).map(|i| format!("function f{i}(x) {{ return x + {i}; }}\n")).collect();
         assert!(runaway_at(&code).is_none());
+    }
+
+    #[test]
+    fn a_file_being_written_is_read_as_it_arrives() {
+        // a function call's arguments, cut anywhere
+        let json = r#"{"path": "tetris.html", "content": "<canvas>\n<script>\nconst ROWS = 20;\nconst p = \"é\u00e9"#;
+        assert_eq!(partial_field(json, "path").as_deref(), Some("tetris.html"));
+        assert_eq!(partial_field(json, "content").as_deref(), Some("<canvas>\n<script>\nconst ROWS = 20;\nconst p = \"éé"));
+        assert_eq!(partial_field(r#"{"pa"#, "path"), None);
+        assert_eq!(partial_field(r#"{"path": "a.js", "content": "x\"#, "content").as_deref(), Some("x"), "a cut escape");
+        // a fenced block still open, then closed
+        let open = "Here it is.\n```write game.js\nlet a = 1;\nlet b = 2;\n";
+        assert_eq!(open_write(open), Some(("game.js".into(), "let a = 1;\nlet b = 2;\n".into())));
+        let closed = format!("{open}```\n```test node --check game.js```");
+        assert_eq!(open_write(&closed), Some(("game.js".into(), "let a = 1;\nlet b = 2;".into())));
+        assert_eq!(open_write("```bash\nls\n```"), None);
+        assert_eq!(open_write("````write r.md\n```js\nx\n```\n").map(|w| w.0), Some("r.md".into()));
     }
 
     #[test]

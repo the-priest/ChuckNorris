@@ -855,19 +855,17 @@ fn what_merges_reaches_the_copies_of_workers_still_building() {
 }
 
 #[test]
-fn alone_one_model_builds_it_in_two_replies() {
-    // no workers: criteria and the whole file in the first reply, the checks and done in the second — no plan
-    // required, no review call, nothing else
+fn alone_one_model_builds_it_in_one_reply() {
+    // no workers: criteria, the whole file, its checks and done, all in one reply — no plan required, no review
+    // call, nothing else
     let dir = tmp("solo");
     let model = Arc::new(Scripted::new().respond(|req| {
         assert!(!text(&req.messages[0]).contains("independent reviewer"), "no review call alone");
         assert!(text(&req.messages[0]).starts_with("You are Chuck"), "the solo prompt");
-        if req.messages.len() == 2 {
-            return "```criteria\n- tetris.html exists :: verify: test -f tetris.html\n- it has a canvas :: verify: grep -q canvas tetris.html\n\
-                - it has the pieces :: verify: grep -q TETROMINOES tetris.html\n```\n\
-                ```write tetris.html\n<canvas id=c></canvas><script>const TETROMINOES = [];</script>\n```".into();
-        }
-        "```test test -f tetris.html```\n```test grep -q canvas tetris.html```\n```test grep -q TETROMINOES tetris.html```\n\
+        "```criteria\n- tetris.html exists :: verify: test -f tetris.html\n- it has a canvas :: verify: grep -q canvas tetris.html\n\
+            - it has the pieces :: verify: grep -q TETROMINOES tetris.html\n```\n\
+            ```write tetris.html\n<canvas id=c></canvas><script>const TETROMINOES = [];</script>\n```\n\
+            ```test test -f tetris.html```\n```test grep -q canvas tetris.html```\n```test grep -q TETROMINOES tetris.html```\n\
             ```done\ntetris.html: a canvas and the seven pieces; all three checks pass.\n```".into()
     }));
     let fleet = chuck_core::FleetConfig { deepseek_workers: 0, glm_workers: 0, ..chuck_core::FleetConfig::default() };
@@ -876,6 +874,54 @@ fn alone_one_model_builds_it_in_two_replies() {
     let (report, _) = run_within(20, rt, Job::new("make me a tetris in tetris.html", &dir));
     assert!(matches!(report.outcome, Outcome::Done { .. }), "{:?}", report.outcome);
     assert!(dir.join("tetris.html").exists());
-    assert_eq!(model.seen.lock().unwrap().len(), 2, "two calls, start to finish");
+    assert_eq!(model.seen.lock().unwrap().len(), 1, "one call, start to finish");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn alone_it_thinks_to_plan_and_to_debug_not_to_carry_on() {
+    let dir = tmp("solo-think");
+    let model = Arc::new(Scripted::new().respond(|req| {
+        match req.messages.iter().filter(|m| m["role"] == "assistant").count() {
+            0 => "```criteria\n- a holds A :: verify: grep -qx A a.txt\n```\n```write a.txt\nB\n```\n```test grep -qx A a.txt```".into(),
+            1 => "```write a.txt\nA\n```".into(), // after a failure
+            2 => "```read a.txt```".into(),         // after a fine turn
+            _ => "```test grep -qx A a.txt```\n```done\na.txt holds A.\n```".into(),
+        }
+    }));
+    let fleet = chuck_core::FleetConfig { deepseek_workers: 0, glm_workers: 0, ..chuck_core::FleetConfig::default() };
+    let rt = Runtime::new(model.clone(), RuntimeConfig { store: dir.join("store"), fleet, ..RuntimeConfig::default() },
+                          Events(None));
+    let (report, _) = run_within(20, rt, Job::new("a holds A", &dir));
+    assert!(matches!(report.outcome, Outcome::Done { .. }), "{:?}", report.outcome);
+    let budgets: Vec<u32> = model.seen.lock().unwrap().iter().map(|r| r.reasoning.budget).collect();
+    assert!(budgets[0] > 0, "it plans with thinking: {budgets:?}");
+    assert!(budgets[1] > 0, "it debugs a failed check with thinking: {budgets:?}");
+    assert_eq!(budgets[2], 0, "a fine turn is carried on without: {budgets:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_file_is_shown_as_it_is_written_by_call_or_by_block() {
+    let dir = tmp("live-write");
+    let big: String = (0..120).map(|i| format!("const row{i} = {i};\\n")).collect();
+    // (a reply's function calls run after its text: the file by call first, the rest next)
+    let first = format!("```criteria\n- both exist :: verify: test -f a.js && test -f b.js\n```\n\
+        @call write {{\"path\": \"a.js\", \"content\": \"{big}\"}}");
+    let second = "```write b.js\nlet b = 1;\nlet c = 2;\n```\n```test test -f a.js && test -f b.js```\n```done\na.js and b.js.\n```";
+    let model = Arc::new(Scripted::new().replies([first, second.to_string()]));
+    let fleet = chuck_core::FleetConfig { deepseek_workers: 0, glm_workers: 0, ..chuck_core::FleetConfig::default() };
+    let (tx, rx) = channel();
+    let rt = Runtime::new(model, RuntimeConfig { store: dir.join("store"), fleet, ..RuntimeConfig::default() }, Events(Some(tx)));
+    let (report, _) = run_within(20, rt, Job::new("write a and b", &dir));
+    assert!(matches!(report.outcome, Outcome::Done { .. }), "{:?}", report.outcome);
+    assert_eq!(std::fs::read_to_string(dir.join("a.js")).unwrap().lines().count(), 120);
+    let writes: Vec<(String, usize, bool)> = rx.try_iter().filter_map(|e| match e {
+        Event::Writing { path, lines, done, .. } => Some((path, lines, done)),
+        _ => None,
+    }).collect();
+    assert!(writes.iter().any(|(p, n, _)| p == "b.js" && *n == 2), "the fenced block is shown: {writes:?}");
+    assert!(writes.iter().any(|(p, n, done)| p == "a.js" && *n == 120 && *done), "the call's file, whole, at the end: {writes:?}");
+    assert!(writes.iter().filter(|(p, _, d)| p == "a.js" && !d).count() >= 1, "and while it grew: {writes:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }

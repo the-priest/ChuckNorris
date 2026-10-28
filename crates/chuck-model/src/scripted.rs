@@ -108,6 +108,13 @@ impl ChatModel for Scripted {
         for chunk in chars.chunks(40) {
             sink.delta(&chunk.iter().collect::<String>());
         }
+        // calls stream their arguments in pieces too, as the API sends them
+        for (i, (name, args)) in calls.iter().enumerate() {
+            let a: Vec<char> = args.chars().collect();
+            for piece in a.chunks(40) {
+                sink.call(i, name, &piece.iter().collect::<String>());
+            }
+        }
         Ok(Outcome {
             usage: Some(Usage { prompt: (req.sent_chars() / 4) as u64 + 50, completion: (text.len() / 4) as u64 + 5,
                                 cached: 0, reasoning: 0 }),

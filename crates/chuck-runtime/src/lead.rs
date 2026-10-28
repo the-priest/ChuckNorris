@@ -1232,8 +1232,10 @@ impl<'a> LeadRun<'a> {
         // past its rounds, the review's points are the summary's, not another lap: the work passed its gate
         let last_lap = !defects.is_empty() && self.critic_rounds > CRITIC_ROUNDS;
         let verdict = if last_lap { Verdict::Accepted } else { verdict };
-        let _ = g.review(self.id, Role::Lead, verdict, "independent critic pass");
-        self.ctx.events.emit(Event::Reviewed { task: "job".into(), accepted: defects.is_empty(), defects: defects.clone() });
+        let _ = g.review(self.id, Role::Lead, verdict, if self.solo() { "its own checks" } else { "independent critic pass" });
+        if !self.solo() {
+            self.ctx.events.emit(Event::Reviewed { task: "job".into(), accepted: defects.is_empty(), defects: defects.clone() });
+        }
         let summary = if last_lap {
             format!("{summary}\n\nStill open after {CRITIC_ROUNDS} rounds of independent review:\n- {}", defects.join("\n- "))
         } else { summary };
@@ -1533,6 +1535,7 @@ impl<'a> LeadRun<'a> {
         let ask = self.gate.lock().unwrap().ask.clone();
         self.checkpoint_soon(&format!("before \"{}\"", clip(&ask, 60)));
         let mut progress = Progress::default();
+        let mut think_next = true;
         let mut warned_term = false;
         let mut nudged = false;
         let mut gate_nudged = false;
@@ -1558,7 +1561,10 @@ impl<'a> LeadRun<'a> {
                 }
             }
             convo.fit(ctx.cfg.context_chars);
-            let reply = match crate::agent::think_with(ctx, self.id, &model, &convo, LEAD_TAGS) {
+            // alone, thinking is where a job's time goes: it thinks to plan (the first turn) and to debug (after a
+            // turn that went wrong); reading a result and carrying on needs none
+            let reasoning = (solo && !think_next).then_some(chuck_model::Reasoning { budget: 0, ..ctx.cfg.reasoning });
+            let reply = match crate::agent::think_as(ctx, self.id, &model, &convo, LEAD_TAGS, reasoning) {
                 Ok(r) => r,
                 Err(h) => return self.pause(&h.describe()),
             };
@@ -1601,6 +1607,9 @@ impl<'a> LeadRun<'a> {
                               team: Some((&team, "lead")), hold: None, lent: &[], claimed: &claimed };
             let r = exec.run(&reply);
             self.mutated |= r.mutated;
+            // something went wrong this turn (a check failed, a call missed or was refused): the next one thinks
+            think_next = r.malformed || r.feedback.iter().any(|l| crate::exec::friction(l).is_some()
+                || l.contains("→ exit ") && !l.contains("→ exit 0"));
             let mut fb = r.feedback.clone();
             let mut refused = false;
             for call in &r.lead_calls {
@@ -1623,6 +1632,7 @@ impl<'a> LeadRun<'a> {
                 refused |= matches!(call.tag.as_str(), "assign" | "review" | "cancel" | "justify") && refusal(&line);
                 fb.push(line);
             }
+            think_next |= fb.iter().any(|l| l.contains("REFUSED") || l.contains("NOT accepted"));
             let waiting = !self.open_tasks().is_empty();
             // what was just assigned, reviewed or cancelled shows now, not when a worker next reports
             if !self.tasks.is_empty() {

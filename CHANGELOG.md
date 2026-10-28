@@ -103,6 +103,14 @@ Chuck is now a Rust app (`crates/`), and the installer puts it over any earlier 
   - the placeholder characters the renderer uses could be faked by a reply.
   The tests check every parser, cutter and cleaner, the Markdown → markup (always valid Pango),
   the safety classifier, and that no file op writes through a link out of the folder.
+- Faster alone: the whole job in ONE reply when it goes right (criteria, files, checks and `done`
+  run in order), and thinking only where it pays — the first turn (planning) and after one that went
+  wrong (debugging); reading a result and carrying on is done without it.
+- What's being written shows live: a WRITING card with the file's newest lines as the model writes
+  it (by function call or by block), WROTE when it's done.
+- A finished job's card has buttons: **Open** what it made (a page, a picture) and **Open folder**.
+- `cargo run --release -p chuck-runtime --example overhead`: the harness's own cost per turn (about
+  30 ms with an instant model).
 - **One model does it all, by default.** DeepSeek-V4.1-Flash-1017 builds the whole job itself, the
   fastest way there: criteria (a few quick checks, about exactly what you asked) and every file in its
   first reply, the checks and `done` in the next. Alone, no plan is required, there's no line-count

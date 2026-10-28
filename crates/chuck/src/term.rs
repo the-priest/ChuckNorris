@@ -205,7 +205,8 @@ impl View {
                 let who = self.who(*id);
                 st.dim(&format!("  ⏵ {who:<6} {}", one_line(cmd, 100)))
             }
-            Event::Gate { .. } | Event::Board { .. } | Event::Tasks(_) | Event::Thinking { .. } | Event::Delta { .. } => return,
+            Event::Gate { .. } | Event::Board { .. } | Event::Tasks(_) | Event::Thinking { .. } | Event::Delta { .. }
+            | Event::Writing { .. } => return,
             Event::Notice { id, text } => {
                 let who = self.who(*id);
                 st.warn(&format!("  ! {who}: {text}"))

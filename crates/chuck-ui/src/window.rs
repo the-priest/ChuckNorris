@@ -105,6 +105,8 @@ struct State {
     names: HashMap<AgentId, (String, Role)>,
     models: HashMap<AgentId, String>,
     lane: Option<Lane>,
+    /// The file being written live: (who, its path, the card's head, its newest lines).
+    writing: Option<(AgentId, String, gtk::Label, gtk::Label)>,
     last_ps: Vec<ProcInfo>,
     /// Chat mode: one model answers, researches, and hands work to the fleet.
     chat: bool,
@@ -1032,9 +1034,83 @@ fn on_event(st: &mut State, e: Event, shared: &Shared) {
         // what each agent is typing, live, for its line in the panel
         Event::Thinking { id, chunk } => st.panel.stream(id, true, &chunk),
         Event::Delta { id, chunk } => st.panel.stream(id, false, &chunk),
+        Event::Writing { id, path, lines, tail, done } => {
+            // the file as the model writes it: one card per file, its newest lines rolling in
+            let head_text = format!("{} {path} · {lines} line{}", if done { "WROTE" } else { "WRITING" },
+                                    if lines == 1 { "" } else { "s" });
+            let same = st.writing.as_ref().is_some_and(|(w, p, _, _)| *w == id && *p == path);
+            if !same {
+                let c = gtk::Box::new(gtk::Orientation::Vertical, 0);
+                c.add_css_class("code-block");
+                c.add_css_class("live-write");
+                c.set_margin_top(8);
+                let head = label(&head_text, &["card-kind", "live-head"]);
+                head.set_margin_start(12);
+                head.set_margin_top(6);
+                let code = label(&tail, &["code-body", "live-code"]);
+                code.set_wrap(false);
+                code.set_ellipsize(pango::EllipsizeMode::End);
+                c.append(&head);
+                c.append(&code);
+                st.append(&c);
+                st.writing = Some((id, path, head, code));
+            } else if let Some((_, _, head, code)) = &st.writing {
+                head.set_label(&head_text);
+                code.set_label(&crate::shown(&tail));
+            }
+            if done {
+                st.writing = None;
+            }
+        }
         Event::AgentEnded { id, .. } => st.panel.stream_done(id),
         Event::Finished(_) | Event::Gate { .. } => {}
     }
+}
+
+/// The files a job made or changed that open by themselves (a page, a
+/// picture, a document): buttons that open them, and the folder.
+fn result_row(folder: &Path, gate: &chuck_core::DoneGate) -> Option<gtk::Box> {
+    let mut files: Vec<String> = Vec::new();
+    for e in &gate.evidence {
+        if let chuck_core::EvidenceKind::Diff { files: f, .. } = &e.kind {
+            for x in f {
+                if !files.contains(x) {
+                    files.push(x.clone());
+                }
+            }
+        }
+    }
+    let opens = |f: &str| {
+        let ext = Path::new(f).extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+        ["html", "htm", "svg", "png", "jpg", "jpeg", "gif", "webp", "pdf"].contains(&ext.as_str())
+    };
+    let shown: Vec<&String> = files.iter().filter(|f| opens(f) && folder.join(f).is_file()).take(4).collect();
+    if files.is_empty() {
+        return None;
+    }
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    row.add_css_class("result-row");
+    row.set_margin_top(6);
+    let launch = |p: PathBuf| {
+        let f = gtk::gio::File::for_path(&p);
+        gtk::FileLauncher::new(Some(&f)).launch(None::<&gtk::Window>, gtk::gio::Cancellable::NONE, |_| {});
+    };
+    for f in shown {
+        let b = gtk::Button::with_label(&format!("▶  Open {}", Path::new(f).file_name().map(|n| n.to_string_lossy())
+            .unwrap_or_default()));
+        b.add_css_class("suggested-action");
+        b.add_css_class("pill-sm");
+        b.set_tooltip_text(Some(&folder.join(f).display().to_string()));
+        let p = folder.join(f);
+        b.connect_clicked(move |_| launch(p.clone()));
+        row.append(&b);
+    }
+    let dir = gtk::Button::with_label("Open folder");
+    dir.add_css_class("pill-sm");
+    let p = folder.to_path_buf();
+    dir.connect_clicked(move |_| launch(p.clone()));
+    row.append(&dir);
+    Some(row)
 }
 
 fn finished(st: &mut State, report: JobReport, shared: &Shared) {
@@ -1071,6 +1147,12 @@ fn finished(st: &mut State, report: JobReport, shared: &Shared) {
             st.add(Entry::Paused { head, text });
         } else {
             st.add(Entry::Card { kind: head, class: class.into(), text });
+        }
+        // what it made, one click away: a page or a picture opens, the folder too
+        if let Some(folder) = st.folder.clone().filter(|_| matches!(report.outcome, Outcome::Done { .. })) {
+            if let Some(row) = result_row(&folder, &report.gate) {
+                st.append(&row);
+            }
         }
     }
     // keep going on its own when only the job's budget ran out, if the user turned that on (never past the daily limit)
@@ -1224,6 +1306,7 @@ fn start(shared: &Shared, text: String) {
     let settings = Settings::load();
     let (model, cfg) = match (&st.opts.model, setup::from_settings(&settings, &folder, None)) {
         (Some(m), _) => (m.clone(), chuck_runtime::RuntimeConfig { access: setup::access_of(&settings, &folder),
+                                                                  fleet: setup::fleet(&settings),
                                                                   web: st.opts.web.clone(), mcp: Some(st.mcp.clone()),
                                                                   lsp: Some(st.lsp.clone()), memory: Some(st.memory.clone()),
                                                                   browser: Some(setup::browser_pref(&settings)),
@@ -2581,7 +2664,7 @@ pub fn build(app: &adw::Application, opts: Options) {
     chat_btn.set_active(chat_mode);
     let shared: Shared = Rc::new(RefCell::new(State {
         ui, panel, opts: opts.clone(), folder: None, saved: Saved::default(), running: None, names: HashMap::new(),
-        models: HashMap::new(), lane: None, last_ps: Vec::new(), chat: chat_mode, on_handoff: None, on_continue: None, on_settings: None, auto_cancel: Rc::new(Cell::new(false)), mcp: mcp.clone(),
+        models: HashMap::new(), lane: None, writing: None, last_ps: Vec::new(), chat: chat_mode, on_handoff: None, on_continue: None, on_settings: None, auto_cancel: Rc::new(Cell::new(false)), mcp: mcp.clone(),
         lsp: Arc::new(setup::lsp(&Settings::load())),
         daemons: chuck_daemon::Registry::load(&chuck_daemon::Registry::default_path()),
         inbox: chuck_daemon::Inbox::load(&chuck_daemon::Inbox::default_path(), 200), daemon_live: HashMap::new(),

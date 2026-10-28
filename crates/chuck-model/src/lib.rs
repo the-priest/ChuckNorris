@@ -80,6 +80,9 @@ pub trait Sink {
     fn think(&mut self, _chunk: &str) {}
     fn delta(&mut self, _chunk: &str) {}
     fn notice(&mut self, _n: Notice) {}
+    /// A function call's arguments as they stream in: call `index` (named
+    /// `name`), the next `piece` of its JSON.
+    fn call(&mut self, _index: usize, _name: &str, _piece: &str) {}
     /// Checked between chunks: true stops the call (Esc, or the kernel's KILL).
     fn should_stop(&self) -> bool {
         false
@@ -174,6 +177,7 @@ enum Piece {
     Think(String),
     Delta(String),
     Notice(Notice),
+    Call(usize, String, String),
     End(Result<Outcome, ModelError>),
 }
 
@@ -191,6 +195,9 @@ impl Sink for Relay {
     }
     fn notice(&mut self, n: Notice) {
         let _ = self.tx.send(Piece::Notice(n));
+    }
+    fn call(&mut self, i: usize, name: &str, piece: &str) {
+        let _ = self.tx.send(Piece::Call(i, name.to_string(), piece.to_string()));
     }
     fn should_stop(&self) -> bool {
         self.stop.load(Ordering::Relaxed)
@@ -228,6 +235,7 @@ pub fn chat_interruptible(model: &Arc<dyn ChatModel>, req: &ChatRequest, sink: &
             Ok(Piece::Think(c)) => sink.think(&c),
             Ok(Piece::Delta(c)) => sink.delta(&c),
             Ok(Piece::Notice(n)) => sink.notice(n),
+            Ok(Piece::Call(i, name, piece)) => sink.call(i, &name, &piece),
             Ok(Piece::End(out)) => return out,
             Err(RecvTimeoutError::Timeout) => continue,
             Err(RecvTimeoutError::Disconnected) => {

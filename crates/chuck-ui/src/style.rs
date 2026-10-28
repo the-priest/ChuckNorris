@@ -94,6 +94,9 @@ headerbar { background-color: @bg; border-bottom: 1px solid @line; box-shadow: n
 .thinking { color: @faint; font-size: 12px; font-style: italic; }
 
 .code-block { background-color: @term; border: 1px solid @line; border-radius: 10px; }
+.live-write { border-color: alpha(@accent_hi, 0.45); }
+.live-head  { color: @accent_hi; }
+.live-code  { color: #B8B8D0; font-size: 11.5px; }
 .md-table-frame { border: 1px solid @line; border-radius: 10px; padding: 2px 12px; }
 .md-cell { padding: 6px 4px; }
 .md-head { border-bottom: 1px solid @line; color: @ink; }
