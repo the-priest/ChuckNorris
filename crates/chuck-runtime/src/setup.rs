@@ -73,7 +73,26 @@ fn live_models(client: &Arc<SiliconFlow>) -> Option<Vec<String>> {
             }
         }
     }
-    let live = client.list_models().ok()?;
+    // the list is kept on disk too (an hour), so `chuck run` — one job per process — skips the call as well
+    let file = crate::default_store().with_file_name("models.json");
+    // (for this endpoint and this key: another account may have other models; the key itself isn't written)
+    let tag = format!("{} {}\n", client.base(), &chuck_store::checkpoint::sha1_hex(client.key_id().as_bytes())[..12]);
+    let on_disk = std::fs::metadata(&file).ok().and_then(|m| m.modified().ok())
+        .filter(|t| t.elapsed().is_ok_and(|age| age < LIVE_FOR))
+        .and_then(|_| std::fs::read_to_string(&file).ok())
+        .and_then(|t| t.strip_prefix(&tag).map(|rest| rest.lines().map(String::from).collect::<Vec<_>>()))
+        .filter(|l| !l.is_empty());
+    let live = match on_disk {
+        Some(l) => l,
+        None => {
+            let l = client.list_models().ok()?;
+            if let Some(d) = file.parent() {
+                let _ = std::fs::create_dir_all(d);
+            }
+            let _ = std::fs::write(&file, format!("{tag}{}", l.join("\n")));
+            l
+        }
+    };
     let mut w = WARM.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(warm) = w.as_mut().filter(|w| Arc::ptr_eq(&w.client, client)) {
         warm.live = Some((std::time::Instant::now(), live.clone()));
@@ -239,6 +258,46 @@ pub fn from_settings(s: &Settings, folder: &Path, max_usd: Option<f64>) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_accounts_model_list_is_asked_for_once_an_hour_not_once_a_job() {
+        use std::io::{BufRead, BufReader, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}/v1", l.local_addr().unwrap());
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let a2 = asked.clone();
+        std::thread::spawn(move || {
+            for c in l.incoming().flatten() {
+                let mut r = BufReader::new(c.try_clone().unwrap());
+                let mut line = String::new();
+                let _ = r.read_line(&mut line);
+                loop {
+                    let mut h = String::new();
+                    if r.read_line(&mut h).unwrap_or(0) == 0 || h == "\r\n" {
+                        break;
+                    }
+                }
+                a2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let b = r#"{"data":[{"id":"deepseek-ai/DeepSeek-V4.1-Flash-1017"}]}"#;
+                let mut c = c;
+                let _ = write!(c, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{b}", b.len());
+            }
+        });
+        let cache = std::env::temp_dir().join(format!("chuck-models-cache-{}", std::process::id()));
+        std::env::set_var("XDG_CACHE_HOME", &cache);
+        // two processes' worth: neither shares the other's client, so only the file can save the second call
+        for _ in 0..2 {
+            let c = Arc::new(SiliconFlow::new(&base, "sk-a", Duration::from_secs(5), true).unwrap());
+            assert_eq!(live_models(&c).unwrap(), vec!["deepseek-ai/DeepSeek-V4.1-Flash-1017".to_string()]);
+        }
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // another key is another account: asked again
+        let c = Arc::new(SiliconFlow::new(&base, "sk-b", Duration::from_secs(5), true).unwrap());
+        live_models(&c).unwrap();
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 2);
+        std::env::remove_var("XDG_CACHE_HOME");
+        let _ = std::fs::remove_dir_all(&cache);
+    }
 
     #[test]
     fn local_only_means_this_machine() {

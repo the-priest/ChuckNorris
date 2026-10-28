@@ -76,6 +76,11 @@ impl SiliconFlow {
         &self.base
     }
 
+    /// The key, to tell accounts apart (hash it before keeping it anywhere).
+    pub fn key_id(&self) -> &str {
+        &self.key
+    }
+
     /// The longest silence allowed between bytes.
     pub fn stall(&self) -> Duration {
         self.stall
