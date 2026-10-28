@@ -256,7 +256,7 @@ impl Jail {
             if !rw {
                 continue;
             }
-            // a linked .git (a worker's copy borrows the project's) is read-only already, and bwrap
+            // a linked .git is read-only already, and bwrap
             // can't mount anything through a link
             if b.join(".git").is_symlink() {
                 continue;

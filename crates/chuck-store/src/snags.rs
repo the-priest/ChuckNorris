@@ -1,7 +1,7 @@
 //! Snags: everything that slowed an agent down, limited it or went wrong,
 //! written down so it can be fixed. The runtime records what it sees itself
-//! (a call that didn't run, an edit that missed, a refusal, a replaced
-//! worker, a stalled API); in debug mode the agents add their own, with the
+//! (a call that didn't run, an edit that missed, a refusal, a stalled
+//! API); in debug mode the agents add their own, with the
 //! `snag` tool. One JSON line each, in ~/.local/state/chucknorris/snags.jsonl
 //! (XDG_STATE_HOME honoured), turned over at 2 MB, readable only by you,
 //! anything shaped like a key blanked first.

@@ -1,5 +1,5 @@
 //! Chat mode: one model answers directly. It can search the web and read
-//! pages, nothing else: no files, no commands, no workers. When the user
+//! pages, nothing else: no files, no commands. When the user
 //! wants something done on their machine it hands the request to Build mode
 //! (```agent```), and the user decides whether to send it.
 

@@ -172,7 +172,7 @@ pub struct DoneGate {
     /// the latest per file.
     #[serde(default)]
     observed: Option<(String, usize)>,
-    /// One agent does the whole job (no workers): no plan required and no
+    /// One agent does the whole job: no plan required and no
     /// proportion check — its few quick checks passing after the last change
     /// is what "done" takes.
     #[serde(default)]
@@ -451,8 +451,8 @@ impl DoneGate {
         out
     }
 
-    /// A worker hands its work to the Lead. Refused (with the gaps) unless the
-    /// work itself is complete; the Lead's review is what's left.
+    /// Hand the work in for review. Refused (with the gaps) unless the work
+    /// itself is complete; the review is what's left.
     pub fn submit(&mut self) -> Result<(), Vec<Unmet>> {
         let gaps = self.check_work();
         if !gaps.is_empty() {

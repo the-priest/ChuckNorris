@@ -237,5 +237,11 @@ expander.lane-older > title:hover { color: @mute; }
             background-color: alpha(black, 0.65); color: white; box-shadow: none; }
 .attach-x:hover { background-color: @bad; }
 .pasted-btn { padding: 0; border-radius: 10px; }
+
+/* ── a question's options ───────────────────────────────────────────── */
+.ask-option { padding: 8px 12px; border-radius: 10px; }
+.ask-option .sub { color: @mute; }
+.ask-option.suggested-action .sub { color: alpha(white, 0.82); }
+.ask-option.suggested-action .prose { color: white; }
 .pasted-shot { border-radius: 10px; border: 1px solid alpha(@accent, 0.35); }
 "#;

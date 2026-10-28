@@ -1,7 +1,7 @@
 //! chuck-model — the only way an agent thinks: SiliconFlow chat completions.
 //!
 //! One trait, [`ChatModel`], with the real HTTP client ([`SiliconFlow`]) and a
-//! scripted stand-in for tests ([`Scripted`]). Every agent in the fleet calls
+//! scripted stand-in for tests ([`Scripted`]). Every model call Chuck makes goes
 //! it from its own thread; the client is `Send + Sync` and shares a connection
 //! pool.
 
@@ -132,7 +132,7 @@ impl Outcome {
 pub enum ModelError {
     #[error("No SiliconFlow API key. Add one in Settings.")]
     NoKey,
-    #[error("{0} isn't a SiliconFlow endpoint: Chuck's fleet talks to SiliconFlow only")]
+    #[error("{0} isn't a SiliconFlow endpoint: Chuck talks to SiliconFlow only")]
     NotSiliconFlow(String),
     #[error("API key rejected — check it in Settings.")]
     Unauthorized,
@@ -167,7 +167,7 @@ impl ModelError {
 pub trait ChatModel: Send + Sync {
     fn chat(&self, req: &ChatRequest, sink: &mut dyn Sink) -> Result<Outcome, ModelError>;
 
-    /// The chat models this key can use (for resolving the fleet's ids).
+    /// The chat models this key can use (for resolving Chuck's model ids).
     fn list_models(&self) -> Result<Vec<String>, ModelError> {
         Ok(Vec::new())
     }

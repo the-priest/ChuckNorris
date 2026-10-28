@@ -26,7 +26,7 @@ pub struct Criterion {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Verdict {
     Accepted,
-    /// Rejected with concrete defects: these become the worker's next turn.
+    /// Rejected with concrete defects: these become the agent's next turn.
     Rejected(Vec<String>),
 }
 

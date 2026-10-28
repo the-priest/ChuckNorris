@@ -1017,6 +1017,7 @@ fn on_event(st: &mut State, e: Event, shared: &Shared) {
                     row.append(&why);
                 }
                 let b = gtk::Button::builder().child(&row).hexpand(true).build();
+                b.add_css_class("ask-option");
                 if o.recommended {
                     b.add_css_class("suggested-action");
                 }
@@ -2057,7 +2058,8 @@ fn settings_dialog(shared: &Shared) {
                   ("Deep (8k)", 8192.0), ("Deeper (16k)", 16384.0), ("Max (32k)", 32768.0)];
     let names: Vec<&str> = levels.iter().map(|(n, _)| *n).collect();
     let rz = adw::ComboRow::builder().title("Reasoning before it builds")
-        .subtitle("It thinks on its first turn and after something fails; the rest of the job goes without").model(&gtk::StringList::new(&names)).build();
+        .subtitle("Off is fastest. On, it thinks on its first turn and after something fails, and goes without \
+                   in between").model(&gtk::StringList::new(&names)).build();
     let cur = s.num("reasoning_budget", 0.0, 0.0, 32768.0);
     rz.set_selected(levels.iter().position(|(_, v)| *v >= cur).unwrap_or(2) as u32);
     let think = adw::SpinRow::with_range(0.0, 1800.0, 10.0);

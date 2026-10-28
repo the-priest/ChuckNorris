@@ -124,12 +124,11 @@ pub struct Exec<'a> {
     pub web: Option<&'a chuck_web::Web>,
     /// Results per search.
     pub sources: usize,
-    /// MCP servers (the lead's only: they run outside any worker's jail).
+    /// MCP servers (they run outside every sandbox: the gate and the user's yes decide).
     pub mcp: Option<&'a chuck_mcp::Manager>,
-    /// Language servers (the lead's only, for the same reason: workers get
-    /// the syntax answers).
+    /// Language servers for def/refs/rename (else answers by syntax).
     pub lsp: Option<&'a chuck_code::Manager>,
-    /// Long-term memory (the lead's: workers don't keep facts).
+    /// Long-term memory (```remember```, ```forget```).
     pub memory: Option<&'a chuck_store::memory::Memory>,
     /// Places outside the folder the user allowed for this job.
     pub allowed_outside: Option<&'a Mutex<Vec<std::path::PathBuf>>>,

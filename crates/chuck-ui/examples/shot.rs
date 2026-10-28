@@ -120,6 +120,12 @@ fn main() {
                 floor and a red console error reads \"TypeError: grid[y] is undefined\"."])
             .for_model(chuck_core::MAIN_MODEL, ["The pieces fall through because the collision check reads `grid[y]` \
                 past the last row — `y` reaches 20 on a 20-row board. Clamping the check to `y < ROWS` fixes it."])),
+        // a question with explained options, waiting for the user
+        "ask" => Arc::new(Scripted::new().replies([
+            "Before I build it, one choice that's yours:\n```ask\nHow should the game be laid out?\n\
+             - Several files (recommended) :: index.html, style.css and game.js — easy to read and change\n\
+             - One HTML file :: everything inline, opens anywhere, harder to edit\n\
+             - A Vite project :: modules and hot reload, needs npm\n```"])),
         "voice" => Arc::new(Scripted::new().replies([
             "The `ls -la` command lists every file, hidden ones included, with permissions, owner, size and date."])),
         "daemons" => Arc::new(Scripted::new().replies([
@@ -198,6 +204,7 @@ fn main() {
         "research" | "chat" | "badchat" => Some("Why does int() fail on an empty string? Check the docs.".to_string()),
         "voice" => Some("What does ls -la show?".to_string()),
         "pasted" => Some("why do the pieces fall through?".to_string()),
+        "ask" => Some("make me a tetris".to_string()),
         "attach" => None,
         "writing" => Some("make me a tetris in tetris.html".to_string()),
         "table" => Some("Which small local model should I run?".to_string()),
