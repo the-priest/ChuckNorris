@@ -750,3 +750,132 @@ fn an_unanswered_question_and_an_endless_review_never_stall_the_job() {
     assert_eq!(critics, 4, "three rejections, and the fourth closes it");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_task_that_checks_anothers_file_waits_for_it_and_finds_it_there() {
+    // the plan from a real run: t1 builds index.html, t2 writes checks for it — assigned together. Run side by side,
+    // t2's checks could never pass in its copy (no index.html there); it waits for t1's merge and starts with it
+    let dir = tmp("deadlock");
+    let model = Arc::new(Scripted::new().respond(|req| {
+        if text(&req.messages[0]) == chuck_runtime::prompts::CRITIC {
+            return "ACCEPT".into();
+        }
+        let me = worker(req);
+        if me.contains("TASK t1") {
+            return if req.messages.len() == 2 {
+                "```write index.html\n<div id=board></div>\n```\n```test grep -q board index.html```\n```submit\nthe board\n```".into()
+            } else { "ok".into() };
+        }
+        if me.contains("TASK t2") {
+            return if req.messages.len() == 2 {
+                "```write verify/check.sh\ngrep -q board index.html\n```\n```test sh verify/check.sh```\n```submit\nthe check\n```".into()
+            } else if last_user(req).contains("TEST `sh verify/check.sh` → exit 1") {
+                "```test sh verify/check.sh```".into() // the loop from the real run: the same failing check again
+            } else { "ok".into() };
+        }
+        let last = last_user(req);
+        if req.messages.len() == 2 {
+            return "```criteria\n- the page has a board :: verify: grep -q board index.html\n\
+                - verify/check.sh passes against index.html :: verify: sh verify/check.sh\n```\n```plan\n- t1: game\n- t2: checks\n```\n\
+                ```assign worker\ntitle: Build the game in index.html\ncriteria:\n- index.html has a board :: verify: grep -q board index.html\n\
+                brief: owns index.html\n```\n\
+                ```assign worker\ntitle: Verification script\ncriteria:\n- verify/check.sh passes against index.html :: verify: sh verify/check.sh\n\
+                brief: owns verify/\n```".into();
+        }
+        let merged = req.messages.iter().filter(|m| m["role"] == "user")
+            .map(|m| text(m).matches("merged without waiting for you").count()).sum::<usize>();
+        if merged == 2 && !last.contains("done REFUSED") {
+            return "```test grep -q board index.html```\n```test sh verify/check.sh```\n```justify proportion\nsmall\n```\n\
+                ```done\nboard and its check, both pass.\n```".into();
+        }
+        "Waiting.".into()
+    }));
+    let (tx, rx) = channel();
+    let rt = Runtime::new(model.clone(), RuntimeConfig { store: dir.join("store"), ..RuntimeConfig::default() },
+                          Events(Some(tx)));
+    let (report, _) = run_within(30, rt, Job::new("a game and its checks", &dir));
+    assert!(matches!(report.outcome, Outcome::Done { .. }), "{:?}", report.outcome);
+    let seen = model.seen.lock().unwrap();
+    assert!(seen.iter().filter(|r| is_lead(r)).any(|r| last_user(r).contains("[t2 waits for t1 (it builds index.html)")),
+            "the Lead is told why t2 waits");
+    // t2's worker never ran its check against a copy without the game
+    assert!(!seen.iter().any(|r| worker(r).contains("TASK t2") && last_user(r).contains("→ exit 1")), "t2 went round in circles");
+    let events: Vec<Event> = rx.try_iter().collect();
+    let merged_t1 = events.iter().position(|e| matches!(e, Event::Merged { task, .. } if task == "t1")).unwrap();
+    let started_t2 = events.iter().position(|e| matches!(e, Event::Assigned { task, .. } if task == "t2")).unwrap();
+    assert!(started_t2 > merged_t1, "t2 started after t1 merged");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn what_merges_reaches_the_copies_of_workers_still_building() {
+    // t1 (a.txt) merges while t2 (b.txt, which doesn't need it) still builds: t2's copy gets a.txt, and t2 is told
+    let dir = tmp("takein");
+    let model = Arc::new(Scripted::new().respond(|req| {
+        if text(&req.messages[0]) == chuck_runtime::prompts::CRITIC {
+            return "ACCEPT".into();
+        }
+        let me = worker(req);
+        if me.contains("TASK t1") {
+            return if req.messages.len() == 2 {
+                "```write a.txt\nA\n```\n```test grep -qx A a.txt```\n```submit\na\n```".into()
+            } else { "ok".into() };
+        }
+        if me.contains("TASK t2") {
+            if heard(req, "your copy now has a.txt") {
+                // it can see t1's work now
+                return if last_user(req).contains("submission REFUSED") || last_user(req).contains("[created b.txt") {
+                    "ok".into()
+                } else {
+                    "```write b.txt\nB\n```\n```bash\ngrep -qx A a.txt\n```\n```test grep -qx B b.txt```\n```submit\nb, next to a\n```".into()
+                };
+            }
+            std::thread::sleep(Duration::from_millis(200));
+            return "```read .```".into();
+        }
+        let last = last_user(req);
+        if req.messages.len() == 2 {
+            return "```criteria\n- a :: verify: grep -qx A a.txt\n- b :: verify: grep -qx B b.txt\n```\n```plan\n- t1: a\n- t2: b\n```\n\
+                ```assign worker\ntitle: a\ncriteria:\n- a holds A :: verify: grep -qx A a.txt\nbrief: owns a.txt\n```\n\
+                ```assign worker\ntitle: b\ncriteria:\n- b holds B :: verify: grep -qx B b.txt\nbrief: owns b.txt\n```".into();
+        }
+        let merged = req.messages.iter().filter(|m| m["role"] == "user")
+            .map(|m| text(m).matches("merged without waiting for you").count()).sum::<usize>();
+        if merged == 2 && !last.contains("done REFUSED") {
+            return "```test grep -qx A a.txt```\n```test grep -qx B b.txt```\n```justify proportion\nsmall\n```\n\
+                ```done\na and b.\n```".into();
+        }
+        "Waiting.".into()
+    }));
+    let rt = Runtime::new(model.clone(), RuntimeConfig { store: dir.join("store"), ..RuntimeConfig::default() }, Events(None));
+    let (report, _) = run_within(30, rt, Job::new("a and b", &dir));
+    assert!(matches!(report.outcome, Outcome::Done { .. }), "{:?}", report.outcome);
+    assert_eq!(std::fs::read_to_string(dir.join("b.txt")).unwrap(), "B\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn alone_one_model_builds_it_in_two_replies() {
+    // no workers: criteria and the whole file in the first reply, the checks and done in the second — no plan
+    // required, no review call, nothing else
+    let dir = tmp("solo");
+    let model = Arc::new(Scripted::new().respond(|req| {
+        assert!(!text(&req.messages[0]).contains("independent reviewer"), "no review call alone");
+        assert!(text(&req.messages[0]).starts_with("You are Chuck"), "the solo prompt");
+        if req.messages.len() == 2 {
+            return "```criteria\n- tetris.html exists :: verify: test -f tetris.html\n- it has a canvas :: verify: grep -q canvas tetris.html\n\
+                - it has the pieces :: verify: grep -q TETROMINOES tetris.html\n```\n\
+                ```write tetris.html\n<canvas id=c></canvas><script>const TETROMINOES = [];</script>\n```".into();
+        }
+        "```test test -f tetris.html```\n```test grep -q canvas tetris.html```\n```test grep -q TETROMINOES tetris.html```\n\
+            ```done\ntetris.html: a canvas and the seven pieces; all three checks pass.\n```".into()
+    }));
+    let fleet = chuck_core::FleetConfig { deepseek_workers: 0, glm_workers: 0, ..chuck_core::FleetConfig::default() };
+    let rt = Runtime::new(model.clone(), RuntimeConfig { store: dir.join("store"), fleet, ..RuntimeConfig::default() },
+                          Events(None));
+    let (report, _) = run_within(20, rt, Job::new("make me a tetris in tetris.html", &dir));
+    assert!(matches!(report.outcome, Outcome::Done { .. }), "{:?}", report.outcome);
+    assert!(dir.join("tetris.html").exists());
+    assert_eq!(model.seen.lock().unwrap().len(), 2, "two calls, start to finish");
+    let _ = std::fs::remove_dir_all(&dir);
+}

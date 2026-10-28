@@ -364,6 +364,39 @@ impl Workspace {
         }
     }
 
+    /// Bring files merged into the project since this copy was made into
+    /// it — the ones the worker hasn't changed itself (its own stay its own,
+    /// for its merge to bring together). Taken into the base too, so they
+    /// aren't counted as the worker's changes. -> the files taken in.
+    pub fn take_in(&self, rels: &[String]) -> Vec<String> {
+        let mine = self.changes().unwrap_or_default();
+        let mut out = Vec::new();
+        for rel in rels {
+            if mine.contains_key(rel) || crate::fs::safe(&self.work, rel).is_err() {
+                continue;
+            }
+            let src = self.source.join(rel);
+            let ok = if src.is_file() && !src.is_symlink() {
+                [&self.base, &self.work].iter().all(|d| {
+                    let to = d.join(rel);
+                    to.parent().is_some_and(|p| fs::create_dir_all(p).is_ok()) && fs::copy(&src, &to).is_ok()
+                })
+            } else if !src.exists() {
+                // deleted in the project: gone here too
+                [&self.base, &self.work].iter().for_each(|d| {
+                    let _ = fs::remove_file(d.join(rel));
+                });
+                true
+            } else {
+                false
+            };
+            if ok {
+                out.push(rel.clone());
+            }
+        }
+        out
+    }
+
     pub fn remove(&self) {
         let _ = fs::remove_dir_all(&self.dir);
     }
@@ -510,6 +543,28 @@ mod tests {
         assert!(!outside.join("new.txt").exists());
         assert!(r.refused.contains(&"s.txt".to_string()) && r.refused.contains(&"ext/new.txt".to_string()), "{r:?}");
         for d in [outside, src, store] {
+            let _ = fs::remove_dir_all(d);
+        }
+    }
+
+    #[test]
+    fn a_running_copy_takes_in_what_was_merged_but_keeps_its_own() {
+        let src = tmp("takein-src");
+        let store = tmp("takein-store");
+        fs::write(src.join("mine.js"), "1\n").unwrap();
+        let ws = Workspace::create(&src, &store, "t2").unwrap();
+        fs::write(ws.work.join("mine.js"), "worker\n").unwrap();
+        // meanwhile another task merged: a new file, a change to mine.js too
+        fs::write(src.join("index.html"), "<game>\n").unwrap();
+        fs::write(src.join("mine.js"), "other\n").unwrap();
+        let got = ws.take_in(&["index.html".into(), "mine.js".into(), "../escape".into()]);
+        assert_eq!(got, vec!["index.html"]);
+        assert_eq!(fs::read_to_string(ws.work.join("index.html")).unwrap(), "<game>\n");
+        assert_eq!(fs::read_to_string(ws.work.join("mine.js")).unwrap(), "worker\n", "its own change stays");
+        let ch = ws.changes().unwrap();
+        assert!(!ch.contains_key("index.html"), "what it was given isn't its change");
+        assert!(ch.contains_key("mine.js"));
+        for d in [src, store] {
             let _ = fs::remove_dir_all(d);
         }
     }

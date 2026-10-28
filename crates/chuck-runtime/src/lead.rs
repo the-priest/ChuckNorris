@@ -327,6 +327,37 @@ pub fn parse_verdict(reply: &str) -> Verdict {
     }
 }
 
+/// Files a task's criteria name (in their words or their check commands)
+/// that aren't in the project yet.
+fn needed_files(criteria: &[(String, Option<String>)], root: &Path) -> Vec<String> {
+    static RX: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let rx = RX.get_or_init(|| regex::Regex::new(r"[A-Za-z0-9_][A-Za-z0-9_./-]*\.[A-Za-z][A-Za-z0-9]{0,5}\b").unwrap());
+    let mut out: Vec<String> = Vec::new();
+    for (text, verify) in criteria {
+        for m in rx.find_iter(&format!("{text} {}", verify.as_deref().unwrap_or(""))) {
+            let f = m.as_str().trim_start_matches("./").trim_end_matches('.').to_string();
+            // a domain or a version isn't a file the project gets
+            if f.contains("..") || f.starts_with("www.") || f.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+                continue;
+            }
+            if !root.join(&f).exists() && !out.contains(&f) {
+                out.push(f);
+            }
+        }
+    }
+    out
+}
+
+/// Does `text` name the file `f` (as a word: `game.js` isn't in `minigame.js`)?
+fn mentions(text: &str, f: &str) -> bool {
+    text.match_indices(f).any(|(i, _)| {
+        let before = text[..i].chars().next_back();
+        let after = text[i + f.len()..].chars().next();
+        !before.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '-')
+            && !after.is_some_and(|c| c.is_alphanumeric() || c == '_')
+    })
+}
+
 impl<'a> LeadRun<'a> {
     pub fn new(ctx: &'a Ctx, id: AgentId, root: &Path, ask: &str, answers: Option<Receiver<String>>) -> LeadRun<'a> {
         let (tx, rx) = channel();
@@ -413,6 +444,12 @@ impl<'a> LeadRun<'a> {
             },
         }).collect();
         self.ctx.events.emit(Event::Tasks(views));
+    }
+
+    /// No workers this job: the Lead does it all, alone and quickly.
+    fn solo(&self) -> bool {
+        let f = &self.ctx.cfg.fleet;
+        f.deepseek_workers as u32 + f.glm_workers as u32 == 0
     }
 
     /// Workers are on it: a message from one of them will come.
@@ -899,8 +936,22 @@ impl<'a> LeadRun<'a> {
                 }
                 let mut files = m.applied.clone();
                 files.extend(m.merged.iter().cloned());
-                self.announce(&format!("{tid} \"{}\" merged into the project: {}. Copies made before this don't have \
-                    it; your work merges on top of it.", clip(&title, 100), clip(&files.join(", "), 400)));
+                self.announce(&format!("{tid} \"{}\" merged into the project: {}.", clip(&title, 100),
+                                       clip(&files.join(", "), 400)));
+                // everyone still building works on the project as it is now: what merged is in their copies
+                // (a file one of them changed itself stays theirs, to be brought together at its merge)
+                let building: Vec<AgentId> = self.tasks.iter().filter(|t| t.state == TaskState::Running)
+                    .flat_map(|t| t.workers.iter().copied()).collect();
+                for id in building {
+                    let Some(w) = self.workers.get(&id).filter(|w| w.live) else { continue };
+                    let got = w.ws.take_in(&files);
+                    if !got.is_empty() {
+                        let text = format!("@{} {tid} merged: your copy now has {} — build on them, and run your checks \
+                            against them", w.name, clip(&got.join(", "), 300));
+                        self.team.post("lead", Some(&w.name), &text);
+                        self.ctx.events.emit(Event::Team { from: "lead".into(), to: Some(w.name.clone()), text });
+                    }
+                }
                 self.mark_plan_for(&tid, &title);
                 self.ctx.events.emit(Event::Reviewed { task: tid.clone(), accepted: true, defects: Vec::new() });
                 if let Some(j) = self.workers.get_mut(&sub.worker).and_then(|w| w.join.take()) {
@@ -986,6 +1037,9 @@ impl<'a> LeadRun<'a> {
     }
 
     fn assign(&mut self, call: &LeadCall) -> String {
+        if self.solo() {
+            return "[assign refused: there are no workers this job (Settings › Workers is 0) — build it yourself, now]".into();
+        }
         if self.ctx.cfg.access == chuck_sandbox::Access::ReadOnly {
             return "[assign refused: this folder is read-only — workers' results would have nowhere to go]".into();
         }
@@ -1008,6 +1062,20 @@ impl<'a> LeadRun<'a> {
         if !unknown.is_empty() {
             return format!("[assign refused: no task {}]", unknown.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "));
         }
+        // what it must prove needs a file another open task is building: it can't pass before that one merges,
+        // so it waits for it (run alongside, its every check fails and its worker goes round in circles)
+        let mut spec = spec;
+        let mut waits = Vec::new();
+        for f in needed_files(&spec.criteria, &self.root) {
+            let builders: Vec<String> = self.tasks.iter().filter(|t| t.open() && !spec.after.contains(&t.task.id))
+                .filter(|t| mentions(&format!("{} {} {}", t.task.title, t.task.brief,
+                    t.task.criteria.iter().map(|c| c.text.as_str()).collect::<Vec<_>>().join(" ")), &f))
+                .map(|t| t.task.id.clone()).collect();
+            for tid in builders {
+                waits.push(format!("{tid} (it builds {f})"));
+                spec.after.push(tid);
+            }
+        }
         let id = format!("t{}", self.task_base + self.tasks.len() + 1);
         let criteria = spec.criteria.into_iter().enumerate()
             .map(|(i, (text, verify))| Criterion { id: CriterionId(i as u16 + 1), text, verify }).collect();
@@ -1015,7 +1083,13 @@ impl<'a> LeadRun<'a> {
                           prefer: spec.prefer, race: spec.race, deps: spec.after };
         self.tasks.push(TaskSlot { task, state: TaskState::Queued, workers: Vec::new(), held: Vec::new(), attempts: 0,
                                    pending: None, note: String::new() });
-        let mut out = self.start_ready();
+        let mut out = Vec::new();
+        if !waits.is_empty() {
+            out.push(format!("[{id} waits for {}: its criteria check files that work builds, so they couldn't pass \
+                before it merges. If they really don't need it, say the interface in both briefs and assign again]",
+                waits.join(", ")));
+        }
+        out.extend(self.start_ready());
         if self.tasks.last().is_some_and(|t| t.state == TaskState::Queued) {
             out.push(format!("[{id} queued: it starts when its dependencies are merged and a worker is free]"));
         }
@@ -1146,7 +1220,10 @@ impl<'a> LeadRun<'a> {
                 rejected it — address its defects first]".into()));
         }
         self.critic_rounds += 1;
-        let verdict = self.critic(&summary, real.as_ref().map(|(p, _)| p.as_str()))?;
+        // alone, its own checks passing is the verdict: no second model call, no review laps
+        let verdict = if self.solo() { Verdict::Accepted } else {
+            self.critic(&summary, real.as_ref().map(|(p, _)| p.as_str()))?
+        };
         let defects = match &verdict {
             Verdict::Rejected(d) => d.clone(),
             Verdict::Accepted => Vec::new(),
@@ -1451,6 +1528,8 @@ impl<'a> LeadRun<'a> {
                 _ => convo.user(&note),
             }
         }
+        let solo = self.solo();
+        self.gate.lock().unwrap().solo = solo;
         let ask = self.gate.lock().unwrap().ask.clone();
         self.checkpoint_soon(&format!("before \"{}\"", clip(&ask, 60)));
         let mut progress = Progress::default();
@@ -1649,7 +1728,7 @@ impl<'a> LeadRun<'a> {
             }
             {
                 let mut g = self.gate.lock().unwrap();
-                if g.criteria.len() >= 3 {
+                if g.criteria.len() >= 3 && !g.solo {
                     g.scale = Scale::Large;
                 }
                 ctx.events.emit(Event::Gate { id: self.id, task: None, phase: g.phase.label().into(),

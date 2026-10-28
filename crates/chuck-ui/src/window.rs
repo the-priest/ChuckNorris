@@ -1871,8 +1871,9 @@ fn settings_dialog(shared: &Shared) {
             cheaper) build and talk to each other; GLM-5.3-Flash looks at screenshots.").build();
     let ds = adw::SpinRow::with_range(0.0, 8.0, 1.0);
     ds.set_title("Workers");
-    ds.set_subtitle("How many build at once. 0: the Lead does the work itself");
-    ds.set_value(s.num("fleet_deepseek_workers", 6.0, 0.0, 8.0));
+    ds.set_subtitle("0 (the default): one model does the whole job — the fastest. More: the Lead splits big work \
+        across them and merges it");
+    ds.set_value(s.num("fleet_deepseek_workers", 0.0, 0.0, 8.0));
     let cap = adw::SpinRow::with_range(0.05, 100.0, 0.05);
     cap.set_title("Spending cap per job ($)");
     cap.set_digits(2);
@@ -1909,9 +1910,9 @@ fn settings_dialog(shared: &Shared) {
     let cur = s.num("reasoning_budget", 2048.0, 0.0, 32768.0);
     rz.set_selected(levels.iter().position(|(_, v)| *v >= cur).unwrap_or(2) as u32);
     let wz = adw::ComboRow::builder().title("Workers' reasoning")
-        .subtitle("They build from the Lead's brief: light thinking keeps them fast").model(&gtk::StringList::new(&names)).build();
-    let wcur = s.num("worker_reasoning_budget", 1024.0, 0.0, 32768.0);
-    wz.set_selected(levels.iter().position(|(_, v)| *v >= wcur).unwrap_or(1) as u32);
+        .subtitle("The Lead thinks; they build from its brief — off keeps them fastest").model(&gtk::StringList::new(&names)).build();
+    let wcur = s.num("worker_reasoning_budget", 0.0, 0.0, 32768.0);
+    wz.set_selected(levels.iter().position(|(_, v)| *v >= wcur).unwrap_or(0) as u32);
     let think = adw::SpinRow::with_range(0.0, 1800.0, 10.0);
     think.set_title("Max thinking time (s)");
     think.set_value(s.num("max_think_seconds", 90.0, 0.0, 1800.0));

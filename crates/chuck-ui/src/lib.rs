@@ -28,6 +28,7 @@ use adw::prelude::*;
 /// is left running.
 pub fn run(opts: Options) -> i32 {
     chuck_store::crashlog::install();
+    chuck_runtime::setup::migrate();
     let app = adw::Application::builder().application_id("org.thepriest.chucknorris")
         .flags(gtk::gio::ApplicationFlags::NON_UNIQUE).build();
     app.connect_activate(move |app| window::build(app, opts.clone()));

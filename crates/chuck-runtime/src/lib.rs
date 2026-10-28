@@ -114,7 +114,7 @@ impl Default for RuntimeConfig {
         RuntimeConfig {
             fleet: FleetConfig::default(),
             reasoning: Reasoning::default(),
-            worker_reasoning: Reasoning { budget: 1024, max_think_secs: 45 },
+            worker_reasoning: Reasoning { budget: 0, max_think_secs: 45 },
             ask_wait: crate::lead::ASK_WAIT,
             native_tools: true,
             debug: false,

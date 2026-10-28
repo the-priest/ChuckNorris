@@ -473,6 +473,7 @@ fn cmd_voice(arg: Option<&str>) -> i32 {
 
 fn main() {
     chuck_store::crashlog::install();
+    chuck_runtime::setup::migrate();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let code = match args.first().map(String::as_str) {
         Some("run") => cmd_run(&args[1..], false, false),

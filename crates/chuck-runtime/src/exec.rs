@@ -41,7 +41,18 @@ pub struct StepResult {
     /// The reply tried to call a tool but wrote it so nothing could run
     /// (a block never closed, a call in the model's own format).
     pub malformed: bool,
+    /// Changes made so far in this reply (a call repeated with none between is skipped).
+    pub changes: u32,
+    /// The exit status of the last command this reply ran.
+    pub last_exit: Option<i32>,
 }
+
+/// Commands one reply may run (a model in a loop writes dozens; what they
+/// show is in the first few).
+pub const COMMANDS_PER_REPLY: usize = 15;
+/// Commands failing in a row after which the rest of the reply's aren't run:
+/// the cause needs fixing, not the same check again.
+pub const FAILS_IN_A_ROW: usize = 3;
 
 impl StepResult {
     pub fn acted(&self) -> bool {
@@ -189,6 +200,10 @@ pub fn friction(line: &str) -> Option<&'static str> {
         "refused"
     } else if l.contains("proves nothing") || l.contains("doesn't count as verification") {
         "check not counted"
+    } else if l.contains("failed in a row, so this reply's") || l.contains("commands of a reply run") {
+        "command flood"
+    } else if l.contains("repeated what this reply had already run") {
+        "repeated calls"
     } else if l.contains("(timed out)") {
         "timed out"
     } else if l.starts_with("[snag noted") {
@@ -502,6 +517,11 @@ impl<'a> Exec<'a> {
         }
         items.sort_by_key(|(s, _)| *s);
         let all_criteria: Vec<CriterionId> = self.gate.lock().unwrap().criteria.iter().map(|c| c.id).collect();
+        // the same call twice in one reply, with nothing changed between: run once (a model in a loop writes
+        // the same few commands over and over — each run costs time and fills the context)
+        let mut ran: std::collections::HashSet<(u32, String, String, String)> = std::collections::HashSet::new();
+        let mut repeats = 0;
+        let (mut commands, mut fails, mut held) = (0usize, 0usize, 0usize);
         for (_, item) in items {
             if self.kernel.should_stop(self.id) {
                 res.feedback.push("[stopped]".into());
@@ -509,8 +529,42 @@ impl<'a> Exec<'a> {
             }
             match item {
                 Item::File(b) => self.file(&b, &all_criteria, &mut res),
-                Item::Tool(t) => self.tool(&t, &mut res),
+                Item::Tool(t) => {
+                    let key = (res.changes, t.tag.clone(), t.arg.trim().to_string(), t.body.trim().to_string());
+                    if !matches!(t.tag.as_str(), "team" | "snag") && !ran.insert(key) {
+                        repeats += 1;
+                        continue;
+                    }
+                    let command = matches!(t.tag.as_str(), "bash" | "sh" | "test");
+                    if command && (fails >= FAILS_IN_A_ROW || commands >= COMMANDS_PER_REPLY) {
+                        held += 1;
+                        continue;
+                    }
+                    res.last_exit = None;
+                    self.tool(&t, &mut res);
+                    if command {
+                        commands += 1;
+                        match res.last_exit {
+                            Some(0) => fails = 0,
+                            Some(_) => fails += 1,
+                            None => {}
+                        }
+                    }
+                }
             }
+        }
+        if held > 0 {
+            res.feedback.push(if fails >= FAILS_IN_A_ROW {
+                format!("[{FAILS_IN_A_ROW} commands failed in a row, so this reply's other {held} weren't run. Read the \
+                    errors above and fix their cause, then check once]")
+            } else {
+                format!("[only the first {COMMANDS_PER_REPLY} commands of a reply run; {held} more weren't — look at these \
+                    results first]")
+            });
+        }
+        if repeats > 0 {
+            res.feedback.push(format!("[{repeats} call(s) repeated what this reply had already run, with nothing \
+                changed between: not run again. Their result is above — act on it]"));
         }
         res
     }
@@ -568,6 +622,8 @@ impl<'a> Exec<'a> {
                 self.gate.lock().unwrap().record(self.id, all.to_vec(), EvidenceKind::Diff {
                     files: vec![ch.rel.clone()], added, removed, patch }, true);
                 res.mutated = true;
+        res.changes += 1;
+                res.changes += 1;
                 let s = format!("{} {} (+{added} −{removed})", if ch.before.is_some() { "changed" } else { "created" }, ch.rel);
                 self.act(&b.tag, &ch.rel, true, &s);
                 res.feedback.push(format!("[{s}]"));
@@ -645,6 +701,7 @@ impl<'a> Exec<'a> {
             });
         }
         res.mutated = true;
+        res.changes += 1;
         let s = format!("patched {} file(s) (+{plus} −{minus}): {}", done.len(), names.join(", "));
         self.kernel.syscall(self.id, "patch", &names.join(" "), 0.0, body.len(), false);
         self.act("patch", &names.join(" "), true, &s);
@@ -798,6 +855,7 @@ impl<'a> Exec<'a> {
                 };
                 let r = self.run_cmd(&if verifies { format!("set -o pipefail\n{cmd}") } else { cmd.clone() }, wrap);
                 let changed = fingerprint(self.root) != before;
+                res.last_exit = Some(r.exit);
                 if let Some((ledger, who)) = &self.audit {
                     // every command that ran, whatever the agent later says about it (recorded after
                     // the change check, so a ledger inside the project isn't mistaken for a change)
@@ -857,6 +915,8 @@ impl<'a> Exec<'a> {
                 }
                 drop(g);
                 res.mutated |= changed;
+        res.changes += u32::from(changed);
+                res.changes += u32::from(changed);
                 res.verified |= verified;
                 let head = format!("exit {}{}{}", r.exit, if r.timed_out { " (timed out)" } else { "" },
                                    if changed { " · files changed" } else { "" });
@@ -1082,6 +1142,9 @@ impl<'a> Exec<'a> {
                     self.gate.lock().unwrap().record(self.id, all.clone(), EvidenceKind::Diff {
                         files: vec![ch.rel.clone()], added, removed, patch }, true);
                     res.mutated = true;
+                    res.changes += 1;
+        res.changes += 1;
+                res.changes += 1;
                     done.push(ch.rel);
                 }
                 Err(e) => {
@@ -1175,6 +1238,7 @@ impl<'a> Exec<'a> {
         self.gate.lock().unwrap().record(self.id, Vec::new(), EvidenceKind::Command { cmd: shown.clone(),
             exit: if ok { 0 } else { 1 }, output: out }, changed);
         res.mutated |= changed;
+        res.changes += u32::from(changed);
         self.act("mcp", &target, ok, text.lines().next().unwrap_or(""));
         if changed {
             text.push_str("\n[files in the folder changed]");
@@ -1314,6 +1378,41 @@ pub fn refuse_command(cmd: &str, role: Role) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_flood_of_failing_commands_stops_after_three() {
+        let d = std::env::temp_dir().join(format!("chuck-flood-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let kernel = Kernel::new(4);
+        let id = kernel.spawn(chuck_core::SpawnSpec::new("ds-1", Role::DeepSeekWorker));
+        let gate = Mutex::new(DoneGate::new("x", chuck_core::Scale::Small));
+        let events = Events(None);
+        let exec = Exec { id, role: Role::DeepSeekWorker, kernel: &kernel, root: &d, gate: &gate,
+                          sandbox: Sandbox { access: Access::Full, bwrap: false, worker: true }, approve: None,
+                          audit: None, stop: Arc::default(), events: &events, cmd_timeout: Duration::from_secs(10),
+                          web: None, sources: 0, mcp: None, lsp: None, memory: None, allowed_outside: None,
+                          team: None, hold: None, lent: &[], claimed: &[] };
+        // forty different checks, all failing: three run
+        let reply: String = (0..40).map(|i| format!("```bash\nfalse && echo {i}\n```\n")).collect();
+        let r = exec.run(&reply);
+        assert_eq!(r.feedback.iter().filter(|f| f.starts_with("RAN")).count(), 3, "{:?}", r.feedback);
+        assert!(r.feedback.iter().any(|f| f.contains("failed in a row")));
+        // the same one forty times: once
+        let reply = "```bash\necho same\n```\n".repeat(40);
+        let r = exec.run(&reply);
+        assert_eq!(r.feedback.iter().filter(|f| f.starts_with("RAN")).count(), 1);
+        assert!(r.feedback.iter().any(|f| f.contains("39 call(s) repeated")));
+        // twenty passing ones: the first fifteen
+        let reply: String = (0..20).map(|i| format!("```bash\necho {i}\n```\n")).collect();
+        let r = exec.run(&reply);
+        assert_eq!(r.feedback.iter().filter(|f| f.starts_with("RAN")).count(), COMMANDS_PER_REPLY);
+        // a check, a fix, the same check again: both run
+        let reply = "```bash\ntest -f a.txt\n```\n```write a.txt\nA\n```\n```bash\ntest -f a.txt\n```\n";
+        exec.gate.lock().unwrap().set_criteria(Role::Lead, vec![("a".into(), None)]);
+        let r = exec.run(reply);
+        assert_eq!(r.feedback.iter().filter(|f| f.starts_with("RAN")).count(), 2, "{:?}", r.feedback);
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     #[test]
     fn root_is_refused_where_a_command_starts_and_nowhere_else() {

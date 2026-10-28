@@ -242,10 +242,11 @@ pub fn runaway_at(s: &str) -> Option<usize> {
     if n < 2000 {
         return None;
     }
-    let base = n.saturating_sub(12_000);
+    let base = n.saturating_sub(24_000);
     let b = &s.as_bytes()[base..];
     let m = b.len();
-    for l in 1..=400usize {
+    // a unit up to a long one-liner (a `node -e "…"` check written again and again)
+    for l in 1..=1200usize {
         if l * 8 > m {
             break;
         }

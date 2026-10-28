@@ -103,6 +103,20 @@ Chuck is now a Rust app (`crates/`), and the installer puts it over any earlier 
   - the placeholder characters the renderer uses could be faked by a reply.
   The tests check every parser, cutter and cleaner, the Markdown → markup (always valid Pango),
   the safety classifier, and that no file op writes through a link out of the folder.
+- **One model does it all, by default.** DeepSeek-V4.1-Flash-1017 builds the whole job itself, the
+  fastest way there: criteria (a few quick checks, about exactly what you asked) and every file in its
+  first reply, the checks and `done` in the next. Alone, no plan is required, there's no line-count
+  check and no second model call for review: its checks passing after the last change is "done". A
+  worker count saved before goes back to 0 once; raise Settings › Workers to bring the fleet back.
+- With workers on:
+  - a task whose criteria check a file another open task is building waits for that one to merge
+    (side by side, its checks could never pass in its copy, and its worker went round in circles);
+  - what merges reaches the copies of workers still building (their own changes stay theirs);
+  - workers run a failing check once, read it, and fix the cause; a check that needs a teammate's
+    part is reported, not re-run;
+  - workers don't think by default (the Lead does).
+- One reply runs at most 15 commands, stops after 3 failing in a row, and never runs the same call
+  twice with nothing changed between (a model looping wrote dozens).
 - Every worker gets a part, and good work is merged at once: a hand-in that passes its gate and its
   re-run checks goes straight into the project, without waiting for the Lead's turn (Settings ›
   Merge good work at once). The Lead sees each one with its diff and fixes or reassigns what's wrong;

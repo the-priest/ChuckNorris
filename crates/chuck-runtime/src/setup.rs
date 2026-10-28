@@ -40,6 +40,19 @@ pub fn access_of(s: &Settings, folder: &Path) -> Access {
     }).and_then(|(_, v)| v.as_str()).map_or(Access::Guarded, Access::parse)
 }
 
+/// Once: one model does it all by default now — a worker count saved before
+/// (the old default was 6) goes back to 0. Workers are asked for again by
+/// raising Settings › Workers; this never runs twice.
+pub fn migrate() {
+    let mut s = Settings::load();
+    if s.map.contains_key("fleet_solo_v1") {
+        return;
+    }
+    s.set("fleet_deepseek_workers", 0.into());
+    s.set("fleet_solo_v1", true.into());
+    let _ = s.save();
+}
+
 pub fn fleet(s: &Settings) -> FleetConfig {
     let mut f = FleetConfig::default();
     if let Some(m) = s.str("fleet_deepseek_model") {
@@ -51,7 +64,8 @@ pub fn fleet(s: &Settings) -> FleetConfig {
     if let Some(m) = s.str("fleet_glm_model") {
         f.glm_model = m.to_string();
     }
-    f.deepseek_workers = s.num("fleet_deepseek_workers", 6.0, 0.0, 8.0) as u8;
+    // one model does it all unless workers are asked for (Settings › Workers)
+    f.deepseek_workers = s.num("fleet_deepseek_workers", 0.0, 0.0, 8.0) as u8;
     // GLM is the eyes. (`fleet_glm_workers`, which older windows saved as 4 for everyone, no longer makes it
     // a worker pool; `fleet_glm_pool` does, for whoever really wants one.)
     f.glm_workers = s.num("fleet_glm_pool", 0.0, 0.0, 4.0) as u8;
@@ -132,9 +146,10 @@ pub fn from_settings(s: &Settings, folder: &Path, max_usd: Option<f64>) -> Resul
         budget: s.num("reasoning_budget", 2048.0, 0.0, 32768.0) as u32,
         max_think_secs: s.num("max_think_seconds", 90.0, 0.0, 1800.0) as u32,
     };
-    // workers build from a brief: light thinking, and never long (each minute of it is a minute of waiting)
+    // the Lead thinks, the workers build from its brief: no thinking by default (each minute of it is a minute
+    // of waiting), and never long when it's turned on
     cfg.worker_reasoning = Reasoning {
-        budget: s.num("worker_reasoning_budget", 1024.0, 0.0, 32768.0) as u32,
+        budget: s.num("worker_reasoning_budget", 0.0, 0.0, 32768.0) as u32,
         max_think_secs: (cfg.reasoning.max_think_secs).min(45),
     };
     let mut usd = max_usd.unwrap_or_else(|| s.num("fleet_job_usd", 2.0, 0.01, 1000.0));

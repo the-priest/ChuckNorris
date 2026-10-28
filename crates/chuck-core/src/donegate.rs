@@ -172,6 +172,11 @@ pub struct DoneGate {
     /// the latest per file.
     #[serde(default)]
     observed: Option<(String, usize)>,
+    /// One agent does the whole job (no workers): no plan required and no
+    /// proportion check — its few quick checks passing after the last change
+    /// is what "done" takes.
+    #[serde(default)]
+    pub solo: bool,
 }
 
 /// A unified diff split per file: (file, section), in order.
@@ -207,7 +212,7 @@ impl DoneGate {
         DoneGate {
             ask: ask.into(), scale, phase: Phase::Intake, criteria: Vec::new(),
             criteria_accepted: false, plan: Vec::new(), plan_done: Vec::new(), evidence: Vec::new(), seq: 0,
-            last_mutation: 0, lines_changed: 0, accepted_justifications: Vec::new(), observed: None,
+            last_mutation: 0, lines_changed: 0, accepted_justifications: Vec::new(), observed: None, solo: false,
         }
     }
 
@@ -277,7 +282,7 @@ impl DoneGate {
     }
 
     fn needs_plan(&self) -> bool {
-        self.scale == Scale::Large || self.criteria.len() > 2
+        !self.solo && (self.scale == Scale::Large || self.criteria.len() > 2)
     }
 
     /// May this job change files now? Criteria come first; a large job also
@@ -438,7 +443,7 @@ impl DoneGate {
             out.push(Unmet::Craftsmanship(format!("{}: {} — `{}`", f.file, f.why, f.line)));
         }
         let lines = self.lines_changed();
-        if self.scale == Scale::Large && lines < 20
+        if self.scale == Scale::Large && !self.solo && lines < 20
             && !self.accepted_justifications.iter().any(|a| a == "proportion")
         {
             out.push(Unmet::OutOfProportion { lines });
