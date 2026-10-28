@@ -108,9 +108,9 @@ Chuck is now a Rust app (`crates/`), and the installer puts it over any earlier 
   after a change, a failure or a rejection). A smaller ceiling schedules and streams faster and keeps
   a reasoning model from filling a huge budget; a reply that is cut short is still continued, so a
   wrong guess costs at most one extra round-trip. This is the single biggest speed lever.
-- Games and apps come out complete in one pass: the solo prompt asks for real end-to-end logic, a
-  single self-contained HTML file (everything inline, no CDN or build step), full mechanics, a clean
-  dark UI, keyboard/mouse, and smooth requestAnimationFrame animation — not a stub or a demo.
+- Games and apps come out complete in one pass: real end-to-end logic, no stubs or placeholders, in
+  the language, files and layout you ask for (a Python package, several HTML/JS/CSS files, one file),
+  or what a good engineer would pick when you don't say; an existing project's structure is followed.
 - Faster alone: the whole job in ONE reply when it goes right (criteria, files, checks and `done`
   run in order), and thinking only where it pays — the first turn (planning) and after one that went
   wrong (debugging); reading a result and carrying on is done without it.
