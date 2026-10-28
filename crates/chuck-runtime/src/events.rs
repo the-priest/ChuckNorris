@@ -27,8 +27,6 @@ pub struct Choice {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
     AgentStarted { id: AgentId, role: Role, name: String, model: String, task: Option<String> },
-    Thinking { id: AgentId, chunk: String },
-    Delta { id: AgentId, chunk: String },
     /// A file being written, as the model writes it: its path, the lines so
     /// far, the newest of them; `done` once the reply is complete.
     Writing { id: AgentId, path: String, lines: usize, tail: String, done: bool },

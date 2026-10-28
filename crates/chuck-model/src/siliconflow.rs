@@ -76,6 +76,11 @@ impl SiliconFlow {
         &self.base
     }
 
+    /// The longest silence allowed between bytes.
+    pub fn stall(&self) -> Duration {
+        self.stall
+    }
+
     fn payload(&self, req: &ChatRequest, think_on: bool) -> Value {
         let mut p = json!({
             "model": req.model,
@@ -304,6 +309,11 @@ fn stream(resp: ureq::http::Response<ureq::Body>, req: &ChatRequest, sink: &mut 
         let data = data.trim();
         if data == "[DONE]" {
             finished = true;
+            // what's left (the end of the response) is read on its own thread: a connection read to its end
+            // goes back to the agent's pool, so the next call skips a new TLS handshake; the reply never waits
+            let _ = std::thread::Builder::new().name("chuck-drain".into()).spawn(move || {
+                let _ = std::io::copy(&mut lines, &mut std::io::sink());
+            });
             break;
         }
         let Ok(d) = serde_json::from_str::<Value>(data) else { continue };

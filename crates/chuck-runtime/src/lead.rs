@@ -168,16 +168,19 @@ pub fn promised(said: &str) -> bool {
 impl<'a> LeadRun<'a> {
     pub fn new(ctx: &'a Ctx, id: AgentId, root: &Path, ask: &str, answers: Option<Receiver<String>>) -> LeadRun<'a> {
         let store = ctx.cfg.store.join(format!("job-{}-{}", std::process::id(), id));
-        let (src, dst) = (root.to_path_buf(), store.join("snapshot"));
-        let snapshot_job = std::thread::Builder::new().name("chuck-snapshot".into())
-            .spawn(move || Snapshot::take(&src, &dst).ok()).ok();
+        let shadow = ctx.cfg.checkpoints.as_ref().filter(|_| ctx.cfg.access != chuck_sandbox::Access::ReadOnly)
+            .and_then(|store| chuck_store::Shadow::new(root, store).ok());
+        // the folder as it was: the first checkpoint holds it (and the real diff is measured against that);
+        // only without checkpoints is the whole folder copied
+        let snapshot_job = shadow.is_none().then(|| {
+            let (src, dst) = (root.to_path_buf(), store.join("snapshot"));
+            std::thread::Builder::new().name("chuck-snapshot".into()).spawn(move || Snapshot::take(&src, &dst).ok()).ok()
+        }).flatten();
         let mut gate = DoneGate::new(ask, Scale::Small);
         gate.solo = true;
         LeadRun { ctx, id, root: root.to_path_buf(), gate: Arc::new(Mutex::new(gate)),
                   answers: answers.map(|a| Arc::new(Mutex::new(a))), store, mutated: false,
-                  snapshot: None, snapshot_job, checkpoint_job: None,
-                  shadow: ctx.cfg.checkpoints.as_ref().filter(|_| ctx.cfg.access != chuck_sandbox::Access::ReadOnly)
-                      .and_then(|store| chuck_store::Shadow::new(root, store).ok()),
+                  snapshot: None, snapshot_job, checkpoint_job: None, shadow,
                   first_checkpoint: None, steer: None, resume: None, resumed: false, last_msgs: Vec::new(),
                   last_head: 1, paused_why: None, outside: Arc::default() }
     }
@@ -254,17 +257,17 @@ impl<'a> LeadRun<'a> {
             self.snapshot = j.join().ok().flatten();
         }
     }
+    /// The real change to the folder since the job began: against the
+    /// checkpoint it started from (a continued job's too), else the copy.
     fn measure(&mut self) -> Option<(String, usize)> {
-        self.snapped();
-        // a continued job: against the checkpoint the whole job started from
-        if self.resumed {
-            if let (Some(sh), Some(cp)) = (&self.shadow, &self.first_checkpoint) {
-                let d = sh.diff_since(cp, 400_000);
-                let lines = d.lines().filter(|l| (l.starts_with('+') && !l.starts_with("+++"))
-                    || (l.starts_with('-') && !l.starts_with("---"))).count();
-                return Some((d, lines));
-            }
+        self.checkpointed();
+        if let (Some(sh), Some(cp)) = (&self.shadow, &self.first_checkpoint) {
+            let d = sh.diff_since(cp, 400_000);
+            let lines = d.lines().filter(|l| (l.starts_with('+') && !l.starts_with("+++"))
+                || (l.starts_with('-') && !l.starts_with("---"))).count();
+            return Some((d, lines));
         }
+        self.snapped();
         self.snapshot.as_ref().and_then(|s| s.diff(400_000).ok())
     }
     pub fn mutated(&self) -> bool {
@@ -339,12 +342,20 @@ impl<'a> LeadRun<'a> {
     /// The Lead's whole run.
     pub fn run(&mut self, first: &str, history: &[(bool, String)]) -> Outcome {
         let out = self.run_inner(first, history);
-        self.snapped();
-        self.checkpointed();
-        if let Some(s) = &self.snapshot {
-            s.remove();
+        // a job that changed nothing (a question) never waits for the folder's copy or first checkpoint: they
+        // finish on their own, and the copy is cleared after
+        if self.mutated {
+            self.checkpointed();
         }
-        let _ = std::fs::remove_dir_all(&self.store);
+        let (job, store, snap) = (self.snapshot_job.take(), self.store.clone(), self.snapshot.take());
+        let clear = move || {
+            if let Some(s) = job.and_then(|j| j.join().ok().flatten()).or(snap) {
+                s.remove();
+            }
+            let _ = std::fs::remove_dir_all(&store);
+        };
+        // (a thread that can't start leaves the scratch for the next run's sweep)
+        let _ = std::thread::Builder::new().name("chuck-clear".into()).spawn(clear);
         out
     }
 
@@ -435,14 +446,19 @@ impl<'a> LeadRun<'a> {
             let reply = chuck_tools::normalize_calls(&reply, LEAD_TAGS).0;
             let reply = chuck_tools::without_made_up_turns(&reply).to_string();
             convo.assistant(&reply);
-            // the first checkpoint, taken while it thought: in place before anything this reply does
-            self.checkpointed();
             let said = chuck_tools::prose(&reply, LEAD_TAGS);
             if !said.trim().is_empty() {
                 ctx.events.emit(Event::Said { id: self.id, text: said.clone() });
             }
             let acts = !held.is_empty() || !chuck_tools::file_blocks(&reply).is_empty()
                 || !chuck_tools::tool_blocks(&reply, &["bash", "sh", "test"]).is_empty();
+            // anything this reply runs could change the folder: the first checkpoint (taken while it thought)
+            // is in place first. A reply that only reads or talks doesn't wait for it
+            let may_change = acts || !chuck_tools::tool_blocks(&reply, &["rename", "mcp"]).is_empty();
+            if may_change {
+                self.checkpointed();
+                self.snapped();
+            }
             if acts && self.first_checkpoint.is_some() {
                 let what = chuck_tools::file_blocks(&reply).first().map(|b| format!("{} {}", b.tag, b.path))
                     .or_else(|| chuck_tools::tool_blocks(&reply, &["bash", "sh", "test"]).first()
@@ -450,9 +466,6 @@ impl<'a> LeadRun<'a> {
                     .unwrap_or_default();
                 self.checkpoint(&format!("before {}", clip(&what, 80)));
             }
-            // nothing changes before the folder as it was is kept
-            self.snapped();
-            self.checkpointed();
             let (root_dir, job_gate, outside) = (self.root.clone(), self.gate.clone(), self.outside.clone());
             let exec = Exec { id: self.id, role: Role::Lead, kernel: &ctx.kernel, root: &root_dir, gate: &job_gate,
                               sandbox: Sandbox { access: ctx.cfg.access, bwrap: ctx.cfg.bwrap },

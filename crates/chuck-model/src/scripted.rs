@@ -14,11 +14,19 @@ pub struct Scripted {
     shared: Mutex<VecDeque<String>>,
     responder: Option<Responder>,
     pub seen: Mutex<Vec<ChatRequest>>,
+    /// Characters per streamed piece (0: 40).
+    piece: usize,
 }
 
 impl Scripted {
     pub fn new() -> Scripted {
         Scripted::default()
+    }
+
+    /// Stream replies `n` characters at a time (a real API sends a token or a few).
+    pub fn chunk(mut self, n: usize) -> Scripted {
+        self.piece = n.max(1);
+        self
     }
 
     /// Replies for any model, in order.
@@ -105,7 +113,8 @@ impl ChatModel for Scripted {
             text
         };
         let chars: Vec<char> = text.chars().collect();
-        for chunk in chars.chunks(40) {
+        let piece = if self.piece == 0 { 40 } else { self.piece };
+        for chunk in chars.chunks(piece) {
             sink.delta(&chunk.iter().collect::<String>());
         }
         // calls stream their arguments in pieces too, as the API sends them

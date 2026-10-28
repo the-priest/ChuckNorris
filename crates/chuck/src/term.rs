@@ -172,7 +172,7 @@ impl View {
                 let _ = id;
                 st.dim(&format!("  ⏵ {}", one_line(cmd, 100)))
             }
-            Event::Gate { .. } | Event::Board { .. } | Event::Thinking { .. } | Event::Delta { .. }
+            Event::Gate { .. } | Event::Board { .. }
             | Event::Writing { .. } => return,
             Event::Notice { text, .. } => st.warn(&format!("  ! {text}")),
             Event::Ask { question, options, .. } => {

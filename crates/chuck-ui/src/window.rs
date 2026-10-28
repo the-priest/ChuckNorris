@@ -1096,8 +1096,6 @@ fn on_event(st: &mut State, e: Event, shared: &Shared) {
             st.add(Entry::Handoff { request });
             st.save();
         }
-        // the reply itself arrives whole (Said); a file being written shows live (Writing)
-        Event::Thinking { .. } | Event::Delta { .. } => {}
         Event::Writing { id, path, lines, tail, done } => {
             // the file as the model writes it: one card per file, its newest lines rolling in
             let head_text = format!("{} {path} · {lines} line{}", if done { "WROTE" } else { "WRITING" },
@@ -3083,6 +3081,10 @@ pub fn build(app: &adw::Application, opts: Options) {
     if opts.listen {
         let sh = shared.clone();
         glib::timeout_add_local_once(Duration::from_millis(400), move || mic_clicked(&sh));
+    }
+    // the connection to SiliconFlow and the account's model list, ready before the first message is sent
+    if opts.model.is_none() {
+        glib::idle_add_local_once(|| setup::warm_up(&Settings::load()));
     }
     for p in &opts.attach {
         match gdk::Texture::from_filename(p) {

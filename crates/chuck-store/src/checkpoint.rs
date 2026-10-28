@@ -215,15 +215,31 @@ impl Shadow {
             .collect()
     }
 
-    /// Commit the folder as it is now → the commit id.
+    /// Commit the folder as it is now → the commit id. Nothing changed since
+    /// the last one: that one (no new point to scroll past). Committed with
+    /// git's plumbing (`write-tree`, `commit-tree`, `update-ref`): `commit`
+    /// does the same at five times the cost on every step that acts.
     pub fn snapshot(&self, label: &str) -> Result<String, CheckpointError> {
         self.ensure()?;
         self.unlock();
         let _ = self.git(&["add", "-A", "--ignore-errors"], false);
+        let tree = self.git(&["write-tree"], true)?.trim().to_string();
+        // the last point and its tree, when there is one
+        let head: Vec<String> = self.git(&["rev-parse", "-q", "HEAD", "HEAD^{tree}"], false).unwrap_or_default()
+            .lines().map(|l| l.trim().to_string()).filter(|l| l.len() == 40).collect();
+        if let [sha, last_tree] = head.as_slice() {
+            if *last_tree == tree {
+                return Ok(sha.clone());
+            }
+        }
         let label: String = label.chars().take(200).collect();
-        self.git(&["commit", "--quiet", "--allow-empty", "--no-verify", "-m",
-                   if label.trim().is_empty() { "step" } else { &label }], true)?;
-        let sha = self.git(&["rev-parse", "HEAD"], true)?.trim().to_string();
+        let label = if label.trim().is_empty() { "step".to_string() } else { label };
+        let mut args = vec!["commit-tree", tree.as_str(), "-m", label.as_str()];
+        if let Some(parent) = head.first() {
+            args.extend(["-p", parent.as_str()]);
+        }
+        let sha = self.git(&args, true)?.trim().to_string();
+        self.git(&["update-ref", "-m", &format!("commit: {label}"), "HEAD", &sha], true)?;
         self.record_manifest(&sha);
         let _ = std::fs::write(self.git_dir.join("chuck-folder"), format!("{}\n", self.work.display())); // last used
         Ok(sha)

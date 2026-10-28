@@ -31,6 +31,65 @@ pub fn client(s: &Settings) -> Result<SiliconFlow, String> {
     SiliconFlow::new(&base, key, stall, is_local(&base)).map_err(|e| e.to_string())
 }
 
+/// The client the session's jobs share, and the account's model list: one
+/// connection (kept alive between jobs, so no new handshake each time) and one
+/// `/models` call an hour, not one of each per job.
+struct Warm {
+    base: String,
+    key: String,
+    stall: Duration,
+    client: Arc<SiliconFlow>,
+    live: Option<(std::time::Instant, Vec<String>)>,
+}
+
+static WARM: std::sync::Mutex<Option<Warm>> = std::sync::Mutex::new(None);
+
+/// How long the account's model list is trusted.
+const LIVE_FOR: Duration = Duration::from_secs(3600);
+
+/// The shared client for these settings (made again when the key, the base
+/// URL or the stall limit changed).
+pub fn shared_client(s: &Settings) -> Result<Arc<SiliconFlow>, String> {
+    let fresh = client(s)?;
+    let mut w = WARM.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(warm) = w.as_ref() {
+        if warm.base == fresh.base() && warm.key == s.api_key().unwrap_or("").trim() && warm.stall == fresh.stall() {
+            return Ok(warm.client.clone());
+        }
+    }
+    let client = Arc::new(fresh);
+    *w = Some(Warm { base: client.base().to_string(), key: s.api_key().unwrap_or("").trim().to_string(),
+                     stall: client.stall(), client: client.clone(), live: None });
+    Ok(client)
+}
+
+/// The account's models (asked at most once an hour; None: the API didn't say).
+fn live_models(client: &Arc<SiliconFlow>) -> Option<Vec<String>> {
+    {
+        let w = WARM.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, live)) = w.as_ref().filter(|w| Arc::ptr_eq(&w.client, client)).and_then(|w| w.live.as_ref()) {
+            if at.elapsed() < LIVE_FOR {
+                return Some(live.clone());
+            }
+        }
+    }
+    let live = client.list_models().ok()?;
+    let mut w = WARM.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(warm) = w.as_mut().filter(|w| Arc::ptr_eq(&w.client, client)) {
+        warm.live = Some((std::time::Instant::now(), live.clone()));
+    }
+    Some(live)
+}
+
+/// Get the client and the model list ready in the background (the window,
+/// at start): the first job then starts at once.
+pub fn warm_up(s: &Settings) {
+    let Ok(client) = shared_client(s) else { return };
+    let _ = std::thread::Builder::new().name("chuck-warm".into()).spawn(move || {
+        let _ = live_models(&client);
+    });
+}
+
 /// The folder's access as the window stores it (`folder_access`: path → mode).
 pub fn access_of(s: &Settings, folder: &Path) -> Access {
     let Some(map) = s.map.get("folder_access").and_then(|v| v.as_object()) else { return Access::Guarded };
@@ -124,9 +183,9 @@ pub fn from_settings(s: &Settings, folder: &Path, max_usd: Option<f64>) -> Resul
     if let Some(p) = &s.problem {
         notes.push(p.clone());
     }
-    let model = client(s)?;
+    let model = shared_client(s)?;
     let mut cfg = RuntimeConfig { models: models(s), ..RuntimeConfig::default() };
-    if let Ok(live) = model.list_models() {
+    if let Some(live) = live_models(&model) {
         for (from, to) in cfg.models.resolve(&live) {
             notes.push(format!("{from} isn't on your account; using {to}"));
         }
@@ -174,7 +233,7 @@ pub fn from_settings(s: &Settings, folder: &Path, max_usd: Option<f64>) -> Resul
         notes.push(format!("this folder is {}, which needs bubblewrap to run commands — install it (pacman -Syu \
             bubblewrap / apt install bubblewrap); until then commands are refused", cfg.access.label()));
     }
-    Ok(Setup { model: Arc::new(model), cfg, usd, notes })
+    Ok(Setup { model, cfg, usd, notes })
 }
 
 #[cfg(test)]

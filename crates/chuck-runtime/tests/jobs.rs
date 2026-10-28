@@ -305,7 +305,8 @@ fn a_whole_job_can_be_rewound() {
     assert!(matches!(report.outcome, Outcome::Done { .. }), "{:?}", report.outcome);
     assert_eq!(std::fs::read_to_string(proj.join("x.txt")).unwrap(), "2\n");
     let sh = chuck_store::Shadow::new(&proj, &store).unwrap();
-    assert!(sh.points(10).len() >= 2, "one before the job, one before the step");
+    // before the job and before its first step the folder was the same: one point, not two
+    assert_eq!(sh.points(10).len(), 1, "{:?}", sh.points(10));
     sh.restore(report.checkpoint.as_deref().unwrap()).unwrap();
     assert_eq!(std::fs::read_to_string(proj.join("x.txt")).unwrap(), "1\n");
     assert!(!proj.join("made-by-shell.txt").exists(), "what a command made is undone too");
@@ -333,5 +334,39 @@ fn what_the_user_types_mid_job_reaches_the_lead_next_step() {
     let _ = run_within(20, rt, job);
     let second = last_user(&model.seen.lock().unwrap()[1]);
     assert!(second.contains("[the user, while you work") && second.contains("also check the README"), "{second}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn with_checkpoints_the_real_diff_comes_from_the_first_one_and_a_shell_stub_is_caught() {
+    // no copy of the folder is taken when checkpoints are on: the gate's real diff is the folder against the
+    // first checkpoint, and a stub a command wrote is in it
+    if std::process::Command::new("git").arg("--version").output().is_err() {
+        return;
+    }
+    let dir = tmp("shadow-diff");
+    let proj = dir.join("proj");
+    std::fs::create_dir_all(&proj).unwrap();
+    std::fs::write(proj.join("app.py"), "def f():\n    return 1\n").unwrap();
+    let model = Arc::new(Scripted::new().respond(|req| {
+        let last = last_user(req);
+        if req.messages.len() == 2 {
+            return "```criteria\n- f returns 2 :: verify: grep -q 'return 2' app.py\n```\n\
+                ```bash\nprintf 'def f():\\n    return 2\\n\\ndef g():\\n    raise NotImplementedError\\n' > app.py\n```\n\
+                ```test grep -q 'return 2' app.py```\n```done\nf returns 2.\n```".into();
+        }
+        if last.contains("done REFUSED") && last.contains("NotImplementedError") {
+            return "```write app.py\ndef f():\n    return 2\n```\n```test grep -q 'return 2' app.py```\n\
+                ```done\nf returns 2; checked.\n```".into();
+        }
+        "Hmm.".into()
+    }));
+    let cfg = RuntimeConfig { store: dir.join("store"), checkpoints: Some(dir.join("cp")), ..RuntimeConfig::default() };
+    let rt = Runtime::new(model.clone(), cfg, Events::none());
+    let (report, _) = run_within(20, rt, Job::new("make f return 2", &proj));
+    assert!(matches!(report.outcome, Outcome::Done { .. }), "{:?}", report.outcome);
+    assert!(!dir.join("store").read_dir().map(|mut d| d.any(|e| e.unwrap().path().join("snapshot").exists()))
+            .unwrap_or(false), "no copy of the folder was taken");
+    assert_eq!(model.calls(), 2, "the stub was caught, then fixed");
     let _ = std::fs::remove_dir_all(&dir);
 }

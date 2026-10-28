@@ -377,7 +377,6 @@ impl Sink for AgentSink<'_> {
     fn think(&mut self, c: &str) {
         self.thought += c.len();
         self.progress();
-        self.ctx.events.emit(Event::Thinking { id: self.id, chunk: c.into() });
     }
     fn delta(&mut self, c: &str) {
         self.got.push_str(c);
@@ -387,7 +386,6 @@ impl Sink for AgentSink<'_> {
         }
         self.wrote += c.len();
         self.progress();
-        self.ctx.events.emit(Event::Delta { id: self.id, chunk: c.into() });
         if !self.fenced_write {
             let mut from = self.got.len().saturating_sub(c.len() + 24);
             while !self.got.is_char_boundary(from) {

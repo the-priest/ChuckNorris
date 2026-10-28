@@ -288,3 +288,60 @@ fn lists_the_accounts_models() {
     let ids = client(&base, 10).list_models().unwrap();
     assert_eq!(ids, vec!["deepseek-ai/DeepSeek-V4.1-Flash", "zai-org/GLM-5.3-Flash"]);
 }
+
+/// One request's head and body off a kept-alive connection (None: it closed).
+fn read_request(r: &mut BufReader<TcpStream>) -> Option<Vec<u8>> {
+    let mut first = String::new();
+    if r.read_line(&mut first).ok()? == 0 {
+        return None;
+    }
+    let mut len = 0usize;
+    loop {
+        let mut h = String::new();
+        if r.read_line(&mut h).ok()? == 0 || h == "\r\n" {
+            break;
+        }
+        if let Some(v) = h.to_lowercase().strip_prefix("content-length:") {
+            len = v.trim().parse().ok()?;
+        }
+    }
+    let mut body = vec![0; len];
+    r.read_exact(&mut body).ok()?;
+    Some(body)
+}
+
+#[test]
+fn calls_one_after_another_share_one_connection() {
+    // a streamed reply read to its end goes back to the pool: the next call skips a new connection and handshake
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}/v1", l.local_addr().unwrap());
+    let conns = Arc::new(Mutex::new(0usize));
+    let c2 = conns.clone();
+    std::thread::spawn(move || {
+        for conn in l.incoming().flatten() {
+            *c2.lock().unwrap() += 1;
+            std::thread::spawn(move || {
+                let mut w = conn.try_clone().unwrap();
+                let mut r = BufReader::new(conn);
+                while read_request(&mut r).is_some() {
+                    let mut body = String::new();
+                    for piece in ["{\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}",
+                                  "{\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}"] {
+                        body.push_str(&format!("data: {piece}\n\n"));
+                    }
+                    body.push_str("data: [DONE]\n\n");
+                    let _ = write!(w, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n\
+                                       {:x}\r\n{body}\r\n0\r\n\r\n", body.len());
+                }
+            });
+        }
+    });
+    let m = SiliconFlow::new(&base, "sk-test", Duration::from_secs(10), true).unwrap();
+    for _ in 0..3 {
+        let mut c = Collect::default();
+        let out = m.chat(&ChatRequest::new("m", vec![json!({"role": "user", "content": "hello"})]), &mut c).unwrap();
+        assert_eq!(out.text, "hi");
+        std::thread::sleep(Duration::from_millis(100)); // the rest of the response is drained on its own thread
+    }
+    assert_eq!(*conns.lock().unwrap(), 1, "three calls, one connection");
+}
