@@ -935,32 +935,63 @@ fn on_event(st: &mut State, e: Event, shared: &Shared) {
             st.add(Entry::Videos { query, items: items.into_iter().map(|v| chat::Video {
                 title: v.title, url: v.url, thumb: v.thumb.map(|t| t.display().to_string()), length: v.length }).collect() });
         }
-        Event::Ask { question, .. } => {
+        Event::Ask { question, options, .. } => {
             let speech = speak(st, &question);
             buddy_says(st, &question, speech);
             let (c, body, foot) = card("THE LEAD ASKS", "ask-card");
             body.append(&render(&question));
-            let entry = gtk::Entry::builder().hexpand(true).placeholder_text("Your answer").build();
+            let entry = gtk::Entry::builder().hexpand(true)
+                .placeholder_text(if options.is_empty() { "Your answer" } else { "Or say what you want instead" }).build();
             let btn = gtk::Button::with_label("Answer");
             btn.add_css_class("suggested-action");
             foot.append(&entry);
             foot.append(&btn);
             let tx = st.running.as_ref().map(|r| r.answers.clone());
-            let (e2, f2, sh, q) = (entry.clone(), foot.clone(), shared.clone(), question.clone());
-            let answer = Rc::new(move || {
-                let a = e2.text().to_string();
+            let picks = gtk::Box::new(gtk::Orientation::Vertical, 6);
+            let (f2, p2, sh, q) = (foot.clone(), picks.clone(), shared.clone(), question.clone());
+            let send: Rc<dyn Fn(String)> = Rc::new(move |a: String| {
+                if a.trim().is_empty() {
+                    return;
+                }
                 if let Some(tx) = &tx {
                     let _ = tx.send(a.clone());
                 }
                 f2.set_sensitive(false);
+                p2.set_sensitive(false);
                 if let Ok(mut st) = sh.try_borrow_mut() {
                     st.record(Entry::Card { kind: "THE LEAD ASKED".into(), class: "ask-card".into(),
                                             text: format!("{q}\n\n**You:** {a}") });
                 }
             });
-            let a2 = answer.clone();
-            btn.connect_clicked(move |_| a2());
-            entry.connect_activate(move |_| answer());
+            for (i, o) in options.iter().enumerate() {
+                let row = gtk::Box::new(gtk::Orientation::Vertical, 2);
+                let head = format!("{}. {}{}", i + 1, o.label, if o.recommended { "  · recommended" } else { "" });
+                let title = label(&head, &["prose"]);
+                title.set_xalign(0.0);
+                row.append(&title);
+                if !o.why.is_empty() {
+                    let why = label(&o.why, &["sub"]);
+                    why.set_xalign(0.0);
+                    why.set_wrap(true);
+                    row.append(&why);
+                }
+                let b = gtk::Button::builder().child(&row).hexpand(true).build();
+                if o.recommended {
+                    b.add_css_class("suggested-action");
+                }
+                b.set_tooltip_text(Some(if o.recommended { "The Lead's pick — what it does if you don't answer" }
+                                        else { "Go this way" }));
+                let (s2, l) = (send.clone(), o.label.clone());
+                b.connect_clicked(move |_| s2(l.clone()));
+                picks.append(&b);
+            }
+            if !options.is_empty() {
+                body.append(&picks);
+            }
+            let (e2, s2) = (entry.clone(), send.clone());
+            btn.connect_clicked(move |_| s2(e2.text().to_string()));
+            let e3 = entry.clone();
+            entry.connect_activate(move |_| send(e3.text().to_string()));
             st.append(&c);
             st.lane = None;
             entry.grab_focus();

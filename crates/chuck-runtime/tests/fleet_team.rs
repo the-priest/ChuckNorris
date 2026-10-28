@@ -949,3 +949,63 @@ fn a_reading_turn_asks_for_a_small_budget_a_writing_turn_the_full_one() {
     assert_eq!(budgets[2], 4096, "a turn after a no-change turn is small — {budgets:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+fn asking_model() -> Arc<Scripted> {
+    Arc::new(Scripted::new().respond(|req| {
+        if text(&req.messages[0]) == chuck_runtime::prompts::CRITIC {
+            return "ACCEPT".into();
+        }
+        let last = last_user(req);
+        if req.messages.len() == 2 {
+            return "```ask\nHow should the board be drawn?\n- Plain DOM (recommended) :: simplest, easy to style\n\
+                - Canvas :: smoother animation for many pieces\n- WebGL :: only worth it for 3D\n```".into();
+        }
+        let pick = if last.contains("[the user picked: Canvas]") { "canvas" }
+            else if last.contains("go with \"Plain DOM\"") { "dom" } else { return "Hmm.".into() };
+        format!("```criteria\n- v holds {pick} :: verify: grep -qx {pick} v.txt\n```\n```write v.txt\n{pick}\n```\n\
+            ```test grep -qx {pick} v.txt```\n```justify proportion\none word\n```\n```done\nv.txt holds {pick} (grep).\n```")
+    }))
+}
+
+#[test]
+fn the_lead_offers_explained_options_and_a_number_picks_one() {
+    let dir = tmp("ask-pick");
+    let (atx, arx) = channel::<String>();
+    let (etx, erx) = channel();
+    let mut job = Job::new("draw the board", &dir);
+    job.answers = Some(arx);
+    let rt = Runtime::new(asking_model(), RuntimeConfig { store: dir.join("store"), ..RuntimeConfig::default() },
+                          Events(Some(etx)));
+    let asked = std::thread::spawn(move || {
+        for e in erx.iter() {
+            if let Event::Ask { question, options, .. } = e {
+                let _ = atx.send("2".into()); // the user clicks / types the second option
+                return Some((question, options));
+            }
+        }
+        None
+    });
+    let (report, _) = run_within(30, rt, job);
+    let (question, options) = asked.join().unwrap().expect("the Lead asked");
+    assert_eq!(question, "How should the board be drawn?");
+    let labels: Vec<_> = options.iter().map(|o| (o.label.as_str(), o.recommended)).collect();
+    assert_eq!(labels, [("Plain DOM", true), ("Canvas", false), ("WebGL", false)]);
+    assert_eq!(options[1].why, "smoother animation for many pieces");
+    assert!(matches!(report.outcome, Outcome::Done { .. }), "{:?}", report.outcome);
+    assert_eq!(std::fs::read_to_string(dir.join("v.txt")).unwrap().trim(), "canvas");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn with_nobody_answering_the_lead_goes_with_its_recommended_option() {
+    let dir = tmp("ask-default");
+    let (_atx, arx) = channel::<String>();
+    let mut job = Job::new("draw the board", &dir);
+    job.answers = Some(arx);
+    let cfg = RuntimeConfig { store: dir.join("store"), ask_wait: Duration::from_millis(300), ..RuntimeConfig::default() };
+    let rt = Runtime::new(asking_model(), cfg, Events(None));
+    let (report, _) = run_within(30, rt, job);
+    assert!(matches!(report.outcome, Outcome::Done { .. }), "{:?}", report.outcome);
+    assert_eq!(std::fs::read_to_string(dir.join("v.txt")).unwrap().trim(), "dom");
+    let _ = std::fs::remove_dir_all(&dir);
+}

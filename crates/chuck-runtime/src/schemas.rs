@@ -90,7 +90,9 @@ fn one(tag: &str) -> Option<Value> {
                            "why", &["arg", "body"]),
         "done" => f("done", "Finish the job (the gate and an independent review check it).",
                     json!({"summary": s("for the user: what changed and how it was verified")}), &["summary"]),
-        "ask" => block("ask", "Ask the user a decision that is theirs.", "", "the question", &["body"]),
+        "ask" => block("ask", "Ask the user a decision that is theirs.", "",
+                       "the question, then 2-4 lines `- <option> :: <why pick it>`, your pick first and marked \
+                        (recommended)", &["body"]),
         "remember" => block("remember", "Keep a durable fact for later chats (`project:` first for this folder only).",
                             "the fact", "", &["arg"]),
         "forget" => block("forget", "Drop remembered facts that match.", "what", "", &["arg"]),

@@ -14,6 +14,16 @@ pub enum Outcome {
     Failed { error: String },
 }
 
+/// One way to go that the Lead offers the user.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Choice {
+    pub label: String,
+    /// Why one would pick it, in a line.
+    pub why: String,
+    /// The Lead's own pick: what it does when nobody answers.
+    pub recommended: bool,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
     AgentStarted { id: AgentId, role: Role, name: String, model: String, task: Option<String> },
@@ -34,7 +44,9 @@ pub enum Event {
     Reviewed { task: String, accepted: bool, defects: Vec<String> },
     Merged { task: String, applied: usize, merged: usize, conflicts: Vec<String>, refused: Vec<String> },
     Notice { id: AgentId, text: String },
-    Ask { id: AgentId, question: String },
+    /// A question for the user, and the ways to go the Lead offers (none:
+    /// an open question).
+    Ask { id: AgentId, question: String, options: Vec<Choice> },
     /// A critical command waits for the user's explicit yes.
     /// `outside`: the paths outside the folder it reaches (then the user may
     /// also allow them for the rest of the job).

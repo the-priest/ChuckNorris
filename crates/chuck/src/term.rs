@@ -211,7 +211,20 @@ impl View {
                 let who = self.who(*id);
                 st.warn(&format!("  ! {who}: {text}"))
             }
-            Event::Ask { question, .. } => format!("\n{} {}", st.bold("? the lead asks:"), question.trim()),
+            Event::Ask { question, options, .. } => {
+                let mut s = format!("\n{} {}", st.bold("? the lead asks:"), question.trim());
+                for (i, o) in options.iter().enumerate() {
+                    let pick = if o.recommended { st.good(" (recommended)") } else { String::new() };
+                    s.push_str(&format!("\n  {} {}{}", st.bold(&format!("{}.", i + 1)), o.label, pick));
+                    if !o.why.is_empty() {
+                        s.push_str(&format!("\n     {}", st.dim(&o.why)));
+                    }
+                }
+                if !options.is_empty() {
+                    s.push_str(&format!("\n  {}", st.dim("type a number, or your own answer")));
+                }
+                s
+            }
             Event::Confirm { command, why, outside, .. } => format!("\n{} {}\n  {}\n  {}{}",
                 if outside.is_empty() { st.bad(&st.bold("! CRITICAL")) } else { st.warn(&st.bold("! OUTSIDE THE FOLDER")) },
                 st.bold("the lead wants to run:"), command.trim(), st.dim(why),
@@ -306,6 +319,19 @@ mod tests {
         assert!(s.contains("INCOMPLETE"));
         assert!(s.contains("- c1 has no evidence"));
         assert!(!s.contains('\x1b'));
+    }
+
+    #[test]
+    fn a_question_lists_its_options_numbered_with_the_pick_marked() {
+        let buf = Buf::default();
+        let mut v = View::new(false, false, Box::new(buf.clone()));
+        let c = |l: &str, w: &str, r| chuck_runtime::Choice { label: l.into(), why: w.into(), recommended: r };
+        v.show(&Event::Ask { id: AgentId(1), question: "Which stack?".into(),
+                             options: vec![c("Rust", "fastest", true), c("Python", "", false)] });
+        let s = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        assert!(s.contains("? the lead asks: Which stack?"), "{s}");
+        assert!(s.contains("1. Rust (recommended)") && s.contains("fastest") && s.contains("2. Python"), "{s}");
+        assert!(s.contains("type a number"), "{s}");
     }
 
     #[test]

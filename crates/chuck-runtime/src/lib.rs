@@ -25,7 +25,7 @@ pub mod team;
 pub mod setup;
 
 pub use agent::{Ctx, Halt};
-pub use events::{Event, Events, Outcome, Picture, TaskView, Video};
+pub use events::{Choice, Event, Events, Outcome, Picture, TaskView, Video};
 
 use chuck_core::{AgentId, DoneGate, FleetConfig, Kernel, Quota, Role, SpawnSpec};
 use chuck_model::{ChatModel, Reasoning};

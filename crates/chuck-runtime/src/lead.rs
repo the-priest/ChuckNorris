@@ -4,7 +4,7 @@
 //! and an independent critic pass.
 
 use crate::agent::{run_worker, think, Convo, Ctx, Halt, ToLead, ToWorker, WorkerSpec};
-use crate::events::{Event, Outcome};
+use crate::events::{Choice, Event, Outcome};
 use crate::exec::{parse_criteria, refuse_command, Approve, Exec, Grant, LeadCall, Sandbox, LEAD_TAGS};
 use crate::prompts;
 use crate::team::Team;
@@ -183,6 +183,73 @@ fn wait_answer(rx: &Mutex<Receiver<String>>, stop: &AtomicBool, kernel: &chuck_c
             Err(RecvTimeoutError::Disconnected) => return None,
         }
     }
+}
+
+/// An ```ask``` block split into its question and the ways to go it offers:
+/// list lines (`- `, `* `, `1. `, `1) `) of `<option> :: <why>` (or
+/// `<option> — <why>`), `(recommended)` marking the Lead's own pick. Fewer
+/// than two such lines: an open question, the text as it came.
+pub fn parse_ask(text: &str) -> (String, Vec<Choice>) {
+    fn item(line: &str) -> Option<&str> {
+        let l = line.trim_start();
+        if let Some(r) = l.strip_prefix("- ").or_else(|| l.strip_prefix("* ")).or_else(|| l.strip_prefix("• ")) {
+            return Some(r);
+        }
+        let digits = l.chars().take_while(|c| c.is_ascii_digit()).count();
+        if (1..=2).contains(&digits) {
+            let r = &l[digits..];
+            return r.strip_prefix(". ").or_else(|| r.strip_prefix(") "));
+        }
+        None
+    }
+    let mut question = Vec::new();
+    let mut options = Vec::new();
+    for line in text.lines() {
+        let Some(it) = item(line) else {
+            if !line.trim().is_empty() {
+                question.push(line.trim());
+            }
+            continue;
+        };
+        let lower = it.to_lowercase();
+        let recommended = lower.contains("(recommended)") || lower.contains("[recommended]");
+        let mut s = it.to_string();
+        for mark in ["(recommended)", "[recommended]", "(Recommended)", "[Recommended]", "(RECOMMENDED)"] {
+            s = s.replace(mark, "");
+        }
+        let (label, why) = match s.split_once("::").or_else(|| s.split_once(" — ")).or_else(|| s.split_once(" -- ")) {
+            Some((l, w)) => (l, w),
+            None => (s.as_str(), ""),
+        };
+        let label = label.trim().trim_matches('*').trim().to_string();
+        if label.is_empty() {
+            continue;
+        }
+        options.push(Choice { label, why: why.trim().to_string(), recommended });
+    }
+    if options.len() < 2 {
+        return (text.trim().to_string(), Vec::new());
+    }
+    // One pick at most: the first marked.
+    let mut seen = false;
+    for o in &mut options {
+        if o.recommended && seen {
+            o.recommended = false;
+        }
+        seen |= o.recommended;
+    }
+    (question.join(" "), options)
+}
+
+/// Which option an answer names: its number, or its label (in any case).
+pub fn picked<'a>(answer: &str, options: &'a [Choice]) -> Option<&'a Choice> {
+    let a = answer.trim().trim_end_matches(['.', ')']).trim();
+    let a = a.strip_prefix('#').unwrap_or(a);
+    if let Ok(n) = a.parse::<usize>() {
+        return n.checked_sub(1).and_then(|i| options.get(i));
+    }
+    let a = a.to_lowercase();
+    options.iter().find(|o| o.label.to_lowercase() == a)
 }
 
 /// A reply that announces work instead of doing it ("Let me check…",
@@ -1119,26 +1186,37 @@ impl<'a> LeadRun<'a> {
     }
 
     fn ask(&mut self, call: &LeadCall) -> String {
-        let q = format!("{} {}", call.arg, call.body).trim().to_string();
+        let text = format!("{}\n{}", call.arg, call.body);
+        let (question, options) = parse_ask(&text);
         if let Some(rx) = &self.answers {
             forget_typed(rx);
         }
-        self.ctx.events.emit(Event::Ask { id: self.id, question: q });
+        // What the Lead does when nobody answers: its own pick, else the first.
+        let fallback = options.iter().find(|o| o.recommended).or(options.first()).map(|o| o.label.clone());
+        self.ctx.events.emit(Event::Ask { id: self.id, question, options: options.clone() });
+        let go_on = match &fallback {
+            Some(l) => format!("go with \"{l}\", say so in a line, and go on"),
+            None => "make the most reasonable choice, say which, and go on".into(),
+        };
         let Some(rx) = &self.answers else {
-            return "[nobody can answer right now: make the most reasonable choice, say which, and go on]".into();
+            return format!("[nobody can answer right now: {go_on}]");
         };
         self.ctx.kernel.block(self.id, "waiting for your answer");
         let wait = self.ctx.cfg.ask_wait;
         let answer = wait_answer(rx, &self.ctx.stop, &self.ctx.kernel, self.id, Some(wait));
         self.ctx.kernel.unblock(self.id);
         if answer.is_none() && !self.ctx.stop.load(Ordering::Relaxed) {
-            self.ctx.events.emit(Event::Notice { id: self.id, text: "no answer yet — the Lead goes on with its best \
-                choice; your answer still reaches it".into() });
+            let with = fallback.as_ref().map(|l| format!("\"{l}\"")).unwrap_or_else(|| "its best choice".into());
+            self.ctx.events.emit(Event::Notice { id: self.id, text: format!("no answer yet — the Lead goes on with \
+                {with}; your answer still reaches it") });
         }
         match answer {
-            Some(a) => format!("[the user answered: {a}]"),
-            None => format!("[no answer in {}: make the most reasonable choice, say which, and go on — the user can \
-                still steer]", if wait.as_secs() >= 120 { format!("{} minutes", wait.as_secs() / 60) } else {
+            Some(a) => match picked(&a, &options) {
+                Some(o) => format!("[the user picked: {}]", o.label),
+                None => format!("[the user answered: {a}]"),
+            },
+            None => format!("[no answer in {}: {go_on} — the user can still steer]",
+                if wait.as_secs() >= 120 { format!("{} minutes", wait.as_secs() / 60) } else {
                     format!("{} seconds", wait.as_secs()) }),
         }
     }
@@ -1790,6 +1868,36 @@ impl<'a> LeadRun<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_ask_splits_into_question_and_explained_options() {
+        let (q, o) = parse_ask("Which stack?\n1. Rust (recommended) :: fastest\n2) Python — quickest to write\n* Go\n");
+        assert_eq!(q, "Which stack?");
+        assert_eq!(o.len(), 3);
+        assert_eq!((o[0].label.as_str(), o[0].why.as_str(), o[0].recommended), ("Rust", "fastest", true));
+        assert_eq!((o[1].label.as_str(), o[1].why.as_str(), o[1].recommended), ("Python", "quickest to write", false));
+        assert_eq!((o[2].label.as_str(), o[2].why.as_str()), ("Go", ""));
+        // one line alone is no choice: an open question, kept whole
+        let (q, o) = parse_ask("Red or blue?\n- note: either works");
+        assert!(o.is_empty() && q.contains("either works"), "{q}");
+        // two picks marked: only the first counts
+        let (_, o) = parse_ask("- a (recommended) :: x\n- b [Recommended] :: y");
+        assert_eq!(o.iter().filter(|c| c.recommended).count(), 1);
+        assert!(o[0].recommended);
+        // a hyphen inside a label is not the separator
+        let (_, o) = parse_ask("- single-file page :: one file\n- multi-file app :: split by job");
+        assert_eq!(o[0].label, "single-file page");
+    }
+
+    #[test]
+    fn an_answer_picks_by_number_or_label() {
+        let (_, o) = parse_ask("- Rust :: a\n- Python :: b");
+        assert_eq!(picked("2", &o).map(|c| c.label.as_str()), Some("Python"));
+        assert_eq!(picked(" #1. ", &o).map(|c| c.label.as_str()), Some("Rust"));
+        assert_eq!(picked("python", &o).map(|c| c.label.as_str()), Some("Python"));
+        assert!(picked("3", &o).is_none() && picked("0", &o).is_none());
+        assert!(picked("Rust, but keep it small", &o).is_none(), "a free answer stays the user's words");
+    }
 
     #[test]
     fn assign_blocks_parse() {
