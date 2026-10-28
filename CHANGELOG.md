@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased — one fast model
+
+- **The fleet is gone.** One model (DeepSeek-V4.1-Flash) does the whole job: criteria, code,
+  checks and done, usually in its first reply. No workers, tasks, reviews, merges or critic.
+- **Faster.** Every turn gets the full reply budget: a turn after one that only looked was capped
+  at 4k tokens, so a file written then was cut off and written again. Criteria run first wherever
+  a reply puts them, and files written before them are kept rather than sent again. Fixes are made
+  with `edit` on the lines at fault, never by rewriting the file.
+- `edit` finds lines quoted at the wrong indentation and re-indents the replacement.
+- A tool call in the model's own format that can't run is reported even beside calls that did.
+- **Asks with options.** When unsure, Chuck asks with 2–4 explained options, its pick marked:
+  click one, type your own, or it goes with its pick after three minutes.
+- **Paste a screenshot** (Ctrl+V) or drop an image on the box you type in. GLM-5.3-Flash
+  describes it, and Chuck works from that and the file.
+- **A cleaner window.** The side panel shows Checks, Commands, Research, Spend, Checkpoints, Inbox,
+  Reminders and Memory, each only once it has something. Fleet mode is **Build**. A file's live
+  card leaves once the reply is in; Chuck's avatar no longer covers the conversation.
+
 ## 18.0.0 — Chuck in Rust
 
 Chuck is now a Rust app (`crates/`), and the installer puts it over any earlier Chuck. See

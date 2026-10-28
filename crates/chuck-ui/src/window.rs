@@ -50,6 +50,8 @@ pub struct Options {
     pub palette: Option<String>,
     /// Strike the welcome screen's code net here (renders of the window).
     pub poke: Option<(f64, f64)>,
+    /// Pictures to attach before anything is sent (as if pasted).
+    pub attach: Vec<PathBuf>,
 }
 
 struct Running {
@@ -86,6 +88,8 @@ struct Ui {
     /// The Recent list on the left, and its search.
     chats: gtk::Box,
     chats_search: gtk::SearchEntry,
+    /// The screenshots waiting to go with the next message, above the box you type in.
+    attach: gtk::Box,
 }
 
 struct Lane {
@@ -107,6 +111,11 @@ struct State {
     lane: Option<Lane>,
     /// The file being written live: (who, its path, the card's head, its newest lines).
     writing: Option<(AgentId, String, gtk::Label, gtk::Label)>,
+    /// The cards of files being written this reply: gone once the reply is in (its action lines say what was
+    /// written), so the conversation keeps only what was said and done.
+    live_cards: Vec<gtk::Box>,
+    /// Screenshots pasted for the next message.
+    pasted: Vec<PathBuf>,
     last_ps: Vec<ProcInfo>,
     /// Chat mode: one model answers, researches, and hands work to Build.
     chat: bool,
@@ -376,6 +385,25 @@ impl State {
 
     fn draw(&mut self, e: &Entry) {
         match e {
+            Entry::Pasted { paths } => {
+                let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+                row.add_css_class("user-row");
+                row.set_halign(gtk::Align::End);
+                for p in paths {
+                    let pic = gtk::Picture::for_filename(p);
+                    pic.set_content_fit(gtk::ContentFit::Cover);
+                    pic.set_size_request(180, 112);
+                    pic.add_css_class("pasted-shot");
+                    pic.set_tooltip_text(Some(p));
+                    let b = gtk::Button::builder().child(&pic).build();
+                    b.add_css_class("flat");
+                    b.add_css_class("pasted-btn");
+                    let path = PathBuf::from(p);
+                    b.connect_clicked(move |_| launch(path.clone()));
+                    row.append(&b);
+                }
+                self.append(&row);
+            }
             Entry::User { text } | Entry::Steer { text } => {
                 let steer = matches!(e, Entry::Steer { .. });
                 let row = gtk::Box::new(gtk::Orientation::Vertical, 2);
@@ -638,9 +666,11 @@ impl State {
             Some(f) => setup::access_of(&Settings::load(), f).label(),
             None => "",
         };
-        self.ui.subtitle.set_label(&if access.is_empty() { folder } else { format!("{folder} · {access}") });
+        // the folder's name is on its button (its path in the tooltip): the line under the title says what Chuck may do
+        self.ui.subtitle.set_label(if access.is_empty() { "no folder yet" } else { access });
         self.ui.folder_btn.set_label(&self.folder.as_ref().and_then(|f| f.file_name())
             .map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "Choose a folder".into()));
+        self.ui.folder_btn.set_tooltip_text(Some(&format!("{folder} — the project Chuck works on (click to change)")));
         self.ui.meter.set_markup(&format!("{} · <span foreground=\"#A78BFA\" weight=\"bold\">{}</span>",
                                           fmt_tokens(self.tokens), fmt_usd(self.spent)));
     }
@@ -794,6 +824,78 @@ fn rewind(shared: &Shared, sha: &str) {
     refresh_chats(&st, shared);
 }
 
+/// Open a file with the desktop's app for it.
+fn launch(p: PathBuf) {
+    let f = gtk::gio::File::for_path(&p);
+    gtk::FileLauncher::new(Some(&f)).launch(None::<&gtk::Window>, gtk::gio::Cancellable::NONE, |_| {});
+}
+
+/// Where pasted screenshots are kept (outside every project).
+fn pasted_dir() -> PathBuf {
+    std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from).filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
+        .unwrap_or_else(std::env::temp_dir).join("chuck").join("pasted")
+}
+
+fn clear_attach(st: &State) {
+    while let Some(c) = st.ui.attach.first_child() {
+        st.ui.attach.remove(&c);
+    }
+    st.ui.attach.set_visible(false);
+}
+
+/// A picture to go with the next message: saved as PNG, shown above the box you type in.
+fn attach_texture(shared: &Shared, tex: &gdk::Texture) {
+    let dir = pasted_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let path = dir.join(format!("paste-{}-{}.png", chuck_sandbox::now_secs() as u64, N.fetch_add(1, Ordering::SeqCst)));
+    if let Err(e) = tex.save_to_png(&path) {
+        shared.borrow().ui.status.set_label(&format!("Couldn't keep that picture: {e}"));
+        return;
+    }
+    attach_file(shared, path);
+}
+
+fn attach_file(shared: &Shared, path: PathBuf) {
+    let mut st = shared.borrow_mut();
+    if st.pasted.contains(&path) || st.pasted.len() >= 6 {
+        return;
+    }
+    st.pasted.push(path.clone());
+    let chip = gtk::Overlay::new();
+    let pic = gtk::Picture::for_filename(&path);
+    pic.set_content_fit(gtk::ContentFit::Cover);
+    pic.set_size_request(88, 56);
+    pic.add_css_class("attach-shot");
+    pic.set_tooltip_text(Some(&format!("{} — goes with your next message", path.display())));
+    chip.set_child(Some(&pic));
+    let x = gtk::Button::from_icon_name("chuck-close-symbolic");
+    x.add_css_class("attach-x");
+    x.set_halign(gtk::Align::End);
+    x.set_valign(gtk::Align::Start);
+    x.set_tooltip_text(Some("Leave it out"));
+    chip.add_overlay(&x);
+    let (sh, c2, p2) = (shared.clone(), chip.clone(), path.clone());
+    x.connect_clicked(move |_| {
+        let mut st = sh.borrow_mut();
+        st.pasted.retain(|p| *p != p2);
+        st.ui.attach.remove(&c2);
+        st.ui.attach.set_visible(!st.pasted.is_empty());
+    });
+    st.ui.attach.append(&chip);
+    st.ui.attach.set_visible(true);
+    st.ui.input.grab_focus();
+}
+
+/// The cards of files written this reply leave the conversation.
+fn clear_live(st: &mut State) {
+    for c in std::mem::take(&mut st.live_cards) {
+        st.ui.transcript.remove(&c);
+    }
+    st.writing = None;
+}
+
 fn mark(ok: bool) -> &'static str {
     if ok { "<span foreground=\"#4ADE9A\">✓</span>" } else { "<span foreground=\"#F87171\">✗</span>" }
 }
@@ -811,10 +913,7 @@ fn on_event(st: &mut State, e: Event, shared: &Shared) {
             if st.is_lead(id) {
                 let model = st.models.get(&id).cloned().unwrap_or_default();
                 let chat = st.names.get(&id).is_some_and(|(n, _)| n == "chuck");
-                // the Lead's news mid-job (a chat's answer pops up whole when it's finished)
-                if !chat {
-                    buddy_says(st, &text, None);
-                }
+                clear_live(st);
                 st.add(Entry::Lead { text: text.clone(), model, chat });
                 st.save(); // a reply is never lost, even if the app is killed
             } else {
@@ -1017,6 +1116,7 @@ fn on_event(st: &mut State, e: Event, shared: &Shared) {
                 c.append(&head);
                 c.append(&code);
                 st.append(&c);
+                st.live_cards.push(c.clone());
                 st.writing = Some((id, path, head, code));
             } else if let Some((_, _, head, code)) = &st.writing {
                 head.set_label(&head_text);
@@ -1054,10 +1154,6 @@ fn result_row(folder: &Path, gate: &chuck_core::DoneGate) -> Option<gtk::Box> {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     row.add_css_class("result-row");
     row.set_margin_top(6);
-    let launch = |p: PathBuf| {
-        let f = gtk::gio::File::for_path(&p);
-        gtk::FileLauncher::new(Some(&f)).launch(None::<&gtk::Window>, gtk::gio::Cancellable::NONE, |_| {});
-    };
     for f in shown {
         let b = gtk::Button::with_label(&format!("▶  Open {}", Path::new(f).file_name().map(|n| n.to_string_lossy())
             .unwrap_or_default()));
@@ -1077,6 +1173,7 @@ fn result_row(folder: &Path, gate: &chuck_core::DoneGate) -> Option<gtk::Box> {
 }
 
 fn finished(st: &mut State, report: JobReport, shared: &Shared) {
+    clear_live(st);
     // the job's final state, read before it is let go
     if let Some(run) = &st.running {
         st.last_ps = run.kernel.ps(true);
@@ -1142,9 +1239,16 @@ fn finished(st: &mut State, report: JobReport, shared: &Shared) {
         st.saved.progress.unmet = unmet;
         st.saved.progress.board = board;
     }
-    if matches!(report.outcome, Outcome::Done { .. } | Outcome::Answered { .. }) {
+    // the reply is right there in the conversation: he only pops up to say it's done, or to read it aloud
+    if matches!(report.outcome, Outcome::Done { .. }) {
         let speech = speak(st, &reply);
-        buddy_says(st, &reply, speech);
+        buddy_says(st, "Done — its checks pass.", speech);
+    } else if matches!(report.outcome, Outcome::Answered { .. }) {
+        if let Some(speech) = speak(st, &reply) {
+            if Settings::load().map.get("buddy").and_then(|v| v.as_bool()).unwrap_or(true) {
+                st.ui.buddy.talk(speech);
+            }
+        }
     } else if matches!(report.outcome, Outcome::Paused { .. }) {
         buddy_says(st, &format!("I had to stop. {}", reply.lines().next().unwrap_or("")), None);
     }
@@ -1193,17 +1297,33 @@ fn paused_text(gaps: &[String]) -> String {
 
 fn start(shared: &Shared, text: String) {
     let mut st = shared.borrow_mut();
-    let text = text.trim().to_string();
+    let images = std::mem::take(&mut st.pasted);
+    clear_attach(&st);
+    let mut text = text.trim().to_string();
+    if text.is_empty() && !images.is_empty() {
+        text = "Look at this screenshot.".into();
+    }
     if text.is_empty() {
         return;
     }
+    let shown: Vec<String> = images.iter().map(|p| p.display().to_string()).collect();
     if let Some(r) = &st.running {
-        // mid-job: it steers the Lead
-        let _ = r.steer.send(text.clone());
+        // mid-job: it steers the Lead (a screenshot as its file, which it can open with browse)
+        let said = if shown.is_empty() { text.clone() } else {
+            format!("{text}\n(screenshot{} pasted: {} — ```browse <that file>``` shows it to you)",
+                    if shown.len() == 1 { "" } else { "s" }, shown.join(", "))
+        };
+        let _ = r.steer.send(said);
         st.add(Entry::Steer { text });
+        if !shown.is_empty() {
+            st.add(Entry::Pasted { paths: shown });
+        }
         return;
     }
     st.add(Entry::User { text: text.clone() });
+    if !shown.is_empty() {
+        st.add(Entry::Pasted { paths: shown });
+    }
     st.voice.stop();
     // carry on the paused job in this folder
     let resume = match text.strip_prefix("/continue").filter(|r| r.is_empty() || r.starts_with(char::is_whitespace)) {
@@ -1293,6 +1413,7 @@ fn start(shared: &Shared, text: String) {
     let kernel = rt.kernel.clone();
     let mut job = Job::new(text.clone(), &folder);
     job.history = st.saved.history.clone();
+    job.images = images;
     if let Some((r, extra)) = resume {
         job.ask = extra;
         job.resume = Some(r);
@@ -2411,7 +2532,8 @@ pub fn build(app: &adw::Application, opts: Options) {
     let transcript = gtk::Box::new(gtk::Orientation::Vertical, 0);
     transcript.set_margin_start(28);
     transcript.set_margin_end(28);
-    transcript.set_margin_bottom(18);
+    // room under the newest message for Chuck when he pops up, so he never covers what was just said
+    transcript.set_margin_bottom(96);
     let clamp = adw::Clamp::builder().maximum_size(880).child(&transcript).build();
     let scroller = gtk::ScrolledWindow::builder().hscrollbar_policy(gtk::PolicyType::Never).child(&clamp).vexpand(true).build();
     scroller.add_css_class("chat-scroll");
@@ -2513,11 +2635,16 @@ pub fn build(app: &adw::Application, opts: Options) {
     let status = label("", &["statusbar"]);
     status.set_wrap(false);
     status.set_ellipsize(pango::EllipsizeMode::End);
+    // screenshots pasted (Ctrl+V) or dropped, waiting to go with the next message
+    let attach = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    attach.add_css_class("attach-row");
+    attach.set_visible(false);
     let bottom = gtk::Box::new(gtk::Orientation::Vertical, 4);
     bottom.set_margin_start(28);
     bottom.set_margin_end(28);
     bottom.set_margin_bottom(14);
     bottom.append(&status);
+    bottom.append(&attach);
     bottom.append(&comp);
     let bclamp = adw::Clamp::builder().maximum_size(880).child(&bottom).build();
     let main = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -2590,7 +2717,8 @@ pub fn build(app: &adw::Application, opts: Options) {
     let ui = Ui { window: window.clone(), stack, transcript, input: input.clone(), hint, send: send.clone(),
                   stop: stop.clone(), status, subtitle, meter, folder_btn: folder_btn.clone(), new_btn: new_btn.clone(),
                   build_btn: build_btn.clone(), chat_btn: chat_btn.clone(), mic: mic.clone(), speaker: speaker.clone(),
-                  hero, lede, chats: chats_list.clone(), chats_search: chats_search.clone(), buddy: buddy.clone() };
+                  hero, lede, chats: chats_list.clone(), chats_search: chats_search.clone(), buddy: buddy.clone(),
+                  attach: attach.clone() };
     // MCP servers start in the background: the window doesn't wait for them
     let mcp = Arc::new(chuck_mcp::Manager::new(chuck_mcp::config_path()));
     if mcp.configured() {
@@ -2602,7 +2730,7 @@ pub fn build(app: &adw::Application, opts: Options) {
     chat_btn.set_active(chat_mode);
     let shared: Shared = Rc::new(RefCell::new(State {
         ui, panel, opts: opts.clone(), folder: None, saved: Saved::default(), running: None, names: HashMap::new(),
-        models: HashMap::new(), lane: None, writing: None, last_ps: Vec::new(), chat: chat_mode, on_handoff: None, on_continue: None, on_settings: None, auto_cancel: Rc::new(Cell::new(false)), mcp: mcp.clone(),
+        models: HashMap::new(), lane: None, writing: None, live_cards: Vec::new(), pasted: Vec::new(), last_ps: Vec::new(), chat: chat_mode, on_handoff: None, on_continue: None, on_settings: None, auto_cancel: Rc::new(Cell::new(false)), mcp: mcp.clone(),
         lsp: Arc::new(setup::lsp(&Settings::load())),
         daemons: chuck_daemon::Registry::load(&chuck_daemon::Registry::default_path()),
         inbox: chuck_daemon::Inbox::load(&chuck_daemon::Inbox::default_path(), 200), daemon_live: HashMap::new(),
@@ -2657,7 +2785,7 @@ pub fn build(app: &adw::Application, opts: Options) {
         move || {
             let buf = sh.borrow().ui.input.buffer();
             let text = buf.text(&buf.start_iter(), &buf.end_iter(), false).to_string();
-            if text.trim().is_empty() {
+            if text.trim().is_empty() && sh.borrow().pasted.is_empty() {
                 return;
             }
             buf.set_text("");
@@ -2691,6 +2819,43 @@ pub fn build(app: &adw::Application, opts: Options) {
         glib::Propagation::Proceed
     });
     input.add_controller(keys);
+    // Ctrl+V of a picture (a screenshot tool's copy): it goes with the next message; text pastes as ever
+    let sh = shared.clone();
+    input.connect_paste_clipboard(move |tv| {
+        let cb = tv.clipboard();
+        if !cb.formats().contains_type(gdk::Texture::static_type()) {
+            return;
+        }
+        tv.stop_signal_emission_by_name("paste-clipboard");
+        let sh = sh.clone();
+        cb.read_texture_async(None::<&gtk::gio::Cancellable>, move |r| match r {
+            Ok(Some(tex)) => attach_texture(&sh, &tex),
+            Ok(None) => {}
+            Err(e) => sh.borrow().ui.status.set_label(&format!("Couldn't paste that picture: {e}")),
+        });
+    });
+    // a picture file dropped on the box you type in: the same
+    let drop = gtk::DropTarget::new(gdk::FileList::static_type(), gdk::DragAction::COPY);
+    let sh = shared.clone();
+    drop.connect_drop(move |_, v, _, _| {
+        let Ok(files) = v.get::<gdk::FileList>() else { return false };
+        let mut any = false;
+        for f in files.files() {
+            let Some(p) = f.path() else { continue };
+            let ext = p.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+            if !["png", "jpg", "jpeg", "webp", "gif", "bmp"].contains(&ext.as_str()) {
+                continue;
+            }
+            // kept as PNG (what the eyes are sent), whatever it was
+            match gdk::Texture::from_filename(&p) {
+                Ok(tex) => attach_texture(&sh, &tex),
+                Err(e) => sh.borrow().ui.status.set_label(&format!("Couldn't open {}: {e}", p.display())),
+            }
+            any = true;
+        }
+        any
+    });
+    comp.add_controller(drop);
     // Ctrl+M anywhere in the window: talk
     let sh = shared.clone();
     let mic_key = gtk::EventControllerKey::new();
@@ -2910,6 +3075,12 @@ pub fn build(app: &adw::Application, opts: Options) {
     if opts.listen {
         let sh = shared.clone();
         glib::timeout_add_local_once(Duration::from_millis(400), move || mic_clicked(&sh));
+    }
+    for p in &opts.attach {
+        match gdk::Texture::from_filename(p) {
+            Ok(tex) => attach_texture(&shared, &tex),
+            Err(e) => eprintln!("chuck: couldn't attach {}: {e}", p.display()),
+        }
     }
     if let Some(text) = opts.send.clone() {
         let sh = shared.clone();

@@ -343,3 +343,30 @@ fn a_file_written_before_any_criteria_is_kept_not_sent_again() {
     assert_eq!(model.seen.lock().unwrap().len(), 2);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_pasted_screenshot_reaches_chuck_as_what_the_eyes_saw() {
+    // the main model reads text: the vision model describes the picture, and Chuck gets that and its path
+    let dir = tmp("pasted");
+    let shot = dir.join("shot.png");
+    // the smallest valid PNG: one pixel
+    std::fs::write(&shot, b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x01\0\0\0\x01\x08\x06\0\0\0\x1f\x15\xc4\x89\0\0\0\rIDATx\x9cc\xf8\xff\xff?\0\x05\xfe\x02\xfe\xa7\x35\x81\x84\0\0\0\0IEND\xaeB`\x82").unwrap();
+    let cfg = RuntimeConfig { store: dir.join("store"), ..RuntimeConfig::default() };
+    let (main, vision) = (cfg.models.main.clone(), cfg.models.vision.clone());
+    let model = Arc::new(Scripted::new()
+        .for_model(&vision, ["A browser page: a red error banner reads \"TypeError: board is undefined\"."])
+        .for_model(&main, ["That TypeError comes from board being used before it's created."]));
+    let mut job = Job::new("why does it break?", &dir);
+    job.images = vec![shot.clone()];
+    let rt = Runtime::new(model.clone(), cfg, Events::none());
+    let (report, _) = run_within(20, rt, job);
+    assert!(matches!(report.outcome, Outcome::Answered { .. }), "{:?}", report.outcome);
+    let seen = model.seen.lock().unwrap();
+    let eyes = seen.iter().find(|r| r.model == vision).expect("the vision model looked");
+    assert!(eyes.messages[1]["content"].to_string().contains("data:image/png;base64,"), "it was sent the picture");
+    let chuck = seen.iter().find(|r| r.model == main).unwrap();
+    let first = last_user(chuck);
+    assert!(first.contains("why does it break?") && first.contains("TypeError: board is undefined")
+            && first.contains(&shot.display().to_string()), "{first}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -156,12 +156,15 @@ pub struct Job {
     pub stop: Arc<AtomicBool>,
     /// Carry on a paused job (`ask` is then what the user adds, if anything).
     pub resume: Option<resume::Resume>,
+    /// Screenshots the user pasted with the request (PNG files): the vision
+    /// model describes each before the work starts.
+    pub images: Vec<PathBuf>,
 }
 
 impl Job {
     pub fn new(ask: impl Into<String>, folder: impl AsRef<Path>) -> Job {
         Job { ask: ask.into(), folder: folder.as_ref().to_path_buf(), history: Vec::new(), answers: None, steer: None,
-              stop: Arc::new(AtomicBool::new(false)), resume: None }
+              stop: Arc::new(AtomicBool::new(false)), resume: None, images: Vec::new() }
     }
 }
 
@@ -291,8 +294,10 @@ impl Runtime {
         self.events.emit(Event::AgentStarted { id: lead, role: Role::Lead, name: "lead".into(),
                                                model: self.cfg.models.main.clone(), task: None });
         let resumed = job.resume.clone();
-        // carrying on: the user's words are only what they add now
-        let first = job.ask.clone();
+        // carrying on: the user's words are only what they add now (and what they pasted, described)
+        let first = if job.images.is_empty() { job.ask.clone() } else {
+            format!("{}\n\n{}", job.ask, browse::describe_pasted(&ctx, lead, &job.images))
+        };
         let history = if resumed.is_some() { Vec::new() } else { turns(&job.history) };
         let ask = resumed.as_ref().map_or(job.ask.clone(), |r| r.ask.clone());
         let mut run = lead::LeadRun::new(&ctx, lead, &folder, &ask, job.answers);

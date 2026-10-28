@@ -120,6 +120,7 @@ impl Buddy {
             return;
         }
         self.bubble.set_label(&g);
+        self.bubble.set_visible(true);
         let read = Duration::from_millis((g.chars().count() as u64 * 55).clamp(2500, 14_000));
         {
             let mut st = self.st.borrow_mut();
@@ -127,6 +128,21 @@ impl Buddy {
             st.talk_until = Some(Instant::now() + if st.speech.is_some() { Duration::from_secs(1) } else {
                 read.min(Duration::from_secs(5)) });
             st.leave_at = Some(Instant::now() + read + Duration::from_secs(6));
+        }
+        self.root.set_can_target(true);
+        self.root.set_reveal_child(true);
+        self.tick();
+    }
+
+    /// Read something aloud that's already on screen: his mouth moves with
+    /// the voice, and no bubble covers what he's reading.
+    pub fn talk(&self, speech: (chuck_voice::Voice, u64)) {
+        self.bubble.set_visible(false);
+        {
+            let mut st = self.st.borrow_mut();
+            st.speech = Some(speech).filter(|(_, n)| *n != 0);
+            st.talk_until = Some(Instant::now() + Duration::from_secs(1));
+            st.leave_at = Some(Instant::now() + Duration::from_secs(8));
         }
         self.root.set_can_target(true);
         self.root.set_reveal_child(true);

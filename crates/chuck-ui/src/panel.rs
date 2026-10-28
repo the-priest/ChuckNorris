@@ -205,6 +205,7 @@ impl Panel {
         self.recent_dirty = true;
         self.commands.root.set_visible(false);
         self.research.root.set_visible(false);
+        self.gate.root.set_visible(false);
         clear(&self.research.body);
         (self.searches, self.pages) = (0, 0);
         self.research.summary.set_label("none");
@@ -269,8 +270,8 @@ impl Panel {
         h.set_wrap(false);
         h.set_tooltip_text(Some(url));
         text.append(&h);
-        let sub = if tool != "fetch" { format!("{who} · {summary}") } else if ok { format!("{who} · {url}") }
-            else { format!("{who} · {summary}") };
+        let _ = who;
+        let sub = if tool == "fetch" && ok { url.to_string() } else { summary.to_string() };
         let d = label(&sub, &["panel-dim"]);
         d.set_ellipsize(pango::EllipsizeMode::End);
         d.set_wrap(false);
@@ -369,8 +370,8 @@ impl Panel {
 
     // ── the Done gate ──
 
+    /// (Shown once there are criteria: a plain question has nothing to check.)
     pub fn set_gate(&self, phase: &str, unmet: &[String]) {
-        self.gate.root.set_visible(true);
         self.gate_phase.set_label(&format!("Phase: {phase}"));
         self.gate_phase.remove_css_class("phase-incomplete");
         self.gate_phase.remove_css_class("phase-done");
@@ -390,6 +391,7 @@ impl Panel {
 
     pub fn set_board(&self, criteria: &[(String, String, Option<String>, Vec<String>)]) {
         clear(&self.gate_criteria);
+        self.gate.root.set_visible(!criteria.is_empty());
         for (id, text, verify, ev) in criteria {
             let head = gtk::Box::new(gtk::Orientation::Horizontal, 8);
             head.append(&label(id, &["crit-id"]));

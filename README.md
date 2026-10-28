@@ -2,15 +2,15 @@
 
 # Chuck
 
-**An AI team that works on your Linux machine: it plans, writes the code, runs it, tests it, and
-counts a job as finished only when there is proof.**
+**A fast AI coder for your Linux machine: it writes the code, runs it, tests it, and counts a job
+as finished only when there is proof.**
 
 ![version](https://img.shields.io/badge/version-18.0.0-8b5cf6?style=flat-square&labelColor=0c0c10)
 ![rust](https://img.shields.io/badge/Rust-GTK4_·_libadwaita-8b5cf6?style=flat-square&labelColor=0c0c10)
 ![models](https://img.shields.io/badge/models-SiliconFlow-2ea043?style=flat-square&labelColor=0c0c10)
 ![licence](https://img.shields.io/badge/licence-MIT-8b5cf6?style=flat-square&labelColor=0c0c10)
 
-<img src="assets/screenshots/welcome.png" alt="Chuck's window: the list of chats on the left, the welcome screen with its field of code glyphs rippling out from a click, and the fleet panel on the right" width="100%">
+<img src="assets/screenshots/welcome.png" alt="Chuck's window: the list of chats on the left, and the welcome screen with its field of code glyphs rippling out from a click" width="100%">
 
 </div>
 
@@ -55,68 +55,59 @@ Chuck works it out on your machine. It reads your files, runs the commands, edit
 it, runs the tests and checks the result. It shows you every step as it happens, and it doesn't
 stop until the work is really finished or there is a real reason to stop.
 
-Chuck is a team, not one chatbot. Everything runs on [SiliconFlow](https://siliconflow.com) with
-your own API key:
+One model does the whole job, so nothing waits on hand-offs. Everything runs on
+[SiliconFlow](https://siliconflow.com) with your own API key:
 
 | Who | Model | What it does |
 |---|---|---|
-| **The Lead** | DeepSeek-V4.1-Flash | Talks to you. Writes the acceptance criteria and the plan. Hands out tasks, reviews every result, merges what passes, and is the only one who can finish a job. |
-| **Up to 8 workers** | DeepSeek-V4-Flash | Do the heavy lifting, on the cheaper model. Each builds in its own copy of your project, and they talk to each other while they work. |
-| **The eyes** | GLM-5.3-Flash | Look at screenshots of pages the team builds or reads, and describe what is there. |
+| **Chuck** | DeepSeek-V4.1-Flash | Talks to you, writes the acceptance criteria, writes the code, runs the checks, and finishes the job only through the Done gate. |
+| **The eyes** | GLM-5.3-Flash | Look at screenshots (pages Chuck checks, pictures you paste) and describe what is there. |
 
 The thinking happens online. Everything Chuck *does* (commands, file changes, builds, tests)
 happens on your computer, in front of you.
 
 ## How a job runs
 
-<img src="assets/screenshots/fleet-working.png" alt="Mid-job: the Lead has written criteria and a four-step plan, two tasks run in parallel on a DeepSeek and a GLM worker, and the right panel shows the plan, the tasks and each agent's state" width="100%">
+<img src="assets/screenshots/job-working.png" alt="Mid-job: Chuck has written criteria, edited the parser and written its tests, and its check is running in the Commands section" width="100%">
 
-1. **You ask.** Type it, or say it (the mic button, Ctrl+M).
-2. **The Lead looks before it acts.** It reads the project, runs harmless commands, and searches the
-   web when it needs to. Until it has written criteria, your folder is read-only to every command.
-3. **Criteria first.** The Lead writes down what "done" means, each item with a command that proves
-   it, for example *"empty input returns `[]` — verify: `pytest -q`"*. Bigger jobs also get a plan.
-   The plan sits at the top of the right panel and moves as steps are finished.
-4. **Work is split up.** The Lead does small things itself and hands larger pieces to workers, all
-   at once when they don't depend on each other. Each worker gets its own copy of the project, so
-   workers can't step on each other or on your files.
-5. **The team talks.** Workers post to a shared channel: what they provide ("`engine.js` exports
-   `create(seed)`"), a file they need from another task, a question for the Lead. The right panel's
-   **Team talk** shows every message. While workers build, the Lead waits: it wakes when one hands
-   in, asks it something, or you type. A worker stuck for 12 turns is replaced by a fresh one, and a
-   step that stalls twice goes back to the Lead. The Lead is the boss: it can change any file at any time. A
-   worker on that file is told at once, and at the merge the Lead's version stands (an overlapping
-   change of the worker's is kept in `.chuck-conflicts/`). It can also take a task back (`cancel`).
-6. **Workers prove their work.** A worker can only hand in a task once every criterion has
-   evidence, and the verification passed *after* its last change.
-7. **The Lead checks before anything reaches your folder.** It re-runs the verification on the
-   worker's copy. Then it reviews the change, and accepts it or sends it back with the defects
-   listed. Only accepted work is merged into your folder.
-8. **The whole result is verified and reviewed.** After merging, the Lead runs the checks on your
-   real folder. Then an independent critic reviews the whole change before the job may finish.
-9. **Done, with the evidence.** The job ends with a summary of what changed and how it was
-   verified. Every criterion and its evidence stays in the panel's Done gate.
+1. **You ask.** Type it, say it (the mic button, Ctrl+M), or paste a screenshot (Ctrl+V) or drop a
+   picture on the box: the eyes describe it, and Chuck works from that and the file.
+2. **It looks only as much as it needs.** Something new usually needs no reading at all; in an
+   existing project it reads what the request touches. Until it has written criteria, your folder
+   is read-only to every command.
+3. **Criteria first.** Chuck writes down what "done" means, each item with a command that proves it,
+   for example *"empty input returns `[]` — verify: `pytest -q`"*.
+4. **It builds it all in one go.** The criteria, every file, the checks and the finish usually come
+   in one reply. Files it writes stream into the conversation as they're written. In an existing
+   project it edits the lines that need changing rather than rewriting files.
+5. **It fixes what fails.** A failing check comes back with its output; Chuck thinks it through,
+   fixes the cause and checks again.
+6. **When it isn't sure, it asks.** A decision that is really yours comes as a question with two to
+   four options, each with a reason, Chuck's pick marked. Click one, type your own answer, or let it
+   go with its pick after three minutes.
+7. **Done, with the evidence.** The job ends with a summary of what changed and how it was verified.
+   Every criterion and its evidence stays in the panel's **Checks**.
 
-<img src="assets/screenshots/fleet-done.png" alt="A finished job: both tasks merged, the whole suite verified in the user's folder, the independent review accepted, and the DONE card with what changed and how it was verified" width="100%">
+<img src="assets/screenshots/job-done.png" alt="A finished job: the fix and its tests, the check passing after the last change, and the DONE card with what changed and how it was verified" width="100%">
 
-You can type while the fleet works, and the Lead reads it at its next step. **Esc** or the stop
-button stops everything.
+You can type while Chuck works, and it reads it at its next step. **Esc** or the stop button stops
+everything.
 
 ## What "done" means
 
 "Done" is enforced by code that the models can't talk their way past, not left to the model's
 judgement:
 
-- **Nothing changes before there are criteria.** Larger work also needs a plan.
+- **Nothing changes before there are criteria.** Files written before them are kept and written as
+  soon as the criteria exist, so nothing has to be sent twice.
 - **Every criterion needs evidence.** That means a command with its real output, a test run, or a
   diff. `echo ok` or `test true` never counts as a test.
 - **Verification must come after the last change.** Editing a file after a passing test makes that
   pass count for nothing until it runs again.
 - **The real result is judged.** The gate compares your folder with a snapshot taken when the job
   started, so a change made by a shell command counts too.
-- **Shortcuts are caught.** Leftover TODOs and stubs, or a tiny diff for a large request, block the
-  finish until fixed or justified.
-- **Prose isn't a finish.** Once criteria exist, a Lead that just writes "All done!" is told that
+- **Shortcuts are caught.** Leftover TODOs and stubs block the finish until they're fixed.
+- **Prose isn't a finish.** Once criteria exist, a reply that just says "All done!" is told that
   only ```` ```done``` ```` ends the job, and the gate checks that. If it does it again, the job
   stops as INCOMPLETE rather than looking finished.
 - **Running out of budget is never "done".** The job ends INCOMPLETE, with the list of what is
@@ -127,16 +118,16 @@ judgement:
 A large job can take hours of work, or days. Chuck has **no step limit and no time limit**. Only
 real reasons pause a job:
 
-- **The job's budget ran out** (Settings › Fleet › spending cap per job; $2 by default).
+- **The job's budget ran out** (Settings › Jobs › spending cap per job; $2 by default).
 - **Your daily or monthly spending limit was reached.** The card says so in its first line and has
   a **Spending limits…** button.
-- **The Lead is stuck,** repeating itself even after being told to change its approach. Exploring a
+- **Chuck is stuck,** repeating itself even after being told to change its approach. Exploring a
   big project is never mistaken for being stuck.
 - **You stopped it.**
 
 A paused job loses nothing. Its card says why it paused and what is still missing. **Keep going**
 (or `/continue`, or `chuck continue` in a terminal) carries on exactly where it stopped. It keeps
-the same criteria, evidence, plan and conversation, even after you closed Chuck or restarted the
+the same criteria, evidence and conversation, even after you closed Chuck or restarted the
 computer.
 
 Other things that keep long jobs going:
@@ -144,7 +135,7 @@ Other things that keep long jobs going:
 - **API outages are waited out.** Chuck retries for up to six hours.
 - **Long commands are fine.** A build, a test suite or an emulator boot may run for up to 30
   minutes; you can change that in Settings.
-- **Background processes survive.** A dev server or emulator the Lead starts with `nohup … &` keeps
+- **Background processes survive.** A dev server or emulator Chuck starts with `nohup … &` keeps
   running between its commands.
 - **Optional automatic continue.** Turn on *Keep going when a job's budget runs out* and Chuck
   continues on its own with another job budget, as often as needed. It never goes past your daily
@@ -152,9 +143,9 @@ Other things that keep long jobs going:
 
 ## Safety
 
-<img src="assets/screenshots/ask-outside.png" alt="The Lead wants to copy a logo from a folder next to the project: the command waits, showing exactly which folder it reaches, with Refuse, Allow once and Allow for this job" width="100%">
+<img src="assets/screenshots/ask-outside.png" alt="Chuck wants to copy a logo from a folder next to the project: the command waits, showing exactly which folder it reaches, with Refuse, Allow once and Allow for this job" width="100%">
 
-**Your project folder is the agents' to use. Anything outside it needs your yes.** This is the
+**Your project folder is Chuck's to use. Anything outside it needs your yes.** This is the
 default for every folder:
 
 - **Inside the folder there are no limits.** Commands run with the folder fully writable.
@@ -165,18 +156,17 @@ default for every folder:
   readable. Package caches (cargo, npm, pip, gradle…) stay writable.
 - **A command that names a path outside the folder waits for you.** That includes `../tools`,
   `~/notes`, `/home/…`, or a file that really exists in `/tmp`. You get three buttons:
-  - **Refuse:** the command doesn't run, and the agent is told why.
+  - **Refuse:** the command doesn't run, and Chuck is told why.
   - **Allow once:** it runs once, with just that folder (or file) added to the jail.
   - **Allow for this job:** that folder stays available until the job ends.
 - **Chuck's own tools ask the same way.** Reading, searching, writing and editing a file outside
   the folder all wait for your yes.
-- **Workers never ask.** A worker is refused outright and has to report it to the Lead.
 
 <img src="assets/screenshots/critical.png" alt="A command that pipes a download into bash waits for the user, with Refuse and Run it" width="100%">
 
 **Some commands always need your yes, in any mode.** Disk wipes, `rm -rf ~`, `curl … | sh` and
 other commands that can destroy data beyond what a checkpoint can restore wait for **Run it**.
-They never run from a worker, and never when nobody is there to answer. The classifier was checked
+They never run when nobody is there to answer. The classifier was checked
 command by command against the Python app's: same verdict on all 1,371 test commands.
 
 | Access (Settings › This folder's access) | Commands can | Network |
@@ -195,19 +185,19 @@ command by command against the Python app's: same verdict on all 1,371 test comm
   store, never in your own `.git`. `/undo` puts the whole folder back to before the last job,
   including changes made by shell commands. `/diff` shows every change. `chuck rewind --list` shows
   every checkpoint, and a rewind can itself be undone.
-- **An evidence ledger.** Every command any agent runs is written to a tamper-evident hash chain.
+- **An evidence ledger.** Every command Chuck runs is written to a tamper-evident hash chain.
   `chuck ledger` verifies it and shows the latest entries.
-- **Spending limits.** Daily and monthly limits apply to every chat, agent and job together. Past a
-  limit no agent gets another call, and only you can raise it.
-- **Closing the window ends everything.** All agents stop, and every process Chuck started ends
+- **Spending limits.** Daily and monthly limits apply to every chat and job together. Past a limit
+  no model gets another call, and only you can raise it.
+- **Closing the window ends everything.** The job stops, and every process Chuck started ends
   with them, including ones started in the background or detached with `nohup` or `setsid`.
   Nothing keeps running after you close Chuck.
 
 ## Chat mode
 
-<img src="assets/screenshots/chat.png" alt="Chat mode: a question answered from the Python docs it fetched, with the source linked, a code snippet, and a request for the fleet with a Hand it to the fleet button" width="100%">
+<img src="assets/screenshots/chat.png" alt="Chat mode: a question answered from the Python docs it fetched, with the source linked, a code snippet, and a request to do on the machine with a Do it in Build button" width="100%">
 
-The **Fleet | Chat** switch at the top turns Chuck into a direct assistant. Use it for questions,
+The **Build | Chat** switch at the top turns Chuck into a direct assistant. Use it for questions,
 explanations, news, comparisons and how-tos:
 
 - **It researches when a fact can be checked.** It searches the web, reads the pages themselves,
@@ -215,18 +205,18 @@ explanations, news, comparisons and how-tos:
 - **It can show pictures and videos.** Ask to see something and you get a gallery. Videos come
   with an **Open** button and a **Download** button (yt-dlp, at most 1080p).
 - **It can't change anything.** It doesn't run commands or touch your files.
-- **Work goes to the fleet only on your say-so.** When you want something done, Chat writes the
-  request for the fleet and shows **Hand it to the fleet**. Nothing runs until you press it.
-- **The conversation carries over.** Switching between Chat and Fleet keeps it: the fleet sees
-  what you discussed.
+- **Work goes to Build only on your say-so.** When you want something done, Chat writes the
+  request and shows **Do it in Build**. Nothing runs until you press it.
+- **The conversation carries over.** Switching between Chat and Build keeps it: Build sees what
+  you discussed.
 
 From a terminal: `chuck ask "your question"`.
 
 ## Research and the browser
 
-<img src="assets/screenshots/browser.png" alt="The Lead loads a todo page in a headless Chromium, clicks Add, and reports the JavaScript error with its file and line, a screenshot, and a description of what the page looks like" width="100%">
+<img src="assets/screenshots/browser.png" alt="Chuck loads a todo page in a headless Chromium, clicks Add, and reports the JavaScript error with its file and line, a screenshot, and a description of what the page looks like" width="100%">
 
-**Search.** Every agent can search the web with ```` ```search``` ````. It asks your own SearXNG
+**Search.** Chuck can search the web with ```` ```search``` ````. It asks your own SearXNG
 first if you have one, then four public instances at once, with DuckDuckGo as a fallback. It takes
 at most two results per site, so one site can't crowd out the rest.
 
@@ -245,7 +235,7 @@ than a headless Chrome. Some protections apply to every page, whichever browser 
 
 Every search and page read is listed with its link in the panel's **Research** section.
 
-**A real browser for checking work.** When there's something with a web UI to check, the Lead uses
+**A real browser for checking work.** When there's something with a web UI to check, Chuck uses
 ```` ```browse page.html 1024x640``` ````. That loads it in your own Brave, Chromium or Chrome
 (headless, with a throwaway profile), or in Camoufox if you pick it in Settings, and lets it click,
 type, press keys and scroll. It reports:
@@ -262,7 +252,7 @@ Camoufox, the folder is served at a private, random address on your machine that
 **Which browser** is set in Settings › Research:
 
 - **Automatic** (the default): Camoufox reads blocked pages, and Brave, Chromium or Chrome checks
-  the Lead's pages. Each falls back to the other.
+  Chuck's pages. Each falls back to the other.
 - **Camoufox**, **Brave**, **Chromium** or **Chrome**: that one browser for both jobs.
 
 ## Daemons and reminders
@@ -295,12 +285,12 @@ open; `chuck daemons` and `chuck inbox` show them from a terminal.
 - **Listening:** the mic button (Ctrl+M) listens with Moonshine and puts what you said in the box.
   Settings can make it send right away.
 
-**Standing rules.** Every agent follows:
+**Standing rules.** Chuck follows:
 
 - `~/.config/chucknorris/CHUCK.md`, your rules for everything;
 - the project's own `CHUCK.md`, `AGENTS.md` or `CLAUDE.md`.
 
-**Memory.** The Lead and Chat keep durable facts with ```` ```remember``` ```` (start a fact with
+**Memory.** Build and Chat keep durable facts with ```` ```remember``` ```` (start a fact with
 `project:` to keep it to that folder) and drop them with ```` ```forget``` ````. Only the few facts
 relevant to the request go into a prompt. The panel's **Memory** section lists every fact, with a
 button to forget each one.
@@ -309,11 +299,10 @@ button to forget each one.
 start and end with the window, and Settings shows each one's state. A server runs outside every
 sandbox, so the rules are stricter than for commands:
 
-- workers never get MCP tools;
 - a tool that may change things asks you first, unless you mark its server `"trust": true`;
 - Chat mode only sees tools that declare themselves read-only.
 
-**Code intelligence.** Agents can find code by meaning:
+**Code intelligence.** Chuck finds code by meaning:
 
 - ```` ```def save``` ```` and ```` ```refs Store.save``` ```` ask your language server
   (rust-analyzer, pyright, typescript-language-server, gopls, clangd…), or fall back to syntax and
@@ -327,22 +316,21 @@ sandbox, so the rules are stricter than for commands:
 
 - **Left: Recent.** Every conversation, searchable, including the ones from the earlier Python
   Chuck. Click one to reopen it.
-- **Middle: the conversation.** Each agent's work appears in a lane under the reply it belongs to:
-  commands, files written, searches, reviews, merges.
-- **Right: the live panel.** Every section starts closed with a one-line summary, so nothing piles
-  up:
+- **Middle: the conversation.** What Chuck did appears in a lane under the reply it belongs to:
+  criteria, files written, commands, searches. A file being written shows live while it streams in.
+- **The box you type in** takes text, your voice (Ctrl+M), and pictures: paste a screenshot with
+  Ctrl+V or drop an image file on it. Each shows as a thumbnail you can remove before sending.
+- **Right: the live panel.** A section appears once it has something to show, closed with a
+  one-line summary, so nothing piles up:
 
   | Section | Shows |
   |---|---|
-  | Plan | The steps, a progress bar, and the current step. |
-  | Tasks | Who has each task, its criteria, and its state: queued, running, review, merged or failed. |
-  | Agents | Each agent's state, model and spend. |
+  | Checks | Each criterion and its evidence. |
   | Commands | What's running now, with live output, and recent commands with exit codes. |
   | Research | Every search and page read, with links. |
-  | Done gate | Each criterion and its evidence. |
   | Spend | This job, today and this month, against your limits. |
   | Checkpoints | Every point you can rewind to. |
-  | Inbox, Daemons & reminders | What daemons reported, and what's scheduled. |
+  | Inbox, Reminders | What daemons reported, and what's scheduled. |
   | Memory | Every remembered fact. |
 
 <img src="assets/screenshots/palette.png" alt="The command palette, filtered by typing 'do': /doctor, /undo, /export, /daemon, voice and /diff" width="100%">
@@ -362,7 +350,7 @@ sandbox, so the rules are stricter than for commands:
 | `/daemon <when>: <what>` | something to look at when it happens; it reports to the Inbox |
 | `/doctor` | check the API key, the sandbox, search, voice, MCP, language servers, disk and the ledger |
 | `/cost` | what this window, today and this month cost |
-| `/snags` | what keeps getting in the agents' way (Settings › Fleet › Debug mode asks them to report it) |
+| `/snags` | what keeps getting in Chuck's way (Settings › Jobs › Debug mode asks it to report its own) |
 | `/export` | save the conversation as Markdown |
 | `/clear` | start a new conversation (the old one stays in Recent) |
 | `/update` · `/restart` | install the newest Chuck · restart into it |
@@ -370,7 +358,7 @@ sandbox, so the rules are stricter than for commands:
 
 ## The command line
 
-`chuck` drives the same fleet from a terminal. It shares the window's settings, API key, ledger,
+`chuck` runs the same Chuck from a terminal. It shares the window's settings, API key, ledger,
 spending limits and checkpoints.
 
 | Command | Does |
@@ -380,7 +368,7 @@ spending limits and checkpoints.
 | `chuck continue ["also add docs"]` | carry on a paused job |
 | `chuck ask "what changed in GTK 4.16?"` | Chat mode: an answer, researched when it should be |
 | `chuck key` | save your SiliconFlow API key |
-| `chuck models` | show the fleet's models, checked against your account |
+| `chuck models` | show Chuck's models, checked against your account |
 | `chuck doctor` | check everything Chuck depends on |
 | `chuck rewind [--list \| N]` | put the folder back to before the last job (or checkpoint N) |
 | `chuck ledger [N]` | verify the evidence chain and show the last N commands |
@@ -388,7 +376,7 @@ spending limits and checkpoints.
 | `chuck update` · `chuck version` | install the newest Chuck · show the version |
 
 Exit status: 0 done or answered, 2 incomplete (paused, with what is missing), 1 failed. Ctrl-C stops
-every agent.
+the job.
 
 ## Install, update, uninstall
 
@@ -436,7 +424,7 @@ better way, because it also sets up the menu entry, bubblewrap and voice.
 - [bubblewrap](https://github.com/containers/bubblewrap), for the jails. The installer adds it.
 - A [SiliconFlow](https://siliconflow.com) API key.
 - Optional:
-  - Brave, Chromium or Chrome, for checking the Lead's pages (Camoufox can do it too);
+  - Brave, Chromium or Chrome, for checking Chuck's pages (Camoufox can do it too);
   - a language server, for code intelligence.
 
 **Updating.** Chuck checks once a day whether a newer version is out (Settings can turn that off).
@@ -462,8 +450,8 @@ The gear icon, or Ctrl+P → Settings.
 | Group | Setting |
 |---|---|
 | SiliconFlow | Your API key. `chuck key` saves the same one. |
-| Fleet | How many workers build at once (0–8; 0 means the Lead works alone). Spending cap per job. The longest one command may run. Keep going on its own when a job's budget runs out. |
-| Reasoning | How much the models may think (off to 32k tokens). The longest thinking time. When to give up on a silent connection. |
+| Jobs | Spending cap per job. The longest one command may run. Keep going on its own when a job's budget runs out. Debug mode. |
+| Reasoning | How much Chuck thinks before it builds and after something fails (off to 32k tokens). The longest thinking time. When to give up on a silent connection. |
 | Spending limits | Daily and monthly, across everything (0 = no limit). |
 | This folder's access | The five modes in [Safety](#safety), per folder. |
 | Research | Your own SearXNG. A proxy for web reads (e.g. Tor's `socks5://127.0.0.1:9050`; Camoufox then also takes the proxy's time zone and language). Which browser to use (Automatic, Camoufox, Brave, Chromium, Chrome), and whether to read blocked pages in it. |
@@ -476,13 +464,14 @@ The gear icon, or Ctrl+P → Settings.
 | Path | What |
 |---|---|
 | `~/.config/chucknorris/settings.json` | Settings and the API key (readable only by you) |
-| `~/.config/chucknorris/CHUCK.md` | Your standing rules for every agent |
+| `~/.config/chucknorris/CHUCK.md` | Your standing rules for Chuck |
 | `~/.config/chucknorris/mcp.json` | MCP servers |
 | `~/.config/chucknorris/daemons.json`, `inbox.json` | Daemons, reminders and their reports |
 | `~/.local/share/chucknorris/fleet-chats/` | Conversations |
 | `~/.local/share/chucknorris/checkpoints/` | Rewind history (never inside your project) |
 | `~/.local/share/chucknorris/resume/` | Paused jobs, ready for Keep going |
 | `~/.local/share/chucknorris/memory/` | Remembered facts |
+| `~/.cache/chuck/pasted/` | Screenshots you pasted |
 | `~/.local/share/chucknorris/spend.json` | Spending history behind the limits |
 | `~/.local/share/chucknorris/camoufox/` | Camoufox's own Python environment (its browser is in `~/.cache/camoufox`) |
 | `~/.local/state/chucknorris/chuck.log` | Errors, with keys blanked (`/doctor` shows the latest) |
@@ -526,11 +515,11 @@ sessions the way people have them.
 |---|---|
 | `chuck` | the `chuck` command |
 | `chuck-ui` | the GTK 4 / libadwaita window |
-| `chuck-runtime` | the Lead, workers, Chat, daemons' agents, the browser check |
-| `chuck-core` | the kernel (agents as processes with quotas), the Done gate, evidence |
+| `chuck-runtime` | the job loop, Chat, daemons' agents, the browser check, pasted pictures |
+| `chuck-core` | the kernel (each model call a process with quotas), the Done gate, evidence |
 | `chuck-model` | the SiliconFlow client (streaming, retries, reasoning limits) |
 | `chuck-sandbox` | bubblewrap jails, access modes, the critical-command classifier |
-| `chuck-tools` | the block parser, files, commands, copy-on-write workspaces, search |
+| `chuck-tools` | the block parser, files (edits that survive wrong indentation), commands, the folder snapshot, search |
 | `chuck-store` | settings, ledger, spending, checkpoints, memory, logs |
 | `chuck-web` | search, page reading, the headless browsers (Chromium over DevTools, Camoufox through its bridge) |
 | `chuck-code` | language servers, the repo map, ranked code search |

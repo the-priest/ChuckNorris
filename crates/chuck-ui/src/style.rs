@@ -229,4 +229,13 @@ expander.panel-row > title > arrow { color: @faint; min-width: 12px; }
 expander.lane-older > title { color: @faint; font-size: 11px; }
 expander.lane-older > title:hover { color: @mute; }
 .composer-hint { color: @faint; font-size: 14px; }
+
+/* ── pasted screenshots ─────────────────────────────────────────────── */
+.attach-row { padding: 2px 4px 4px 4px; }
+.attach-shot { border-radius: 8px; border: 1px solid @line2; }
+.attach-x { min-width: 20px; min-height: 20px; padding: 0; margin: 3px; border-radius: 999px;
+            background-color: alpha(black, 0.65); color: white; box-shadow: none; }
+.attach-x:hover { background-color: @bad; }
+.pasted-btn { padding: 0; border-radius: 10px; }
+.pasted-shot { border-radius: 10px; border: 1px solid alpha(@accent, 0.35); }
 "#;

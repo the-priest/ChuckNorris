@@ -12,6 +12,8 @@ const KEEP: usize = 4000;
 #[serde(tag = "k", rename_all = "snake_case")]
 pub enum Entry {
     User { text: String },
+    /// Screenshots the user pasted with their message (PNG files).
+    Pasted { paths: Vec<String> },
     /// A message typed to the Lead while it worked.
     Steer { text: String },
     Lead {
@@ -119,6 +121,7 @@ pub fn markdown(s: &Saved) -> String {
         }
         match e {
             Entry::User { text } => out.push_str(&format!("**You:** {}\n\n", text.trim())),
+            Entry::Pasted { paths } => out.push_str(&format!("**You pasted:** {}\n\n", paths.join(", "))),
             Entry::Steer { text } => out.push_str(&format!("**You (while it worked):** {}\n\n", text.trim())),
             Entry::Lead { text, model, chat } => out.push_str(&format!("**{}**{}\n\n{}\n\n", if *chat { "Chuck" } else { "Lead" },
                 if model.is_empty() { String::new() } else { format!(" · {model}") }, text.trim())),

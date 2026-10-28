@@ -114,6 +114,12 @@ fn main() {
     let model: Arc<dyn chuck_model::ChatModel> = match mode.as_str() {
         "table" => Arc::new(Scripted::new().replies(["**Top pick: Qwen3.5 9B** — `ollama pull qwen3.5:9b`. Brand new, and at 9B it's right at your ceiling.\n\n### Why it wins\n| | Qwen3.5 9B | Qwen3.5 4B | Gemma 4 E4B | Phi-4-mini |\n|---|---|---|---|---|\n| Download | 6.6–7.6GB | 3.3–4.0GB | 9.6GB | ~2.2GB |\n| Params | 9B | 4B | ~4.5B eff. | 3.8B |\n| Context | **256K** | 256K | — | 128K |\n| Input | **Text + image** | Text + image | Text | Text |\n\n**If you're on 8GB VRAM, drop to `qwen3.5:4b`** (3.3–4.0GB).\n\n### Runners-up\n- **`gemma4:e4b`** — April 2026, Apache 2.0, built for 8GB machines\n- *phi-4-mini* — small and quick\n1. pull it\n2. run it\n> numbers from the Ollama library"])),
         "writing" => Arc::new(Scripted::new().replies(["```criteria\n- tetris.html has the board :: verify: grep -q board tetris.html\n```\n```write tetris.html\n<!doctype html>\n<title>Tetris</title>\n<canvas id=board width=300 height=600></canvas>\n<script>\n  const row0 = Array(10).fill(0); // row 0\n  const row1 = Array(10).fill(0); // row 1\n  const row2 = Array(10).fill(0); // row 2\n  const row3 = Array(10).fill(0); // row 3\n  const row4 = Array(10).fill(0); // row 4\n  const row5 = Array(10).fill(0); // row 5\n  const row6 = Array(10).fill(0); // row 6\n  const row7 = Array(10).fill(0); // row 7\n  const row8 = Array(10).fill(0); // row 8\n  const row9 = Array(10).fill(0); // row 9\n  const row10 = Array(10).fill(0); // row 10\n  const row11 = Array(10).fill(0); // row 11\n  const row12 = Array(10).fill(0); // row 12\n  const row13 = Array(10).fill(0); // row 13\n  const row14 = Array(10).fill(0); // row 14\n  const row15 = Array(10).fill(0); // row 15\n  const row16 = Array(10).fill(0); // row 16\n  const row17 = Array(10).fill(0); // row 17\n  const row18 = Array(10).fill(0); // row 18\n  const row19 = Array(10).fill(0); // row 19\n  const row20 = Array(10).fill(0); // row 20\n  const row21 = Array(10).fill(0); // row 21\n  const row22 = Array(10).fill(0); // row 22\n  const row23 = Array(10).fill(0); // row 23\n  const row24 = Array(10).fill(0); // row 24\n  const row25 = Array(10).fill(0); // row 25\n  const row26 = Array(10).fill(0); // row 26\n  const row27 = Array(10).fill(0); // row 27\n  const row28 = Array(10).fill(0); // row 28\n  const row29 = Array(10).fill(0); // row 29\n  const row30 = Array(10).fill(0); // row 30\n  const row31 = Array(10).fill(0); // row 31\n  const row32 = Array(10).fill(0); // row 32\n  const row33 = Array(10).fill(0); // row 33\n  const row34 = Array(10).fill(0); // row 34\n  const row35 = Array(10).fill(0); // row 35\n  const row36 = Array(10).fill(0); // row 36\n  const row37 = Array(10).fill(0); // row 37\n  const row38 = Array(10).fill(0); // row 38\n  const row39 = Array(10).fill(0); // row 39\n</script>\n```\n```test grep -q board tetris.html```\n```done\n**tetris.html** is ready: a 10×20 board, the seven pieces, rotation, line clears and a score. `grep -q board tetris.html` passes.\n```"])),
+        // a screenshot pasted (CHUCK_SHOT_IMAGE: any PNG), described by the eyes, then answered
+        "pasted" => Arc::new(Scripted::new()
+            .for_model(chuck_core::VISION_MODEL, ["A game page: the board is drawn, but the pieces fall through the \
+                floor and a red console error reads \"TypeError: grid[y] is undefined\"."])
+            .for_model(chuck_core::MAIN_MODEL, ["The pieces fall through because the collision check reads `grid[y]` \
+                past the last row — `y` reaches 20 on a 20-row board. Clamping the check to `y < ROWS` fixes it."])),
         "voice" => Arc::new(Scripted::new().replies([
             "The `ls -la` command lists every file, hidden ones included, with permissions, owner, size and date."])),
         "daemons" => Arc::new(Scripted::new().replies([
@@ -191,6 +197,8 @@ fn main() {
         "paused" => Some("The parser crashes on empty input. Fix it.".to_string()),
         "research" | "chat" | "badchat" => Some("Why does int() fail on an empty string? Check the docs.".to_string()),
         "voice" => Some("What does ls -la show?".to_string()),
+        "pasted" => Some("why do the pieces fall through?".to_string()),
+        "attach" => None,
         "writing" => Some("make me a tetris in tetris.html".to_string()),
         "table" => Some("Which small local model should I run?".to_string()),
         "pictures" => Some("Show me red pandas".to_string()),
@@ -221,10 +229,13 @@ fn main() {
     let code = chuck_ui::run(chuck_ui::Options { model, folder: Some(proj), send,
                                                  shot: Some((out, ms)), width: 1280, height: 860,
                                                  settings: mode == "settings", open: Some(open), web,
-                                                 chat: Some(matches!(mode.as_str(), "chat" | "badchat" | "voice" | "pictures" | "table")),
+                                                 chat: Some(matches!(mode.as_str(), "chat" | "badchat" | "voice" | "pictures" | "table" | "pasted")),
                                                  listen: mode == "voice",
                                                  palette: (mode == "palette").then(|| "do".to_string()),
-                                                 poke: (mode == "wave").then_some((400.0, 380.0)) });
+                                                 poke: (mode == "wave").then_some((400.0, 380.0)),
+                                                 attach: if matches!(mode.as_str(), "attach" | "pasted") {
+                                                     std::env::var_os("CHUCK_SHOT_IMAGE").map(std::path::PathBuf::from)
+                                                         .into_iter().collect() } else { Vec::new() } });
     if std::env::var_os("CHUCK_SHOT_FOLDER").is_none() {
         let _ = std::fs::remove_dir_all(&dir);
     }

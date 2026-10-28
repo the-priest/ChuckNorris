@@ -23,6 +23,7 @@ const ICONS: &[(&str, &str)] = &[
     ("search", r##"<circle cx="6.8" cy="6.8" r="4.3" fill="none" stroke="#bebebe" stroke-width="1.6"/><path d="M10 10l4 4" stroke="#bebebe" stroke-width="1.8" stroke-linecap="round"/>"##),
     ("image", r##"<rect x="1.75" y="2.75" width="12.5" height="10.5" rx="1.5" fill="none" stroke="#bebebe" stroke-width="1.5"/><path d="M3 12l3.5-4 2.5 2.7 1.8-1.9L13 12z" fill="#bebebe"/><circle cx="10.8" cy="5.8" r="1.2" fill="#bebebe"/>"##),
     ("video", r##"<rect x="1.5" y="3.5" width="9" height="9" rx="1.5" fill="none" stroke="#bebebe" stroke-width="1.5"/><path d="M11 7l3.5-2.2v6.4L11 9z" fill="#bebebe"/>"##),
+    ("close", r##"<path d="M4 4l8 8m0-8l-8 8" fill="none" stroke="#bebebe" stroke-width="1.8" stroke-linecap="round"/>"##),
     ("page", r##"<path d="M3.75 1.75h5.5l3 3v9.5h-8.5z" fill="none" stroke="#bebebe" stroke-width="1.5" stroke-linejoin="round"/><path d="M6 8h4M6 10.5h4" stroke="#bebebe" stroke-width="1.3" stroke-linecap="round"/>"##),
 ];
 
