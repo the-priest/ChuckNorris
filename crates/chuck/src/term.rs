@@ -1,4 +1,4 @@
-//! The fleet in a terminal: what the Lead says, what each agent does, the
+//! Chuck in a terminal: what it says, what it does, the
 //! gate, and an honest ending (done, or INCOMPLETE with what's missing).
 
 use chuck_core::{AgentId, Role};
@@ -110,11 +110,10 @@ impl View {
                     _ if summary.is_empty() => one_line(arg, 90),
                     _ => one_line(summary, 110),
                 };
-                format!("  {mark} {} {} {}", st.dim(&format!("{who:<6}")), tool, st.dim(&what))
+                let _ = who;
+                format!("  {mark} {} {}", tool, st.dim(&what))
             }
             Event::Snag { who, kind, text, .. } => st.dim(&format!("  ⚠ {who} · {kind}: {}", one_line(text, 140))),
-            Event::Team { from, to, text } => st.dim(&format!("  ✉ {from} → {}: {}", to.as_deref().unwrap_or("everyone"),
-                                                           one_line(text, 140))),
             Event::Gallery { query, items } => {
                 let mut s = format!("  {} {query}", st.accent(&format!("◉ {} pictures", items.len())));
                 for p in items {
@@ -150,32 +149,6 @@ impl View {
                 }
                 st.dim(chunk.trim_end())
             }
-            Event::Assigned { task, title, worker, role } => {
-                let who = self.who(*worker);
-                st.accent(&format!("  ◆ {task} \"{}\" → {who} ({})", one_line(title, 60), role.label()))
-            }
-            Event::Submitted { task, worker, lines } => {
-                let who = self.who(*worker);
-                st.accent(&format!("  ◆ {task} submitted by {who} ({lines} lines changed)"))
-            }
-            Event::Reviewed { task, accepted, defects } => {
-                let what = if task == "job" { "independent review".to_string() } else { task.clone() };
-                if *accepted {
-                    st.good(&format!("  ✓ {what}: accepted"))
-                } else {
-                    st.warn(&format!("  ↺ {what}: sent back — {}", one_line(&defects.join("; "), 140)))
-                }
-            }
-            Event::Merged { task, applied, merged, conflicts, refused } => {
-                let mut s = format!("  ⇣ {task} merged into your folder: {applied} file(s) applied, {merged} merged");
-                if !conflicts.is_empty() {
-                    s.push_str(&format!(", CONFLICTS: {}", conflicts.join(", ")));
-                }
-                if !refused.is_empty() {
-                    s.push_str(&format!(", refused: {}", refused.join(", ")));
-                }
-                if conflicts.is_empty() { st.good(&s) } else { st.warn(&s) }
-            }
             Event::Gate { id, task: None, phase, unmet } => {
                 if !self.is_lead(*id) {
                     return;
@@ -192,27 +165,18 @@ impl View {
                     st.dim(&format!("  gate: {phase} — {} open: {}", unmet.len(), one_line(&unmet.join("; "), 120)))
                 }
             }
-            Event::Plan { steps } => {
-                let done = steps.iter().filter(|(_, d)| *d).count();
-                let now = steps.iter().find(|(_, d)| !d).map(|(s, _)| one_line(s, 80))
-                    .unwrap_or_else(|| "every step done".into());
-                st.accent(&format!("  ▤ plan {done}/{} — now: {now}", steps.len()))
-            }
             Event::Running { id, cmd, .. } => {
                 if !self.verbose {
                     return;
                 }
-                let who = self.who(*id);
-                st.dim(&format!("  ⏵ {who:<6} {}", one_line(cmd, 100)))
+                let _ = id;
+                st.dim(&format!("  ⏵ {}", one_line(cmd, 100)))
             }
-            Event::Gate { .. } | Event::Board { .. } | Event::Tasks(_) | Event::Thinking { .. } | Event::Delta { .. }
+            Event::Gate { .. } | Event::Board { .. } | Event::Thinking { .. } | Event::Delta { .. }
             | Event::Writing { .. } => return,
-            Event::Notice { id, text } => {
-                let who = self.who(*id);
-                st.warn(&format!("  ! {who}: {text}"))
-            }
+            Event::Notice { text, .. } => st.warn(&format!("  ! {text}")),
             Event::Ask { question, options, .. } => {
-                let mut s = format!("\n{} {}", st.bold("? the lead asks:"), question.trim());
+                let mut s = format!("\n{} {}", st.bold("? Chuck asks:"), question.trim());
                 for (i, o) in options.iter().enumerate() {
                     let pick = if o.recommended { st.good(" (recommended)") } else { String::new() };
                     s.push_str(&format!("\n  {} {}{}", st.bold(&format!("{}.", i + 1)), o.label, pick));
@@ -227,7 +191,7 @@ impl View {
             }
             Event::Confirm { command, why, outside, .. } => format!("\n{} {}\n  {}\n  {}{}",
                 if outside.is_empty() { st.bad(&st.bold("! CRITICAL")) } else { st.warn(&st.bold("! OUTSIDE THE FOLDER")) },
-                st.bold("the lead wants to run:"), command.trim(), st.dim(why),
+                st.bold("Chuck wants to run:"), command.trim(), st.dim(why),
                 if outside.is_empty() { String::new() } else { format!("\n  {}", st.dim(&format!("it reaches: {}", outside.join(", ")))) }),
             Event::Usage { tokens, usd, prompt, cached, .. } => {
                 self.tokens += tokens;
@@ -245,7 +209,7 @@ impl View {
             }
             Event::Schedule { kind, when, what } => format!("{} {}: {}", st.bold(if kind == "remind" { "⏰ reminder set," }
                 else { "◎ daemon set," }), chuck_daemon::describe(when), what),
-            Event::Handoff { request } => format!("\n{}\n  {}\n{}", st.bold("→ for the fleet (nothing has run):"),
+            Event::Handoff { request } => format!("\n{}\n  {}\n{}", st.bold("→ to do on your machine (nothing has run):"),
                 request.trim().replace('\n', "\n  "),
                 st.dim(&format!("  to send it:  chuck run \"{}\"", one_line(request, 200).replace('"', "\\\"")))),
             Event::Finished(o) => self.ending(o),
@@ -302,20 +266,14 @@ mod tests {
         let buf = Buf::default();
         let mut v = View::new(false, false, Box::new(buf.clone()));
         let lead = AgentId(1);
-        let w = AgentId(2);
         v.show(&Event::AgentStarted { id: lead, role: Role::Lead, name: "lead".into(), model: "m".into(), task: None });
-        v.show(&Event::AgentStarted { id: w, role: Role::GlmWorker, name: "glm-1".into(),
-                                      model: "zai-org/GLM-5.3-Flash".into(), task: Some("t1".into()) });
         v.show(&Event::Said { id: lead, text: "On it.".into() });
-        v.show(&Event::Said { id: w, text: "worker chatter".into() });
-        v.show(&Event::Action { id: w, tool: "write".into(), arg: "a.rs".into(), ok: true, summary: "created a.rs (+3 −0)".into() });
-        v.show(&Event::Usage { id: w, tokens: 1500, usd: 0.001, prompt: 1200, cached: 600 });
+        v.show(&Event::Action { id: lead, tool: "write".into(), arg: "a.rs".into(), ok: true, summary: "created a.rs (+3 −0)".into() });
+        v.show(&Event::Usage { id: lead, tokens: 1500, usd: 0.001, prompt: 1200, cached: 600 });
         v.show(&Event::Finished(Outcome::Paused { gaps: vec!["c1 has no evidence".into()] }));
         let s = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
-        assert!(s.contains("+ glm-1 (GLM-5.3-Flash) on t1"));
         assert!(s.contains("On it."));
-        assert!(!s.contains("worker chatter"), "workers' prose only with --verbose");
-        assert!(s.contains("✓ glm-1  write created a.rs (+3 −0)"));
+        assert!(s.contains("✓ write created a.rs (+3 −0)"), "{s}");
         assert!(s.contains("INCOMPLETE"));
         assert!(s.contains("- c1 has no evidence"));
         assert!(!s.contains('\x1b'));
@@ -329,7 +287,7 @@ mod tests {
         v.show(&Event::Ask { id: AgentId(1), question: "Which stack?".into(),
                              options: vec![c("Rust", "fastest", true), c("Python", "", false)] });
         let s = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
-        assert!(s.contains("? the lead asks: Which stack?"), "{s}");
+        assert!(s.contains("? Chuck asks: Which stack?"), "{s}");
         assert!(s.contains("1. Rust (recommended)") && s.contains("fastest") && s.contains("2. Python"), "{s}");
         assert!(s.contains("type a number"), "{s}");
     }
@@ -346,9 +304,9 @@ mod tests {
         v.show(&Event::Finished(Outcome::Answered { text: "Use `rg -S`.".into() }));
         let s = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
         assert!(!s.contains("+ chuck"), "{s}");
-        assert!(s.contains("✓ chuck  search “rg smart case” → 5 results"), "{s}");
+        assert!(s.contains("✓ search “rg smart case” → 5 results"), "{s}");
         assert!(s.contains("\nUse `rg -S`."));
-        assert!(s.contains("→ for the fleet (nothing has run):\n  Add alias"));
+        assert!(s.contains("→ to do on your machine (nothing has run):\n  Add alias"));
         assert!(s.contains(r#"chuck run "Add alias rg=\"rg -S\" to ~/.bashrc""#), "{s}");
     }
 }

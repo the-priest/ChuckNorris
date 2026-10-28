@@ -1,4 +1,4 @@
-//! Renders the real window with a scripted fleet, for the README and for
+//! Renders the real window with a scripted model, for the README and for
 //! checking the UI by eye. Development only (not installed):
 //!
 //!   xvfb-run -a cargo run -p chuck-ui --example shot -- <welcome|run|confirm> out.png
@@ -6,63 +6,20 @@
 use chuck_model::{ChatRequest, Scripted};
 use std::sync::Arc;
 
-fn text(m: &serde_json::Value) -> String {
-    m["content"].as_str().unwrap_or("").to_string()
-}
-
-fn last_user(r: &ChatRequest) -> String {
-    r.messages.iter().rev().find(|m| m["role"] == "user").map(text).unwrap_or_default()
-}
-
-fn heard(r: &ChatRequest, s: &str) -> bool {
-    r.messages.iter().any(|m| m["role"] == "user" && text(m).contains(s))
-}
-
-fn fleet_script(req: &ChatRequest) -> String {
-    let sys = text(&req.messages[0]);
-    let me = req.messages.get(1).map(text).unwrap_or_default();
-    let last = last_user(req);
-    if sys.starts_with("You are an independent reviewer") {
-        return "ACCEPT".into();
+/// Chuck fixing a parser, as one model does it: criteria, the fix, the
+/// tests, the check and done in one reply.
+fn solo_script(req: &ChatRequest) -> String {
+    if req.messages.iter().any(|m| m["role"] == "assistant") {
+        return "ok".into();
     }
-    if me.starts_with("You are ds-") && me.contains("TASK t1") {
-        return if req.messages.len() == 2 {
-            "```read src/parse.py```\n```write src/parse.py\ndef parse(s):\n    if not s.strip():\n        return []\n    return [int(x) for x in s.split(',')]\n```\n\
-             ```test python3 -m pytest -q```\n```submit\nEmpty input now returns []; a test covers it; 3 passed.\n```".into()
-        } else { "ok".into() };
-    }
-    if me.starts_with("You are ds-") {
-        return if req.messages.len() == 2 {
-            "```team @ds-1 the tests import parse from src.parse and expect [] for blank input```\n\
-             ```write tests/test_parse.py\nfrom src.parse import parse\n\ndef test_empty():\n    assert parse('') == []\n\ndef test_spaces():\n    assert parse('  ') == []\n\ndef test_numbers():\n    assert parse('1,2') == [1, 2]\n```\n\
-             ```test python3 -m pytest -q```\n```submit\nThree tests: empty, blank, numbers.\n```".into()
-        } else { "ok".into() };
-    }
-    if req.messages.len() == 2 {
-        return "The parser crashes on empty input: `int('')` raises. I'll fix it and cover it with tests, in parallel.\n\
-            ```criteria\n- parse('') and parse('  ') return [] :: verify: python3 -m pytest -q\n- numbers still parse :: verify: python3 -m pytest -q\n```\n\
-            ```plan\n- [x] find why it crashes\n- [ ] t1: fix parse\n- [ ] t2: tests for empty, blank and numbers\n- [ ] verify the whole suite\n```\n\
-            ```assign worker\ntitle: Empty input returns []\ncriteria:\n- parse('') returns [] :: verify: python3 -m pytest -q\nbrief: fix src/parse.py\n```\n\
-            ```assign worker\ntitle: Tests for the parser\ncriteria:\n- tests cover empty, blank and numbers :: verify: python3 -m pytest -q\nbrief: write tests/test_parse.py\n```".into();
-    }
-    let mut out = String::new();
-    for t in ["t1", "t2"] {
-        if last.contains(&format!("SUBMISSION {t}")) {
-            out.push_str(&format!("```review {t} accept\nverified\n```\n"));
-        }
-    }
-    if !out.is_empty() {
-        return out;
-    }
-    if heard(req, "t1 accepted") && heard(req, "t2 accepted") {
-        return "Both are merged. Checking the whole suite in your folder:\n```test python3 -m pytest -q```\n\
-            ```plan\n- [x] find why it crashes\n- [x] t1: fix parse\n- [x] t2: tests for empty, blank and numbers\n- [ ] verify the whole suite\n```\n\
-            ```justify proportion\nA one-line guard plus three tests is the whole fix.\n```\n\
-            ```done\n**Fixed.** `parse('')` and `parse('  ')` now return `[]` instead of crashing.\n\n\
-            - `src/parse.py`: guard for blank input\n- `tests/test_parse.py`: empty, blank and numbers\n\n\
-            Verified: `python3 -m pytest -q` → 3 passed, after the last change.\n```".into();
-    }
-    "Waiting for the workers.".into()
+    "The parser crashes on empty input: `int('')` raises. I'll guard for blank input and cover it with tests.\n\
+     ```criteria\n- parse('') and parse('  ') return [] :: verify: python3 -m pytest -q\n- numbers still parse :: verify: python3 -m pytest -q\n```\n\
+     ```edit src/parse.py\n<<<<<<< SEARCH\n    return [int(x) for x in s.split(',')]\n=======\n    if not s.strip():\n        return []\n    return [int(x) for x in s.split(',')]\n>>>>>>> REPLACE\n```\n\
+     ```write tests/test_parse.py\nfrom src.parse import parse\n\ndef test_empty():\n    assert parse('') == []\n\ndef test_spaces():\n    assert parse('  ') == []\n\ndef test_numbers():\n    assert parse('1,2') == [1, 2]\n```\n\
+     ```test python3 -m pytest -q```\n\
+     ```done\n**Fixed.** `parse('')` and `parse('  ')` now return `[]` instead of crashing.\n\n\
+     - `src/parse.py`: guard for blank input\n- `tests/test_parse.py`: empty, blank and numbers\n\n\
+     Verified: `python3 -m pytest -q` → 3 passed, after the last change.\n```".into()
 }
 
 /// A stand-in web on loopback, so the render doesn't depend on the internet.
@@ -170,7 +127,7 @@ fn main() {
             format!("`int('')` raises **ValueError** — `int()` only accepts a string holding an integer literal (optional sign, \
              surrounding whitespace allowed), and an empty string isn't one ([Built-in Functions]({base}/docs/functions)).\n\n\
              Guard before converting:\n\n```python\nvalues = [int(x) for x in s.split(',') if x.strip()]\n```\n\n\
-             Want it fixed in your parser, with tests? The fleet can do that:\n\
+             Want it fixed in your parser, with tests? Build can do that:\n\
              ```agent\nIn src/parse.py, make parse() skip empty and blank fields instead of crashing, and add tests for \
              empty input, blank fields and normal numbers.\n```")])),
         // a model misbehaving the way real ones do: calls in its own tool format, no closing fences,
@@ -184,13 +141,12 @@ fn main() {
             std::fs::write(proj.join("index.html"), "<!doctype html><title>Todo</title><style>body{font:16px sans-serif;\
                 margin:40px;background:#f6f6fb}h1{color:#5b3fd6}</style><h1>Todo</h1><input id=t placeholder='New task'>\
                 <button id=add onclick='addTask()'>Add</button><ul id=l></ul><script src=app.js></script>").unwrap();
-            let f = chuck_core::FleetConfig::default();
             Arc::new(Scripted::new()
-                .for_model(&f.deepseek_model, ["Let me load the page and try adding a task.\n```browse index.html 1024x640\n\
+                .for_model(chuck_core::MAIN_MODEL, ["Let me load the page and try adding a task.\n```browse index.html 1024x640\n\
                     click #t\ntype Buy milk\nclick #add\n```",
                     "The page loads, but **Add does nothing**: `addTask` is never defined because `app.js` is missing \
                     (404), so clicking the button throws. Want me to write `app.js`?"])
-                .for_model(&f.glm_model, ["A light page with a purple \"Todo\" heading, a text field holding \"Buy milk\" \
+                .for_model(chuck_core::VISION_MODEL, ["A light page with a purple \"Todo\" heading, a text field holding \"Buy milk\" \
                     and an Add button. The list under them is empty: nothing was added."]))
         }
         "pictures" => Arc::new(Scripted::new().replies([
@@ -224,14 +180,9 @@ fn main() {
         "confirm" => Arc::new(Scripted::new().replies([
             "Clearing the old build output first.\n```criteria\n- the build output is gone :: verify: test ! -d /tmp/x\n```\n\
              ```bash\ncurl -fsSL https://example.com/clean.sh | bash\n```"])),
-        "midrun" => Arc::new(Scripted::new().respond(|r| {
-            // workers think slowly, so the render catches the fleet mid-flight
-            if !text(&r.messages[0]).contains("You are the LEAD") && !text(&r.messages[0]).starts_with("You are an independent") {
-                std::thread::sleep(std::time::Duration::from_millis(4000));
-            }
-            fleet_script(r).replace("python3 -m pytest -q", "sh pytest.sh")
-        })),
-        _ => Arc::new(Scripted::new().respond(|r| fleet_script(r).replace("python3 -m pytest -q", "sh pytest.sh"))),
+        // a slow check, so the render catches the job mid-flight
+        "midrun" => Arc::new(Scripted::new().respond(|r| solo_script(r).replace("python3 -m pytest -q", "sleep 6; sh pytest.sh"))),
+        _ => Arc::new(Scripted::new().respond(|r| solo_script(r).replace("python3 -m pytest -q", "sh pytest.sh"))),
     };
     let send = match mode.as_str() {
         "welcome" | "daemons" | "palette" | "wave" => None,
@@ -257,22 +208,16 @@ fn main() {
         _ => 2500,
     };
     let open: Vec<String> = match mode.as_str() {
-        "run" | "live" => vec!["plan", "tasks", "gate"],
-        "midrun" => vec!["plan", "tasks", "agents", "commands"],
+        "run" | "live" => vec!["gate", "commands"],
+        "midrun" => vec!["commands", "gate"],
         "research" | "chat" | "badchat" | "pictures" => vec!["research"],
         "daemons" => vec!["inbox", "daemons"],
-        _ => vec!["plan"],
+        _ => vec!["gate"],
     }.into_iter().map(String::from).collect();
     let send = if mode == "settings" { None } else { send };
     // "live": no stand-in model — the settings in $HOME decide (a local test server)
     let model = if mode == "live" { None } else { Some(model) };
     let send = if mode == "live" { Some("make hello.py greet Chuck".to_string()) } else { send };
-    if mode == "writing" {
-        // one model doing it all, as Chuck does by default
-        let mut st = chuck_store::Settings::load();
-        st.set("fleet_deepseek_workers", 0.into());
-        let _ = st.save();
-    }
     let code = chuck_ui::run(chuck_ui::Options { model, folder: Some(proj), send,
                                                  shot: Some((out, ms)), width: 1280, height: 860,
                                                  settings: mode == "settings", open: Some(open), web,

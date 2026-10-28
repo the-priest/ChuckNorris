@@ -65,12 +65,8 @@ fn one(tag: &str) -> Option<Value> {
                      &["url"]),
         "images" => block("images", "Show the user pictures.", "what of", "", &["arg"]),
         "videos" => block("videos", "Show the user videos.", "what of", "", &["arg"]),
-        "submit" => f("submit", "Hand your task to the Lead: what changed, how each criterion was verified.",
-                      json!({"report": s("the report")}), &["report"]),
         "snag" => block("snag", "Note what slowed you down, limited you or went wrong (it gets fixed); then carry on.",
                         "what, in one line", "", &["arg"]),
-        "team" => f("team", "Message the team: everyone, or one (`ds-2`, `lead`).",
-                    json!({"to": s("one name (optional: everyone)"), "message": s("short and concrete")}), &["message"]),
         "browse" => block("browse", "Load a page or file in a real browser: JS errors, failed requests, text, a look.",
                           "url or file, optional WxH, optional `for c1`",
                           "optional action lines: click <css|x,y>, type <text>, press <keys>, wait <ms>, scroll <px>, \
@@ -78,17 +74,7 @@ fn one(tag: &str) -> Option<Value> {
         "mcp" => block("mcp", "Call an MCP server's tool.", "server.tool", "the arguments as JSON", &["arg"]),
         "criteria" => block("criteria", "Set the acceptance criteria.", "",
                             "one per line: `- <criterion> :: verify: <command>`", &["body"]),
-        "plan" => block("plan", "Set the plan, or mark steps (arg `done 2 3`).", "`done N…` to mark steps",
-                        "the steps, one per line: `- [ ] <step>`", &[]),
-        "assign" => block("assign", "Give a task to a worker.", "`worker`, or `race`; optionally `after t1,t2`",
-                          "`title: …`, then `criteria:` and lines `- <criterion> :: verify: <command>`, then `brief:` \
-                           and the work (the files it owns, the interfaces it provides or uses)", &["arg", "body"]),
-        "review" => block("review", "Your verdict on a submission.", "`t1 accept` or `t1 reject`",
-                          "for a rejection, one `- <defect>` line each", &["arg"]),
-        "cancel" => block("cancel", "Take a task back: its workers stop.", "`t2 <why>`", "", &["arg"]),
-        "justify" => block("justify", "Why a small change fully answers a large ask.", "`proportion` (or `t1 proportion`)",
-                           "why", &["arg", "body"]),
-        "done" => f("done", "Finish the job (the gate and an independent review check it).",
+        "done" => f("done", "Finish the job (the gate checks every criterion was verified after the last change).",
                     json!({"summary": s("for the user: what changed and how it was verified")}), &["summary"]),
         "ask" => block("ask", "Ask the user a decision that is theirs.", "",
                        "the question, then 2-4 lines `- <option> :: <why pick it>`, your pick first and marked \
@@ -98,7 +84,7 @@ fn one(tag: &str) -> Option<Value> {
         "forget" => block("forget", "Drop remembered facts that match.", "what", "", &["arg"]),
         "remind" => block("remind", "Remind the user.", "`<when>: <what>`", "", &["arg"]),
         "daemon" => block("daemon", "Keep an eye on something and report.", "`<when>: <what to look at>`", "", &["arg"]),
-        "agent" => block("agent", "Hand a request to the fleet, which can act on the machine.", "",
+        "agent" => block("agent", "Hand a request to Build mode, which can act on the machine.", "",
                          "the request, complete and self-contained", &["body"]),
         _ => return None,
     })
@@ -117,11 +103,11 @@ pub fn tools(tags: &[&str]) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::exec::{LEAD_TAGS, WORKER_TAGS};
+    use crate::exec::LEAD_TAGS;
 
     #[test]
     fn every_tool_an_agent_has_is_a_function_and_its_call_runs_as_its_block() {
-        for tags in [WORKER_TAGS, LEAD_TAGS, crate::chat::CHAT_TAGS] {
+        for tags in [LEAD_TAGS, crate::chat::CHAT_TAGS] {
             let t = tools(tags);
             let names: Vec<&str> = t.as_array().unwrap().iter().map(|f| f["function"]["name"].as_str().unwrap()).collect();
             for tag in tags.iter().filter(|t| **t != "sh") {
@@ -132,13 +118,6 @@ mod tests {
         let w = |name: &str, args: Value| chuck_tools::native::call_block(name, &args.to_string(), LEAD_TAGS);
         assert_eq!(w("bash", json!({"command": "npm test"})).unwrap(), "```bash\nnpm test\n```");
         assert_eq!(w("read", json!({"path": "a.rs", "start_line": 3, "end_line": 9})).unwrap(), "```read a.rs:3-9```");
-        let a = w("assign", json!({"arg": "worker after t1", "body": "title: x\ncriteria:\n- y :: verify: true\nbrief: z"}))
-            .unwrap();
-        let b = &chuck_tools::tool_blocks(&a, LEAD_TAGS)[0];
-        assert_eq!((b.tag.as_str(), b.arg.as_str()), ("assign", "worker after t1"));
-        assert!(b.body.contains("criteria:\n- y :: verify: true"));
-        let r = w("review", json!({"arg": "t1 reject", "body": "- no test"})).unwrap();
-        assert_eq!(chuck_tools::tool_blocks(&r, LEAD_TAGS)[0].body, "- no test");
         assert_eq!(w("map", json!({})).unwrap(), "```map```");
         // the criteria a check proves, in either spelling
         assert_eq!(w("test", json!({"command": "grep -q x a && echo ok", "criteria": "c3, c4"})).unwrap(),

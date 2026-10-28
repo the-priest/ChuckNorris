@@ -295,55 +295,29 @@ fn text(m: &serde_json::Value) -> String {
     m["content"].as_str().unwrap_or("").to_string()
 }
 
-/// A whole fleet job where the worker writes the way DeepSeek does when it
-/// reaches for function calling: its first move a call it can't complete
-/// (a write with no content: told it didn't run), then a block never
-/// closed (told), then everything in DSML. That runs, and the work is
-/// reviewed, merged, verified in the user's folder and finished through
-/// the gate.
+/// A job where Chuck writes the way DeepSeek does when it reaches for
+/// function calling: its first move a call it can't complete (a write with
+/// no content: told it didn't run), then a block never closed (told), then
+/// everything in DSML. That runs, and the job finishes through the gate.
 #[test]
-fn a_worker_that_writes_its_calls_wrong_is_corrected_and_the_job_finishes() {
-    let dir = tmp("worker-malformed");
+fn calls_written_wrong_are_corrected_and_the_job_finishes() {
+    let dir = tmp("malformed");
     let model = Arc::new(Scripted::new().respond(|req| {
-        let sys = text(&req.messages[0]);
-        let me = req.messages.get(1).map(text).unwrap_or_default();
         let last = last_user(req);
-        if sys.starts_with("You are an independent reviewer") {
-            return "ACCEPT".into();
+        if last.contains("NOTHING RAN") {
+            "Writing it.\n```write out.txt\nhello\n".into()
+        } else if last.contains("NOT run") || last.contains("never closed") {
+            "<｜DSML｜function_calls>\n<｜DSML｜invoke name=\"write_file\">\n<｜DSML｜parameter name=\"path\" string=\"true\">out.txt\
+             </｜DSML｜parameter>\n<｜DSML｜parameter name=\"content\" string=\"true\">hello\n</｜DSML｜parameter>\n</｜DSML｜invoke>\n\
+             <｜DSML｜invoke name=\"test\">\n<｜DSML｜parameter name=\"command\" string=\"true\">grep -q hello out.txt</｜DSML｜parameter>\n\
+             </｜DSML｜invoke>\n<｜DSML｜invoke name=\"done\">\n<｜DSML｜parameter name=\"summary\" string=\"true\">out.txt says hello; \
+             verified.</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜function_calls>".into()
+        } else if req.messages.len() == 2 {
+            "```criteria\n- out.txt says hello :: verify: grep -q hello out.txt\n```\n\
+             <function_calls>\n<invoke name=\"write\">\n<parameter name=\"path\">out.txt</parameter>\n</invoke>\n</function_calls>".into()
+        } else {
+            "ok".into()
         }
-        if me.starts_with("You are ds-") || me.starts_with("You are glm-") {
-            return if last.contains("NOTHING RAN") {
-                "Writing it.\n```write out.txt\nhello\n".into()
-            } else if last.contains("NOT run") || last.contains("never closed") {
-                "<｜DSML｜function_calls>\n<｜DSML｜invoke name=\"write_file\">\n<｜DSML｜parameter name=\"path\" string=\"true\">out.txt\
-                 </｜DSML｜parameter>\n<｜DSML｜parameter name=\"content\" string=\"true\">hello\n</｜DSML｜parameter>\n</｜DSML｜invoke>\n\
-                 <｜DSML｜invoke name=\"test\">\n<｜DSML｜parameter name=\"command\" string=\"true\">grep -q hello out.txt</｜DSML｜parameter>\n\
-                 </｜DSML｜invoke>\n<｜DSML｜invoke name=\"submit\">\n<｜DSML｜parameter name=\"report\" string=\"true\">out.txt says hello; \
-                 verified.</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜function_calls>".into()
-            } else if req.messages.len() == 2 {
-                "<function_calls>\n<invoke name=\"write\">\n<parameter name=\"path\">out.txt</parameter>\n</invoke>\n</function_calls>".into()
-            } else {
-                "ok".into()
-            };
-        }
-        if req.messages.len() == 2 {
-            return "```criteria\n- out.txt says hello :: verify: grep -q hello out.txt\n```\n\
-                    ```plan\n- [ ] t1: write out.txt\n- [ ] verify\n```\n\
-                    ```assign deepseek\ntitle: Write out.txt\ncriteria:\n- out.txt says hello :: verify: grep -q hello out.txt\n\
-                    brief: write hello into out.txt\n```".into();
-        }
-        if last.contains("SUBMISSION t1") {
-            return "```review t1 accept\nverified\n```".into();
-        }
-        if last.contains("```justify proportion```") {
-            // told how by the refusal (a real model reads it the same way)
-            return "```justify proportion\nOne line of text is the whole request.\n```\n```test grep -q hello out.txt```\n\
-                    ```done\nout.txt says hello, verified in your folder.\n```".into();
-        }
-        if req.messages.iter().any(|m| m["role"] == "user" && text(m).contains("t1 accepted")) {
-            return "```test grep -q hello out.txt```\n```done\nout.txt says hello, verified in your folder.\n```".into();
-        }
-        "Waiting for the worker.".into()
     }));
     let cfg = RuntimeConfig { store: dir.join("store"), access: chuck_sandbox::Access::Full, ..RuntimeConfig::default() };
     let rt = Runtime::new(model.clone(), cfg, Events::none());

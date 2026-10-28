@@ -240,6 +240,58 @@ fn loose_find(hay: &str, needle: &str) -> Option<(usize, usize)> {
     Some((start, end))
 }
 
+/// Locate `needle` quoted at the wrong depth: every line of the match is the
+/// needle's line with the same indentation added (or taken away), only when
+/// the match is unique. Returns the span and the replacement re-indented
+/// the same way, so the edit lands at the file's depth.
+fn shifted_find(hay: &str, needle: &str, repl: &str) -> Option<(usize, usize, String)> {
+    let hl: Vec<&str> = hay.split('\n').collect();
+    let nl: Vec<&str> = needle.trim_matches('\n').split('\n').map(str::trim_end).collect();
+    let lead = |l: &str| l.len() - l.trim_start().len();
+    let first = nl.iter().position(|l| !l.trim().is_empty())?;
+    if nl.len() > hl.len() || nl.iter().filter(|l| !l.trim().is_empty()).count() < 1 {
+        return None;
+    }
+    // (taken away from the needle, added): how the needle's lines become the file's
+    let shift = |i: usize| -> Option<(String, String)> {
+        let (h, n) = (hl[i + first].trim_end(), nl[first]);
+        let (hi, ni) = (&h[..lead(h)], &n[..lead(n)]);
+        let (cut, add) = match hi.strip_prefix(ni) {
+            Some(extra) => ("", extra),
+            None => (ni.strip_prefix(hi)?, ""),
+        };
+        for (k, n) in nl.iter().enumerate() {
+            let h = hl[i + k].trim_end();
+            if n.trim().is_empty() {
+                if !h.trim().is_empty() { return None; }
+                continue;
+            }
+            let body = n.strip_prefix(cut)?;
+            if h.strip_prefix(add)? != body { return None; }
+        }
+        Some((cut.to_string(), add.to_string()))
+    };
+    let mut hit = None;
+    for i in 0..=hl.len() - nl.len() {
+        if let Some(sh) = shift(i) {
+            if hit.is_some() {
+                return None;
+            }
+            hit = Some((i, sh));
+        }
+    }
+    let (i, (cut, add)) = hit?;
+    if cut.is_empty() && add.is_empty() {
+        return None; // the same depth: the exact and loose matches decide
+    }
+    let start: usize = hl[..i].iter().map(|l| l.len() + 1).sum();
+    let end = start + hl[i..i + nl.len()].join("\n").len();
+    let moved: Vec<String> = repl.split('\n').map(|l| if l.trim().is_empty() { l.to_string() } else {
+        format!("{add}{}", l.strip_prefix(cut.as_str()).unwrap_or(l))
+    }).collect();
+    Some((start, end, moved.join("\n")))
+}
+
 /// SEARCH text copied from a `read` page keeps its line numbers ("  229  if
 /// (x) {"): without them, when every line has one.
 fn without_line_numbers(search: &str) -> Option<String> {
@@ -301,8 +353,10 @@ pub fn edit_file(root: &Path, rel: &str, body: &str) -> Result<Change, FsError> 
         let search = unnumbered.as_ref().unwrap_or(search);
         match text.matches(search.as_str()).count() {
             1 => text = text.replacen(search.as_str(), repl, 1),
-            0 => match loose_find(&text, search) {
-                Some((a, b)) => text = format!("{}{}{}", &text[..a], repl, &text[b..]),
+            0 => match loose_find(&text, search).map(|(a, b)| (a, b, repl.clone()))
+                .or_else(|| shifted_find(&text, search, repl))
+            {
+                Some((a, b, new)) => text = format!("{}{}{}", &text[..a], new, &text[b..]),
                 None => return Err(FsError::Refused(match nearest(&text, search) {
                     Some(near) => format!("block {n}: SEARCH text not found in {rel}. The file has, {near}\n\
                         (quote those lines exactly, without line numbers)"),
@@ -510,6 +564,32 @@ mod tests {
         for bad in ["./../x", "./..", "...", "src/./../../x"] {
             assert!(safe(&r, bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn an_edit_quoted_at_the_wrong_depth_lands_at_the_files_depth() {
+        let d = tmp();
+        let src = "class Game:\n    def step(self):\n        if self.over:\n            return\n        self.t += 1\n";
+        fs::write(d.join("g.py"), src).unwrap();
+        // quoted with no indentation at all: the replacement is moved to the file's depth
+        let e = "<<<<<<< SEARCH\nif self.over:\n    return\n=======\nif self.over or self.paused:\n    return\n>>>>>>> REPLACE";
+        edit_file(&d, "g.py", e).unwrap();
+        assert_eq!(fs::read_to_string(d.join("g.py")).unwrap(),
+                   "class Game:\n    def step(self):\n        if self.over or self.paused:\n            return\n        self.t += 1\n");
+        // quoted deeper than it is: taken back out
+        let e = "<<<<<<< SEARCH\n            self.t += 1\n=======\n            self.t += 2\n>>>>>>> REPLACE";
+        edit_file(&d, "g.py", e).unwrap();
+        assert!(fs::read_to_string(d.join("g.py")).unwrap().ends_with("\n        self.t += 2\n"));
+        // the same lines at two depths: ambiguous, nothing changed
+        fs::write(d.join("h.py"), "if a:\n  x = 1\nif b:\n    x = 1\n").unwrap();
+        let e = "<<<<<<< SEARCH\n        x = 1\n=======\n        x = 2\n>>>>>>> REPLACE";
+        assert!(edit_file(&d, "h.py", e).is_err());
+        assert_eq!(fs::read_to_string(d.join("h.py")).unwrap(), "if a:\n  x = 1\nif b:\n    x = 1\n");
+        // inner structure that differs is no match
+        fs::write(d.join("k.py"), "def f():\n    if a:\n        b()\n").unwrap();
+        let e = "<<<<<<< SEARCH\nif a:\nb()\n=======\nif a:\n    c()\n>>>>>>> REPLACE";
+        assert!(edit_file(&d, "k.py", e).is_err());
+        let _ = fs::remove_dir_all(&d);
     }
 
     #[test]

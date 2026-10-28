@@ -1,19 +1,16 @@
-//! The right side: everything the fleet is doing, in sections you open when
-//! you want them. Each section shows a one-line summary while it's closed
-//! (the plan also keeps its progress bar and current step in view); click a
-//! header to see the detail. What you opened is remembered.
+//! The right side: what Chuck is doing, in sections you open when you want
+//! them. Each shows a one-line summary while closed; a section with nothing
+//! in it yet stays out of sight. What you opened is remembered.
 
 use crate::md::escape;
-use chuck_core::{AgentId, ProcInfo, ProcState, Role};
+use chuck_core::{AgentId, ProcInfo};
 use chuck_model::{fmt_tokens, fmt_usd};
-use chuck_runtime::TaskView;
 use gtk::prelude::*;
 use gtk::pango;
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use std::time::Instant;
 
-const LOG_KEEP: usize = 200;
 const RECENT_KEEP: usize = 60;
 const TAIL_BYTES: usize = 6_000;
 
@@ -60,11 +57,10 @@ fn ago(t: Instant) -> String {
 }
 
 /// A collapsible section: a header you click, a summary that's always
-/// there, an optional always-visible strip, and the detail.
+/// there, and the detail.
 pub struct Section {
     pub root: gtk::Box,
     pub summary: gtk::Label,
-    pub strip: gtk::Box,
     pub body: gtk::Box,
     revealer: gtk::Revealer,
 }
@@ -91,10 +87,6 @@ impl Section {
         row.append(&summary);
         head.set_child(Some(&row));
         root.append(&head);
-        let strip = gtk::Box::new(gtk::Orientation::Vertical, 4);
-        strip.add_css_class("sec-strip");
-        strip.set_visible(false);
-        root.append(&strip);
         let body = gtk::Box::new(gtk::Orientation::Vertical, 2);
         body.add_css_class("sec-body");
         let revealer = gtk::Revealer::builder().transition_type(gtk::RevealerTransitionType::SlideDown)
@@ -107,7 +99,7 @@ impl Section {
             chevron.set_icon_name(Some(if open { "chuck-down-symbolic" } else { "chuck-right-symbolic" }));
             on_toggle(name, open);
         });
-        Section { root, summary, strip, body, revealer }
+        Section { root, summary, body, revealer }
     }
 
     pub fn open(&self) -> bool {
@@ -117,7 +109,6 @@ impl Section {
 
 #[derive(Clone)]
 struct Cmd {
-    who: String,
     tool: String,
     cmd: String,
     started: Instant,
@@ -136,16 +127,6 @@ fn expander(head: &gtk::Widget, child: &gtk::Widget) -> gtk::Expander {
 
 pub struct Panel {
     pub root: gtk::ScrolledWindow,
-    plan: Section,
-    plan_bar: gtk::ProgressBar,
-    plan_now: gtk::Label,
-    tasks: Section,
-    team: Section,
-    team_posts: usize,
-    debug: Section,
-    /// Snags this job: (kind, count), most recent kind last.
-    snag_kinds: Vec<(String, usize)>,
-    agents: Section,
     commands: Section,
     running_box: gtk::Box,
     recent_box: gtk::Box,
@@ -162,15 +143,9 @@ pub struct Panel {
     daemons: Section,
     memory: Section,
     // what's shown
-    steps: Vec<(String, bool)>,
-    finished: bool,
-    logs: HashMap<String, VecDeque<String>>,
     running: HashMap<AgentId, Cmd>,
     recent: VecDeque<Cmd>,
     recent_dirty: bool,
-    agents_sig: String,
-    /// What each agent's call in flight has streamed lately: (thinking, the tail).
-    live: HashMap<AgentId, (bool, String)>,
 }
 
 impl Panel {
@@ -179,24 +154,6 @@ impl Panel {
         let side = gtk::Box::new(gtk::Orientation::Vertical, 0);
         side.add_css_class("side");
         let mk = |n: &'static str, t: &str| Section::new(n, t, is(n), on_toggle.clone());
-
-        let plan = mk("plan", "PLAN");
-        let plan_bar = gtk::ProgressBar::new();
-        plan_bar.add_css_class("plan-bar");
-        let plan_now = label("", &["plan-now"]);
-        plan.strip.append(&plan_bar);
-        plan.strip.append(&plan_now);
-        plan.body.append(&label("The Lead writes a plan for larger work; its progress shows here.", &["panel-dim"]));
-
-        let tasks = mk("tasks", "TASKS");
-        tasks.body.append(&label("Work the Lead hands to the fleet appears here.", &["panel-dim"]));
-        let debug = mk("debug", "DEBUG — WHAT GOT IN THE WAY");
-        debug.body.append(&label("What slows the agents down, limits them or goes wrong shows here, to be fixed. \
-            Settings › Debug mode asks them to report their own too.", &["panel-dim"]));
-        let team = mk("team", "TEAM TALK");
-        team.body.append(&label("What the workers and the Lead say to each other appears here.", &["panel-dim"]));
-        let agents = mk("agents", "AGENTS");
-        agents.body.append(&label("Agents appear here while a job runs.", &["panel-dim"]));
 
         let commands = mk("commands", "COMMANDS");
         let running_box = gtk::Box::new(gtk::Orientation::Vertical, 2);
@@ -210,7 +167,7 @@ impl Panel {
         let research = mk("research", "RESEARCH");
         research.body.append(&label("Searches and the pages agents read appear here, with links.", &["panel-dim"]));
 
-        let gate = mk("gate", "DONE GATE");
+        let gate = mk("gate", "CHECKS");
         let gate_phase = label("No job yet", &["gate-phase"]);
         let gate_unmet = gtk::Box::new(gtk::Orientation::Vertical, 1);
         let gate_criteria = gtk::Box::new(gtk::Orientation::Vertical, 4);
@@ -221,23 +178,20 @@ impl Panel {
         let spend = mk("spend", "SPEND");
         let checkpoints = mk("checkpoints", "CHECKPOINTS");
         let inbox = mk("inbox", "INBOX");
-        let daemons = mk("daemons", "DAEMONS & REMINDERS");
+        let daemons = mk("daemons", "REMINDERS");
         let memory = mk("memory", "MEMORY");
 
-        for s in [&plan, &tasks, &team, &agents, &debug, &commands, &research, &gate, &spend, &checkpoints, &inbox, &daemons, &memory] {
+        for s in [&gate, &commands, &research, &spend, &checkpoints, &inbox, &daemons, &memory] {
             side.append(&s.root);
         }
+        // nothing to show yet: out of sight (each appears with its first content)
+        for s in [&gate, &commands, &research, &checkpoints, &inbox, &daemons, &memory] {
+            s.root.set_visible(false);
+        }
         let root = gtk::ScrolledWindow::builder().child(&side).hscrollbar_policy(gtk::PolicyType::Never).build();
-        let p = Panel { root, plan, plan_bar, plan_now, tasks, team, team_posts: 0, debug, snag_kinds: Vec::new(), agents, commands, running_box, recent_box,
-                        research, searches: 0, pages: 0, gate,
-                        gate_phase, gate_unmet, gate_criteria, spend, checkpoints, inbox, daemons, memory, steps: Vec::new(), finished: false,
-                        logs: HashMap::new(), running: HashMap::new(), recent: VecDeque::new(), recent_dirty: false,
-                        agents_sig: String::new(), live: HashMap::new() };
-        p.plan.summary.set_label("no plan yet");
-        p.tasks.summary.set_label("none");
-        p.team.summary.set_label("quiet");
-        p.debug.summary.set_label("none");
-        p.agents.summary.set_label("idle");
+        let p = Panel { root, commands, running_box, recent_box, research, searches: 0, pages: 0, gate,
+                        gate_phase, gate_unmet, gate_criteria, spend, checkpoints, inbox, daemons, memory,
+                        running: HashMap::new(), recent: VecDeque::new(), recent_dirty: false };
         p.commands.summary.set_label("none yet");
         p.research.summary.set_label("none");
         p.gate.summary.set_label("no job");
@@ -246,24 +200,11 @@ impl Panel {
 
     /// A new job: what belonged to the last one goes.
     pub fn reset(&mut self) {
-        self.steps.clear();
-        self.finished = false;
-        self.logs.clear();
         self.running.clear();
         self.recent.clear();
         self.recent_dirty = true;
-        self.agents_sig.clear();
-        self.set_plan(Vec::new());
-        self.set_tasks(&[]);
-        clear(&self.debug.body);
-        self.snag_kinds.clear();
-        self.debug.summary.set_label("none");
-        self.debug.body.append(&label("What slows the agents down, limits them or goes wrong shows here, to be fixed.",
-                                      &["panel-dim"]));
-        clear(&self.team.body);
-        self.team_posts = 0;
-        self.team.summary.set_label("quiet");
-        self.team.body.append(&label("What the workers and the Lead say to each other appears here.", &["panel-dim"]));
+        self.commands.root.set_visible(false);
+        self.research.root.set_visible(false);
         clear(&self.research.body);
         (self.searches, self.pages) = (0, 0);
         self.research.summary.set_label("none");
@@ -273,171 +214,18 @@ impl Panel {
         self.gate.summary.set_label("intake");
     }
 
-    // ── plan ──
-
-    pub fn set_plan(&mut self, steps: Vec<(String, bool)>) {
-        self.steps = steps;
-        self.draw_plan();
-    }
-
     /// Show where a job got to (a conversation opened again).
     pub fn restore(&mut self, p: &crate::chat::Progress) {
-        self.steps = p.plan.clone();
-        self.finished = p.finished;
-        self.draw_plan();
-        let tasks: Vec<TaskView> = p.tasks.iter().map(|t| TaskView { id: t.id.clone(), title: t.title.clone(),
-            state: t.state.clone(), workers: t.workers.clone(), deps: t.deps.clone(), criteria: t.criteria.clone(),
-            note: t.note.clone() }).collect();
-        self.set_tasks(&tasks);
         if !p.phase.is_empty() {
             self.set_gate(&p.phase, &p.unmet);
         }
         self.set_board(&p.board);
     }
 
-    pub fn job_finished(&mut self, done: bool) {
-        self.finished = done;
-        self.draw_plan();
+    pub fn job_finished(&mut self) {
         clear(&self.running_box);
         self.running_box.append(&label("nothing running", &["panel-dim"]));
         self.running.clear();
-    }
-
-    fn draw_plan(&self) {
-        clear(&self.plan.body);
-        let n = self.steps.len();
-        if n == 0 {
-            self.plan.summary.set_label("no plan yet");
-            self.plan.strip.set_visible(false);
-            self.plan.body.append(&label("The Lead writes a plan for larger work; its progress shows here.", &["panel-dim"]));
-            return;
-        }
-        let done_flags: Vec<bool> = self.steps.iter().map(|(_, d)| *d || self.finished).collect();
-        let done = done_flags.iter().filter(|d| **d).count();
-        let current = done_flags.iter().position(|d| !d);
-        self.plan.summary.set_label(&format!("{done} / {n} steps"));
-        self.plan.strip.set_visible(true);
-        self.plan_bar.set_fraction(done as f64 / n as f64);
-        self.plan_now.set_label(&match current {
-            Some(i) => format!("Now: {}", one_line(&self.steps[i].0, 80)),
-            None => "Every step done".into(),
-        });
-        for (i, (step, _)) in self.steps.iter().enumerate() {
-            let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-            row.add_css_class("plan-step");
-            let (mark, class) = if done_flags[i] {
-                ("✓", "step-done")
-            } else if Some(i) == current {
-                ("▶", "step-now")
-            } else {
-                ("○", "step-todo")
-            };
-            let m = label(mark, &["step-mark", class]);
-            m.set_valign(gtk::Align::Start);
-            row.append(&m);
-            let t = label(step, &["step-text", class]);
-            t.set_hexpand(true);
-            row.append(&t);
-            self.plan.body.append(&row);
-        }
-    }
-
-    // ── tasks ──
-
-    pub fn set_tasks(&self, tasks: &[TaskView]) {
-        clear(&self.tasks.body);
-        if tasks.is_empty() {
-            self.tasks.summary.set_label("none");
-            self.tasks.body.append(&label("Work the Lead hands to the fleet appears here.", &["panel-dim"]));
-            return;
-        }
-        let count = |s: &str| tasks.iter().filter(|t| t.state == s).count();
-        let mut parts = Vec::new();
-        for (s, word) in [("running", "running"), ("review", "in review"), ("queued", "queued"), ("merged", "merged"),
-                          ("failed", "failed")] {
-            let c = count(s);
-            if c > 0 {
-                parts.push(format!("{c} {word}"));
-            }
-        }
-        self.tasks.summary.set_label(&parts.join(" · "));
-        for t in tasks {
-            let head = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-            head.append(&label(&t.id, &["task-id"]));
-            let title = label(&t.title, &["task-title"]);
-            title.set_hexpand(true);
-            title.set_wrap(false);
-            title.set_ellipsize(pango::EllipsizeMode::End);
-            head.append(&title);
-            let badge = label(&t.state, &["badge", &format!("badge-{}", t.state)]);
-            badge.set_wrap(false);
-            head.append(&badge);
-            let body = gtk::Box::new(gtk::Orientation::Vertical, 3);
-            body.add_css_class("panel-detail");
-            if !t.workers.is_empty() {
-                body.append(&label(&format!("worker: {}", t.workers.join(" vs ")), &["panel-meta"]));
-            }
-            if !t.deps.is_empty() {
-                body.append(&label(&format!("after: {}", t.deps.join(", ")), &["panel-meta"]));
-            }
-            for (i, c) in t.criteria.iter().enumerate() {
-                body.append(&label(&format!("c{}  {c}", i + 1), &["panel-text"]));
-            }
-            if !t.note.is_empty() {
-                body.append(&label(&t.note, &["panel-warn"]));
-            }
-            self.tasks.body.append(&expander(head.upcast_ref(), body.upcast_ref()));
-        }
-    }
-
-    // ── debug: snags ──
-
-    /// Something got in an agent's way.
-    pub fn snag(&mut self, who: &str, kind: &str, text: &str) {
-        if self.snag_kinds.is_empty() {
-            clear(&self.debug.body);
-        }
-        match self.snag_kinds.iter_mut().find(|(k, _)| k == kind) {
-            Some(e) => e.1 += 1,
-            None => self.snag_kinds.push((kind.to_string(), 1)),
-        }
-        let head = label("", &["team-head"]);
-        head.set_markup(&format!("<b>{}</b> <span foreground=\"#F5B454\">{}</span>", escape(who), escape(kind)));
-        head.set_wrap(false);
-        self.debug.body.append(&head);
-        self.debug.body.append(&label(&one_line(text, 300), &["panel-text"]));
-        while self.debug.body.observe_children().n_items() > 200 {
-            if let Some(first) = self.debug.body.first_child() {
-                self.debug.body.remove(&first);
-            }
-        }
-        let n: usize = self.snag_kinds.iter().map(|(_, c)| c).sum();
-        let mut top = self.snag_kinds.clone();
-        top.sort_by_key(|e| std::cmp::Reverse(e.1));
-        self.debug.summary.set_label(&format!("{n} · most: {} ×{}", top[0].0, top[0].1));
-    }
-
-    // ── the team's talk ──
-
-    /// A message on the team channel: who to whom, and what.
-    pub fn team_post(&mut self, from: &str, to: Option<&str>, text: &str) {
-        if self.team_posts == 0 {
-            clear(&self.team.body);
-        }
-        self.team_posts += 1;
-        let head = label("", &["team-head"]);
-        head.set_markup(&format!("<b>{}</b> <span foreground=\"#5F5F6E\">→ {}</span>", escape(from),
-                                 escape(to.unwrap_or("everyone"))));
-        head.set_wrap(false);
-        self.team.body.append(&head);
-        self.team.body.append(&label(&one_line(text, 400), &["panel-text"]));
-        while self.team.body.observe_children().n_items() > 160 {
-            if let Some(first) = self.team.body.first_child() {
-                self.team.body.remove(&first);
-            }
-        }
-        self.team.summary.set_label(&format!("{} message{} · last: {from}", self.team_posts,
-                                             if self.team_posts == 1 { "" } else { "s" }));
     }
 
     // ── research ──
@@ -446,6 +234,7 @@ impl Panel {
     pub fn research(&mut self, who: &str, tool: &str, what: &str, ok: bool, summary: &str) {
         if self.searches + self.pages == 0 {
             clear(&self.research.body);
+            self.research.root.set_visible(true);
         }
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         row.add_css_class("panel-row");
@@ -498,166 +287,12 @@ impl Panel {
                                                  if p == 1 { "" } else { "s" }));
     }
 
-    // ── agents ──
-
-    /// A piece of what an agent is thinking or writing right now.
-    pub fn stream(&mut self, id: AgentId, thinking: bool, chunk: &str) {
-        let e = self.live.entry(id).or_insert((thinking, String::new()));
-        if e.0 != thinking {
-            *e = (thinking, String::new()); // from thinking to writing: a new line of sight
-        }
-        e.1.push_str(chunk);
-        if e.1.len() > 600 {
-            let mut cut = e.1.len() - 300;
-            while !e.1.is_char_boundary(cut) {
-                cut += 1;
-            }
-            e.1.drain(..cut);
-        }
-    }
-
-    /// Its call ended: nothing is being typed until the next one.
-    pub fn stream_done(&mut self, id: AgentId) {
-        self.live.remove(&id);
-    }
-
-    /// The last line it is typing, as one line (the newest words win).
-    fn typing(&self, id: AgentId) -> Option<(bool, String)> {
-        let (thinking, t) = self.live.get(&id)?;
-        let line = t.trim_end().rsplit('\n').map(str::trim).find(|l| !l.is_empty())?;
-        let chars: Vec<char> = line.chars().collect();
-        let shown: String = if chars.len() > 70 { format!("…{}", chars[chars.len() - 70..].iter().collect::<String>()) }
-            else { line.to_string() };
-        Some((*thinking, shown))
-    }
-
-    /// A line of what an agent did, for its own history.
-    pub fn log(&mut self, who: &str, line: String) {
-        let l = self.logs.entry(who.to_string()).or_default();
-        l.push_back(line);
-        while l.len() > LOG_KEEP {
-            l.pop_front();
-        }
-        self.agents_sig.clear(); // redraw on the next tick
-    }
-
-    /// The agents at work now, each with what it is doing; the ones that
-    /// finished are a count (their work shows in the tasks and the log).
-    pub fn set_agents(&mut self, ps: &[ProcInfo], models: &HashMap<AgentId, String>) {
-        let usd: f64 = ps.iter().filter(|p| p.ppid.is_none()).map(|p| p.usd).sum::<f64>().max(0.0);
-        let (active, ended): (Vec<&ProcInfo>, Vec<&ProcInfo>) = ps.iter().partition(|p| p.state.alive());
-        self.agents.summary.set_label(&if ps.is_empty() { "idle".to_string() } else if active.is_empty() {
-            format!("none active · {} finished · {}", ended.len(), fmt_usd(usd))
-        } else {
-            format!("{} active · {} finished · {}", active.len(), ended.len(), fmt_usd(usd))
-        });
-        // only rebuild when something visible changed (and only while open)
-        let sig: String = active.iter().map(|p| format!("{}{:?}{}{}{}{:?}", p.pid, p.state, p.activity, p.tokens,
-            self.logs.get(&p.name).map_or(0, |l| l.len()), self.typing(p.pid)))
-            .chain(std::iter::once(ended.len().to_string())).collect();
-        if !self.agents.open() || sig == self.agents_sig {
-            if !self.agents.open() {
-                self.agents_sig.clear();
-            }
-            return;
-        }
-        self.agents_sig = sig;
-        clear(&self.agents.body);
-        if active.is_empty() {
-            self.agents.body.append(&label(if ps.is_empty() { "Agents appear here while a job runs." } else {
-                "Nobody is working right now." }, &["panel-dim"]));
-        }
-        for p in active {
-            let head = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-            let dot = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-            dot.add_css_class("dot");
-            dot.add_css_class(match p.state {
-                ProcState::Running => "dot-run",
-                ProcState::Waiting | ProcState::Ready | ProcState::Stopped => "dot-wait",
-                ProcState::Done => "dot-done",
-                ProcState::Failed | ProcState::Killed => "dot-fail",
-            });
-            dot.set_valign(gtk::Align::Center);
-            head.append(&dot);
-            let col = gtk::Box::new(gtk::Orientation::Vertical, 0);
-            col.set_hexpand(true);
-            let top = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-            top.append(&label(&p.name, &["agent-name"]));
-            let model = models.get(&p.pid).cloned().unwrap_or_else(|| match p.role {
-                Role::GlmWorker => "GLM".into(),
-                _ => "DeepSeek".into(),
-            });
-            let m = label(&model, &["panel-meta"]);
-            m.set_wrap(false);
-            m.set_ellipsize(pango::EllipsizeMode::End);
-            top.append(&m);
-            col.append(&top);
-            let doing = if p.activity.is_empty() { p.state.label().to_string() } else { p.activity.clone() };
-            // a parent is charged what its children spend: its own share, then the team's
-            let kids: (u64, f64) = ps.iter().filter(|c| c.ppid == Some(p.pid))
-                .fold((0, 0.0), |(t, u), c| (t + c.tokens, u + c.usd));
-            let spent = if kids.1 > 0.0 || kids.0 > 0 {
-                format!("own {} · {} · team {}", fmt_tokens(p.tokens.saturating_sub(kids.0)),
-                        fmt_usd((p.usd - kids.1).max(0.0)), fmt_usd(p.usd))
-            } else {
-                format!("{} · {}", fmt_tokens(p.tokens), fmt_usd(p.usd))
-            };
-            col.append(&label(&format!("{} · {spent}", one_line(&doing, 40)), &["panel-meta"]));
-            if !p.brief.is_empty() && p.role != Role::Lead {
-                col.append(&label(&one_line(&p.brief, 48), &["panel-meta"]));
-            }
-            // what it is typing this moment, live: a line that moves is an agent at work
-            if let Some((thinking, line)) = self.typing(p.pid) {
-                let l = label(&format!("{} {line}", if thinking { "💭" } else { "✎" }), &["panel-typing"]);
-                l.set_wrap(false);
-                l.set_ellipsize(pango::EllipsizeMode::Start);
-                l.set_tooltip_text(Some(if thinking { "what it is thinking, live" } else { "what it is writing, live" }));
-                col.append(&l);
-            } else if let Some(last) = self.logs.get(&p.name).and_then(|l| l.back()) {
-                // what it did last: the line that says what it is on
-                let l = label(&one_line(last, 60), &["panel-dim"]);
-                l.set_wrap(false);
-                l.set_ellipsize(pango::EllipsizeMode::End);
-                col.append(&l);
-            }
-            head.append(&col);
-            let body = gtk::Box::new(gtk::Orientation::Vertical, 1);
-            body.add_css_class("panel-detail");
-            match self.logs.get(&p.name) {
-                Some(l) if !l.is_empty() => {
-                    let shown: Vec<&String> = l.iter().rev().take(40).collect();
-                    if l.len() > shown.len() {
-                        body.append(&label(&format!("{} earlier lines", l.len() - shown.len()), &["panel-dim"]));
-                    }
-                    for line in shown.into_iter().rev() {
-                        body.append(&mono(line));
-                    }
-                }
-                _ => body.append(&label("nothing yet", &["panel-dim"])),
-            }
-            self.agents.body.append(&expander(head.upcast_ref(), body.upcast_ref()));
-        }
-        if !ended.is_empty() {
-            // "18 finished: eyes ×14, ds-1, ds-2, critic …" — counted by name
-            let mut by: Vec<(String, usize)> = Vec::new();
-            for p in &ended {
-                match by.iter_mut().find(|(n, _)| *n == p.name) {
-                    Some((_, c)) => *c += 1,
-                    None => by.push((p.name.clone(), 1)),
-                }
-            }
-            let names: Vec<String> = by.iter().map(|(n, c)| if *c > 1 { format!("{n} ×{c}") } else { n.clone() }).collect();
-            let spent: f64 = ended.iter().map(|p| p.usd).sum();
-            self.agents.body.append(&label(&format!("{} finished ({}): {}", ended.len(), fmt_usd(spent),
-                                                    one_line(&names.join(", "), 200)), &["panel-dim"]));
-        }
-    }
-
     // ── commands ──
 
-    pub fn command_started(&mut self, id: AgentId, who: &str, tool: &str, cmd: &str) {
-        self.running.insert(id, Cmd { who: who.into(), tool: tool.into(), cmd: cmd.into(), started: Instant::now(),
+    pub fn command_started(&mut self, id: AgentId, tool: &str, cmd: &str) {
+        self.running.insert(id, Cmd { tool: tool.into(), cmd: cmd.into(), started: Instant::now(),
                                       out: String::new(), result: None });
+        self.commands.root.set_visible(true);
         self.draw_running();
     }
 
@@ -690,7 +325,7 @@ impl Panel {
         let mut cmds: Vec<&Cmd> = self.running.values().collect();
         cmds.sort_by_key(|c| c.started);
         for c in cmds {
-            let head = label(&format!("⏵ {}  {}  {}", c.who, ago(c.started), one_line(&c.cmd, 60)), &["cmd-live"]);
+            let head = label(&format!("⏵ {}  {}", ago(c.started), one_line(&c.cmd, 64)), &["cmd-live"]);
             let body = mono(if c.out.trim().is_empty() { "(no output yet)" } else { c.out.trim_end() });
             self.running_box.append(&expander(head.upcast_ref(), body.upcast_ref()));
         }
@@ -720,8 +355,8 @@ impl Panel {
                 let (ok, sum) = c.result.clone().unwrap_or((true, String::new()));
                 let mark = if ok { "<span foreground=\"#4ADE9A\">✓</span>" } else { "<span foreground=\"#F87171\">✗</span>" };
                 let head = label("", &["cmd-done"]);
-                head.set_markup(&format!("{mark} {} <span foreground=\"#5F5F6E\">{}</span>  {}",
-                                         escape(&c.who), escape(&c.tool), escape(&one_line(&c.cmd, 54))));
+                head.set_markup(&format!("{mark} <span foreground=\"#5F5F6E\">{}</span>  {}",
+                                         escape(&c.tool), escape(&one_line(&c.cmd, 58))));
                 let body = gtk::Box::new(gtk::Orientation::Vertical, 2);
                 body.add_css_class("panel-detail");
                 body.append(&mono(&c.cmd));
@@ -735,6 +370,7 @@ impl Panel {
     // ── the Done gate ──
 
     pub fn set_gate(&self, phase: &str, unmet: &[String]) {
+        self.gate.root.set_visible(true);
         self.gate_phase.set_label(&format!("Phase: {phase}"));
         self.gate_phase.remove_css_class("phase-incomplete");
         self.gate_phase.remove_css_class("phase-done");
@@ -799,29 +435,15 @@ impl Panel {
             self.spend.body.append(&label(&format!("Prompt cache: {:.0}% of what was sent was billed at the cached \
                 price", c * 100.0), &["panel-meta"]));
         }
-        if !ps.is_empty() {
-            self.spend.body.append(&label("BY AGENT", &["panel-sub"]));
-            let mut rows: Vec<&ProcInfo> = ps.iter().collect();
-            rows.sort_by(|a, b| b.usd.partial_cmp(&a.usd).unwrap_or(std::cmp::Ordering::Equal));
-            for p in rows {
-                // own spend: the lead's total includes its children, so subtract them
-                let own = if p.ppid.is_none() {
-                    p.usd - ps.iter().filter(|c| c.ppid == Some(p.pid)).map(|c| c.usd).sum::<f64>()
-                } else {
-                    p.usd
-                };
-                self.spend.body.append(&mono(&format!("{:<8} {:>9}  {} calls", p.name, fmt_usd(own.max(0.0)),
-                                                      p.calls)));
-            }
-        }
     }
 
-    // ── checkpoints ──
+    // ── inbox, reminders, memory, checkpoints ──
 
     /// Daemon reports, newest first; unread ones marked. `on_read` marks
     /// them all read.
     pub fn set_inbox(&self, items: &[serde_json::Map<String, serde_json::Value>], on_read: Rc<dyn Fn()>) {
         clear(&self.inbox.body);
+        self.inbox.root.set_visible(!items.is_empty());
         let unread = items.iter().filter(|i| i.get("unread").and_then(|v| v.as_bool()) == Some(true)).count();
         self.inbox.summary.set_label(&match (items.len(), unread) {
             (0, _) => "empty".into(),
@@ -872,6 +494,7 @@ impl Panel {
     pub fn set_daemons(&self, items: &[chuck_daemon::Daemon], live: &[i64], on_toggle: Rc<dyn Fn(i64)>,
                        on_remove: Rc<dyn Fn(i64)>) {
         clear(&self.daemons.body);
+        self.daemons.root.set_visible(!items.is_empty());
         let on = items.iter().filter(|d| d.enabled()).count();
         self.daemons.summary.set_label(&match (items.len(), live.len()) {
             (0, _) => "none".into(),
@@ -920,6 +543,7 @@ impl Panel {
     /// `folder`: the open project (its own facts are marked).
     pub fn set_memory(&self, facts: &[chuck_store::memory::Fact], folder: &str, on_forget: Rc<dyn Fn(serde_json::Value)>) {
         clear(&self.memory.body);
+        self.memory.root.set_visible(!facts.is_empty());
         let here = facts.iter().filter(|f| f.scope().is_empty() || f.scope() == folder).count();
         self.memory.summary.set_label(&match facts.len() {
             0 => "nothing yet".into(),
@@ -956,6 +580,7 @@ impl Panel {
 
     pub fn set_checkpoints(&self, points: &[chuck_store::Point], busy: bool, on_rewind: Rc<dyn Fn(String)>) {
         clear(&self.checkpoints.body);
+        self.checkpoints.root.set_visible(!points.is_empty());
         self.checkpoints.summary.set_label(&match points.len() {
             0 => "none yet".into(),
             1 => "1".into(),

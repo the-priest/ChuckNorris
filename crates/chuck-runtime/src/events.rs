@@ -39,10 +39,6 @@ pub enum Event {
     Gate { id: AgentId, task: Option<String>, phase: String, unmet: Vec<String> },
     /// The job's criteria as they stand: (id, text, verify, evidence labels).
     Board { criteria: Vec<(String, String, Option<String>, Vec<String>)> },
-    Assigned { task: String, title: String, worker: AgentId, role: Role },
-    Submitted { task: String, worker: AgentId, lines: usize },
-    Reviewed { task: String, accepted: bool, defects: Vec<String> },
-    Merged { task: String, applied: usize, merged: usize, conflicts: Vec<String>, refused: Vec<String> },
     Notice { id: AgentId, text: String },
     /// A question for the user, and the ways to go the Lead offers (none:
     /// an open question).
@@ -55,17 +51,11 @@ pub enum Event {
     /// much of the prompt the API's cache served (billed at a fraction).
     Usage { id: AgentId, tokens: u64, usd: f64, prompt: u64, cached: u64 },
     AgentEnded { id: AgentId, status: String },
-    /// The lead's plan as it stands: (step, done).
-    Plan { steps: Vec<(String, bool)> },
-    /// Every task of the job, whenever one changes.
-    Tasks(Vec<TaskView>),
-    /// A message on the team's channel (to: one reader, or everyone).
-    Team { from: String, to: Option<String>, text: String },
     /// Something got in an agent's way (debug: see `chuck_store::snags`).
     Snag { id: AgentId, who: String, kind: String, text: String },
     /// A command started (it ends with an Action for the same agent).
     Running { id: AgentId, tool: String, cmd: String },
-    /// Chat mode: something to be done on the machine, for the fleet — sent
+    /// Chat mode: something to be done on the machine, for Build mode — sent
     /// only if the user says so.
     Handoff { request: String },
     /// Chat mode: a reminder ("remind") or a daemon ("report") to keep —
@@ -101,20 +91,6 @@ pub struct Video {
     /// Its poster, downloaded.
     pub thumb: Option<std::path::PathBuf>,
     pub length: Option<String>,
-}
-
-/// A task as the panel shows it.
-#[derive(Clone, Debug, PartialEq)]
-pub struct TaskView {
-    pub id: String,
-    pub title: String,
-    /// "queued", "running", "review", "merged" or "failed".
-    pub state: String,
-    pub workers: Vec<String>,
-    pub deps: Vec<String>,
-    pub criteria: Vec<String>,
-    /// Why it failed, or what was sent back last.
-    pub note: String,
 }
 
 #[derive(Clone)]

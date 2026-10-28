@@ -1,15 +1,11 @@
-//! map, def, refs and rename in the fleet: by meaning through a language
-//! server for the lead (chuck-code's fake one), by syntax for a worker, and
-//! rename only through the gate.
+//! map, def, refs and rename on a job: by meaning through a language server
+//! (chuck-code's fake one), and rename only through the gate.
 
 use chuck_code::Manager;
-use chuck_core::{DoneGate, EvidenceKind, Kernel, Role, Scale, SpawnSpec};
 use chuck_model::{ChatRequest, Scripted};
-use chuck_runtime::exec::{Exec, Sandbox};
 use chuck_runtime::{Events, Job, Runtime, RuntimeConfig};
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 const FAKE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../chuck-code/tests/fake_lsp.py");
@@ -67,27 +63,6 @@ fn the_lead_asks_by_meaning_and_renames_only_through_the_gate() {
             "{fb}");
     assert_eq!(std::fs::read_to_string(dir.join("pkg/app.py")).unwrap(), "from pkg.store import build_store\ns = build_store()\n");
     m.stop_all();
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn a_worker_gets_syntax_answers_and_no_rename() {
-    let dir = project("worker");
-    let Some(m) = servers() else { return };
-    let kernel = Kernel::new(4);
-    let id = kernel.spawn(SpawnSpec::new("glm-1", Role::GlmWorker));
-    let gate = Mutex::new(DoneGate::new("x", Scale::Small));
-    gate.lock().unwrap().set_criteria(Role::GlmWorker, vec![("renamed".into(), None)]);
-    let ev = Events::none();
-    let exec = Exec { id, role: Role::GlmWorker, kernel: &kernel, root: &dir, gate: &gate,
-                      sandbox: Sandbox { access: chuck_sandbox::Access::Full, bwrap: false, worker: true }, approve: None,
-                      audit: None, stop: Arc::new(AtomicBool::new(false)), events: &ev,
-                      cmd_timeout: Duration::from_secs(10), web: None, sources: 6, mcp: None, lsp: Some(&m), memory: None,
-                      allowed_outside: None, team: None, hold: None, lent: &[], claimed: &[] };
-    let r = exec.run("```def make_store```\n```rename make_store build_store```");
-    assert!(r.feedback[0].contains("via syntax (no language server)"), "{:?}", r.feedback);
-    assert!(r.feedback[1].contains("workers don't get"), "{:?}", r.feedback);
-    assert!(!gate.lock().unwrap().evidence.iter().any(|e| matches!(e.kind, EvidenceKind::Diff { .. })));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

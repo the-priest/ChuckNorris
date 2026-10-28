@@ -1,18 +1,13 @@
-//! One agent's life: think (a model call through the kernel's scheduler),
-//! act (its blocks through the guard and the gate), hear back, repeat — and
-//! for a worker, hand the result to the lead and wait for the verdict.
+//! An agent's thinking: a model call through the kernel's scheduler, its
+//! conversation kept within the context.
 
 use crate::events::{Event, Events};
-use crate::exec::{Exec, Sandbox, WORKER_TAGS};
-use crate::prompts;
 use crate::RuntimeConfig;
-use chuck_core::{AgentId, DoneGate, Kernel, Progress, Role, Stall, Submission, Task, Unmet};
+use chuck_core::{AgentId, Kernel};
 use chuck_model::{price_for, ChatModel, ChatRequest, ModelError, Notice, Sink, Usage};
-use chuck_tools::Workspace;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// What every agent of a job shares.
@@ -483,8 +478,7 @@ pub fn think_as(ctx: &Ctx, id: AgentId, model: &str, convo: &Convo, tags: &[&str
         }
         ctx.kernel.note(id, "waiting for the model's first word");
         let mut req = ChatRequest::new(model, msgs.clone());
-        req.reasoning = reasoning.unwrap_or(if ctx.kernel.role(id).is_some_and(|r| r.is_worker()) {
-            ctx.cfg.worker_reasoning } else { ctx.cfg.reasoning });
+        req.reasoning = reasoning.unwrap_or(ctx.cfg.reasoning);
         // a continuation gets the full budget: the reply was cut, so it IS a long one
         req.max_tokens = if round == 0 { max_tokens.unwrap_or(ctx.cfg.max_tokens) } else { ctx.cfg.max_tokens };
         // a continuation goes on as text (a cut function call can't be continued as one)
@@ -589,246 +583,6 @@ pub fn think_as(ctx: &Ctx, id: AgentId, model: &str, convo: &Convo, tags: &[&str
     Ok(text)
 }
 
-/// `text` with the project's own path, wherever it names it (a whole path
-/// component: `/p/proj` never matches inside `/p/proj2`), made the copy's.
-pub fn in_copy(text: &str, source: &std::path::Path, copy: &std::path::Path) -> String {
-    let src = source.display().to_string();
-    if src.len() < 2 || !text.contains(&src) {
-        return text.to_string();
-    }
-    let rx = regex::Regex::new(&format!(r#"{}(/|["'`\s:;)]|$)"#, regex::escape(&src))).expect("valid regex");
-    rx.replace_all(text, |c: &regex::Captures| format!("{}{}", copy.display(), &c[1])).into_owned()
-}
-
-/// A worker's heartbeat, read by the Lead's supervisor: how many turns it
-/// has gone without changing or verifying anything, and what it did last.
-#[derive(Clone, Debug, Default)]
-pub struct Pulse {
-    pub turns: u32,
-    /// Turns in a row with no file changed and no check passed.
-    pub idle: u32,
-    pub last: String,
-}
-
-/// The most a worker's conversation holds (characters).
-pub const WORKER_CONTEXT: usize = 240_000;
-
-/// Worker → lead.
-#[derive(Debug)]
-pub enum ToLead {
-    Submitted(Box<Submission>),
-    /// The worker stopped without a submission the gate accepts.
-    Ended { task: String, worker: AgentId, gaps: Vec<String>, why: String },
-}
-
-/// Lead → worker.
-#[derive(Clone, Debug, PartialEq)]
-pub enum ToWorker {
-    Accepted,
-    Rejected(Vec<String>),
-    Stop,
-}
-
-pub struct WorkerSpec {
-    pub id: AgentId,
-    pub role: Role,
-    pub name: String,
-    pub task: Task,
-    pub ws: Workspace,
-    pub gate: Arc<Mutex<DoneGate>>,
-    /// This worker's own stop (set for a race's loser, and with the job's Stop).
-    pub stop: Arc<AtomicBool>,
-    pub to_lead: Sender<ToLead>,
-    pub inbox: Receiver<ToWorker>,
-    /// The job's channel, shared with the Lead and the other workers.
-    pub team: Arc<crate::team::Team>,
-    /// Who else is working and on what, as the worker first reads it.
-    pub roster: String,
-    /// The team post it starts reading after (the roster covers what came before).
-    pub heard: u64,
-    /// The project's dependency (and history) folders its copy borrows.
-    pub lent: Vec<std::path::PathBuf>,
-    /// Its heartbeat, for the Lead's supervisor.
-    pub pulse: Arc<Mutex<Pulse>>,
-}
-
-fn describe(gaps: &[Unmet]) -> Vec<String> {
-    gaps.iter().map(Unmet::describe).collect()
-}
-
-/// A worker's whole life, on its own thread.
-pub fn run_worker(ctx: Ctx, w: WorkerSpec) {
-    let model = ctx.cfg.fleet.model_for(w.role).to_string();
-    let root = w.ws.work.display().to_string();
-    // the project's own rules (its CHUCK.md / AGENTS.md is in the copy too)
-    let mut system = prompts::with_context(prompts::worker(), &prompts::instructions(Some(&w.ws.work)), "");
-    if ctx.cfg.debug {
-        system.push_str("\n\n");
-        system.push_str(prompts::DEBUG);
-    }
-    let mut convo = Convo::new(&system, &prompts::worker_first(&w.name, &model, &w.task, &root, &w.roster));
-    let mut heard = w.heard;
-    let mut progress = Progress::default();
-    let mut warned_term = false;
-    // workers build: the full budget on the first turn and after a change/rejection, small while reading
-    let mut build_next = true;
-    let (status, ended) = 'life: {
-        for _step in 0..ctx.cfg.worker_steps {
-            if w.stop.load(Ordering::Relaxed) {
-                break 'life ("stopped", None); // the lead took the task back
-            }
-            if ctx.kernel.terminating(w.id) && !warned_term {
-                warned_term = true;
-                convo.user("[the budget is nearly spent: this is your LAST turn. Submit what is verified and say \
-                    plainly what isn't]");
-            }
-            // a worker's context is one task's: kept smaller than the Lead's, so each call costs less
-            convo.fit(ctx.cfg.context_chars.min(WORKER_CONTEXT));
-            let room = if build_next { ctx.cfg.max_tokens } else { ctx.cfg.turn_tokens };
-            let reply = match think_as(&ctx, w.id, &model, &convo, WORKER_TAGS, None, Some(room)) {
-                Ok(r) => r,
-                Err(_) if w.stop.load(Ordering::Relaxed) => break 'life ("stopped", None),
-                Err(h) => break 'life ("paused", Some(h.describe())),
-            };
-            // calls in the model's own format (DeepSeek's DSML…) run as the blocks they mean
-            let reply = chuck_tools::normalize_calls(&reply, WORKER_TAGS).0;
-            let reply = chuck_tools::without_made_up_turns(&reply).to_string();
-            // the real project's path (as the Lead's brief names it) means the same place in the copy
-            let reply = in_copy(&reply, &w.ws.source, &w.ws.work);
-            convo.assistant(&reply);
-            let said = chuck_tools::prose(&reply, WORKER_TAGS);
-            if !said.trim().is_empty() {
-                ctx.events.emit(Event::Said { id: w.id, text: said.clone() });
-            }
-            let exec = Exec { id: w.id, role: w.role, kernel: &ctx.kernel, root: &w.ws.work, gate: &w.gate,
-                              sandbox: Sandbox { access: ctx.cfg.access, bwrap: ctx.cfg.bwrap, worker: true },
-                              approve: None, audit: ctx.cfg.audit.clone().map(|l| (l, w.name.clone())),
-                              stop: w.stop.clone(), events: &ctx.events,
-                              cmd_timeout: ctx.cfg.cmd_timeout,
-                              web: ctx.cfg.web.as_deref(), sources: ctx.cfg.sources,
-                              mcp: ctx.cfg.mcp.as_deref(), lsp: ctx.cfg.lsp.as_deref(),
-                              memory: ctx.cfg.memory.as_deref(), allowed_outside: None,
-                              team: Some((&w.team, &w.name)), hold: None, lent: &w.lent, claimed: &[] };
-            let r = exec.run(&reply);
-            // the next turn may write: after a change, a failure, or a missed call
-            build_next = r.mutated || r.malformed || r.feedback.iter().any(|l| crate::exec::friction(l).is_some()
-                || l.contains("→ exit ") && !l.contains("→ exit 0"));
-            {
-                let mut p = w.pulse.lock().unwrap_or_else(|e| e.into_inner());
-                p.turns += 1;
-                // a change, a passing check or a hand-in is progress; reading and talking alone aren't
-                p.idle = if r.mutated || r.verified || r.submit.is_some() { 0 } else { p.idle + 1 };
-                p.last = r.actions.last().cloned().unwrap_or_else(|| "no tool call".into());
-            }
-            let mut fb = r.feedback.clone();
-            let idle = w.pulse.lock().unwrap_or_else(|e| e.into_inner()).idle;
-            if idle == crate::lead::PUSH_TURNS {
-                // the Lead pushes, on the team channel where everyone (the user too) sees it
-                let text = format!("@{} hurry up on {}: {idle} turns without a change or a passing check (last: {}). \
-                    Stop reading around — make the change now and check it. Blocked? Tell me what you need.",
-                    w.name, w.task.id, chuck_core::evidence::clip(r.actions.last().map(String::as_str).unwrap_or("no tool call"), 80));
-                w.team.post("lead", Some(&w.name), &text);
-                ctx.events.emit(Event::Team { from: "lead".into(), to: Some(w.name.clone()), text });
-            }
-            if idle == crate::lead::WARN_TURNS {
-                crate::snag(&ctx.events, w.id, &w.name, "stuck",
-                            &format!("{idle} turns without a change or a passing check (last: {})", r.actions.last()
-                                .map(String::as_str).unwrap_or("no tool call")));
-                fb.push(format!("[supervisor: {idle} turns without changing or verifying anything. Change the code and \
-                    check it now, or ask the Lead (```team @lead```) what you're missing — at {} you are replaced]",
-                    crate::lead::STALL_TURNS));
-            }
-            // "All done, every check passes." with no ```submit```: when its gate agrees (every criterion
-            // verified since the last change), that is its hand-in — not a turn lost, nor an idle worker
-            let finished = r.submit.is_none() && !r.acted() && !r.malformed && !said.trim().is_empty()
-                && w.gate.lock().unwrap().check_work().is_empty();
-            let submit = r.submit.clone().or_else(|| finished.then(|| said.trim().to_string()));
-            if let Some(report) = &submit {
-                // judged on the copy as it really is, not on the history of edits
-                let (diff, lines) = w.ws.diff(400_000).unwrap_or_else(|e| (format!("(diff failed: {e})"), 0));
-                let sub = {
-                    let mut g = w.gate.lock().unwrap();
-                    g.observe(diff.clone(), lines);
-                    g.submit()
-                };
-                match sub {
-                    Err(gaps) => {
-                        crate::snag(&ctx.events, w.id, &w.name, "hand-in refused", &describe(&gaps).join("; "));
-                        fb.push(format!("[submission REFUSED by the gate — still missing:\n- {}\nFinish these, then \
-                            submit again]", describe(&gaps).join("\n- ")))
-                    }
-                    Ok(()) => {
-                        let evidence = w.gate.lock().unwrap().evidence.clone();
-                        ctx.events.emit(Event::Submitted { task: w.task.id.clone(), worker: w.id, lines });
-                        let s = Submission { task: w.task.id.clone(), worker: w.id, role: w.role, report: report.clone(),
-                                             evidence, diff, lines_changed: lines, gaps: Vec::new() };
-                        if w.to_lead.send(ToLead::Submitted(Box::new(s))).is_err() {
-                            break 'life ("lead gone", None);
-                        }
-                        ctx.kernel.block(w.id, "waiting for the lead's review");
-                        let verdict = loop {
-                            if ctx.stop.load(Ordering::Relaxed) || w.stop.load(Ordering::Relaxed)
-                                || ctx.kernel.should_stop(w.id) {
-                                break ToWorker::Stop;
-                            }
-                            match w.inbox.recv_timeout(Duration::from_millis(200)) {
-                                Ok(v) => break v,
-                                Err(RecvTimeoutError::Timeout) => continue,
-                                Err(RecvTimeoutError::Disconnected) => break ToWorker::Stop,
-                            }
-                        };
-                        ctx.kernel.unblock(w.id);
-                        match verdict {
-                            ToWorker::Accepted => break 'life ("accepted", None),
-                            ToWorker::Stop => break 'life ("stopped", None),
-                            ToWorker::Rejected(defects) => {
-                                warned_term = false;
-                                build_next = true; // it fixes defects now: it will write
-                                
-                                fb = vec![format!("[the lead REJECTED your submission. Fix every defect, verify again \
-                                    after your last change, and resubmit:\n- {}]", defects.join("\n- "))];
-                            }
-                        }
-                    }
-                }
-            } else if !r.acted() {
-                crate::snag(&ctx.events, w.id, &w.name, "no tool call", &chuck_core::evidence::clip(&reply, 200));
-                fb.push("[no tool calls in that reply — keep working with the tools, or ```submit``` when every \
-                    criterion has evidence]".into());
-            }
-            // going in circles: told so; stopping a stuck worker is the supervisor's call (see lead.rs)
-            if let Stall::Replan(why) = progress.turn(r.mutated, r.verified, &r.actions) {
-                fb.push(format!("[you are going in circles ({why}). Stop and re-think: what exactly is still \
-                    missing for each criterion, and what is the next concrete change or check?]"));
-            }
-            if ctx.kernel.terminating(w.id) && warned_term && submit.is_none() {
-                break 'life ("paused", Some("budget spent".into()));
-            }
-            fb.push(exec.gate_line());
-            let (posts, cursor) = w.team.since(&w.name, heard);
-            heard = cursor;
-            if !posts.is_empty() {
-                fb.push(crate::team::render(&posts));
-            }
-            {
-                let g = w.gate.lock().unwrap();
-                ctx.events.emit(Event::Gate { id: w.id, task: Some(w.task.id.clone()), phase: g.phase.label().into(),
-                                              unmet: describe(&g.check_work()) });
-            }
-            convo.user(&fb.join("\n\n"));
-        }
-        ("paused", Some(format!("used all {} steps", ctx.cfg.worker_steps)))
-    };
-    if let Some(why) = ended {
-        // never a silent exit: the user sees why, as the Lead does
-        ctx.events.emit(Event::Notice { id: w.id, text: format!("stopped on {} without finishing: {why}", w.task.id) });
-        let gaps = w.gate.lock().unwrap().pause();
-        let _ = w.to_lead.send(ToLead::Ended { task: w.task.id.clone(), worker: w.id, gaps, why });
-    }
-    ctx.kernel.exit(w.id, if status == "accepted" { 0 } else { 1 }, Some(status.into()));
-    ctx.events.emit(Event::AgentEnded { id: w.id, status: status.into() });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -866,14 +620,6 @@ mod tests {
         assert_eq!(open_write(&closed), Some(("game.js".into(), "let a = 1;\nlet b = 2;".into())));
         assert_eq!(open_write("```bash\nls\n```"), None);
         assert_eq!(open_write("````write r.md\n```js\nx\n```\n").map(|w| w.0), Some("r.md".into()));
-    }
-
-    #[test]
-    fn the_projects_path_means_the_copy() {
-        let (src, copy) = (std::path::Path::new("/home/u/chuck training"), std::path::Path::new("/c/work"));
-        assert_eq!(in_copy("```read /home/u/chuck training/js/a.js```", src, copy), "```read /c/work/js/a.js```");
-        assert_eq!(in_copy("cd \"/home/u/chuck training\" && ls", src, copy), "cd \"/c/work\" && ls");
-        assert_eq!(in_copy("ls /home/u/chuck training2/x", src, copy), "ls /home/u/chuck training2/x", "another folder");
     }
 
     #[test]

@@ -1,6 +1,6 @@
-//! The Chuck window: the conversation with the Lead on the left, with each
-//! agent's work in a lane under the reply; everything the fleet is doing on
-//! the right, in sections you open when you want them.
+//! The Chuck window: the conversation on the left, with what Chuck did in a
+//! lane under each reply; the job's checks, commands and spend on the right,
+//! in sections you open when you want them.
 
 use crate::chat::{self, Entry, Saved};
 use crate::md::{self, Part};
@@ -42,7 +42,7 @@ pub struct Options {
     pub open: Option<Vec<String>>,
     /// The web for a scripted session (a real one gets it from the settings).
     pub web: Option<Arc<chuck_web::Web>>,
-    /// Start in Chat mode (true) or with the fleet (false); else as last time.
+    /// Start in Chat mode (true) or in Build (false); else as last time.
     pub chat: Option<bool>,
     /// Start listening once the window is up (as if the mic was clicked).
     pub listen: bool,
@@ -75,7 +75,7 @@ struct Ui {
     meter: gtk::Label,
     folder_btn: gtk::Button,
     new_btn: gtk::Button,
-    fleet_btn: gtk::ToggleButton,
+    build_btn: gtk::ToggleButton,
     chat_btn: gtk::ToggleButton,
     mic: gtk::Button,
     speaker: gtk::ToggleButton,
@@ -108,9 +108,9 @@ struct State {
     /// The file being written live: (who, its path, the card's head, its newest lines).
     writing: Option<(AgentId, String, gtk::Label, gtk::Label)>,
     last_ps: Vec<ProcInfo>,
-    /// Chat mode: one model answers, researches, and hands work to the fleet.
+    /// Chat mode: one model answers, researches, and hands work to Build.
     chat: bool,
-    /// What the "hand it to the fleet" button does.
+    /// What the "do it in Build" button does.
     on_handoff: Option<Rc<dyn Fn(String)>>,
     /// The Keep going button: carry on the paused job.
     on_continue: Option<Rc<dyn Fn()>>,
@@ -382,7 +382,7 @@ impl State {
                 row.add_css_class("user-row");
                 row.set_halign(gtk::Align::End);
                 if steer {
-                    row.append(&label("to the Lead, while it works", &["steer-note"]));
+                    row.append(&label("to Chuck, while it works", &["steer-note"]));
                 }
                 let bubble = gtk::Box::new(gtk::Orientation::Vertical, 0);
                 bubble.add_css_class("user-bubble");
@@ -397,14 +397,14 @@ impl State {
                 self.append(&row);
                 self.lane = None;
             }
-            Entry::Lead { text, model, chat } => {
+            Entry::Lead { text, model, .. } => {
                 let col = gtk::Box::new(gtk::Orientation::Vertical, 6);
                 col.add_css_class("bot-row");
                 let by = gtk::Box::new(gtk::Orientation::Horizontal, 8);
                 let av = label("C", &["avatar"]);
                 av.set_xalign(0.5);
                 by.append(&av);
-                by.append(&label(if *chat { "Chuck" } else { "Lead" }, &["byline"]));
+                by.append(&label("Chuck", &["byline"]));
                 let meta = label(model, &["byline-meta"]);
                 meta.set_hexpand(true);
                 by.append(&meta);
@@ -523,12 +523,12 @@ impl State {
                 self.lane = None;
             }
             Entry::Handoff { request } => {
-                let (c, body, foot) = card("FOR THE FLEET", "ask-card");
+                let (c, body, foot) = card("TO DO ON YOUR MACHINE", "ask-card");
                 body.append(&render(request));
-                let btn = gtk::Button::with_label("Hand it to the fleet");
+                let btn = gtk::Button::with_label("Do it in Build");
                 btn.add_css_class("suggested-action");
                 btn.add_css_class("pill-sm");
-                btn.set_tooltip_text(Some("Switch to the fleet and send this — it can act on your machine"));
+                btn.set_tooltip_text(Some("Switch to Build and send this — it can act on your machine"));
                 if let Some(go) = self.on_handoff.clone() {
                     let r = request.clone();
                     btn.connect_clicked(move |b| {
@@ -582,7 +582,7 @@ impl State {
         if self.running.is_some() {
             // a job in flight keeps its mode; the switch shows what's true
             self.ui.chat_btn.set_active(self.chat);
-            self.ui.fleet_btn.set_active(!self.chat);
+            self.ui.build_btn.set_active(!self.chat);
             return;
         }
         if self.folder.is_none() {
@@ -593,7 +593,7 @@ impl State {
         s.set("agent_mode", (!chat).into());
         let _ = s.save();
         self.ui.chat_btn.set_active(chat);
-        self.ui.fleet_btn.set_active(!chat);
+        self.ui.build_btn.set_active(!chat);
         if self.folder.is_none() {
             let f = self.folder.clone();
             self.open_folder(f, shared);
@@ -615,20 +615,16 @@ impl State {
 
     fn set_running(&mut self, on: bool) {
         self.ui.stop.set_visible(on);
-        self.ui.send.set_tooltip_text(Some(if on { "Tell the Lead (it reads it at its next step)" } else {
+        self.ui.send.set_tooltip_text(Some(if on { "Tell Chuck (it reads it at its next step)" } else {
             "Send (Enter) · new line: Shift+Enter" }));
         self.ui.hint.set_label(match (on, self.chat) {
-            (true, false) => "Type to steer — the Lead reads it at its next step · Esc stops",
+            (true, false) => "Type to steer — Chuck reads it at its next step · Esc stops",
             (true, true) => "Add to the question — Chuck reads it before its next step · Esc stops",
-            (false, false) => "Tell the fleet what you want",
-            (false, true) => "Ask Chuck anything — it can look things up",
+            (false, false) => "What should Chuck build or fix? · paste a screenshot with Ctrl+V",
+            (false, true) => "Ask Chuck anything · paste a screenshot with Ctrl+V",
         });
-        self.ui.hero.set_label(if self.chat { "Ask Chuck anything." } else { "Tell the fleet what you want." });
-        self.ui.lede.set_label(if self.chat {
-            "Answers straight away, looks up what it should check on the web, and cites its sources. When you want \
-             something done on your machine, it hands it to the fleet — on your say-so." } else {
-            "A Lead and up to eight workers on SiliconFlow. Criteria first, evidence for every claim, and nothing \
-             is done until the gate says so." });
+        self.ui.hero.set_label(if self.chat { "Ask Chuck anything." } else { "What should Chuck build?" });
+        self.ui.lede.set_label(if self.chat { CHAT_LEDE } else { BUILD_LEDE });
         self.ui.folder_btn.set_sensitive(!on);
         self.ui.new_btn.set_sensitive(!on);
         if !on {
@@ -746,7 +742,7 @@ fn open_chat(shared: &Shared, l: &chat::Listed) {
             if st.chat != l_is_chat(l) {
                 st.chat = l_is_chat(l);
                 st.ui.chat_btn.set_active(st.chat);
-                st.ui.fleet_btn.set_active(!st.chat);
+                st.ui.build_btn.set_active(!st.chat);
             }
             st.open_folder(Some(folder), shared);
         }
@@ -756,7 +752,7 @@ fn open_chat(shared: &Shared, l: &chat::Listed) {
         Ok(None) => {
             st.chat = true;
             st.ui.chat_btn.set_active(true);
-            st.ui.fleet_btn.set_active(false);
+            st.ui.build_btn.set_active(false);
             st.open_folder(None, shared);
         }
         Err(e) => st.ui.status.set_label(&format!("couldn't open that conversation: {e}")),
@@ -765,7 +761,7 @@ fn open_chat(shared: &Shared, l: &chat::Listed) {
     refresh_chats(&st, shared);
 }
 
-/// Was it a Chat-mode conversation (Chuck answering, no fleet)?
+/// Was it a Chat-mode conversation (Chuck answering, nothing built)?
 fn l_is_chat(l: &chat::Listed) -> bool {
     l.folder.is_empty() || (l.kind != chat::Kind::Python && chat::load_path(&l.path).is_some_and(|s| s.entries.iter()
         .any(|e| matches!(e, Entry::Lead { chat: true, .. }))))
@@ -808,18 +804,9 @@ fn on_event(st: &mut State, e: Event, shared: &Shared) {
         Event::AgentStarted { id, role, name, model, task } => {
             st.names.insert(id, (name.clone(), role));
             st.models.insert(id, short(&model).to_string());
-            if name != "lead" && name != "chuck" {
-                let what = match (&task, name.as_str()) {
-                    (Some(t), _) => format!(" on {t}"),
-                    (None, "critic") => " — reviewing the whole result".into(),
-                    _ => String::new(),
-                };
-                st.act(format!("<span foreground=\"#5F5F6E\">+ {} ({}){}</span>", esc(&name), esc(short(&model)), esc(&what)));
-                st.panel.log(&name, format!("started{what}"));
-            }
+            let _ = task;
         }
         Event::Said { id, text } => {
-            st.panel.stream_done(id); // its reply is whole: what follows is a new call
             let who = st.who(id);
             if st.is_lead(id) {
                 let model = st.models.get(&id).cloned().unwrap_or_default();
@@ -833,12 +820,9 @@ fn on_event(st: &mut State, e: Event, shared: &Shared) {
             } else {
                 st.act(format!("<span foreground=\"#5F5F6E\">{:<6} │ {}</span>", esc(&who), esc(&one_line(&text, 160))));
             }
-            st.panel.log(&who, format!("said: {}", one_line(&text, 200)));
         }
         Event::Running { id, tool, cmd } => {
-            let who = st.who(id);
-            st.panel.command_started(id, &who, &tool, &cmd);
-            st.panel.log(&who, format!("$ {}", one_line(&cmd, 200)));
+            st.panel.command_started(id, &tool, &cmd);
         }
         Event::Output { id, chunk } => st.panel.output(id, &chunk),
         Event::Action { id, tool, arg, ok, summary } => {
@@ -857,45 +841,14 @@ fn on_event(st: &mut State, e: Event, shared: &Shared) {
             if matches!(tool.as_str(), "search" | "fetch" | "images" | "videos") {
                 st.panel.research(&who, &tool, &arg, ok, &summary);
             }
-            st.panel.log(&who, format!("{} {tool} {what}", if ok { "✓" } else { "✗" }));
-            st.act(format!("{} <span foreground=\"#5F5F6E\">{:<6}</span> {} <span foreground=\"#8E8E9E\">{}</span>",
-                           mark(ok), esc(&who), esc(&tool), esc(&what)));
-        }
-        Event::Assigned { task, title, worker, role } => {
-            let who = st.who(worker);
-            st.act(format!("<span foreground=\"#A78BFA\">◆ {} “{}” → {} ({})</span>", esc(&task), esc(&one_line(&title, 60)),
-                           esc(&who), role.label()));
-        }
-        Event::Submitted { task, worker, lines } => {
-            let who = st.who(worker);
-            st.act(format!("<span foreground=\"#A78BFA\">◆ {} submitted by {} ({lines} lines)</span>", esc(&task), esc(&who)));
-        }
-        Event::Reviewed { task, accepted, defects } => {
-            let what = if task == "job" { "independent review".to_string() } else { task };
-            st.act(if accepted {
-                format!("<span foreground=\"#4ADE9A\">✓ {}: accepted</span>", esc(&what))
-            } else {
-                format!("<span foreground=\"#F5B454\">↺ {}: sent back — {}</span>", esc(&what), esc(&one_line(&defects.join("; "), 160)))
-            });
-        }
-        Event::Merged { task, applied, merged, conflicts, refused } => {
-            let mut s = format!("⇣ {task} merged into your folder: {applied} applied, {merged} merged");
-            if !conflicts.is_empty() {
-                s.push_str(&format!(", CONFLICTS: {}", conflicts.join(", ")));
-            }
-            if !refused.is_empty() {
-                s.push_str(&format!(", refused: {}", refused.join(", ")));
-            }
-            let color = if conflicts.is_empty() { "#4ADE9A" } else { "#F5B454" };
-            st.act(format!("<span foreground=\"{color}\">{}</span>", esc(&s)));
+            st.act(format!("{} {} <span foreground=\"#8E8E9E\">{}</span>", mark(ok), esc(&tool), esc(&what)));
         }
         Event::Notice { id, text } => {
-            let who = st.who(id);
-            st.panel.log(&who, format!("! {text}"));
-            st.act(format!("<span foreground=\"#F5B454\">! {}: {}</span>", esc(&who), esc(&text)));
+            let _ = id;
+            st.act(format!("<span foreground=\"#F5B454\">! {}</span>", esc(&text)));
         }
         Event::Usage { id, tokens, usd, prompt, cached } => {
-            st.panel.stream_done(id); // a call ended: its words are in, nothing is being typed
+            let _ = id;
             st.tokens += tokens;
             st.spent += usd;
             st.prompt += prompt;
@@ -911,19 +864,8 @@ fn on_event(st: &mut State, e: Event, shared: &Shared) {
             st.panel.set_board(&criteria);
             st.saved.progress.board = criteria;
         }
-        Event::Plan { steps } => {
-            st.saved.progress.plan = steps.clone();
-            st.panel.set_plan(steps);
-        }
-        Event::Tasks(t) => {
-            st.panel.set_tasks(&t);
-            st.saved.progress.tasks = t.iter().map(|t| chat::TaskSnap { id: t.id.clone(), title: t.title.clone(),
-                state: t.state.clone(), workers: t.workers.clone(), deps: t.deps.clone(), criteria: t.criteria.clone(),
-                note: t.note.clone() }).collect();
-        }
         Event::Browsed { id, url, title, size, ms, engine, errors, failed, warnings, steps, refused, shot, look } => {
-            let who = st.who(id);
-            st.panel.log(&who, format!("browsed {url}: {} JS errors, {} failed requests", errors.len(), failed.len()));
+            let _ = id;
             st.add(Entry::Browser(Box::new(chat::Browsed { url, title, size, ms, engine, errors, failed, warnings, steps, refused,
                                                            shot: shot.map(|p| p.display().to_string()), look })));
         }
@@ -938,7 +880,7 @@ fn on_event(st: &mut State, e: Event, shared: &Shared) {
         Event::Ask { question, options, .. } => {
             let speech = speak(st, &question);
             buddy_says(st, &question, speech);
-            let (c, body, foot) = card("THE LEAD ASKS", "ask-card");
+            let (c, body, foot) = card("CHUCK ASKS", "ask-card");
             body.append(&render(&question));
             let entry = gtk::Entry::builder().hexpand(true)
                 .placeholder_text(if options.is_empty() { "Your answer" } else { "Or say what you want instead" }).build();
@@ -959,7 +901,7 @@ fn on_event(st: &mut State, e: Event, shared: &Shared) {
                 f2.set_sensitive(false);
                 p2.set_sensitive(false);
                 if let Ok(mut st) = sh.try_borrow_mut() {
-                    st.record(Entry::Card { kind: "THE LEAD ASKED".into(), class: "ask-card".into(),
+                    st.record(Entry::Card { kind: "CHUCK ASKED".into(), class: "ask-card".into(),
                                             text: format!("{q}\n\n**You:** {a}") });
                 }
             });
@@ -979,7 +921,7 @@ fn on_event(st: &mut State, e: Event, shared: &Shared) {
                 if o.recommended {
                     b.add_css_class("suggested-action");
                 }
-                b.set_tooltip_text(Some(if o.recommended { "The Lead's pick — what it does if you don't answer" }
+                b.set_tooltip_text(Some(if o.recommended { "Chuck's pick — what it does if you don't answer" }
                                         else { "Go this way" }));
                 let (s2, l) = (send.clone(), o.label.clone());
                 b.connect_clicked(move |_| s2(l.clone()));
@@ -1002,7 +944,7 @@ fn on_event(st: &mut State, e: Event, shared: &Shared) {
             let out = !outside.is_empty();
             let (c, body, foot) = if out { card("OUTSIDE THE FOLDER — MAY IT?", "ask-card") } else {
                 card("CRITICAL — NEEDS YOUR YES", "crit-card") };
-            body.append(&label("The Lead wants to run:", &["prose"]));
+            body.append(&label("Chuck wants to run:", &["prose"]));
             let cmd = label(&command, &["cmd-text"]);
             cmd.set_selectable(true);
             body.append(&cmd);
@@ -1048,23 +990,14 @@ fn on_event(st: &mut State, e: Event, shared: &Shared) {
             st.daemons.add("", when, &what, &folder, &kind, 150_000);
             refresh_daemons(st, shared);
         }
-        Event::Team { from, to, text } => {
-            st.panel.team_post(&from, to.as_deref(), &text);
-            st.panel.log(&from, format!("team → {}: {}", to.as_deref().unwrap_or("everyone"), one_line(&text, 160)));
-            st.act(format!("<span foreground=\"#7DD3FC\">✉ {} → {}: {}</span>", esc(&from),
-                           esc(to.as_deref().unwrap_or("everyone")), esc(&one_line(&text, 140))));
-        }
-        Event::Snag { who, kind, text, .. } => {
-            st.panel.snag(&who, &kind, &text);
-            st.panel.log(&who, format!("⚠ {kind}: {}", one_line(&text, 160)));
-        }
+        // written down for Chuck to be improved (chuck_store::snags), not shown
+        Event::Snag { .. } => {}
         Event::Handoff { request } => {
             st.add(Entry::Handoff { request });
             st.save();
         }
-        // what each agent is typing, live, for its line in the panel
-        Event::Thinking { id, chunk } => st.panel.stream(id, true, &chunk),
-        Event::Delta { id, chunk } => st.panel.stream(id, false, &chunk),
+        // the reply itself arrives whole (Said); a file being written shows live (Writing)
+        Event::Thinking { .. } | Event::Delta { .. } => {}
         Event::Writing { id, path, lines, tail, done } => {
             // the file as the model writes it: one card per file, its newest lines rolling in
             let head_text = format!("{} {path} · {lines} line{}", if done { "WROTE" } else { "WRITING" },
@@ -1093,8 +1026,7 @@ fn on_event(st: &mut State, e: Event, shared: &Shared) {
                 st.writing = None;
             }
         }
-        Event::AgentEnded { id, .. } => st.panel.stream_done(id),
-        Event::Finished(_) | Event::Gate { .. } => {}
+        Event::AgentEnded { .. } | Event::Finished(_) | Event::Gate { .. } => {}
     }
 }
 
@@ -1145,13 +1077,10 @@ fn result_row(folder: &Path, gate: &chuck_core::DoneGate) -> Option<gtk::Box> {
 }
 
 fn finished(st: &mut State, report: JobReport, shared: &Shared) {
-    // the fleet's final state, read before the job is let go
+    // the job's final state, read before it is let go
     if let Some(run) = &st.running {
         st.last_ps = run.kernel.ps(true);
     }
-    let ps = std::mem::take(&mut st.last_ps);
-    st.panel.set_agents(&ps, &st.models);
-    st.last_ps = ps;
     if let Outcome::Failed { error } = &report.outcome {
         chuck_store::crashlog::record("job failed", error);
     }
@@ -1192,7 +1121,7 @@ fn finished(st: &mut State, report: JobReport, shared: &Shared) {
         let day = s.num("budget_day_usd", 0.0, 0.0, 1e5);
         if s.map.get("fleet_auto_continue").and_then(|v| v.as_bool()) == Some(true) && day > 0.0 && r.runs < 200 {
             st.act(format!("<span foreground=\"#A78BFA\">↻ the job's budget ran out: carrying on in 5 s with another \
-                (Settings › Fleet; the daily limit {} still holds) — Stop to stay paused</span>", fmt_usd(day)));
+                (Settings › Jobs; the daily limit {} still holds) — Stop to stay paused</span>", fmt_usd(day)));
             let sh = shared.clone();
             let cancelled = st.auto_cancel.clone();
             cancelled.set(false);
@@ -1223,7 +1152,7 @@ fn finished(st: &mut State, report: JobReport, shared: &Shared) {
         st.saved.progress.checkpoint = report.checkpoint.clone();
     }
     let done = matches!(report.outcome, Outcome::Done { .. });
-    st.panel.job_finished(done);
+    st.panel.job_finished();
     refresh_daemons(st, shared);
     st.saved.progress.finished = done;
     st.saved.history.push(("lead".into(), reply));
@@ -1245,9 +1174,9 @@ fn paused_text(gaps: &[String]) -> String {
             stopped.")
     } else if why.contains("budget") {
         format!("**Paused: {why}.** This job's own budget was used up. **Keep going** gives it another one and carries on \
-            where it stopped (Settings › Fleet can do that on its own).")
+            where it stopped (Settings › Jobs can do that on its own).")
     } else if why.contains("stuck") {
-        format!("**Paused: {why}.** The Lead kept repeating itself after being told to replan. Say what to try differently \
+        format!("**Paused: {why}.** Chuck kept repeating itself after being told to replan. Say what to try differently \
             and press **Keep going**, or type `/continue <your hint>`.")
     } else if why.contains("stopped by you") || why == "stopped" {
         "**Stopped by you.** **Keep going** carries on where it stopped.".to_string()
@@ -1322,14 +1251,14 @@ fn start(shared: &Shared, text: String) {
         refresh_daemons(&st, shared);
         return;
     }
-    // a paused job is the fleet's, whatever mode the window is in
+    // a paused job is Build's, whatever mode the window is in
     let chat_mode = st.chat && resume.is_none();
     let folder = match st.folder.clone() {
         Some(f) => f,
         // Chat mode works on no folder; nothing it does touches one
         None if chat_mode => std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(std::env::temp_dir),
         None => {
-            st.add(Entry::Lead { text: "Pick a project folder first (the button at the top): the fleet works on a \
+            st.add(Entry::Lead { text: "Pick a project folder first (the button at the top): Build works on a \
                 folder. Or switch to **Chat** to just ask.".into(), model: String::new(), chat: false });
             return;
         }
@@ -1337,7 +1266,7 @@ fn start(shared: &Shared, text: String) {
     let settings = Settings::load();
     let (model, cfg) = match (&st.opts.model, setup::from_settings(&settings, &folder, None)) {
         (Some(m), _) => (m.clone(), chuck_runtime::RuntimeConfig { access: setup::access_of(&settings, &folder),
-                                                                  fleet: setup::fleet(&settings),
+                                                                  models: setup::models(&settings),
                                                                   web: st.opts.web.clone(), mcp: Some(st.mcp.clone()),
                                                                   lsp: Some(st.lsp.clone()), memory: Some(st.memory.clone()),
                                                                   browser: Some(setup::browser_pref(&settings)),
@@ -1385,7 +1314,7 @@ fn start(shared: &Shared, text: String) {
     refresh_chats(&st, shared);
 }
 
-/// Drain the fleet's events into the window (every 60 ms).
+/// Drain the job's events into the window (every 60 ms).
 fn pump(shared: &Shared) {
     let mut st = shared.borrow_mut();
     let Some(run) = &st.running else { return };
@@ -1403,7 +1332,7 @@ fn pump(shared: &Shared) {
     }
 }
 
-/// Twice a second: the fleet as the kernel sees it, spend, the status line.
+/// Twice a second: the job as the kernel sees it, spend, the status line.
 fn tick(shared: &Shared) {
     let mut st = shared.borrow_mut();
     daemon_poll(&mut st, shared);
@@ -1430,23 +1359,17 @@ fn tick(shared: &Shared) {
         let ps = run.kernel.ps(true);
         let elapsed = run.started.elapsed().as_secs();
         let lead = ps.iter().find(|p| p.ppid.is_none());
-        let working = ps.iter().filter(|p| p.ppid.is_some() && p.state.alive()).count();
-        let lead_doing = lead.map(|p| match p.state {
-            chuck_core::ProcState::Running => "the Lead is thinking".to_string(),
-            _ if !p.activity.is_empty() => format!("the Lead: {}", p.activity),
-            _ => "the Lead is working".to_string(),
+        let doing = lead.map(|p| match p.state {
+            chuck_core::ProcState::Running => "thinking".to_string(),
+            _ if !p.activity.is_empty() => p.activity.clone(),
+            _ => "working".to_string(),
         }).unwrap_or_default();
         let cmds = chuck_tools::running();
-        let mut s = format!("{}:{:02}  ·  {lead_doing}", elapsed / 60, elapsed % 60);
-        if working > 0 {
-            s.push_str(&format!("  ·  {working} agent{} working", if working == 1 { "" } else { "s" }));
-        }
+        let mut s = format!("{}:{:02}  ·  {doing}", elapsed / 60, elapsed % 60);
         if cmds > 0 {
             s.push_str(&format!("  ·  {cmds} command{} running", if cmds == 1 { "" } else { "s" }));
         }
         st.ui.status.set_label(&s);
-        let models = st.models.clone();
-        st.panel.set_agents(&ps, &models);
         st.last_ps = ps;
     }
     let spend = chuck_store::Spend::at(&chuck_store::Spend::default_path());
@@ -1615,7 +1538,7 @@ when disk / is above 90%, when ~/src changes…); it only looks and reports to t
 - `/undo` — put the folder back to before the last job · `/diff` — every change the last job made
 - `/doctor` — check everything Chuck depends on · `/update` — install the newest Chuck · `/restart`
 - `/export` — save this conversation as Markdown · `/cost` — what was spent · `/clear` — a new conversation
-- `/snags` — what keeps getting in the agents' way (Settings › Fleet › Debug mode asks them to report it)
+- `/snags` — what keeps getting in the agents' way (Settings › Jobs › Debug mode asks it to report its own)
 - Ctrl+P finds any command · Ctrl+M talks · Esc stops (agents, commands and speech) · the right panel shows \
 everything as it happens";
 
@@ -1974,20 +1897,14 @@ fn settings_dialog(shared: &Shared) {
     let s = Settings::load();
     let page = adw::PreferencesPage::new();
     let api = adw::PreferencesGroup::builder().title("SiliconFlow")
-        .description("The whole fleet thinks on SiliconFlow, with your key. `chuck` in a terminal uses it too.").build();
+        .description("Chuck thinks on SiliconFlow, with your key. `chuck` in a terminal uses it too.").build();
     let key = adw::PasswordEntryRow::builder().title("API key").build();
     key.set_text(s.api_key().unwrap_or(""));
     api.add(&key);
     page.add(&api);
 
-    let fleet = adw::PreferencesGroup::builder().title("Fleet")
-        .description("The Lead (DeepSeek-V4.1-Flash) plans, reviews and merges; the workers (DeepSeek-V4-Flash, \
-            cheaper) build and talk to each other; GLM-5.3-Flash looks at screenshots.").build();
-    let ds = adw::SpinRow::with_range(0.0, 8.0, 1.0);
-    ds.set_title("Workers");
-    ds.set_subtitle("0 (the default): one model does the whole job — the fastest. More: the Lead splits big work \
-        across them and merges it");
-    ds.set_value(s.num("fleet_deepseek_workers", 0.0, 0.0, 8.0));
+    let jobs = adw::PreferencesGroup::builder().title("Jobs")
+        .description("One model (DeepSeek-V4.1-Flash) does the whole job; GLM-5.3-Flash looks at screenshots.").build();
     let cap = adw::SpinRow::with_range(0.05, 100.0, 0.05);
     cap.set_title("Spending cap per job ($)");
     cap.set_digits(2);
@@ -2000,33 +1917,23 @@ fn settings_dialog(shared: &Shared) {
         .subtitle("Carries on with another job budget, as often as needed, until it's done — never past the daily \
             limit, which this needs set (Spending limits below)")
         .active(s.map.get("fleet_auto_continue").and_then(|v| v.as_bool()) == Some(true)).build();
-    fleet.add(&ds);
-    let merge_row = adw::SwitchRow::builder().title("Merge good work at once")
-        .subtitle("A worker's hand-in that passes its gate and its re-run checks goes straight into the project; the \
-                   Lead looks it over after. Off: each waits for the Lead's review")
-        .active(s.map.get("fleet_auto_merge").and_then(|v| v.as_bool()) != Some(false)).build();
-    fleet.add(&merge_row);
     let debug_row = adw::SwitchRow::builder().title("Debug mode")
-        .subtitle("The agents note whatever slows them down, limits them or goes wrong (right panel › Debug, /snags) \
-                   — for it to be fixed")
+        .subtitle("Chuck notes whatever slows it down, limits it or goes wrong (/snags) — for it to be fixed")
         .active(s.map.get("debug").and_then(|v| v.as_bool()) == Some(true)).build();
-    fleet.add(&debug_row);
-    fleet.add(&cap);
-    fleet.add(&cmd_min);
-    fleet.add(&auto);
-    page.add(&fleet);
+    jobs.add(&cap);
+    jobs.add(&cmd_min);
+    jobs.add(&auto);
+    jobs.add(&debug_row);
+    page.add(&jobs);
 
     let reason = adw::PreferencesGroup::builder().title("Reasoning").build();
     let levels = [("Off — answer straight away", 0.0), ("Light (1k tokens)", 1024.0), ("Quick (2k)", 2048.0), ("Normal (4k)", 4096.0),
                   ("Deep (8k)", 8192.0), ("Deeper (16k)", 16384.0), ("Max (32k)", 32768.0)];
     let names: Vec<&str> = levels.iter().map(|(n, _)| *n).collect();
-    let rz = adw::ComboRow::builder().title("The Lead's reasoning").model(&gtk::StringList::new(&names)).build();
+    let rz = adw::ComboRow::builder().title("Reasoning before it builds")
+        .subtitle("It thinks on its first turn and after something fails; the rest of the job goes without").model(&gtk::StringList::new(&names)).build();
     let cur = s.num("reasoning_budget", 2048.0, 0.0, 32768.0);
     rz.set_selected(levels.iter().position(|(_, v)| *v >= cur).unwrap_or(2) as u32);
-    let wz = adw::ComboRow::builder().title("Workers' reasoning")
-        .subtitle("The Lead thinks; they build from its brief — off keeps them fastest").model(&gtk::StringList::new(&names)).build();
-    let wcur = s.num("worker_reasoning_budget", 0.0, 0.0, 32768.0);
-    wz.set_selected(levels.iter().position(|(_, v)| *v >= wcur).unwrap_or(0) as u32);
     let think = adw::SpinRow::with_range(0.0, 1800.0, 10.0);
     think.set_title("Max thinking time (s)");
     think.set_value(s.num("max_think_seconds", 90.0, 0.0, 1800.0));
@@ -2034,7 +1941,6 @@ fn settings_dialog(shared: &Shared) {
     stall.set_title("Give up on a silent connection after (s)");
     stall.set_value(s.num("stall_seconds", 90.0, 20.0, 600.0));
     reason.add(&rz);
-    reason.add(&wz);
     reason.add(&think);
     reason.add(&stall);
     page.add(&reason);
@@ -2099,8 +2005,8 @@ fn settings_dialog(shared: &Shared) {
     let browser = adw::ComboRow::builder().title("Browser")
         .subtitle(md::escape(&match (pick(&pref, Purpose::Read), pick(&pref, Purpose::Check)) {
             (Ok(r), Ok(c)) if r == c => format!("{} — reads pages that need JavaScript or turn bots away, and checks \
-                the Lead's pages", r.describe()),
-            (Ok(r), Ok(c)) => format!("Reads blocked pages: {} · checks the Lead's pages: {}", r.describe(), c.describe()),
+                Chuck's pages", r.describe()),
+            (Ok(r), Ok(c)) => format!("Reads blocked pages: {} · checks Chuck's pages: {}", r.describe(), c.describe()),
             (Err(e), _) | (_, Err(e)) => e,
         }))
         .model(&gtk::StringList::new(&browsers.iter().map(|b| b.1).collect::<Vec<_>>())).build();
@@ -2126,7 +2032,7 @@ fn settings_dialog(shared: &Shared) {
     let tts = adw::SwitchRow::builder().title("Read replies aloud")
         .active(s.map.get("tts").and_then(|v| v.as_bool()).unwrap_or(true)).build();
     let buddy_row = adw::SwitchRow::builder().title("Chuck pops up")
-        .subtitle("With what the Lead has to say: its news, its questions, the finished job")
+        .subtitle("With what Chuck has to say: its news, its questions, the finished job")
         .active(s.map.get("buddy").and_then(|v| v.as_bool()).unwrap_or(true)).build();
     let engines = [("auto", "Automatic (the most natural installed)"), ("kokoro", "Kokoro — natural"),
                    ("piper", "Piper"), ("espeak", "espeak-ng — robotic")];
@@ -2300,13 +2206,10 @@ fn settings_dialog(shared: &Shared) {
         if !k.is_empty() {
             s.set("siliconflow_api_key", k.into());
         }
-        s.set("fleet_deepseek_workers", (ds.value() as i64).into());
         s.set("fleet_job_usd", cap.value().into());
         s.set("fleet_auto_continue", auto.is_active().into());
-        s.set("fleet_auto_merge", merge_row.is_active().into());
         s.set("command_timeout", ((cmd_min.value() * 60.0) as i64).into());
         s.set("reasoning_budget", (levels[rz.selected() as usize].1 as i64).into());
-        s.set("worker_reasoning_budget", (levels[wz.selected() as usize].1 as i64).into());
         s.set("max_think_seconds", (think.value() as i64).into());
         s.set("stall_seconds", (stall.value() as i64).into());
         s.set("budget_day_usd", day.value().into());
@@ -2348,6 +2251,11 @@ fn settings_dialog(shared: &Shared) {
     dialog.present(Some(&win));
 }
 
+const BUILD_LEDE: &str = "One fast model writes the code, runs it and checks it. It's done when its checks pass, not \
+    when it says so.";
+const CHAT_LEDE: &str = "Answers straight away, looks things up on the web and cites its sources. Anything to do on \
+    your machine goes to Build, on your say-so.";
+
 fn welcome(shared_slot: Rc<RefCell<Option<Shared>>>) -> (gtk::Box, gtk::Label, gtk::Label) {
     let b = gtk::Box::new(gtk::Orientation::Vertical, 14);
     b.set_valign(gtk::Align::Center);
@@ -2356,11 +2264,10 @@ fn welcome(shared_slot: Rc<RefCell<Option<Shared>>>) -> (gtk::Box, gtk::Label, g
     mark.set_xalign(0.5);
     mark.set_halign(gtk::Align::Center);
     b.append(&mark);
-    let hero = label("Tell the fleet what you want.", &["hero"]);
+    let hero = label("What should Chuck build?", &["hero"]);
     hero.set_xalign(0.5);
     b.append(&hero);
-    let lede = label("A Lead and up to eight workers on SiliconFlow. Criteria first, evidence for every claim, \
-                      and nothing is done until the gate says so.", &["lede"]);
+    let lede = label(BUILD_LEDE, &["lede"]);
     lede.set_xalign(0.5);
     lede.set_justify(gtk::Justification::Center);
     lede.set_max_width_chars(60);
@@ -2368,7 +2275,7 @@ fn welcome(shared_slot: Rc<RefCell<Option<Shared>>>) -> (gtk::Box, gtk::Label, g
     let flow = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     flow.set_halign(gtk::Align::Center);
     flow.set_margin_top(10);
-    for ex in ["Fix the failing tests", "Add input validation and tests", "Explain how this project is built"] {
+    for ex in ["Make a Tetris game", "Fix the failing tests", "Explain how this project is built"] {
         let btn = gtk::Button::with_label(ex);
         btn.add_css_class("pill");
         let slot = shared_slot.clone();
@@ -2466,22 +2373,22 @@ pub fn build(app: &adw::Application, opts: Options) {
     header.pack_start(&titlebox);
     let folder_btn = gtk::Button::with_label("Choose a folder");
     folder_btn.add_css_class("pill");
-    folder_btn.set_tooltip_text(Some("The project the fleet works on"));
+    folder_btn.set_tooltip_text(Some("The project Chuck works on"));
     header.pack_start(&folder_btn);
     let new_btn = gtk::Button::from_icon_name("chuck-new-symbolic");
     new_btn.add_css_class("headerbtn");
     new_btn.set_tooltip_text(Some("New conversation (the current one is kept on disk)"));
     header.pack_start(&new_btn);
-    // Fleet: the Lead and workers act on the folder. Chat: Chuck answers, researches, hands work over.
+    // Build: Chuck acts on the folder. Chat: Chuck answers, researches, hands work over.
     let modes = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     modes.add_css_class("linked");
     modes.add_css_class("modes");
-    let fleet_btn = gtk::ToggleButton::with_label("Fleet");
-    fleet_btn.set_tooltip_text(Some("The Lead and its workers act on the project folder"));
+    let build_btn = gtk::ToggleButton::with_label("Build");
+    build_btn.set_tooltip_text(Some("Chuck builds and fixes things in the project folder"));
     let chat_btn = gtk::ToggleButton::with_label("Chat");
     chat_btn.set_tooltip_text(Some("Chuck answers and looks things up — it can't change anything"));
-    chat_btn.set_group(Some(&fleet_btn));
-    modes.append(&fleet_btn);
+    chat_btn.set_group(Some(&build_btn));
+    modes.append(&build_btn);
     modes.append(&chat_btn);
     header.pack_start(&modes);
     let gear = gtk::Button::from_icon_name("chuck-settings-symbolic");
@@ -2493,7 +2400,7 @@ pub fn build(app: &adw::Application, opts: Options) {
     header.pack_end(&speaker);
     let side_btn = gtk::ToggleButton::builder().icon_name("chuck-panel-symbolic").active(true).build();
     side_btn.add_css_class("headerbtn");
-    side_btn.set_tooltip_text(Some("Show or hide what the fleet is doing"));
+    side_btn.set_tooltip_text(Some("Show or hide the side panel"));
     header.pack_end(&side_btn);
     let meter = label("", &["meter"]);
     meter.set_wrap(false);
@@ -2568,7 +2475,7 @@ pub fn build(app: &adw::Application, opts: Options) {
     // the composer
     let input = gtk::TextView::builder().wrap_mode(gtk::WrapMode::WordChar).accepts_tab(false).hexpand(true)
         .top_margin(4).bottom_margin(4).build();
-    let hint = label("Tell the fleet what you want", &["composer-hint"]);
+    let hint = label("What should Chuck build or fix? · paste a screenshot with Ctrl+V", &["composer-hint"]);
     hint.set_can_target(false);
     hint.set_valign(gtk::Align::Start);
     hint.set_margin_top(4);
@@ -2617,7 +2524,7 @@ pub fn build(app: &adw::Application, opts: Options) {
     main.append(&stack);
     main.append(&bclamp);
 
-    // the right side: everything the fleet is doing, in sections you open
+    // the right side: what Chuck is doing, in sections you open
     let open = Rc::new(RefCell::new(opts.open.clone().unwrap_or_else(panel_open_from_settings)));
     let o2 = open.clone();
     let remember = opts.open.is_none();
@@ -2682,7 +2589,7 @@ pub fn build(app: &adw::Application, opts: Options) {
         .and_then(|f| f.canonicalize().ok()).filter(|f| f.is_dir());
     let ui = Ui { window: window.clone(), stack, transcript, input: input.clone(), hint, send: send.clone(),
                   stop: stop.clone(), status, subtitle, meter, folder_btn: folder_btn.clone(), new_btn: new_btn.clone(),
-                  fleet_btn: fleet_btn.clone(), chat_btn: chat_btn.clone(), mic: mic.clone(), speaker: speaker.clone(),
+                  build_btn: build_btn.clone(), chat_btn: chat_btn.clone(), mic: mic.clone(), speaker: speaker.clone(),
                   hero, lede, chats: chats_list.clone(), chats_search: chats_search.clone(), buddy: buddy.clone() };
     // MCP servers start in the background: the window doesn't wait for them
     let mcp = Arc::new(chuck_mcp::Manager::new(chuck_mcp::config_path()));
@@ -2691,7 +2598,7 @@ pub fn build(app: &adw::Application, opts: Options) {
         std::thread::Builder::new().name("mcp-start".into()).spawn(move || m.start_all()).ok();
     }
     let chat_mode = opts.chat.unwrap_or_else(|| Settings::load().map.get("agent_mode").and_then(|v| v.as_bool()) == Some(false));
-    fleet_btn.set_active(!chat_mode);
+    build_btn.set_active(!chat_mode);
     chat_btn.set_active(chat_mode);
     let shared: Shared = Rc::new(RefCell::new(State {
         ui, panel, opts: opts.clone(), folder: None, saved: Saved::default(), running: None, names: HashMap::new(),
@@ -2705,7 +2612,7 @@ pub fn build(app: &adw::Application, opts: Options) {
         spent: 0.0, prompt: 0, cached: 0, unsaved: false,
     }));
     *slot.borrow_mut() = Some(shared.clone());
-    // the handoff button: to the fleet, and send
+    // the handoff button: to Build, and send
     let weak = Rc::downgrade(&shared);
     shared.borrow_mut().on_handoff = Some(Rc::new(move |request: String| {
         let Some(sh) = weak.upgrade() else { return };
@@ -2734,7 +2641,7 @@ pub fn build(app: &adw::Application, opts: Options) {
     }));
     shared.borrow_mut().open_folder(folder, &shared);
     shared.borrow_mut().set_running(false);
-    for (btn, chat) in [(fleet_btn.clone(), false), (chat_btn.clone(), true)] {
+    for (btn, chat) in [(build_btn.clone(), false), (chat_btn.clone(), true)] {
         let sh = shared.clone();
         btn.connect_toggled(move |b| {
             if b.is_active() {
@@ -2799,8 +2706,8 @@ pub fn build(app: &adw::Application, opts: Options) {
     let pal_key = gtk::EventControllerKey::new();
     {
         let (sh, win) = (shared.clone(), window.clone());
-        let (gear, new_btn, folder_btn, fleet_btn, chat_btn, speaker, side_btn, stop) = (gear.clone(), new_btn.clone(),
-            folder_btn.clone(), fleet_btn.clone(), chat_btn.clone(), speaker.clone(), side_btn.clone(), stop.clone());
+        let (gear, new_btn, folder_btn, build_btn, chat_btn, speaker, side_btn, stop) = (gear.clone(), new_btn.clone(),
+            folder_btn.clone(), build_btn.clone(), chat_btn.clone(), speaker.clone(), side_btn.clone(), stop.clone());
         let open = move |query: &str| {
             use crate::palette::Item;
             let click = |b: &gtk::Button| { let b = b.clone(); Box::new(move || b.emit_clicked()) as Box<dyn Fn()> };
@@ -2817,12 +2724,12 @@ pub fn build(app: &adw::Application, opts: Options) {
             let toggle = |b: &gtk::ToggleButton| { let b = b.clone(); Box::new(move || b.set_active(!b.is_active())) as Box<dyn Fn()> };
             let it = |title: &str, group: &'static str, keywords: &'static str, shortcut: &'static str, run: Box<dyn Fn()>| Item {
                 title: title.into(), group, keywords, shortcut, run };
-            let (fb, cb) = (fleet_btn.clone(), chat_btn.clone());
+            let (fb, cb) = (build_btn.clone(), chat_btn.clone());
             let sh2 = sh.clone();
             let items = vec![
                 it("New conversation", "Chat", "clear fresh reset", "", click(&new_btn)),
                 it("Switch to Chat", "Chat", "mode answer ask question", "", Box::new(move || cb.set_active(true))),
-                it("Switch to Fleet", "Chat", "mode agents lead workers", "", Box::new(move || fb.set_active(true))),
+                it("Switch to Build", "Chat", "mode build fleet code", "", Box::new(move || fb.set_active(true))),
                 it("Stop everything", "Chat", "cancel halt kill agents commands", "Esc", click(&stop)),
                 it("/help — every command", "Commands", "commands keys", "", run("/help")),
                 it("/doctor — check everything Chuck depends on", "Commands", "health diagnose problems", "", run("/doctor")),
@@ -2838,7 +2745,7 @@ pub fn build(app: &adw::Application, opts: Options) {
                 it("/diff — every change the last job made", "Folder", "changes review", "", run("/diff")),
                 it("Talk", "Voice", "microphone listen speak dictate", "Ctrl+M", Box::new(move || mic_clicked(&sh2))),
                 it("Read replies aloud on or off", "Voice", "speaker speech tts mute", "", toggle(&speaker)),
-                it("Show or hide the side panel", "View", "panel right sidebar fleet", "", toggle(&side_btn)),
+                it("Show or hide the side panel", "View", "panel right sidebar", "", toggle(&side_btn)),
                 it("Settings", "Settings", "preferences key budget models voice research mcp", "", click(&gear)),
             ];
             crate::palette::show(&win, items, query);

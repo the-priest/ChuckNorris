@@ -25,8 +25,7 @@ fn main() {
             _ => "```test test -f t.html```\n```done\nmade t.html\n```".into(),
         }
     }));
-    let fleet = chuck_core::FleetConfig { deepseek_workers: 0, glm_workers: 0, ..chuck_core::FleetConfig::default() };
-    let cfg = RuntimeConfig { store: outer.join("store"), fleet, checkpoints: Some(outer.join("cp")), ..RuntimeConfig::default() };
+    let cfg = RuntimeConfig { store: outer.join("store"), checkpoints: Some(outer.join("cp")), ..RuntimeConfig::default() };
     let rt = Runtime::new(model.clone(), cfg, Events(None));
     let t = Instant::now();
     let r = rt.run(Job::new("make t.html", &dir));

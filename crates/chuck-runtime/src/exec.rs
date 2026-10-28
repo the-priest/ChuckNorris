@@ -11,18 +11,15 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-pub const WORKER_TAGS: &[&str] = &["read", "grep", "glob", "map", "find", "def", "refs", "rename", "bash", "sh", "test", "search", "fetch",
-    "mcp", "browse", "submit", "team", "snag"];
 pub const LEAD_TAGS: &[&str] = &["read", "grep", "glob", "map", "find", "def", "refs", "rename", "bash", "sh", "test", "search",
-    "fetch", "mcp", "browse", "remember", "forget", "criteria", "plan", "assign",
-    "review", "justify", "done", "ask", "team", "cancel", "snag"];
+    "fetch", "mcp", "browse", "remember", "forget", "criteria", "done", "ask", "snag"];
 /// A file read comes back this long at most (the rest a page away): what
 /// stays in the conversation is re-sent with every call, so it's kept lean.
 const CLIP: usize = 12_000;
 /// A fetched page is handed over this many characters at a time.
 pub const PAGE_CHARS: usize = 12_000;
 
-/// A lead-only call the lead loop handles (needs the fleet).
+/// A call the Lead's loop handles itself (ask, done, browse).
 #[derive(Clone, Debug)]
 pub struct LeadCall {
     pub tag: String,
@@ -36,7 +33,6 @@ pub struct StepResult {
     pub mutated: bool,
     pub verified: bool,
     pub actions: Vec<String>,
-    pub submit: Option<String>,
     pub lead_calls: Vec<LeadCall>,
     /// The reply tried to call a tool but wrote it so nothing could run
     /// (a block never closed, a call in the model's own format).
@@ -45,6 +41,9 @@ pub struct StepResult {
     pub changes: u32,
     /// The exit status of the last command this reply ran.
     pub last_exit: Option<i32>,
+    /// Files written before the criteria existed: kept, not written, until
+    /// they do (then they are, without the model sending them again).
+    pub held: Vec<chuck_tools::FileBlock>,
 }
 
 /// Commands one reply may run (a model in a loop writes dozens; what they
@@ -56,14 +55,20 @@ pub const FAILS_IN_A_ROW: usize = 3;
 
 impl StepResult {
     pub fn acted(&self) -> bool {
-        !self.actions.is_empty() || self.submit.is_some() || !self.lead_calls.is_empty()
+        !self.actions.is_empty() || !self.lead_calls.is_empty()
     }
 }
 
 /// What an agent hears when it called a tool in its own native format.
-pub const NATIVE_CALLS: &str = "[NOTHING RAN: that tool call was written in a function-call format this system \
-    doesn't read. Tools here are fenced blocks in your reply text — three backticks, the tool name, its argument, \
-    three backticks — e.g. ```search your query``` or\n```bash\nls -la\n```\nSend it again that way]";
+pub const NATIVE_CALLS: &str = concat!("[NOTHING RAN: that tool call was written in a function-call format this \
+    system doesn't read. ", native_how!());
+
+/// How a call is written instead (the end of `NATIVE_CALLS`).
+macro_rules! native_how {
+    () => { "Tools here are fenced blocks in your reply text — three backticks, the tool name, its argument, three \
+        backticks — e.g. ```search your query``` or\n```bash\nls -la\n```\nSend it again that way]" };
+}
+use native_how;
 
 /// Asks the user whether a critical command may run (true: yes, typed).
 pub type Approve = Arc<dyn Fn(&str, &str, &[String]) -> Grant + Send + Sync>;
@@ -95,11 +100,10 @@ impl Grant {
 /// How an agent's commands are contained.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Sandbox {
-    /// The folder's access (the lead); workers always work in a jailed copy.
+    /// The folder's access.
     pub access: Access,
     /// bubblewrap is there to use.
     pub bwrap: bool,
-    pub worker: bool,
 }
 
 pub struct Exec<'a> {
@@ -129,62 +133,6 @@ pub struct Exec<'a> {
     pub memory: Option<&'a chuck_store::memory::Memory>,
     /// Places outside the folder the user allowed for this job.
     pub allowed_outside: Option<&'a Mutex<Vec<std::path::PathBuf>>>,
-    /// The team's channel, and this agent's name on it.
-    pub team: Option<(&'a crate::team::Team, &'a str)>,
-    /// Why this agent may not change the project now (the lead, while its
-    /// workers own the changes): reads and checks still run.
-    pub hold: Option<String>,
-    /// The project's own folders a worker's copy borrows (its dependencies,
-    /// its history): shown read-only in the worker's jail.
-    pub lent: &'a [std::path::PathBuf],
-    /// Files a running worker has changed in its copy (path, who, task): the
-    /// Lead may change them too (it's the boss), and that worker is told.
-    pub claimed: &'a [(String, String, String)],
-}
-
-impl Exec<'_> {
-    /// Who is changing `path` in their copy, if anyone (the Lead's view).
-    fn claimed_by(&self, path: &str) -> Option<&(String, String, String)> {
-        if self.claimed.is_empty() {
-            return None;
-        }
-        let base = self.root.canonicalize().unwrap_or_else(|_| self.root.to_path_buf());
-        let rel = chuck_tools::safe(self.root, path).ok()
-            .and_then(|p| p.strip_prefix(&base).ok().map(|r| r.to_string_lossy().into_owned()))
-            .unwrap_or_else(|| path.trim_start_matches("./").to_string());
-        self.claimed.iter().find(|(f, _, _)| *f == rel)
-    }
-
-    /// The Lead changed a file a worker is changing too: the Lead is the boss, so it stands, and the
-    /// worker hears it at once (at its merge the Lead's version stays; an overlapping one of its own is
-    /// set aside in .chuck-conflicts/).
-    fn overrule(&self, c: &(String, String, String), res: &mut StepResult) {
-        let note = format!("the Lead changed {} in the project while you work on it. The project's version wins: \
-            build on it (read it again from the project if you need it) — your overlapping change would be set aside", c.0);
-        if let Some((team, me)) = self.team {
-            team.post(me, Some(&c.1), &note);
-            self.events.emit(Event::Team { from: me.to_string(), to: Some(c.1.clone()), text: note });
-        }
-        res.feedback.push(format!("[note: {} is changing {} too ({}); it was told yours stands — at its merge an \
-            overlapping change of its own goes to .chuck-conflicts/]", c.1, c.0, c.2));
-    }
-}
-
-/// The environment a command in a copy with a borrowed virtualenv needs:
-/// the copy's own code ahead of whatever the environment installed in
-/// editable mode (which points at the real project).
-pub fn copy_env(root: &Path, lent: &[std::path::PathBuf]) -> Vec<(String, String)> {
-    if !lent.iter().any(|p| p.file_name().is_some_and(|n| n == ".venv" || n == "venv")) {
-        return Vec::new();
-    }
-    let mut paths = vec![root.display().to_string()];
-    if root.join("src").is_dir() {
-        paths.push(root.join("src").display().to_string());
-    }
-    if let Some(old) = std::env::var_os("PYTHONPATH").filter(|o| !o.is_empty()) {
-        paths.push(old.to_string_lossy().into_owned());
-    }
-    vec![("PYTHONPATH".into(), paths.join(":"))]
 }
 
 /// What sort of snag a line of feedback is, if it is one.
@@ -282,23 +230,6 @@ pub fn proves_nothing(cmd: &str) -> bool {
     })
 }
 
-/// Plan lines, "- [x] done step" / "- [ ] open step" / "- step": (step, done).
-pub fn parse_plan(body: &str) -> Vec<(String, bool)> {
-    body.lines().filter_map(|l| {
-        let l = l.trim().trim_start_matches(['-', '*', '•']).trim();
-        let l = l.trim_start_matches(|c: char| c.is_ascii_digit()).trim_start_matches(['.', ')']).trim();
-        let (done, rest) = if let Some(r) = l.strip_prefix("[x]").or_else(|| l.strip_prefix("[X]")) {
-            (true, r)
-        } else if let Some(r) = l.strip_prefix("[ ]").or_else(|| l.strip_prefix("[]")) {
-            (false, r)
-        } else {
-            (false, l)
-        };
-        let rest = rest.trim();
-        (!rest.is_empty()).then(|| (rest.to_string(), done))
-    }).collect()
-}
-
 /// "- text :: verify: cmd" lines.
 pub fn parse_criteria(body: &str) -> Vec<(String, Option<String>)> {
     body.lines().filter_map(|l| {
@@ -337,9 +268,6 @@ impl<'a> Exec<'a> {
     }
 
     fn mutation_ok(&self) -> Result<(), String> {
-        if let Some(why) = &self.hold {
-            return Err(why.clone());
-        }
         self.gate.lock().unwrap().allow_mutation().map_err(|unmet| {
             format!("[refused — nothing may change yet: {}]",
                     unmet.iter().map(Unmet::describe).collect::<Vec<_>>().join("; "))
@@ -358,16 +286,7 @@ impl<'a> Exec<'a> {
     /// Err: it must not run at all.
     fn jail(&self, reach: &Reach) -> Result<(Option<Wrap>, bool), String> {
         let s = self.sandbox;
-        let may_write = self.hold.is_none() && self.gate.lock().unwrap().allow_mutation().is_ok();
-        if s.worker {
-            // a worker's copy is jailed whatever the folder's access; an offline folder keeps it offline
-            let j = || match s.access {
-                Access::Sandbox => Jail::new(self.root).offline(),
-                Access::Guarded => Jail::new(self.root).guarded(),
-                _ => Jail::new(self.root),
-            }.lend(self.lent);
-            return Ok((s.bwrap.then(|| j().wrap()), false));
-        }
+        let may_write = self.gate.lock().unwrap().allow_mutation().is_ok();
         let look = |j: Jail| (Some(j.read_only().wrap()), true);
         if s.access == Access::Guarded {
             let allowed: Vec<std::path::PathBuf> = self.allowed_outside.map(|a| a.lock().unwrap().clone()).unwrap_or_default();
@@ -404,7 +323,7 @@ impl<'a> Exec<'a> {
     }
 
     /// May this reach the paths outside the folder it names? Asks the user
-    /// in "ask outside" mode (the lead's; a worker is refused). Err: refused.
+    /// in "ask outside" mode. Err: refused.
     fn reach(&self, what: &str, outside: Vec<std::path::PathBuf>) -> Result<Reach, String> {
         if self.sandbox.access != Access::Guarded {
             return Ok(Reach::Inside);
@@ -421,10 +340,6 @@ impl<'a> Exec<'a> {
             None => outside.iter().map(|p| p.display().to_string()).collect(),
         };
         list.dedup();
-        if self.sandbox.worker {
-            return Err(format!("[refused: `{}` reaches outside your copy of the project ({}). Work inside it; if the \
-                task truly needs something outside, say so in your submission for the lead]", clip(what, 120), list.join(", ")));
-        }
         if let Some(p) = outside.iter().find(|p| secret_path(p)) {
             return Err(format!("[refused: {} holds credentials, which no agent may touch]", p.display()));
         }
@@ -460,11 +375,11 @@ impl<'a> Exec<'a> {
             return Err(format!("[refused: {} holds credentials, which no agent may touch]", abs.display()));
         }
         match self.sandbox.access {
-            Access::Full if !self.sandbox.worker => Ok(Some(abs)),
+            Access::Full => Ok(Some(abs)),
             Access::Guarded if chuck_sandbox::free_to_reach(&abs, self.root) => Ok(Some(abs)),
             Access::Guarded => self.reach(what, vec![abs.clone()]).map(|_| Some(abs)),
-            _ => Err(format!("[refused: {} is outside the project, and this {} stays inside it]", abs.display(),
-                             if self.sandbox.worker { "copy's work" } else { "folder's access" })),
+            _ => Err(format!("[refused: {} is outside the project, and this folder's access stays inside it]",
+                             abs.display())),
         }
     }
 
@@ -479,15 +394,20 @@ impl<'a> Exec<'a> {
         o.wrap = wrap;
         o.stop = Some(self.stop.clone());
         o.on_chunk = Some(&mut on);
-        o.env = copy_env(self.root, self.lent);
         bash(cmd, o)
     }
 
     /// Run every call in `reply`. What got in the agent's way is written
     /// down as a snag (see `chuck_store::snags`) on the way out.
     pub fn run(&self, reply: &str) -> StepResult {
-        let res = self.run_calls(reply);
-        let who = self.team.map(|(_, n)| n.to_string()).unwrap_or_else(|| self.role.label().to_lowercase());
+        self.run_held(reply, Vec::new())
+    }
+
+    /// `run`, with files an earlier reply wrote too soon (before the criteria):
+    /// they go right after this reply's criteria, before its other calls.
+    pub fn run_held(&self, reply: &str, held: Vec<chuck_tools::FileBlock>) -> StepResult {
+        let res = self.run_calls(reply, held);
+        let who = self.role.label().to_lowercase();
         for line in &res.feedback {
             if let Some(kind) = friction(line) {
                 crate::snag(self.events, self.id, &who, kind, line);
@@ -496,9 +416,9 @@ impl<'a> Exec<'a> {
         res
     }
 
-    fn run_calls(&self, reply: &str) -> StepResult {
+    fn run_calls(&self, reply: &str, held: Vec<chuck_tools::FileBlock>) -> StepResult {
         let mut res = StepResult::default();
-        let tags: &[&str] = if self.role == Role::Lead { LEAD_TAGS } else { WORKER_TAGS };
+        let tags: &[&str] = LEAD_TAGS;
         enum Item {
             File(chuck_tools::FileBlock),
             Tool(chuck_tools::ToolBlock),
@@ -511,11 +431,24 @@ impl<'a> Exec<'a> {
         }
         let mut items: Vec<(usize, Item)> = file_blocks(reply).into_iter().map(|b| (b.start, Item::File(b))).collect();
         items.extend(tool_blocks(reply, tags).into_iter().map(|b| (b.start, Item::Tool(b))));
-        if items.is_empty() && chuck_tools::native_tool_markup(reply) {
+        // a call in the model's own format that couldn't be read is never dropped in silence, even beside
+        // calls that ran
+        if chuck_tools::native_tool_markup(reply) {
             res.malformed = true;
-            res.feedback.push(NATIVE_CALLS.into());
+            res.feedback.push(if items.is_empty() { NATIVE_CALLS.into() } else {
+                format!("[the calls written as blocks ran, but part of that reply was a call in a function-call format \
+                    this system doesn't read (or one missing what it needs, like a write with no content) — that part \
+                    did NOT run. {}", native_how!())
+            });
         }
         items.sort_by_key(|(s, _)| *s);
+        // the criteria come first, wherever the reply put them: a file written above them would be refused —
+        // and a whole file sent again costs the user a reply's wait
+        let first = |i: &Item| matches!(i, Item::Tool(t) if t.tag == "criteria");
+        let (mut ordered, rest): (Vec<_>, Vec<_>) = items.into_iter().partition(|(_, i)| first(i));
+        ordered.extend(held.into_iter().map(|b| (b.start, Item::File(b))));
+        ordered.extend(rest);
+        let items = ordered;
         let all_criteria: Vec<CriterionId> = self.gate.lock().unwrap().criteria.iter().map(|c| c.id).collect();
         // the same call twice in one reply, with nothing changed between: run once (a model in a loop writes
         // the same few commands over and over — each run costs time and fills the context)
@@ -531,7 +464,7 @@ impl<'a> Exec<'a> {
                 Item::File(b) => self.file(&b, &all_criteria, &mut res),
                 Item::Tool(t) => {
                     let key = (res.changes, t.tag.clone(), t.arg.trim().to_string(), t.body.trim().to_string());
-                    if !matches!(t.tag.as_str(), "team" | "snag") && !ran.insert(key) {
+                    if t.tag != "snag" && !ran.insert(key) {
                         repeats += 1;
                         continue;
                     }
@@ -578,18 +511,23 @@ impl<'a> Exec<'a> {
             self.act(&b.tag, &b.path, false, "fences unclear: asked to resend");
             return;
         }
-        if self.sandbox.access == Access::ReadOnly && !self.sandbox.worker {
+        if self.sandbox.access == Access::ReadOnly {
             let e = "[refused: this folder is read-only (its access setting) — nothing in it is changed]".to_string();
             self.act(&b.tag, &b.path, false, &e);
             res.feedback.push(e);
             return;
         }
-        if let Some(c) = (b.tag != "patch").then(|| self.claimed_by(&b.path)).flatten() {
-            self.overrule(c, res);
-        }
-        if let Err(e) = self.allowed("write", &b.path).and_then(|_| self.mutation_ok()) {
+        if let Err(e) = self.allowed("write", &b.path) {
             self.act(&b.tag, &b.path, false, &e);
             res.feedback.push(e);
+            return;
+        }
+        if let Err(e) = self.mutation_ok() {
+            // too soon, not wrong: kept for when the criteria exist
+            self.act(&b.tag, &b.path, false, "kept until the criteria exist");
+            res.feedback.push(format!("[{} {} KEPT, not written yet: {} It is written as soon as you send ```criteria``` \
+                — don't send the file again]", b.tag, b.path, e.trim_start_matches('[').trim_end_matches(']')));
+            res.held.push(b.clone());
             return;
         }
         // a file outside the folder: asked first (in "ask outside" mode), then written where it is
@@ -622,7 +560,6 @@ impl<'a> Exec<'a> {
                 self.gate.lock().unwrap().record(self.id, all.to_vec(), EvidenceKind::Diff {
                     files: vec![ch.rel.clone()], added, removed, patch }, true);
                 res.mutated = true;
-        res.changes += 1;
                 res.changes += 1;
                 let s = format!("{} {} (+{added} −{removed})", if ch.before.is_some() { "changed" } else { "created" }, ch.rel);
                 self.act(&b.tag, &ch.rel, true, &s);
@@ -646,9 +583,6 @@ impl<'a> Exec<'a> {
                 return;
             }
         };
-        for c in plan.iter().filter_map(|(rel, ..)| self.claimed_by(rel)) {
-            self.overrule(c, res);
-        }
         if let Some(rel) = plan.iter().find(|(rel, ..)| self.sandbox.access != Access::Full
             && chuck_tools::safe(self.root, rel).is_ok_and(|p| secret_path(&p))).map(|p| p.0.clone())
         {
@@ -795,7 +729,7 @@ impl<'a> Exec<'a> {
                     res.feedback.push(e);
                     return;
                 }
-                if let Some(why) = refuse_command(&cmd, self.role) {
+                if let Some(why) = refuse_command(&cmd) {
                     self.act(tag, &cmd, false, &why);
                     res.feedback.push(why);
                     return;
@@ -810,15 +744,10 @@ impl<'a> Exec<'a> {
                 };
                 if classify_command(&cmd) == Level::Critical {
                     let why = "it can destroy data or the system beyond what a checkpoint brings back";
-                    let yes = !self.sandbox.worker && self.approve.as_ref().is_some_and(|ok| ok(&cmd, why, &[]).yes());
+                    let yes = self.approve.as_ref().is_some_and(|ok| ok(&cmd, why, &[]).yes());
                     if !yes {
-                        let msg = if self.sandbox.worker {
-                            format!("[refused: `{}` is critical ({why}); background workers never run commands \
-                                that need the user's approval — report what you need to the lead]", clip(&cmd, 120))
-                        } else {
-                            format!("[refused: `{}` is critical ({why}) and the user didn't approve it — find a \
-                                safer way, or explain why it's needed]", clip(&cmd, 120))
-                        };
+                        let msg = format!("[refused: `{}` is critical ({why}) and the user didn't approve it — find a \
+                            safer way, or explain why it's needed]", clip(&cmd, 120));
                         self.act(tag, &cmd, false, "critical: not approved");
                         res.feedback.push(msg);
                         return;
@@ -859,10 +788,10 @@ impl<'a> Exec<'a> {
                 if let Some((ledger, who)) = &self.audit {
                     // every command that ran, whatever the agent later says about it (recorded after
                     // the change check, so a ledger inside the project isn't mistaken for a change)
-                    ledger.record(&cmd, r.exit, &r.output, if self.sandbox.worker { "agent" } else { "shell" },
+                    ledger.record(&cmd, r.exit, &r.output, "shell",
                                   &format!("chuck:{}:{who}", std::process::id()), &started);
                 }
-                if !self.sandbox.worker && !looking {
+                if !looking {
                     let gone = git_disarm(self.root, t_start);
                     if !gone.is_empty() {
                         res.feedback.push(format!("[disarmed git hooks/settings that command added (they would run \
@@ -872,8 +801,6 @@ impl<'a> Exec<'a> {
                 if looking {
                     res.feedback.push(if self.sandbox.access == Access::ReadOnly {
                         "[ran read-only: this folder's access lets commands look, never change]".into()
-                    } else if self.hold.is_some() {
-                        "[ran read-only: the workers own the project's changes until they hand in]".into()
                     } else {
                         "[ran read-only: nothing may change before the acceptance criteria exist]".into()
                     });
@@ -891,10 +818,7 @@ impl<'a> Exec<'a> {
                         .map(|c| c.id).collect()
                 };
                 let out = chuck_core::evidence::clip_ends(&r.output, 6000);
-                if changed && self.hold.is_some() {
-                    res.feedback.push("[warning: that command changed the project while workers are on it (no \
-                        sandbox here could stop it) — their merges may conflict with it]".into());
-                } else if changed && g.allow_mutation().is_err() {
+                if changed && g.allow_mutation().is_err() {
                     res.feedback.push("[warning: that command changed files before acceptance criteria were \
                         written — the gate will not accept changes made without criteria]".into());
                 }
@@ -915,7 +839,6 @@ impl<'a> Exec<'a> {
                 }
                 drop(g);
                 res.mutated |= changed;
-        res.changes += u32::from(changed);
                 res.changes += u32::from(changed);
                 res.verified |= verified;
                 let head = format!("exit {}{}{}", r.exit, if r.timed_out { " (timed out)" } else { "" },
@@ -948,18 +871,10 @@ impl<'a> Exec<'a> {
             "remember" | "forget" => {
                 let what = if arg.is_empty() { t.body.trim() } else { arg };
                 res.actions.push(format!("{tag} {what}"));
-                let (ok, summary, text) = memory_tool(if self.sandbox.worker { None } else { self.memory }, tag, what,
+                let (ok, summary, text) = memory_tool(self.memory, tag, what,
                                                       &self.root.display().to_string());
                 self.act(tag, what, ok, &summary);
                 res.feedback.push(text);
-            }
-            "browse" if self.sandbox.worker => {
-                res.actions.push(format!("browse {arg}"));
-                res.feedback.push("[browse: the browser is the lead's (it runs outside your jail) — check pages with \
-                    the project's own tests, or say in your submission what the lead should look at]".into());
-            }
-            "submit" => {
-                res.submit = Some(format!("{}\n{}", arg, t.body).trim().to_string());
             }
             "snag" => {
                 // the agent's own word on what got in its way (debug mode asks for these)
@@ -968,26 +883,10 @@ impl<'a> Exec<'a> {
                     res.feedback.push("[snag: say what got in your way — ```snag <what>```]".into());
                     return;
                 }
-                let who = self.team.map(|(_, n)| n.to_string()).unwrap_or_else(|| self.role.label().to_lowercase());
+                let who = self.role.label().to_lowercase();
                 crate::snag(self.events, self.id, &who, "said", &what);
                 res.actions.push(format!("snag {}", clip(&what, 60)));
                 res.feedback.push("[snag noted — carry on]".into());
-            }
-            "team" => {
-                let Some((team, me)) = self.team else {
-                    res.feedback.push("[team: there is no team on this job]".into());
-                    return;
-                };
-                let (to, text) = crate::team::addressee(arg, &t.body);
-                if text.is_empty() {
-                    res.feedback.push("[team: say something — ```team <message>``` or ```team @ds-2 <message>```]".into());
-                    return;
-                }
-                team.post(me, to.as_deref(), &text);
-                self.events.emit(Event::Team { from: me.to_string(), to: to.clone(), text: text.clone() });
-                res.actions.push(format!("team {}", clip(&text, 60)));
-                self.act("team", &to.as_ref().map_or_else(|| "everyone".into(), |t| format!("@{t}")), true, &clip(&text, 200));
-                res.feedback.push(format!("[sent to {}]", to.unwrap_or_else(|| "the team".into())));
             }
             "criteria" => {
                 // verify commands as the gate compares them (no redundant `cd <folder> &&`)
@@ -1005,46 +904,12 @@ impl<'a> Exec<'a> {
                 self.act("criteria", "", true, &list.join(" · "));
                 res.feedback.push(format!("[criteria accepted — link evidence with `for cN`:\n{}]", list.join("\n")));
             }
-            "plan" => {
-                // ```plan done 2 3``` (or ```plan undo 3```): mark steps without sending the plan again
-                let spec = format!("{arg} {}", t.body).trim().to_string();
-                let mark = spec.split_whitespace().next().map(|w| w.to_lowercase())
-                    .filter(|w| w == "done" || w == "undo");
-                let mut g = self.gate.lock().unwrap();
-                let msg = if let Some(how) = mark {
-                    let nums: Vec<usize> = spec.split(|c: char| !c.is_ascii_digit()).filter_map(|n| n.parse().ok()).collect();
-                    if nums.is_empty() {
-                        "[plan: say which steps — ```plan done 2 3```]".to_string()
-                    } else {
-                        match g.mark_plan(&nums, how == "done") {
-                            Ok(()) => String::new(),
-                            Err(e) => format!("[plan: {e}]"),
-                        }
-                    }
-                } else {
-                    g.set_plan_steps(parse_plan(&t.body));
-                    String::new()
-                };
-                let steps = g.plan_view();
-                drop(g);
-                let (n, done) = (steps.len(), steps.iter().filter(|(_, d)| *d).count());
-                self.events.emit(Event::Plan { steps: steps.clone() });
-                res.actions.push(format!("plan {done}/{n}"));
-                self.act("plan", "", n > 0 && msg.is_empty(), &format!("{done}/{n} steps done"));
-                res.feedback.push(if msg.is_empty() {
-                    let next = steps.iter().position(|(_, d)| !d);
-                    format!("[plan: {done} of {n} steps done{}]", next.map(|i| format!("; now step {}: {}", i + 1,
-                        clip(&steps[i].0, 120))).unwrap_or_default())
-                } else { msg });
-            }
             other => res.lead_calls.push(LeadCall { tag: other.into(), arg: arg.into(), body: t.body.clone() }),
         }
     }
 
-    /// The language servers this agent may use: the lead's own, never a
-    /// worker's (a server for a worker's copy would run outside its jail).
     fn servers(&self) -> Option<&chuck_code::Manager> {
-        if self.sandbox.worker { None } else { self.lsp }
+        self.lsp
     }
 
     /// Lines naming files: those under a credentials folder are left out
@@ -1110,10 +975,6 @@ impl<'a> Exec<'a> {
             res.feedback.push(e);
             return;
         }
-        if self.sandbox.worker {
-            return refuse(res, "renaming needs a language server, which workers don't get — edit the uses yourself \
-                (```refs``` finds them)".into());
-        }
         if self.sandbox.access == Access::ReadOnly {
             return refuse(res, "this folder is read-only (its access setting)".into());
         }
@@ -1143,8 +1004,6 @@ impl<'a> Exec<'a> {
                         files: vec![ch.rel.clone()], added, removed, patch }, true);
                     res.mutated = true;
                     res.changes += 1;
-        res.changes += 1;
-                res.changes += 1;
                     done.push(ch.rel);
                 }
                 Err(e) => {
@@ -1161,7 +1020,7 @@ impl<'a> Exec<'a> {
     }
 
     /// ```mcp server.tool``` + JSON arguments: a tool on an MCP server. The
-    /// server runs outside every sandbox, so: never a worker's; before the
+    /// server runs outside every sandbox, so: before the
     /// criteria, and in a read-only folder, only tools that say they only
     /// read; nothing in an offline folder; and a tool that may destroy
     /// things asks the user first (unless its server is trusted in mcp.json).
@@ -1181,10 +1040,6 @@ impl<'a> Exec<'a> {
         if let Err(e) = self.allowed("mcp", &target) {
             res.feedback.push(e);
             return;
-        }
-        if self.sandbox.worker {
-            return refuse(res, "MCP servers run outside your jail, so workers can't use them — tell the lead what you \
-                need from it".into());
         }
         let Some(m) = self.mcp else {
             return refuse(res, format!("no MCP servers are set up ({})", chuck_mcp::config_path().display()));
@@ -1360,7 +1215,7 @@ pub fn research(web: Option<&chuck_web::Web>, sources: usize, tag: &str, what: &
 
 /// Privilege: no agent runs as root (the window asks for a password; here
 /// nobody can). Destruction is the classifier's (chuck-sandbox::safety).
-pub fn refuse_command(cmd: &str, role: Role) -> Option<String> {
+pub fn refuse_command(cmd: &str) -> Option<String> {
     static RX: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     // where a command starts (not anywhere: `grep -rn su .` and a commit message about sudo are not root), and
     // behind the prefixes that run what follows them
@@ -1369,8 +1224,7 @@ pub fn refuse_command(cmd: &str, role: Role) -> Option<String> {
         r"(?:(?:env(?:\s+-\S+)*(?:\s+\w+=\S*)*|nohup|exec|time|nice(?:\s+-n\s*-?\d+)?|command|builtin|xargs(?:\s+-\S+)*|\w+=\S*)\s+)*",
         r"(?:sudo|doas|pkexec|su|run0)(?:\s|$)")).unwrap());
     if rx.is_match(cmd) {
-        return Some(format!("[refused: a {} doesn't get root — say what needs root and why, and the user can \
-            run it]", role.label()));
+        return Some("[refused: Chuck doesn't get root — say what needs root and why, and the user can run it]".into());
     }
     None
 }
@@ -1384,14 +1238,13 @@ mod tests {
         let d = std::env::temp_dir().join(format!("chuck-flood-{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         let kernel = Kernel::new(4);
-        let id = kernel.spawn(chuck_core::SpawnSpec::new("ds-1", Role::DeepSeekWorker));
+        let id = kernel.spawn(chuck_core::SpawnSpec::new("lead", Role::Lead));
         let gate = Mutex::new(DoneGate::new("x", chuck_core::Scale::Small));
         let events = Events(None);
-        let exec = Exec { id, role: Role::DeepSeekWorker, kernel: &kernel, root: &d, gate: &gate,
-                          sandbox: Sandbox { access: Access::Full, bwrap: false, worker: true }, approve: None,
+        let exec = Exec { id, role: Role::Lead, kernel: &kernel, root: &d, gate: &gate,
+                          sandbox: Sandbox { access: Access::Full, bwrap: false }, approve: None,
                           audit: None, stop: Arc::default(), events: &events, cmd_timeout: Duration::from_secs(10),
-                          web: None, sources: 0, mcp: None, lsp: None, memory: None, allowed_outside: None,
-                          team: None, hold: None, lent: &[], claimed: &[] };
+                          web: None, sources: 0, mcp: None, lsp: None, memory: None, allowed_outside: None };
         // forty different checks, all failing: three run
         let reply: String = (0..40).map(|i| format!("```bash\nfalse && echo {i}\n```\n")).collect();
         let r = exec.run(&reply);
@@ -1419,11 +1272,11 @@ mod tests {
         for c in ["sudo pacman -Syu", "ls && sudo rm x", "echo hi; su -c id", "cat f | sudo tee /etc/x", "$(sudo id)",
                   "bash -c \"sudo make install\"", "env FOO=1 sudo id", "nohup sudo x &", "xargs -0 sudo rm", "doas sh",
                   "SUDO_ASKPASS=/x sudo -A id", "pkexec bash", "  sudo id", "run0 id"] {
-            assert!(refuse_command(c, Role::DeepSeekWorker).is_some(), "{c}");
+            assert!(refuse_command(c).is_some(), "{c}");
         }
         for c in ["grep -rn su .", "git commit -m 'fix the su prompt'", "grep -n \"sudo\" install.sh", "echo pseudo",
                   "ls susan", "rg 'doas|sudo' -n", "cat su.txt", "npm run build", "python3 -m sudoku"] {
-            assert!(refuse_command(c, Role::DeepSeekWorker).is_none(), "{c}");
+            assert!(refuse_command(c).is_none(), "{c}");
         }
     }
 
@@ -1439,12 +1292,6 @@ mod tests {
         let c = parse_criteria("- parser takes empty input :: verify: `pytest -q tests/p.py`\n- docs updated\n");
         assert_eq!(c, vec![("parser takes empty input".into(), Some("pytest -q tests/p.py".into())),
                            ("docs updated".into(), None)]);
-    }
-
-    #[test]
-    fn plans_with_progress() {
-        assert_eq!(parse_plan("- [x] read the parser\n- [ ] fix it\n3. verify\n* [X] two"), vec![
-            ("read the parser".into(), true), ("fix it".into(), false), ("verify".into(), false), ("two".into(), true)]);
     }
 
     #[test]
@@ -1471,9 +1318,9 @@ mod tests {
 
     #[test]
     fn the_floor_of_refusals() {
-        assert!(refuse_command("sudo pacman -Syu", Role::Lead).is_some());
-        assert!(refuse_command("cd x && su -c 'id'", Role::GlmWorker).is_some());
-        assert!(refuse_command("echo sudoku", Role::DeepSeekWorker).is_none());
-        assert!(refuse_command("pytest -q", Role::GlmWorker).is_none());
+        assert!(refuse_command("sudo pacman -Syu").is_some());
+        assert!(refuse_command("cd x && su -c 'id'").is_some());
+        assert!(refuse_command("echo sudoku").is_none());
+        assert!(refuse_command("pytest -q").is_none());
     }
 }

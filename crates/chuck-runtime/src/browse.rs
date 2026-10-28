@@ -2,7 +2,7 @@
 //! real browser, run the action lines under it, and hear back what broke —
 //! uncaught exceptions, console errors, failed requests — plus the visible
 //! text and what the page looks like. The lead model doesn't see images, so
-//! the screenshot goes to the fleet's vision model for a short, plain
+//! the screenshot goes to the vision model for a short, plain
 //! description (one cheap call); that look is evidence for the criteria it
 //! names, but only when the page loaded without errors.
 
@@ -60,12 +60,12 @@ fn shot_path(ctx: &Ctx) -> PathBuf {
                      N.fetch_add(1, Ordering::SeqCst)))
 }
 
-/// The vision model's look at a screenshot (None: no model in the fleet
+/// The vision model's look at a screenshot (None: no model
 /// sees images, or the call failed — the report says so).
 fn look(ctx: &Ctx, lead: AgentId, png: &[u8], about: &str) -> Result<String, String> {
-    let model = [&ctx.cfg.fleet.glm_model, &ctx.cfg.fleet.deepseek_model].into_iter()
+    let model = [&ctx.cfg.models.vision, &ctx.cfg.models.main].into_iter()
         .find(|m| chuck_model::sees_images(m)).cloned()
-        .ok_or("no model in the fleet reads images")?;
+        .ok_or("no model reads images")?;
     let k = &ctx.kernel;
     let id = k.spawn(SpawnSpec::new("eyes", Role::Lead).parent(lead).caps(Caps::READ).brief("look at a screenshot"));
     ctx.events.emit(Event::AgentStarted { id, role: Role::Lead, name: "eyes".into(), model: model.clone(), task: None });

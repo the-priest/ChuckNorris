@@ -222,7 +222,7 @@ impl DoneGate {
     }
 
     /// Write the acceptance criteria (each "text" or "text ⟶ verify: cmd").
-    /// Workers receive theirs from the Lead, already accepted.
+    /// Accepted as they are set by the Lead.
     pub fn set_criteria(&mut self, by: Role, items: Vec<(String, Option<String>)>) {
         self.criteria = items.into_iter().enumerate().filter(|(_, (t, _))| !t.trim().is_empty())
             .map(|(i, (text, verify))| Criterion {
@@ -634,7 +634,7 @@ mod tests {
         let mut g = DoneGate::new("fix it", Scale::Small);
         g.set_criteria(Role::Lead, vec![("parser handles empty input".into(), None)]);
         g.record(W, vec![CriterionId(1)], diff(5, "x = "), true);
-        assert!(matches!(g.declare_done(Role::DeepSeekWorker), Err(e) if e == vec![Unmet::NotTheLead(Role::DeepSeekWorker)]));
+        assert!(matches!(g.declare_done(Role::Daemon), Err(e) if e == vec![Unmet::NotTheLead(Role::Daemon)]));
         let gaps = g.submit().unwrap_err();
         assert!(gaps.contains(&Unmet::NotVerifiedSinceLastChange));
     }
@@ -680,7 +680,7 @@ mod tests {
         g.record(W, vec![CriterionId(1)], diff(3, "q = "), true);
         g.record(W, vec![CriterionId(1)], test(0), false);
         assert_eq!(g.check_work(), vec![Unmet::OutOfProportion { lines: 3 }]);
-        assert!(!g.accept_justification(Role::GlmWorker, "proportion"));
+        assert!(!g.accept_justification(Role::Daemon, "proportion"));
         assert!(g.accept_justification(Role::Lead, "proportion"));
         assert!(g.check_work().is_empty());
     }
@@ -693,7 +693,7 @@ mod tests {
         g.record(W, vec![CriterionId(1)], test(0), false);
         g.submit().unwrap();
         assert_eq!(g.check(), vec![Unmet::NotReviewed]);
-        assert!(g.review(W, Role::GlmWorker, Verdict::Accepted, "").is_err());
+        assert!(g.review(W, Role::Daemon, Verdict::Accepted, "").is_err());
         g.review(LEAD, Role::Lead, Verdict::Rejected(vec!["no error handling".into()]), "").unwrap();
         assert!(matches!(g.declare_done(Role::Lead), Err(e) if matches!(e[0], Unmet::Rejected(_))));
         g.record(W, vec![CriterionId(1)], diff(3, "c = "), true);

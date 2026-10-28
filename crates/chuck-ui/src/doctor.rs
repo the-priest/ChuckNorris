@@ -54,10 +54,10 @@ pub fn run(folder: Option<&Path>, mcp: Option<&chuck_mcp::Manager>) -> Vec<Check
         Ok(m) => match m.list_models() {
             Ok(models) => {
                 out.push(c("SiliconFlow", State::Ok, format!("the key works · {} models on your account", models.len())));
-                let mut cfg = setup::fleet(&s);
+                let mut cfg = setup::models(&s);
                 let notes = cfg.resolve(&models);
-                out.push(c("Fleet models", if notes.is_empty() { State::Ok } else { State::Warn },
-                           if notes.is_empty() { format!("lead {}, workers {}, eyes {}", cfg.deepseek_model, cfg.worker_model, cfg.glm_model) } else {
+                out.push(c("Models", if notes.is_empty() { State::Ok } else { State::Warn },
+                           if notes.is_empty() { format!("{}, eyes {}", cfg.main, cfg.vision) } else {
                                notes.iter().map(|(a, b)| format!("{a} isn't on your account: {b} is used")).collect::<Vec<_>>().join("; ")
                            }));
             }
@@ -95,8 +95,8 @@ pub fn run(folder: Option<&Path>, mcp: Option<&chuck_mcp::Manager>) -> Vec<Check
     let pref = setup::browser_pref(&s);
     use chuck_web::browser::{pick, Purpose};
     match pick(&pref, Purpose::Check) {
-        Ok(e) => out.push(c("Browser", State::Ok, format!("{} — the Lead's page checks", e.describe()))),
-        Err(e) => out.push(c("Browser", State::Warn, format!("{e}: the Lead can't check web pages"))),
+        Ok(e) => out.push(c("Browser", State::Ok, format!("{} — Chuck's page checks", e.describe()))),
+        Err(e) => out.push(c("Browser", State::Warn, format!("{e}: Chuck can't check web pages"))),
     }
     match pick(&pref, Purpose::Read) {
         Ok(e) => out.push(c("Blocked pages", if matches!(e, chuck_web::browser::Engine::Camoufox(_)) { State::Ok } else {

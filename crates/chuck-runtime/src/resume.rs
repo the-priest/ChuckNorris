@@ -1,6 +1,6 @@
 //! A job that paused (out of budget, stuck, stopped, an outage too long)
 //! can carry on exactly where it stopped: the Lead's conversation, the
-//! criteria and every piece of evidence, the plan, and the checkpoint the
+//! criteria and every piece of evidence, and the checkpoint the
 //! whole job started from. Kept on disk per folder, so "Keep going" works
 //! after Chuck was closed, too; a job that finishes clears it.
 
@@ -24,8 +24,6 @@ pub struct Resume {
     pub mutated: bool,
     /// The checkpoint taken before the job touched anything.
     pub checkpoint: Option<String>,
-    /// Tasks assigned so far (new ones are numbered after them).
-    pub tasks: usize,
     /// Why it paused, and what was missing then.
     pub why: String,
     pub gaps: Vec<String>,

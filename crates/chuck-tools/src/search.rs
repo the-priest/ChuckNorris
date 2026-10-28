@@ -2,7 +2,7 @@
 //! whether anything changed (so a shell command that edited files counts as
 //! a change, and earlier verification stops counting).
 
-use crate::cow::SKIP;
+use crate::snapshot::SKIP;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 

@@ -820,15 +820,15 @@ mod tests {
     fn child_quota_and_caps_are_clipped_to_the_parent() {
         let k = Kernel::new(2);
         let lead = k.spawn(SpawnSpec::new("lead", Role::Lead).quota(Quota::tokens(1000)));
-        let w = k.spawn(SpawnSpec::new("w", Role::GlmWorker).parent(lead).quota(Quota::tokens(5000))
+        let w = k.spawn(SpawnSpec::new("w", Role::Daemon).parent(lead).quota(Quota::tokens(5000))
             .caps(Caps::ALL));
         let info = k.info(w).unwrap();
         assert_eq!(info.quota.tokens, Some(1000));
         assert!(info.caps.has(Caps::SPAWN)); // the lead has all, so the worker may too
         let d = k.spawn(SpawnSpec::new("d", Role::Daemon).parent(w).caps(Caps::ALL));
         assert!(!k.caps(d).has(Caps::SPAWN) || k.caps(w).has(Caps::SPAWN));
-        let r = k.spawn(SpawnSpec::new("r", Role::GlmWorker).parent(lead).caps(Caps::READ));
-        let rr = k.spawn(SpawnSpec::new("rr", Role::GlmWorker).parent(r).caps(Caps::ALL));
+        let r = k.spawn(SpawnSpec::new("r", Role::Daemon).parent(lead).caps(Caps::READ));
+        let rr = k.spawn(SpawnSpec::new("rr", Role::Daemon).parent(r).caps(Caps::ALL));
         assert_eq!(k.caps(rr), Caps::READ, "a child never does more than its parent");
     }
 
@@ -836,8 +836,8 @@ mod tests {
     fn spend_is_charged_up_the_tree_and_a_parent_quota_caps_its_subtree() {
         let k = Kernel::new(4);
         let lead = k.spawn(SpawnSpec::new("lead", Role::Lead).quota(Quota::tokens(1000)));
-        let a = k.spawn(SpawnSpec::new("a", Role::DeepSeekWorker).parent(lead));
-        let b = k.spawn(SpawnSpec::new("b", Role::GlmWorker).parent(lead));
+        let a = k.spawn(SpawnSpec::new("a", Role::Daemon).parent(lead));
+        let b = k.spawn(SpawnSpec::new("b", Role::Daemon).parent(lead));
         k.charge(a, 400, 100, 0.01);
         k.charge(b, 400, 100, 0.01);
         assert_eq!(k.info(lead).unwrap().tokens, 1000);
@@ -847,7 +847,7 @@ mod tests {
     #[test]
     fn past_quota_a_process_gets_one_last_call_then_is_killed() {
         let k = Kernel::new(1);
-        let p = k.spawn(SpawnSpec::new("w", Role::DeepSeekWorker).quota(Quota::tokens(10)));
+        let p = k.spawn(SpawnSpec::new("w", Role::Daemon).quota(Quota::tokens(10)));
         assert_eq!(k.acquire(p, None), Ok(true));
         k.charge(p, 10, 0, 0.0);
         k.release(p);
@@ -862,9 +862,9 @@ mod tests {
     fn slots_go_to_the_lowest_nice_and_waiting_ages() {
         let (clk, t) = clock();
         let k = Arc::new(Kernel::with_clock(1, clk));
-        let a = k.spawn(SpawnSpec::new("a", Role::GlmWorker));
-        let hi = k.spawn(SpawnSpec::new("hi", Role::DeepSeekWorker).nice(-5));
-        let lo = k.spawn(SpawnSpec::new("lo", Role::GlmWorker).nice(5));
+        let a = k.spawn(SpawnSpec::new("a", Role::Daemon));
+        let hi = k.spawn(SpawnSpec::new("hi", Role::Daemon).nice(-5));
+        let lo = k.spawn(SpawnSpec::new("lo", Role::Daemon).nice(5));
         assert_eq!(k.acquire(a, None), Ok(true));
         let order = Arc::new(Mutex::new(Vec::new()));
         let mut hs = vec![];
@@ -890,7 +890,7 @@ mod tests {
     fn stop_parks_and_kill_reaches_children() {
         let k = Kernel::new(2);
         let lead = k.spawn(SpawnSpec::new("lead", Role::Lead));
-        let w = k.spawn(SpawnSpec::new("w", Role::GlmWorker).parent(lead));
+        let w = k.spawn(SpawnSpec::new("w", Role::Daemon).parent(lead));
         k.signal(w, Signal::Stop);
         assert_eq!(k.acquire(w, Some(Duration::from_millis(300))), Ok(false));
         k.signal(w, Signal::Cont);
@@ -905,7 +905,7 @@ mod tests {
     fn mail_and_board() {
         let k = Kernel::new(1);
         let a = k.spawn(SpawnSpec::new("a", Role::Lead));
-        let b = k.spawn(SpawnSpec::new("b", Role::GlmWorker).parent(a));
+        let b = k.spawn(SpawnSpec::new("b", Role::Daemon).parent(a));
         assert!(k.send(b, "also keep port 80", a));
         let m = k.drain(b);
         assert_eq!(m.len(), 1);
@@ -917,7 +917,7 @@ mod tests {
     #[test]
     fn wait_returns_the_result() {
         let k = Arc::new(Kernel::new(1));
-        let p = k.spawn(SpawnSpec::new("w", Role::GlmWorker));
+        let p = k.spawn(SpawnSpec::new("w", Role::Daemon));
         let k2 = k.clone();
         let h = std::thread::spawn(move || k2.wait(p, Some(Duration::from_secs(5))));
         std::thread::sleep(Duration::from_millis(50));

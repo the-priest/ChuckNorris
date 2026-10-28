@@ -1,9 +1,9 @@
-//! From the user's settings to a ready fleet: the SiliconFlow client, the
+//! From the user's settings to a ready job: the SiliconFlow client, the
 //! team, reasoning, budgets, the folder's access, the ledgers — the same for
 //! `chuck run` and the window, so the two can never disagree.
 
 use crate::RuntimeConfig;
-use chuck_core::{FleetConfig, Quota};
+use chuck_core::{Models, Quota};
 use chuck_model::{fmt_usd, is_siliconflow, ChatModel, Reasoning, SiliconFlow, DEFAULT_BASE};
 use chuck_sandbox::Access;
 use chuck_store::{Ledger, Settings, Spend};
@@ -24,7 +24,7 @@ pub fn client(s: &Settings) -> Result<SiliconFlow, String> {
     let key = s.api_key().ok_or("no SiliconFlow API key yet — add it in Settings (or run `chuck key`)")?;
     let base = s.str("siliconflow_base_url").unwrap_or(DEFAULT_BASE).to_string();
     if !is_siliconflow(&base) && !is_local(&base) {
-        return Err(format!("{base} isn't a SiliconFlow endpoint: Chuck's fleet talks to SiliconFlow only \
+        return Err(format!("{base} isn't a SiliconFlow endpoint: Chuck talks to SiliconFlow only \
             (clear \"API base URL\" in Settings)"));
     }
     let stall = Duration::from_secs(s.num("stall_seconds", 90.0, 20.0, 600.0) as u64);
@@ -40,37 +40,17 @@ pub fn access_of(s: &Settings, folder: &Path) -> Access {
     }).and_then(|(_, v)| v.as_str()).map_or(Access::Guarded, Access::parse)
 }
 
-/// Once: one model does it all by default now — a worker count saved before
-/// (the old default was 6) goes back to 0. Workers are asked for again by
-/// raising Settings › Workers; this never runs twice.
-pub fn migrate() {
-    let mut s = Settings::load();
-    if s.map.contains_key("fleet_solo_v1") {
-        return;
+/// The models, from the settings (`fleet_deepseek_model` / `fleet_glm_model`:
+/// the names older versions saved them under).
+pub fn models(s: &Settings) -> Models {
+    let mut m = Models::default();
+    if let Some(v) = s.str("fleet_deepseek_model") {
+        m.main = v.to_string();
     }
-    s.set("fleet_deepseek_workers", 0.into());
-    s.set("fleet_solo_v1", true.into());
-    let _ = s.save();
-}
-
-pub fn fleet(s: &Settings) -> FleetConfig {
-    let mut f = FleetConfig::default();
-    if let Some(m) = s.str("fleet_deepseek_model") {
-        f.deepseek_model = m.to_string();
+    if let Some(v) = s.str("fleet_glm_model") {
+        m.vision = v.to_string();
     }
-    if let Some(m) = s.str("fleet_worker_model") {
-        f.worker_model = m.to_string();
-    }
-    if let Some(m) = s.str("fleet_glm_model") {
-        f.glm_model = m.to_string();
-    }
-    // one model does it all unless workers are asked for (Settings › Workers)
-    f.deepseek_workers = s.num("fleet_deepseek_workers", 0.0, 0.0, 8.0) as u8;
-    // GLM is the eyes. (`fleet_glm_workers`, which older windows saved as 4 for everyone, no longer makes it
-    // a worker pool; `fleet_glm_pool` does, for whoever really wants one.)
-    f.glm_workers = s.num("fleet_glm_pool", 0.0, 0.0, 4.0) as u8;
-    f.auto_merge = s.map.get("fleet_auto_merge").and_then(|v| v.as_bool()).unwrap_or(true);
-    f
+    m
 }
 
 /// Everything a job needs, from the settings.
@@ -131,9 +111,9 @@ pub fn from_settings(s: &Settings, folder: &Path, max_usd: Option<f64>) -> Resul
         notes.push(p.clone());
     }
     let model = client(s)?;
-    let mut cfg = RuntimeConfig { fleet: fleet(s), ..RuntimeConfig::default() };
+    let mut cfg = RuntimeConfig { models: models(s), ..RuntimeConfig::default() };
     if let Ok(live) = model.list_models() {
-        for (from, to) in cfg.fleet.resolve(&live) {
+        for (from, to) in cfg.models.resolve(&live) {
             notes.push(format!("{from} isn't on your account; using {to}"));
         }
     }
@@ -145,12 +125,6 @@ pub fn from_settings(s: &Settings, folder: &Path, max_usd: Option<f64>) -> Resul
     cfg.reasoning = Reasoning {
         budget: s.num("reasoning_budget", 2048.0, 0.0, 32768.0) as u32,
         max_think_secs: s.num("max_think_seconds", 90.0, 0.0, 1800.0) as u32,
-    };
-    // the Lead thinks, the workers build from its brief: no thinking by default (each minute of it is a minute
-    // of waiting), and never long when it's turned on
-    cfg.worker_reasoning = Reasoning {
-        budget: s.num("worker_reasoning_budget", 0.0, 0.0, 32768.0) as u32,
-        max_think_secs: (cfg.reasoning.max_think_secs).min(45),
     };
     let mut usd = max_usd.unwrap_or_else(|| s.num("fleet_job_usd", 2.0, 0.01, 1000.0));
     // the window's evidence chain and day/month spend: one history, one budget

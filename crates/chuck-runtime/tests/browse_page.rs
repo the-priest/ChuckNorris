@@ -36,7 +36,7 @@ fn the_lead_browses_a_broken_page_and_hears_what_it_looks_like() {
     std::fs::write(dir.join("index.html"), "<title>Todo</title><h1>Todo</h1><button id=go onclick=\"undefinedFn()\">Go</button>\
         <script>console.error('init failed')</script>").unwrap();
     let cfg0 = RuntimeConfig::default();
-    let (lead, glm) = (cfg0.fleet.deepseek_model.clone(), cfg0.fleet.glm_model.clone());
+    let (lead, glm) = (cfg0.models.main.clone(), cfg0.models.vision.clone());
     let model = Arc::new(Scripted::new()
         .for_model(&lead, ["```browse index.html 640x480\nclick #go\nwait 100\n```".to_string(),
                            "The page has two errors.".to_string()])
@@ -80,7 +80,7 @@ fn a_clean_page_backs_its_criterion_and_a_broken_one_does_not() {
     std::fs::write(dir.join("ok.html"), "<title>Fine</title><p>All good</p>").unwrap();
     std::fs::write(dir.join("bad.html"), "<script>throw new Error('nope')</script>").unwrap();
     let cfg0 = RuntimeConfig::default();
-    let lead = cfg0.fleet.deepseek_model.clone();
+    let lead = cfg0.models.main.clone();
     let model = Arc::new(Scripted::new()
         .for_model(&lead, ["```criteria\n- the page renders :: verify: browse ok.html\n```\n```browse ok.html for c1```\n```browse bad.html for c1```".to_string(),
                            "Checked.".to_string()])

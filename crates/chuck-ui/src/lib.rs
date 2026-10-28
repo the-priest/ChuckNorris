@@ -1,5 +1,5 @@
-//! chuck-ui — the GTK4 window: talk to the Lead, watch the whole fleet work
-//! in an organised side panel, see the Done gate fill in.
+//! chuck-ui — the GTK4 window: talk to Chuck, watch it work, see its checks
+//! pass.
 
 mod buddy;
 mod chat;
@@ -24,11 +24,10 @@ pub(crate) fn shown(s: &str) -> std::borrow::Cow<'_, str> {
 
 use adw::prelude::*;
 
-/// Open the window; returns when it's closed — and nothing the fleet started
+/// Open the window; returns when it's closed — and nothing Chuck started
 /// is left running.
 pub fn run(opts: Options) -> i32 {
     chuck_store::crashlog::install();
-    chuck_runtime::setup::migrate();
     let app = adw::Application::builder().application_id("org.thepriest.chucknorris")
         .flags(gtk::gio::ApplicationFlags::NON_UNIQUE).build();
     app.connect_activate(move |app| window::build(app, opts.clone()));

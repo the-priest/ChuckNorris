@@ -5,7 +5,8 @@
 //! its promises (cuts on char boundaries, sizes within bounds). A panic here
 //! would be a worker dying mid-job on a reply nobody planned for.
 
-use chuck_runtime::exec::{LEAD_TAGS, WORKER_TAGS};
+use chuck_runtime::exec::LEAD_TAGS;
+use chuck_runtime::chat::CHAT_TAGS;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 /// A small, seeded generator: the same seed, the same inputs (a failure is reproducible).
@@ -73,7 +74,7 @@ fn reply_parsers_take_anything() {
             for b in chuck_tools::tool_blocks(s, LEAD_TAGS) {
                 assert!(b.start <= s.len() && s.is_char_boundary(b.start));
             }
-            let _ = chuck_tools::tool_blocks(s, WORKER_TAGS);
+            let _ = chuck_tools::tool_blocks(s, CHAT_TAGS);
         });
         survive("file_blocks", seed, 3000, 30, |s| {
             for b in chuck_tools::file_blocks(s) {
@@ -94,7 +95,7 @@ fn reply_parsers_take_anything() {
         survive("normalize_calls", seed, 3000, 30, |s| {
             let (once, _) = chuck_tools::normalize_calls(s, LEAD_TAGS);
             let _ = chuck_tools::normalize_calls(&once, LEAD_TAGS);
-            let _ = chuck_tools::normalize_calls(s, WORKER_TAGS);
+            let _ = chuck_tools::normalize_calls(s, CHAT_TAGS);
         });
     }
 }
@@ -162,25 +163,23 @@ fn cutters_cut_on_character_boundaries_and_within_bounds() {
 fn the_runtimes_own_parsers_take_anything() {
     let root = std::env::temp_dir();
     for seed in [21, 22, 23] {
-        survive("parse_criteria / plan / split_for", seed, 3000, 30, |s| {
+        survive("parse_criteria / split_for", seed, 3000, 30, |s| {
             let _ = chuck_runtime::exec::parse_criteria(s);
-            let _ = chuck_runtime::exec::parse_plan(s);
             let (cmd, _) = chuck_runtime::exec::split_for(s);
             assert!(s.contains(cmd.as_str()) || cmd.is_empty() || s.trim().contains(cmd.trim()));
             let _ = chuck_runtime::exec::as_checked(s, &root);
             let _ = chuck_runtime::exec::proves_nothing(s);
             let _ = chuck_runtime::exec::friction(s);
         });
-        survive("assign / verdict / promised", seed, 3000, 30, |s| {
-            let (arg, body) = s.split_once('\n').unwrap_or((s, ""));
-            let _ = chuck_runtime::lead::parse_assign(arg, body);
-            let _ = chuck_runtime::lead::parse_verdict(s);
+        survive("ask / picked / promised", seed, 3000, 30, |s| {
             let _ = chuck_runtime::lead::promised(s);
-            let _ = chuck_runtime::team::addressee(arg, body);
-        });
-        survive("in_copy", seed, 2000, 20, |s| {
-            let out = chuck_runtime::agent::in_copy(s, std::path::Path::new("/home/u/proj"), std::path::Path::new("/c/w"));
-            assert!(!out.contains("/home/u/proj/") || s.contains("/home/u/proj2") || out.contains("/home/u/proj/"));
+            let (q, options) = chuck_runtime::lead::parse_ask(s);
+            assert!(options.is_empty() || options.len() >= 2, "a choice has two ways at least");
+            assert!(options.iter().filter(|o| o.recommended).count() <= 1, "one pick at most");
+            assert!(options.iter().all(|o| !o.label.trim().is_empty()));
+            let _ = q;
+            let first = s.lines().next().unwrap_or("");
+            let _ = chuck_runtime::lead::picked(first, &options);
         });
         survive("page_spec", seed, 3000, 10, |s| {
             let (path, a, b) = chuck_tools::fs::page_spec(&root, s);
@@ -204,7 +203,7 @@ fn the_safety_checks_take_anything() {
             assert!(chuck_sandbox::classify_command(&p) >= chuck_sandbox::classify_command(s)
                     || chuck_sandbox::classify_command(&p) == chuck_sandbox::Level::Safe
                     || p.contains(s.trim()), "prepare changed {s:?} into {p:?}");
-            let _ = chuck_runtime::exec::refuse_command(s, chuck_core::Role::DeepSeekWorker);
+            let _ = chuck_runtime::exec::refuse_command(s);
         });
     }
 }

@@ -1,7 +1,7 @@
-//! `chuck` — the fleet from a terminal.
+//! `chuck` — Chuck from a terminal.
 //!
 //!   chuck run [-C DIR] [--max-usd N] [--verbose] "what to do"
-//!   chuck models      the fleet's models, checked against your account
+//!   chuck models      Chuck's models, checked against your account
 //!   chuck key         save your SiliconFlow API key (shared with the window)
 //!   chuck version
 
@@ -20,16 +20,16 @@ use std::time::Duration;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const HELP: &str = "\
-chuck — one Lead and eight workers on SiliconFlow; work ends only through the Done gate.
+chuck — one fast model on SiliconFlow that builds, runs and checks; work ends only through the Done gate.
 
 USAGE
-  chuck             the fleet window (in the folder you start it from)
+  chuck             the window (in the folder you start it from)
   chuck run [-C DIR] [--max-usd N] [--verbose] \"what to do\"
   chuck continue [-C DIR] [--max-usd N] [\"what to add\"]   carry on a paused (INCOMPLETE)
                     job exactly where it stopped: criteria, evidence and the Lead's work kept
   chuck ask [--max-usd N] \"a question\"   Chat mode: an answer, researched on the web
                     when it should be; it changes nothing (work goes to `chuck run`)
-  chuck models      show the fleet's models, checked against your account
+  chuck models      show Chuck's models, checked against your account
   chuck key         save your SiliconFlow API key (shared with the Chuck window)
   chuck doctor      check everything Chuck depends on (the API, sandbox, search, voice…)
   chuck update      install the newest Chuck
@@ -46,8 +46,8 @@ USAGE
 
 RUN
   -C, --dir DIR     the project folder (default: the current folder)
-  --max-usd N       spending cap for this job, Lead and workers together
-  -v, --verbose     also show what workers say and every command's output
+  --max-usd N       spending cap for this job
+  -v, --verbose     also show every command's output
   The folder's access (set in the window's Settings), the daily and monthly
   spending limits, and the evidence ledger are the window's own.
   Ctrl-C stops every agent; the job ends INCOMPLETE with what is missing.
@@ -256,15 +256,13 @@ fn cmd_ledger(n: usize) -> i32 {
 fn cmd_models() {
     let s = Settings::load();
     let c = client(&s);
-    let mut f = setup::fleet(&s);
+    let mut f = setup::models(&s);
     let live = c.list_models().unwrap_or_else(|e| fail(&e.to_string()));
     let changes = f.resolve(&live);
     let have = |m: &str| live.iter().any(|x| x == m);
     let on = |m: &str| if have(m) { "✓ on your account" } else { "✗ not on your account" };
-    println!("lead (plans, reviews, merges)  {}  {}", f.deepseek_model, on(&f.deepseek_model));
-    println!("{} workers (build)             {}  {}", f.deepseek_workers, f.worker_model, on(&f.worker_model));
-    println!("eyes (screenshots){}       {}  {}", if f.glm_workers > 0 { format!(" + {} GLM workers", f.glm_workers) }
-             else { String::new() }, f.glm_model, on(&f.glm_model));
+    println!("does the work       {}  {}", f.main, on(&f.main));
+    println!("eyes (screenshots)  {}  {}", f.vision, on(&f.vision));
     for (from, to) in changes {
         println!("  {from} isn't listed; using {to}");
     }
@@ -338,10 +336,10 @@ fn cmd_run(args: &[String], chat: bool, cont: bool) -> i32 {
     let lsp = Arc::new(setup::lsp(&s));
     cfg.lsp = Some(lsp.clone());
     let header = if chat {
-        format!("chat · {} · up to {}", term::short_model(&cfg.fleet.deepseek_model), chuck_model::fmt_usd(usd))
+        format!("chat · {} · up to {}", term::short_model(&cfg.models.main), chuck_model::fmt_usd(usd))
     } else {
-        format!("lead + {} workers · {} ({}) · up to {}", cfg.fleet.deepseek_workers + cfg.fleet.glm_workers,
-                folder.display(), cfg.access.label(), chuck_model::fmt_usd(usd))
+        format!("{} · {} ({}) · up to {}", term::short_model(&cfg.models.main), folder.display(), cfg.access.label(),
+                chuck_model::fmt_usd(usd))
     };
     let (tx, rx) = channel();
     let rt = Runtime::new(model, cfg, Events(Some(tx)));
@@ -473,7 +471,6 @@ fn cmd_voice(arg: Option<&str>) -> i32 {
 
 fn main() {
     chuck_store::crashlog::install();
-    chuck_runtime::setup::migrate();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let code = match args.first().map(String::as_str) {
         Some("run") => cmd_run(&args[1..], false, false),

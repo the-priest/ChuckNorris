@@ -1,5 +1,5 @@
 //! Conversations kept on disk, one per project folder, so nothing you and
-//! the fleet said disappears when the window closes. Everything shown in the
+//! Chuck said disappears when the window closes. Everything shown in the
 //! conversation is an entry here, and is drawn from the entry both live and
 //! when it's opened again.
 
@@ -17,11 +17,11 @@ pub enum Entry {
     Lead {
         text: String,
         model: String,
-        /// Said in Chat mode (by Chuck, not the fleet's Lead).
+        /// Said in Chat mode (not by a Build job).
         #[serde(default)]
         chat: bool,
     },
-    /// Chat mode proposed work for the fleet: a button sends it.
+    /// Chat mode proposed work for Build: a button sends it.
     Handoff { request: String },
     /// One line of the work lane (Pango markup).
     Act { markup: String },
@@ -72,24 +72,10 @@ pub struct Browsed {
     pub look: Option<String>,
 }
 
-/// A task, as last shown.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct TaskSnap {
-    pub id: String,
-    pub title: String,
-    pub state: String,
-    pub workers: Vec<String>,
-    pub deps: Vec<String>,
-    pub criteria: Vec<String>,
-    pub note: String,
-}
-
 /// Where the last job got to, so the panel shows it when you come back.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Progress {
-    pub plan: Vec<(String, bool)>,
     pub finished: bool,
-    pub tasks: Vec<TaskSnap>,
     pub phase: String,
     pub unmet: Vec<String>,
     pub board: Vec<(String, String, Option<String>, Vec<String>)>,
@@ -108,7 +94,7 @@ pub struct Saved {
     pub progress: Progress,
 }
 
-/// The conversation as Markdown (/export): what was said, what the fleet
+/// The conversation as Markdown (/export): what was said, what Chuck
 /// did, the cards.
 pub fn markdown(s: &Saved) -> String {
     let plain = |m: &str| {
@@ -143,7 +129,7 @@ pub fn markdown(s: &Saved) -> String {
             Entry::Card { kind, text, .. } => {
                 out.push_str(&format!("> **{kind}**\n>\n{}\n\n", text.trim().lines().map(|l| format!("> {l}")).collect::<Vec<_>>().join("\n")));
             }
-            Entry::Handoff { request } => out.push_str(&format!("> **FOR THE FLEET**\n>\n> {}\n\n", request.trim())),
+            Entry::Handoff { request } => out.push_str(&format!("> **TO DO ON YOUR MACHINE**\n>\n> {}\n\n", request.trim())),
             Entry::Paused { head, text } => {
                 out.push_str(&format!("> **{head}**\n>\n{}\n\n", text.trim().lines().map(|l| format!("> {l}")).collect::<Vec<_>>().join("\n")));
             }
@@ -457,13 +443,13 @@ mod tests {
                                       Entry::Handoff { request: "install rg".into() },
                                       Entry::Act { markup: "<b>x</b>".into() },
                                       Entry::Card { kind: "DONE".into(), class: "done-card".into(), text: "ok".into() }],
-                        progress: Progress { plan: vec![("a".into(), true)], finished: true, ..Default::default() } };
+                        progress: Progress { finished: true, ..Default::default() } };
         save(&folder, &s);
         assert_eq!(load(&folder), Some(s.clone()));
         archive(&folder);
         let md = markdown(&s);
         assert!(md.contains("**You:** hi") && md.contains("**Chuck** · m\n\n**hello**") && md.contains("    x")
-                && md.contains("> **DONE**") && md.contains("> **FOR THE FLEET**"), "{md}");
+                && md.contains("> **DONE**") && md.contains("> **TO DO ON YOUR MACHINE**"), "{md}");
         assert_eq!(load(&folder), None);
         // an old file, from before Chat mode, still opens
         std::fs::write(path_for(&folder), r#"{"folder":"x","history":[],"entries":[{"k":"lead","text":"t","model":"m"}]}"#).unwrap();

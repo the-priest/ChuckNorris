@@ -162,7 +162,7 @@ impl Jail {
         self
     }
 
-    /// Shown read-only at their own paths (a worker's lent dependencies).
+    /// Shown read-only at their own paths.
     pub fn lend(mut self, paths: &[PathBuf]) -> Jail {
         self.extra_ro.extend(paths.iter().cloned());
         self

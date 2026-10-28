@@ -1,8 +1,6 @@
-//! chuck-runtime — the fleet at work. One request becomes a job: the Lead
-//! (a kernel process) writes criteria, delegates to DeepSeek and GLM workers
-//! (child processes, each on its own thread and its own copy of the
-//! project), reviews, merges through the gates, verifies, and finishes only
-//! through the Done gate and an independent critic pass.
+//! chuck-runtime — one request becomes a job: the Lead (a kernel process,
+//! one model) writes criteria, builds, verifies, and finishes only through
+//! the Done gate.
 
 pub mod agent;
 pub mod browse;
@@ -21,13 +19,12 @@ pub fn snag(events: &events::Events, id: chuck_core::AgentId, who: &str, kind: &
     chuck_store::snags::record(who, kind, &text);
     events.emit(events::Event::Snag { id, who: who.to_string(), kind: kind.to_string(), text });
 }
-pub mod team;
 pub mod setup;
 
 pub use agent::{Ctx, Halt};
-pub use events::{Choice, Event, Events, Outcome, Picture, TaskView, Video};
+pub use events::{Choice, Event, Events, Outcome, Picture, Video};
 
-use chuck_core::{AgentId, DoneGate, FleetConfig, Kernel, Quota, Role, SpawnSpec};
+use chuck_core::{AgentId, DoneGate, Kernel, Models, Quota, Role, SpawnSpec};
 use chuck_model::{ChatModel, Reasoning};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -37,10 +34,8 @@ use std::time::Duration;
 
 #[derive(Clone)]
 pub struct RuntimeConfig {
-    pub fleet: FleetConfig,
+    pub models: Models,
     pub reasoning: Reasoning,
-    /// The workers' (lighter: they build from a brief).
-    pub worker_reasoning: Reasoning,
     /// How long the Lead waits for an answer to its question before going on.
     pub ask_wait: Duration,
     /// Offer agents their tools as functions the API parses (see `schemas`);
@@ -49,30 +44,24 @@ pub struct RuntimeConfig {
     /// Debug mode: the agents are asked to note whatever slows them down,
     /// limits them or goes wrong (```snag```), for it to be fixed.
     pub debug: bool,
+    /// A reply's ceiling (not its size: only what's written is billed). A
+    /// reply cut short is continued.
     pub max_tokens: u32,
-    /// The ceiling for a turn that isn't writing a file — reading, checking,
-    /// planning, answering. Small, so the provider schedules and streams it
-    /// fast and a reasoning model can't fill a huge budget; a building turn
-    /// gets the full `max_tokens`, and a reply cut short is continued.
-    pub turn_tokens: u32,
     pub lead_steps: usize,
-    pub worker_steps: usize,
     pub cmd_timeout: Duration,
     /// How long an agent waits out an API or network outage (retrying with
     /// backoff) before the job pauses.
     pub outage_wait: Duration,
     /// A conversation is trimmed past this many characters.
     pub context_chars: usize,
-    /// The whole job: the Lead and everything under it.
+    /// The whole job.
     pub job_quota: Quota,
-    /// Each worker (also clipped to what the job has left).
-    pub worker_quota: Quota,
-    /// The project folder's access (settings `folder_access`): the lead's
-    /// commands follow it. Workers always work jailed in their own copy.
+    /// The project folder's access (settings `folder_access`): the Lead's
+    /// commands follow it.
     pub access: chuck_sandbox::Access,
     /// Use bubblewrap (when installed).
     pub bwrap: bool,
-    /// Where workers' copies live.
+    /// Where a job keeps its scratch files (the folder's starting snapshot).
     pub store: PathBuf,
     /// Model calls in flight at once.
     pub slots: usize,
@@ -117,29 +106,25 @@ pub fn default_store() -> PathBuf {
 impl Default for RuntimeConfig {
     fn default() -> RuntimeConfig {
         RuntimeConfig {
-            fleet: FleetConfig::default(),
+            models: Models::default(),
             reasoning: Reasoning::default(),
-            worker_reasoning: Reasoning { budget: 0, max_think_secs: 45 },
             ask_wait: crate::lead::ASK_WAIT,
             native_tools: true,
             debug: false,
             // a reply's ceiling, not its size (only what's written is billed): a big file fits in one
             max_tokens: 32768,
-            turn_tokens: 4096,
             // no real cap: work ends when it's done, out of budget or stuck — never on a step count
             lead_steps: 1_000_000,
-            worker_steps: 100_000,
             // long builds and test suites take time; Stop ends any command at once
             cmd_timeout: Duration::from_secs(1800),
             outage_wait: Duration::from_secs(6 * 3600),
             context_chars: 360_000,
-            // money is the job's limit (the user sets it); tokens only cap a single runaway worker
+            // money is the job's limit (the user sets it)
             job_quota: Quota { tokens: None, usd: Some(2.0), seconds: None },
-            worker_quota: Quota::tokens(8_000_000),
             access: chuck_sandbox::Access::Full,
             bwrap: chuck_sandbox::bwrap().is_some(),
             store: default_store(),
-            slots: 10, // the Lead, eight workers, and the eyes or the critic
+            slots: 4, // the Lead, the eyes, a daemon
             audit: None,
             spend: None,
             day_limit: 0.0,
@@ -165,8 +150,8 @@ pub struct Job {
     pub history: Vec<(String, String)>,
     /// Answers to the Lead's ```ask``` (None: nobody is there to answer).
     pub answers: Option<Receiver<String>>,
-    /// What the user types while the fleet works: the Lead reads it before
-    /// its next step (and stops waiting on workers to read it).
+    /// What the user types while Chuck works: the Lead reads it before its
+    /// next step.
     pub steer: Option<Receiver<String>>,
     pub stop: Arc<AtomicBool>,
     /// Carry on a paused job (`ask` is then what the user adds, if anything).
@@ -251,8 +236,8 @@ pub(crate) fn turns(history: &[(String, String)]) -> Vec<(bool, String)> {
     out
 }
 
-/// Copies left behind by a job whose process is gone (a crash, a power cut):
-/// nothing will ever merge them, so they only take space.
+/// Scratch left behind by a job whose process is gone (a crash, a power
+/// cut): nothing will ever use it, so it only takes space.
 fn sweep_stale(store: &Path) {
     let Ok(rd) = std::fs::read_dir(store) else { return };
     let me = std::process::id();
@@ -304,7 +289,7 @@ impl Runtime {
         let lead = self.kernel.spawn(SpawnSpec::new("lead", Role::Lead).quota(self.cfg.job_quota)
             .brief(chuck_core::evidence::clip(&job.ask, 160)));
         self.events.emit(Event::AgentStarted { id: lead, role: Role::Lead, name: "lead".into(),
-                                               model: self.cfg.fleet.deepseek_model.clone(), task: None });
+                                               model: self.cfg.models.main.clone(), task: None });
         let resumed = job.resume.clone();
         // carrying on: the user's words are only what they add now
         let first = job.ask.clone();
@@ -331,13 +316,13 @@ impl Runtime {
         let checkpoint = run.first_checkpoint.clone();
         // a paused job can carry on later, even after Chuck was closed; a finished one is done with
         let resume = match &outcome {
-            Outcome::Paused { gaps } if run.mutated() || !gate.criteria.is_empty() || run.tasks_assigned() > 0 => {
+            Outcome::Paused { gaps } if run.mutated() || !gate.criteria.is_empty() => {
                 let (convo, head) = if run.last_msgs.len() >= 2 { (run.last_msgs.clone(), run.last_head) } else {
                     (vec![serde_json::json!({"role": "system", "content": ""}), serde_json::json!({"role": "user", "content": first})], 1)
                 };
                 let r = resume::Resume {
                     ask: ask.clone(), folder: folder.display().to_string(), convo, head, gate: gate.clone(),
-                    mutated: run.mutated(), checkpoint: checkpoint.clone(), tasks: run.tasks_assigned(),
+                    mutated: run.mutated(), checkpoint: checkpoint.clone(),
                     why: run.paused_why.clone().unwrap_or_else(|| gaps.first().cloned().unwrap_or_default()),
                     gaps: gaps.clone(), spent_usd: resumed.as_ref().map_or(0.0, |r| r.spent_usd) + usd,
                     runs: resumed.as_ref().map_or(0, |r| r.runs + 1), saved_at: chuck_sandbox::now_secs() as f64,

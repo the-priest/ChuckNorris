@@ -14,43 +14,17 @@ impl fmt::Display for AgentId {
     }
 }
 
-/// The model family an agent thinks with. SiliconFlow only.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum ModelFamily {
-    /// DeepSeek-V4.1-Flash-1017: the Lead and four workers.
-    DeepSeek,
-    /// GLM-5.3-Flash: four workers.
-    Glm,
-}
-
-/// What an agent is for. The rules that make the fleet a team rather than
-/// nine chatbots live on this type, not in prompts.
+/// What an agent is for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Role {
-    /// Talks to the user, plans, writes acceptance criteria, assigns work,
-    /// develops the critical path, reviews every result, owns "done".
+    /// Talks to the user, writes acceptance criteria, does the work, owns "done".
     Lead,
-    /// Implementation-heavy work: code, refactors, tests, tooling.
-    DeepSeekWorker,
-    /// Parallel implementation, exploration, alternatives, review, docs.
-    GlmWorker,
     /// A daemon woken by its trigger: looks and reports, never changes.
     Daemon,
 }
 
 impl Role {
-    pub fn family(self) -> ModelFamily {
-        match self {
-            Role::GlmWorker => ModelFamily::Glm,
-            Role::Lead | Role::DeepSeekWorker | Role::Daemon => ModelFamily::DeepSeek,
-        }
-    }
-
-    pub fn is_worker(self) -> bool {
-        matches!(self, Role::DeepSeekWorker | Role::GlmWorker)
-    }
-
-    /// Only the Lead may declare a job done. Workers submit; the Lead decides.
+    /// Only the Lead may declare a job done.
     pub fn may_declare_done(self) -> bool {
         matches!(self, Role::Lead)
     }
@@ -68,7 +42,6 @@ impl Role {
     pub fn default_caps(self) -> Caps {
         match self {
             Role::Lead => Caps::ALL,
-            Role::DeepSeekWorker | Role::GlmWorker => Caps::READ | Caps::WRITE | Caps::EXEC | Caps::NET,
             Role::Daemon => Caps::READ | Caps::EXEC,
         }
     }
@@ -76,8 +49,6 @@ impl Role {
     pub fn label(self) -> &'static str {
         match self {
             Role::Lead => "lead",
-            Role::DeepSeekWorker => "deepseek",
-            Role::GlmWorker => "glm",
             Role::Daemon => "daemon",
         }
     }

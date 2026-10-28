@@ -53,7 +53,7 @@ pub fn project_files(root: &Path, limit: usize) -> Vec<String> {
     let mut out = Vec::new();
     let walk = walkdir::WalkDir::new(root).follow_links(false).sort_by_file_name().into_iter()
         .filter_entry(|e| e.depth() == 0 || !(e.file_name().to_string_lossy().starts_with('.')
-            || e.file_type().is_dir() && chuck_tools::cow::SKIP.contains(&e.file_name().to_string_lossy().as_ref())));
+            || e.file_type().is_dir() && chuck_tools::snapshot::SKIP.contains(&e.file_name().to_string_lossy().as_ref())));
     for e in walk.flatten() {
         if e.file_type().is_file() {
             if let Ok(rel) = e.path().strip_prefix(root) {
